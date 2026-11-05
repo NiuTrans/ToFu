@@ -44,7 +44,7 @@ def emitted(monkeypatch):
     def _capture(task, phase, **fields):
         frames.append((task.get('id'), phase, fields))
 
-    monkeypatch.setattr(run, 'emit_phase', _capture)
+    monkeypatch.setattr('lib.tasks_pkg.orchestrator._startup.emit_phase', _capture)
     return frames
 
 
@@ -82,7 +82,7 @@ def test_startup_phase_emit_never_raises_into_the_run(monkeypatch):
     def _boom(*args, **kwargs):
         raise RuntimeError('push channel down')
 
-    monkeypatch.setattr(run, 'emit_phase', _boom)
+    monkeypatch.setattr('lib.tasks_pkg.orchestrator._startup.emit_phase', _boom)
     run._emit_startup_phase({'id': 'worker-task'}, 'tools')
 
 

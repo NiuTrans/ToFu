@@ -8,6 +8,10 @@ Pins the two halves of the event-vocabulary integrity rule
   (strict under pytest; warn-and-log in production). Forward compatibility
   is achieved by REGISTERING the new type (additive, no version bump), never
   by emitting an undeclared one.
+* **Required-on-write at delivery**: ``append_event`` writes the durable log
+  those readers fold, and a raw frame never constructs through
+  ``build_event``, so the seam refuses an unregistered (or missing) type in
+  every ``TOFU_EVENT_SCHEMA`` mode before the frame is sequenced.
 * **Required-on-read**: durable reconstruction paths refuse rows whose
   ``type`` is not in the registry — an unknown type means the log was
   written by a newer runtime or corrupted, and silently folding past it
@@ -35,6 +39,35 @@ def test_build_event_rejects_unregistered_type():
 def test_build_event_accepts_registered_type():
     from lib.agent_core.events import build_event
     assert build_event('delta', content='x') == {'type': 'delta', 'content': 'x'}
+
+
+@pytest.mark.parametrize('mode', ['strict', 'warn', 'off'])
+@pytest.mark.parametrize('frame', [
+    {'type': 'from_a_newer_runtime', 'content': 'x'},
+    {'content': 'a frame without a type'},
+], ids=['unregistered', 'untyped'])
+def test_append_event_refuses_unregistered_type_before_sequencing(
+        monkeypatch, mode, frame):
+    """The delivery seam writes the log the required-on-read gate folds, so it
+    refuses the same vocabulary regardless of the schema enforcement mode:
+    the refused frame consumes no sequence, so nothing is stored or pushed,
+    and the next registered frame takes the first sequence."""
+    from lib.agent_core.events import EventContractError
+    from lib.tasks_pkg.manager import append_event
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    monkeypatch.setenv('TOFU_EVENT_SCHEMA', mode)
+    task = chat_task_runtime.create(
+        user_id=1, task_id=f'unregistered-{uuid.uuid4().hex[:8]}')
+    try:
+        with pytest.raises(EventContractError, match='unregistered event type'):
+            append_event(task, dict(frame))
+        assert task['events'] == []
+        assert task['_eventNextSeq'] == 0
+        append_event(task, {'type': 'delta', 'content': 'kept'})
+        assert [(event['seq'], event['type']) for event in task['events']] == [
+            (0, 'delta')]
+    finally:
+        chat_task_runtime.discard(task['id'])
 
 
 def test_assert_registered_event_types_accepts_both_row_shapes():

@@ -33,7 +33,6 @@ custom Escape listener has no compatibility test. Skips without node/jsdom.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -50,14 +49,6 @@ _SRC = os.path.join(JS_DIR, 'main', 'main_folders_mobile.js')
 _CONTROLS = native_module_path(
     '.native/folder-config-control.js',
     os.path.join(ROOT, 'frontend/src/conversation/ui/folder-config-control.ts'))
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    result = subprocess.run(["node", "-p", 'require.resolve("jsdom")'],
-                            cwd=ROOT, capture_output=True, timeout=10)
-    return result.returncode == 0
 
 
 _HARNESS = r"""
@@ -232,8 +223,6 @@ _EXPECTED = (
 )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_folder_longpress_and_swipe_guard():
     output = _run(_SRC)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -272,8 +261,6 @@ def _nc(anchor, replacement, must_fail, must_still_pass):
         assert f.read() == original, 'shipped main_folders_mobile.js must be byte-identical'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_longpress_timer_is_load_bearing():
     """Neuter the long-press: make _showFolderTabMenu never fire from the hold
     (drop the call in the setTimeout body) → longpress_opens_menu FAILs while
@@ -286,8 +273,6 @@ def test_NC_longpress_timer_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_click_swallow_is_load_bearing():
     """Neuter the trailing-click suppression → longpress_click_swallowed FAILs
     (the folder switch fires) while the menu-open check still PASSes."""

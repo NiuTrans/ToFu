@@ -147,6 +147,21 @@ def test_bounded_receipt_seam_strips_secrets_and_keeps_mixed_calls_honest():
     assert len(compaction_attribution_from_receipt(evidence)['summaryCalls']) == 16
 
 
+def test_one_hour_cache_write_price_evidence_survives_the_timeline():
+    """Receipt price evidence stays recomputable: the 1h write share and rate."""
+    evidence = receipt()
+    call = evidence['summary']['cost']['calls'][0]
+    call['cacheWrite1hTokens'] = 3_000
+    call['pricingSnapshot']['rates'].update(cacheWriteMul=1.25, cacheWrite1hMul=2.)
+    timeline = fold(None, task(), EventType.COMPACTION_DONE, 1,
+                    archiveId='archive-1h', roundNum=0, receipt=evidence)
+    [row] = timeline['entries'][0]['summaryCalls']
+    assert row['cacheWrite1hTokens'] == 3_000
+    assert row['pricingSnapshot']['rates'] == {
+        'input': 2., 'output': 3., 'cacheWriteMul': 1.25, 'cacheWrite1hMul': 2.}
+    assert normalize_activity_timeline(json.loads(json.dumps(timeline))) == timeline
+
+
 @pytest.mark.parametrize('position', [[], {}, 7, True, ['after']])
 def test_hostile_anchor_position_is_rejected_without_crashing(position):
     timeline = fold(None, task(), EventType.COMPACTION_DONE, 1,

@@ -11,7 +11,7 @@ from lib.paper.tools import make_paper_task_tool_executor
 pytestmark = pytest.mark.unit
 
 
-def _adapter(executor):
+def _adapter(executor, *, include_llm_round=False):
     task = {'round_counter': 4, 'tool_rounds': [], '_worldVersion': 'world-2'}
     messages, events, feedback = [], [], []
     abort = threading.Event()
@@ -29,12 +29,15 @@ def _adapter(executor):
         result_budget=SimpleNamespace(append=append),
         paper_tool_executor=executor, on_tool_event=events.append,
         log_prefix='[Paper:Test]',
+        **({'include_llm_round': True} if include_llm_round else {}),
     )
     return execute, task, messages, events, feedback, abort, shim
 
 
 @pytest.mark.parametrize('rejected', [False, True])
-def test_tool_events_and_bounded_feedback_preserve_executor_result(rejected):
+@pytest.mark.parametrize('include_llm_round', [False, True])
+def test_tool_events_and_bounded_feedback_preserve_executor_result(
+        rejected, include_llm_round):
     calls = []
     content = 'result-' + 'x' * 5000
     raw = '{"queries":"one query"}'
@@ -46,7 +49,8 @@ def test_tool_events_and_bounded_feedback_preserve_executor_result(rejected):
                 status='rejected', contractError={'code': 'bad_argument'})
         return content, [{'title': 'evidence'}], {'source': 'diag'}, {'web': 1}, ['web']
 
-    execute, task, messages, events, feedback, abort, shim = _adapter(executor)
+    execute, task, messages, events, feedback, abort, shim = _adapter(
+        executor, include_llm_round=include_llm_round)
     assert execute(2, {'id': 'call-1', 'function': {
         'name': 'web_search', 'arguments': raw}}) == 'bounded-feedback'
     name, args, kwargs = calls[0]
@@ -62,6 +66,8 @@ def test_tool_events_and_bounded_feedback_preserve_executor_result(rejected):
     assert row['toolArgs'] == raw
     assert row['status'] == ('rejected' if rejected else 'done')
     assert [event['type'] for event in events] == ['tool_start', 'tool_done']
+    assert all(event.get('llmRound') == (2 if include_llm_round else None)
+               for event in events)
     assert events[0]['toolCallId'] == events[1]['toolCallId'] == 'call-1'
     assert events[1]['toolContent'] == content[:4000]
     assert events[1]['status'] == row['status']
@@ -186,3 +192,109 @@ def test_workers_preserve_draft_reset_feedback_and_terminal_policy(
     else:
         assert task['tool_rounds'][0]['status'] == 'searching'
         assert len(requests) == 1
+
+
+@pytest.mark.parametrize('outcome', ['done', 'rejected', 'abort', 'error'])
+@pytest.mark.parametrize('structured_args', [False, True])
+def test_report_preserves_multi_tool_rounds_feedback_and_publication(
+        monkeypatch, outcome, structured_args):
+    import json
+    import lib.paper.report_engine.worker as worker
+    from tests.paper.test_paper_report_artifact_integrity import (
+        REPORT_BODY, _new_task, _patch_terminal_report,
+    )
+
+    task = _new_task()
+    task['config']['tools'] = {'schemaBudgetTokens': 0}
+    _patch_terminal_report(monkeypatch, worker, REPORT_BODY)
+    monkeypatch.setattr(worker, '_build_report_meta', lambda *args: {})
+    messages = [{'role': 'system', 'content': 'preserved policy'},
+                {'role': 'user', 'content': 'declared question'}]
+    requests, calls, published = [], [], []
+    arguments = [{'queries': 'one query'}, {'command': 'echo evidence'}]
+    raw_args = arguments if structured_args else [json.dumps(args) for args in arguments]
+    names = ['web_search', 'run_command']
+
+    class Repository:
+        def __init__(self, owner):
+            assert owner == task['_userId']
+
+        def put_report(self, report, **kwargs):
+            published.append(report)
+            return True
+
+    def dispatch(history, *, on_content, on_thinking, **kwargs):
+        requests.append(list(history))
+        assert kwargs['prefer_model'] == 'model-a'
+        assert kwargs['strict_model'] is True
+        assert kwargs['max_tokens'] == 128000
+        if len(requests) == 1:
+            on_thinking('checking evidence')
+            on_content('interim draft')
+            return ({'role': 'assistant', 'content': 'interim draft',
+                     'tool_calls': [
+                         {'id': f'call-{index}', 'function': {
+                             'name': name, 'arguments': raw_args[index]}}
+                         for index, name in enumerate(names)]}, 'tool_calls', {})
+        assert outcome in ('done', 'rejected')
+        feedback = [message for message in history if message.get('role') == 'tool']
+        assert [message['tool_call_id'] for message in feedback] == ['call-0', 'call-1']
+        assert all('tool evidence' in message['content'] for message in feedback)
+        assert 'preserved policy' in history[0]['content']
+        on_content(REPORT_BODY)
+        return ({'role': 'assistant', 'content': REPORT_BODY, 'tool_calls': []}, 'stop', {})
+
+    def executor(name, raw, **kwargs):
+        index = len(calls)
+        calls.append((name, raw))
+        assert (name, raw) == (names[index], raw_args[index])
+        assert kwargs['user_question'] == 'declared question'
+        assert kwargs['exec_shim'] is not None
+        assert kwargs['abort']() is False
+        if outcome == 'abort':
+            task['abort_event'].set()
+            raise AbortedError('injected owner stop')
+        if outcome == 'error':
+            raise RuntimeError('injected tool failure')
+        if outcome == 'rejected' and index == 0:
+            kwargs['round_entry'].update(
+                status='rejected', contractError={'code': 'bad_argument'})
+        return 'tool evidence', [{'title': 'source'}], {'source': 'diag'}, {'web': 1}, ['web']
+
+    monkeypatch.setattr(worker, 'dispatch_stream', dispatch)
+    monkeypatch.setattr(worker, 'execute_paper_tool', executor)
+    monkeypatch.setattr(worker, 'PaperArtifactRepository', Repository)
+    worker.run_report_task(task, messages, [])
+
+    expected = 'done' if outcome in ('done', 'rejected') else (
+        'aborted' if outcome == 'abort' else 'error')
+    assert task['status'] == expected, task.get('error')
+    assert task['agentUsageV1']
+    events = task['events']
+    assert any(event['type'] == 'thinking' and event['llmRound'] == 0 for event in events)
+    assert any(event['type'] == 'delta_reset' and event['llmRound'] == 0 for event in events)
+    tool_events = [event for event in events if event['type'] in ('tool_start', 'tool_done')]
+    assert all(event['llmRound'] == 0 for event in tool_events)
+    assert tool_events[0]['toolName'] == 'web_search'
+    assert all(row['llmRound'] == 0 for row in task['tool_rounds'])
+    if expected == 'done':
+        assert len(calls) == 2 and len(requests) == 2
+        assert [event['toolCallId'] for event in tool_events] == [
+            'call-0', 'call-0', 'call-1', 'call-1']
+        assert [event['roundNum'] for event in tool_events] == [1, 1, 2, 2]
+        assert tool_events[2]['toolName'] == 'code_exec'
+        assert tool_events[1]['status'] == ('rejected' if outcome == 'rejected' else 'done')
+        assert tool_events[1]['searchDiag'] == {'source': 'diag'}
+        assert tool_events[1]['engineBreakdown'] == {'web': 1}
+        assert tool_events[1]['verticals'] == ['web']
+        if outcome == 'rejected':
+            assert tool_events[1]['contractError'] == {'code': 'bad_argument'}
+        assert len(published) == 1 and published[0].report == REPORT_BODY
+        assert task['full_text'] == REPORT_BODY
+        assert any(event['type'] == 'delta' and event.get('llmRound') == 1 for event in events)
+    else:
+        assert len(calls) == len(requests) == 1
+        assert [event['type'] for event in tool_events] == ['tool_start']
+        assert not published
+        assert not any(event['type'] == 'done' for event in events)
+        assert task['tool_rounds'][0]['status'] == 'searching'

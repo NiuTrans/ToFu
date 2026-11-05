@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from lib.billing.cost import transfer_native_child_fees
+from lib.billing.native_cost import transfer_native_child_fees
 from lib.billing.native_actor_fees import capture
 from lib.goal_runs.pending_recovery import preflight_pending_actors
 from lib.goal_runs.pending_fee_evidence import preflight_pending_fees

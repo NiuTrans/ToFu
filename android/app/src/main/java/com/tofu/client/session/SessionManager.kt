@@ -98,8 +98,7 @@ class SessionManager(
             ?: return@withContext LoginResult.Error("Invalid server URL")
         if (profile.authType == AuthType.NONE) return@withContext LoginResult.Success(server.host)
         if (!cookies.cookieHeader(sessionProbeUrl(server)).isNullOrBlank() && verifyGatewaySession(profile)) {
-            stamp(profile, server.host)
-            return@withContext withApiPreflight(server, LoginResult.Success(server.host))
+            return@withContext if (stamp(profile, server.host)) withApiPreflight(server, LoginResult.Success(server.host)) else interactive(profile)
         }
         if (profile.authType == AuthType.INTERACTIVE_SSO) return@withContext interactive(profile)
         val secret = secrets.secretFor(profile.alias)
@@ -149,11 +148,16 @@ class SessionManager(
                 if (hop == MAX_GATEWAY_REDIRECTS) return Attempt(interactive(profile), AttemptKind.DEFINITIVE)
             }
             val loginForm = passwordForm ?: run {
-                val result = if (verifyGatewaySession(profile)) {
-                    stamp(profile, server.host)
+                val result = if (verifyGatewaySession(profile) && stamp(profile, server.host)) {
                     LoginResult.Success(server.host)
                 } else interactive(profile)
                 return Attempt(result, AttemptKind.DEFINITIVE)
+            }
+            currentCoroutineContext().ensureActive()
+            val current = dao.getById(profile.id)
+            if (current?.baseUrl != profile.baseUrl || current.alias != profile.alias ||
+                current.authType != profile.authType || secrets.secretFor(current.alias) != secret) {
+                return Attempt(interactive(profile), AttemptKind.DEFINITIVE)
             }
             diagnostics?.record("I", "Auth", "recognized code-server form target=${ClientReport.safeUrl(loginForm.target.toString())} fields=${loginForm.fields.keys}")
             val form = FormBody.Builder().apply {
@@ -172,8 +176,7 @@ class SessionManager(
                     return Attempt(interactive(profile), AttemptKind.DEFINITIVE)
                 }
                 if (issuedSession && response.code in setOf(200, 204, 302, 303)) {
-                    stamp(profile, server.host)
-                    return Attempt(LoginResult.Success(server.host), AttemptKind.DEFINITIVE)
+                    return Attempt(if (stamp(profile, server.host)) LoginResult.Success(server.host) else interactive(profile), AttemptKind.DEFINITIVE)
                 }
                 // HTTP 200 is only a wrong-password verdict when a known
                 // code-server form was re-served. An IdP HTML page is not evidence.
@@ -254,9 +257,10 @@ class SessionManager(
     private suspend fun stamp(profile: Profile, host: String): Boolean {
         currentCoroutineContext().ensureActive()
         val current = dao.getById(profile.id)
-        if (current?.baseUrl == profile.baseUrl && current.cookieHost == host) return true
-        val stamped = dao.setCookieHostIfUrlMatches(profile.id, profile.baseUrl, host) > 0
-        diagnostics?.record(if (stamped) "I" else "W", "Auth", "session marker saved=$stamped profile=${profile.alias} (conditional URL match)")
+        if (current?.baseUrl == profile.baseUrl && current.alias == profile.alias &&
+            current.authType == profile.authType && current.cookieHost == host) return true
+        val stamped = dao.setCookieHostIfCurrent(profile.id, profile.baseUrl, profile.alias, profile.authType, host) > 0
+        diagnostics?.record(if (stamped) "I" else "W", "Auth", "session marker saved=$stamped profile=${profile.alias} (conditional profile identity match)")
         return stamped
     }
 
@@ -344,8 +348,12 @@ class SessionManager(
         val verified = verifyGatewaySession(profile)
         diagnostics?.record(if (verified) "I" else "W", "SSO", "completion profile=${profile.alias} endpointVerified=$verified page=${ClientReport.safeUrl(finishedUrl)}")
         if (!InteractiveSso.completedSignIn(profile, finishedUrl, header, verified)) return@withContext false
-        cookies.flush()
-        stamp(profile, server.host)
+        val current = dao.getById(profile.id) ?: return@withContext false
+        if (current.baseUrl != profile.baseUrl || current.alias != profile.alias || current.authType == AuthType.NONE) return@withContext false
+        val stamped = stamp(current, server.host)
+        currentCoroutineContext().ensureActive()
+        if (stamped) cookies.flush()
+        stamped
     }
 
     suspend fun submitReport(profile: Profile, reportJson: String): String = withContext(Dispatchers.IO) {

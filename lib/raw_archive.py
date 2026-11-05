@@ -3,17 +3,22 @@
 The transport supplies the final protocol-specific request document and raw
 response bytes. This owner preserves request and response values, keeps temporary
 response growth bounded, compresses each part, and commits through semantic
-storage operations without ever failing the model request.
+storage operations without ever failing the model request. ``commit`` only hands
+the capture to one bounded background writer (``_ArchiveWriter``); persistence
+never runs on the provider call or the event loop (docs/LOGGING.md).
 """
 
 from __future__ import annotations
 
+import atexit
 import base64
+from collections import deque
 from collections.abc import Mapping, Sequence
 import hashlib
 import os
 import shutil
 import tempfile
+import threading
 from typing import Any
 import time
 import uuid
@@ -106,6 +111,227 @@ _COMMIT_RETRYABLE_CODES = frozenset(
     {'database_timeout', 'database_busy', 'database_unavailable'})
 _COMMIT_MAX_ATTEMPTS = 3
 
+_SHED_PAUSE_BASE_S = 30.0
+_SHED_PAUSE_MAX_S = 900.0
+
+
+def _is_load_shed(exc: BaseException) -> bool:
+    """The authority refused for capacity, not for a transient blip.
+
+    storage.v2 maps a retryable ``database_resource_exhausted`` onto
+    ``database_unavailable`` and keeps the wire code as the message (the
+    convention the conversation repositories already match). The native
+    authority reclaims its oldest archives at the owner and conversation
+    ceilings instead of refusing (docs/LOGGING.md), so a refusal is
+    host-pressure shedding; an engine that predates reclamation still refuses
+    at the ceiling. Both pause capture. A deterministic per-request bound
+    arrives non-retryable and keeps the ``database_resource_exhausted`` code:
+    it fails one archive and never pauses capture.
+    """
+    return (isinstance(exc, StorageError)
+            and exc.code == 'database_unavailable'
+            and exc.message == 'database_resource_exhausted')
+
+
+class _LoadShedPause:
+    """Process-wide pause of optional archive commits while capacity is refused.
+
+    A refused commit already cost the client's own replay loop, so retrying
+    every later round paid that again per provider call and kept loading the
+    authority that event and turn writes share. While paused a capture is
+    dropped without an RPC; once a window ends exactly one commit probes (the
+    window is reserved while it runs). Success resumes capture; another refusal
+    doubles the window.
+    """
+
+    def __init__(self, clock=None) -> None:
+        self._clock = clock or time.monotonic
+        self._lock = threading.Lock()
+        self._streak = 0
+        self._until = 0.0
+        self._skipped = 0
+
+    def _window(self) -> float:
+        return min(_SHED_PAUSE_MAX_S,
+                   _SHED_PAUSE_BASE_S * 2 ** max(0, self._streak - 1))
+
+    def paused(self) -> bool:
+        """Count and refuse a capture inside the window without reserving a probe."""
+        with self._lock:
+            if self._streak and self._clock() < self._until:
+                self._skipped += 1
+                return True
+            return False
+
+    def admit(self) -> bool:
+        with self._lock:
+            if not self._streak:
+                return True
+            now = self._clock()
+            if now < self._until:
+                self._skipped += 1
+                return False
+            self._until = now + self._window()
+            return True
+
+    def record_success(self) -> None:
+        with self._lock:
+            if not self._streak:
+                return
+            skipped, self._streak, self._until, self._skipped = self._skipped, 0, 0.0, 0
+        logger.info("Raw archive capture resumed; %d archive(s) were not "
+                    "recorded while paused", skipped)
+
+    def record_refusal(self, exc: BaseException) -> None:
+        with self._lock:
+            self._streak += 1
+            window = self._window()
+            self._until = self._clock() + window
+            skipped, self._skipped = self._skipped, 0
+        logger.warning(
+            "Raw archive capture paused for %.0fs: the storage authority refused "
+            "raw_archive.put (%s); %d archive(s) skipped since the last refusal. "
+            "Request Inspector evidence is not recorded while paused.",
+            window, exc, skipped)
+
+
+_shed_pause = _LoadShedPause()
+
+# Bounds the captures waiting for the writer by their resident bytes. Writer
+# throughput is bounded by the storage authority, not by this queue, so a
+# larger bound only delays the drop while holding more memory.
+_PENDING_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024
+_RESPONSE_SPOOL_MEMORY_BYTES = 1024 * 1024
+_EXIT_DRAIN_S = 5.0
+
+
+class _ArchiveWriter:
+    """Persist finished captures on one background thread, in submission order.
+
+    Transports finish a capture on the provider call's thread, and the async
+    relay finishes it on the event loop, before the model result returns.
+    Compressing, hashing and the storage command (whose client replays refusals
+    with backoff) therefore sat on every round's critical path, and on the
+    relay it blocked every coroutine of the loop. Measured 2026-10-23: refused
+    commits held their provider call p50 47 s, p90 290 s. ``submit`` is now a
+    bounded enqueue. One writer, because the authority serializes commits:
+    parallel writers would only contend with the event and turn writes that
+    share it. An empty queue always admits one capture, so an oversized
+    request is never starved; beyond the bound a capture is dropped and counted.
+    """
+
+    def __init__(self, memory_limit_bytes: int = _PENDING_MEMORY_LIMIT_BYTES) -> None:
+        self._memory_limit_bytes = memory_limit_bytes
+        self._condition = threading.Condition()
+        self._pending: deque[RawArchiveCapture] = deque()
+        self._pending_bytes = 0
+        self._active = False
+        self._closed = False
+        self._dropped = 0
+        self._thread: threading.Thread | None = None
+
+    def submit(self, capture: "RawArchiveCapture") -> bool:
+        if _shed_pause.paused():
+            capture._release()
+            return False
+        size = capture._resident_bytes()
+        first_drop = False
+        with self._condition:
+            admitted = not self._closed and (
+                not self._pending
+                or self._pending_bytes + size <= self._memory_limit_bytes)
+            if admitted:
+                self._pending.append(capture)
+                self._pending_bytes += size
+                self._ensure_thread_locked()
+                self._condition.notify_all()
+            elif not self._closed:
+                first_drop = not self._dropped
+                self._dropped += 1
+            pending_bytes = self._pending_bytes
+        if admitted:
+            return True
+        capture._release()
+        if first_drop:
+            logger.warning(
+                "Raw archive writer is saturated (%d pending bytes, bound %d); "
+                "dropping new captures until it drains",
+                pending_bytes, self._memory_limit_bytes)
+        return False
+
+    def _ensure_thread_locked(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run, name="raw-archive-writer", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while not self._pending and not self._closed:
+                    self._condition.wait()
+                if not self._pending:
+                    return
+                capture = self._pending.popleft()
+                self._pending_bytes -= capture._resident_bytes()
+                self._active = True
+            try:
+                capture._persist()
+            except Exception as exc:
+                logger.warning("Raw archive writer failed: %s", exc)
+            finally:
+                with self._condition:
+                    self._active = False
+                    dropped = 0
+                    if not self._pending:
+                        dropped, self._dropped = self._dropped, 0
+                    self._condition.notify_all()
+                if dropped:
+                    logger.warning(
+                        "Raw archive writer drained; %d capture(s) were dropped "
+                        "while it was saturated", dropped)
+
+    def flush(self, timeout: float) -> bool:
+        """Wait until every submitted capture has been persisted or dropped."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._condition:
+            while self._pending or self._active:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+        return True
+
+    def close(self, timeout: float) -> bool:
+        """Drain for at most ``timeout`` seconds, then release what is left."""
+        drained = self.flush(timeout)
+        with self._condition:
+            self._closed = True
+            left = list(self._pending)
+            self._pending.clear()
+            self._pending_bytes = 0
+            self._condition.notify_all()
+        for capture in left:
+            capture._release()
+        if left:
+            logger.warning("Raw archive writer closed with %d unpersisted "
+                           "capture(s)", len(left))
+        return drained
+
+
+_writer = _ArchiveWriter()
+
+
+def flush_pending_archives(timeout: float) -> bool:
+    """Wait for submitted captures to settle; for shutdown and specifications."""
+    return _writer.flush(timeout)
+
+
+@atexit.register
+def _close_writer_at_exit() -> None:
+    _writer.close(_EXIT_DRAIN_S)
+
 
 def _commit_with_retry(
     client: Any,
@@ -124,7 +350,10 @@ def _commit_with_retry(
                 'raw_archive.put', payload, command_id,
                 priority='event', deadline=60)
         except StorageError as exc:
-            retryable = exc.retryable and exc.code in _COMMIT_RETRYABLE_CODES
+            # The client already replayed a capacity refusal with availability
+            # backoff; replaying its whole loop again only re-hammers it.
+            retryable = (exc.retryable and exc.code in _COMMIT_RETRYABLE_CODES
+                         and not _is_load_shed(exc))
             if not retryable or attempt + 1 >= _COMMIT_MAX_ATTEMPTS:
                 raise
             delay = min(max((exc.retry_after_ms or 0) / 1000.0, 0.25), 2.0)
@@ -154,6 +383,8 @@ class RawArchiveCapture:
         self._response_total_bytes = 0
         self._response_retained_bytes = 0
         self._closed = False
+        self._response_complete = False
+        self._status_code: int | None = None
 
     @classmethod
     def create(
@@ -206,11 +437,32 @@ class RawArchiveCapture:
         *,
         response_complete: bool,
         status_code: int | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> bool:
+        """Hand the finished attempt to the background writer without blocking.
+
+        Returns whether the capture was queued. Request Inspector evidence must
+        never delay or replace a provider result, so a refusal is a drop.
+        """
         if self._closed:
-            return None
+            return False
         self._closed = True
+        self._response_complete = bool(response_complete)
+        self._status_code = status_code
+        return _writer.submit(self)
+
+    def _resident_bytes(self) -> int:
+        return len(self.request_bytes) + min(
+            self._response_retained_bytes, _RESPONSE_SPOOL_MEMORY_BYTES)
+
+    def _release(self) -> None:
+        self._response_file.close()
+
+    def _persist(self) -> None:
+        response_complete = self._response_complete
+        status_code = self._status_code
         try:
+            if not _shed_pause.admit():
+                return
             self._response_file.seek(0)
             retained_response = self._response_file.read()
             response_bytes = retained_response
@@ -253,7 +505,7 @@ class RawArchiveCapture:
 
             from lib.storage import get_storage_client
 
-            return _commit_with_retry(
+            _commit_with_retry(
                 get_storage_client(write=True),
                 {
                     "archive_id": self.archive_id,
@@ -285,10 +537,12 @@ class RawArchiveCapture:
                 },
                 "raw-archive:" + self.archive_id,
             )
+            _shed_pause.record_success()
         except Exception as exc:
-            # Request Inspector evidence must never replace a provider result.
-            logger.warning("Raw archive commit failed: %s", exc)
-            return None
+            if _is_load_shed(exc):
+                _shed_pause.record_refusal(exc)
+            else:
+                logger.warning("Raw archive commit failed: %s", exc)
         finally:
             self._response_file.close()
 

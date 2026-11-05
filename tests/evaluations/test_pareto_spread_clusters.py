@@ -23,6 +23,7 @@ import subprocess
 import pytest
 
 from tests._runtime_sections import ROOT
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -36,8 +37,8 @@ def _collides(left, right):
         < CLEARANCE - 1e-6
 
 
-@pytest.mark.skipif(not NODE, reason='node not installed')
 def test_same_coordinate_cluster_spreads_horizontally_only(tmp_path):
+    require_node_modules('vite')
     entry = tmp_path / 'entry.ts'
     output = tmp_path / 'spread.cjs'
     module = ROOT / 'frontend/src/features/model-catalog/pareto-chart.ts'

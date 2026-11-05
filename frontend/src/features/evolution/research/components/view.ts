@@ -1,6 +1,5 @@
 import { paperCards, bindPaperCards, destroyLiteratureGraph } from './live-library';
 import { openResearchRecord, resumeSavedResearch, startResearchJob } from '../controllers/runtime';
-import { _i18nLang } from '../../../../i18n';
 import { patchResearchDom } from './stable-dom';
 import { researchNumber, researchText } from '../../../paper/research-cycle';
 import { featureRegistry } from '../../../../feature-registry';
@@ -689,18 +688,14 @@ export function researchDeliverablesHtml(stream: ResearchStream, t: Translator):
    program card on top, every past exploration below. Mirrors the paper
    library overlay; the classes live in 03-paper-reader.css. */
 
-function researchUiLabel(zh: string, en: string): string {
-  return _i18nLang === 'zh' ? zh : en;
-}
-
-const RECORD_STATUS: Record<string, { dot: string; zh: string; en: string }> = {
-  running: { dot: 'is-running', zh: '后台运行中', en: 'Running' },
-  pending: { dot: 'is-pending', zh: '等待执行', en: 'Pending' },
-  interrupted: { dot: 'is-interrupted', zh: '已中断 · 记录已保存', en: 'Interrupted · saved' },
-  done: { dot: 'is-done', zh: '已完成', en: 'Completed' },
-  error: { dot: 'is-error', zh: '执行失败 · 记录已保存', en: 'Failed · saved' },
-  aborted: { dot: 'is-aborted', zh: '已停止', en: 'Stopped' },
-  degraded: { dot: 'is-degraded', zh: '已完成 · 需复核', en: 'Completed · review needed' },
+const RECORD_STATUS: Record<string, { dot: string; key: string; fallback: string }> = {
+  running: { dot: 'is-running', key: 'evolution.research.recordRunning', fallback: 'Running' },
+  pending: { dot: 'is-pending', key: 'evolution.research.recordPending', fallback: 'Pending' },
+  interrupted: { dot: 'is-interrupted', key: 'evolution.research.recordInterrupted', fallback: 'Interrupted · saved' },
+  done: { dot: 'is-done', key: 'evolution.research.recordDone', fallback: 'Completed' },
+  error: { dot: 'is-error', key: 'evolution.research.recordError', fallback: 'Failed · saved' },
+  aborted: { dot: 'is-aborted', key: 'evolution.research.recordAborted', fallback: 'Stopped' },
+  degraded: { dot: 'is-degraded', key: 'evolution.research.recordDegraded', fallback: 'Completed · review needed' },
 };
 
 function sidebarDate(timestamp: unknown): string {
@@ -762,11 +757,10 @@ export async function renderResearchSidebar(): Promise<void> {
         const rows = array(data.items);
         if (rows.length) {
           list.innerHTML = rows.map((row) => {
-            const status = RECORD_STATUS[text(row.status)]
-              ?? { dot: '', zh: text(row.status), en: text(row.status) };
+            const status = RECORD_STATUS[text(row.status)];
             const taskId = text(row.task_id);
-            return itemHtml(status.dot, text(row.direction) || taskId,
-              researchUiLabel(status.zh, status.en), sidebarDate(row.updated_at),
+            return itemHtml(status?.dot ?? '', text(row.direction) || taskId,
+              status ? tr(t, status.key, status.fallback) : text(row.status), sidebarDate(row.updated_at),
               Boolean(stream?.taskId && stream.taskId === taskId));
           }).join('');
           list.querySelectorAll<HTMLButtonElement>('.research-record-item').forEach((button, index) => {
@@ -782,7 +776,7 @@ export async function renderResearchSidebar(): Promise<void> {
     if (!list.isConnected) return;
     const items = array(data.items);
     if (!items.length) {
-      note(researchUiLabel('还没有探索记录 — 从上方的新方向开始。',
+      note(tr(t, 'evolution.research.recordsEmpty',
         'No exploration records yet — start a new direction above.'));
       return;
     }
@@ -1041,8 +1035,11 @@ function researchHeader(stream: ResearchStream, t: Translator): string {
     + '<div><div class="rs-eyebrow">' + escapeHtml(tr(t, 'evolution.research.activeProgram', 'Active research program'))
     + '</div><h1>' + escapeHtml(stream.direction) + '</h1>'
     + '</div></div><div class="rs-run-meta"><span role="status" class="rs-status ' + statusClass + '"><i></i>'
-    + escapeHtml(stream.status === 'interrupted' ? (_i18nLang === 'zh' ? '已中断 · 记录已保存' : 'Interrupted · saved') : researchStatusLabel(stream, t)) + '</span>'
-    + (stream.status === 'interrupted' ? '<button type="button" id="researchResumeSaved" class="rs-btn">' + (_i18nLang === 'zh' ? '从已保存阶段继续' : 'Resume saved stages') + '</button>' : '')
+    + escapeHtml(stream.status === 'interrupted'
+      ? tr(t, 'evolution.research.recordInterrupted', 'Interrupted · saved')
+      : researchStatusLabel(stream, t)) + '</span>'
+    + (stream.status === 'interrupted' ? '<button type="button" id="researchResumeSaved" class="rs-btn">'
+      + escapeHtml(tr(t, 'evolution.research.resumeSaved', 'Resume saved stages')) + '</button>' : '')
     + (researchTimestamp(stream.startedAt) ? '<time>' + escapeHtml(researchTimestamp(stream.startedAt)) + '</time>' : '')
     + (researchIsRunning(stream) && stream.taskId && !stream.cancelling ? '<button type="button" class="rs-stop-btn" data-tofu-action="_abortResearchJob()">'
       + escapeHtml(tr(t, 'evolution.research.abort', 'Stop run')) + '</button>' : '')

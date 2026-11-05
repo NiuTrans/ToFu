@@ -1,30 +1,24 @@
 """lib/key_stats/_record.py — Hot-path outcome recording.
 
-``record_outcome`` / ``record_rate_limit`` / ``record_gateway_error`` /
-``mark_key_exhausted`` apply semantic increments to the latest durable
-document under ``_lock``. All state lives in ``lib.key_stats._state`` and is
-imported here BY REFERENCE.
+``record_outcome`` / ``record_rate_limit`` / ``record_gateway_error`` record
+reconstructible health telemetry: the in-memory view changes at once and the
+coalesced background flush persists it, so a request thread never touches
+disk (``_state._record_telemetry``). ``mark_key_exhausted`` records a billing
+stop — an admission decision — and commits it durably before returning
+(``_state._commit_decision``). All state lives in ``lib.key_stats._state``
+and is imported here BY REFERENCE.
 """
 
 from lib.log import get_logger
 
 from lib.key_stats._state import (
-    _lock,
-    _new_entry,
+    _commit_decision,
+    _entry_for_update,
     _pair_key,
-    _update_store_unlocked,
+    _record_telemetry,
 )
 
 logger = get_logger(__name__)
-
-
-def _entry_for_update(stats: dict, pk: str) -> dict:
-    """Return a mutable entry, repairing a malformed leaf defensively."""
-    entry = stats.get(pk)
-    if not isinstance(entry, dict):
-        entry = _new_entry()
-        stats[pk] = entry
-    return entry
 
 
 def record_outcome(provider_id: str, key_name: str, success: bool,
@@ -32,7 +26,8 @@ def record_outcome(provider_id: str, key_name: str, success: bool,
     """Record a single request outcome (non-429).
 
     Called from Slot.record_success / Slot.record_error. Must be cheap:
-    updates the in-memory counter and persists asynchronously-safe.
+    updates the in-memory counter; the coalesced background flush persists
+    it within ``KEY_STATS_FLUSH_INTERVAL_SECONDS``.
 
     Rate-limit (HTTP 429) errors should call :func:`record_rate_limit`
     instead — they're tracked separately because they reflect contention
@@ -44,26 +39,19 @@ def record_outcome(provider_id: str, key_name: str, success: bool,
     """
     if not key_name:
         return
-    pk = _pair_key(provider_id, key_name)
-
-    def _mutate(stats, _overrides):
-        entry = _entry_for_update(stats, pk)
-        # Any non-429 outcome (success OR hard failure) breaks a 429 streak —
-        # the key is clearly capable of returning something else.
-        entry['consecutive_429'] = 0
-        if success:
-            entry['success'] = int(entry.get('success') or 0) + 1
-        else:
-            entry['failure'] = int(entry.get('failure') or 0) + 1
-            if error:
-                entry['last_error'] = str(error)[:200]
-            if credential_failure:
-                entry['credential_failures'] = (
-                    int(entry.get('credential_failures') or 0) + 1)
-                entry['last_credential_error'] = str(error)[:200]
-
-    with _lock:
-        _update_store_unlocked(_mutate)
+    # Any non-429 outcome (success OR hard failure) breaks a 429 streak —
+    # the key is clearly capable of returning something else.
+    delta = {'streak_reset': True}
+    if success:
+        delta['success'] = 1
+    else:
+        delta['failure'] = 1
+        if error:
+            delta['last_error'] = str(error)[:200]
+        if credential_failure:
+            delta['credential_failures'] = 1
+            delta['last_credential_error'] = str(error)[:200]
+    _record_telemetry(_pair_key(provider_id, key_name), delta)
 
 
 def record_rate_limit(provider_id: str, key_name: str,
@@ -74,7 +62,7 @@ def record_rate_limit(provider_id: str, key_name: str,
     error resets it to zero) plus the daily ``rate_limited`` total; both are
     shown on the Settings card. That is ALL a 429 may do here.
 
-    Owner policy (2026-07-29, after the sankuai-anthropic total-outage): a
+    Owner policy (2026-07-29, after the example-corp-anthropic total-outage): a
     429 streak NEVER disables a key. 429 is backpressure — the answer is the
     slot-local steering cooldown and RPM decay, so the key rejoins the
     moment the upstream recovers, with zero human action. Only an explicit
@@ -87,15 +75,8 @@ def record_rate_limit(provider_id: str, key_name: str,
     """
     if not key_name:
         return
-    pk = _pair_key(provider_id, key_name)
-
-    def _mutate(stats, _overrides):
-        entry = _entry_for_update(stats, pk)
-        entry['rate_limited'] = int(entry.get('rate_limited') or 0) + 1
-        entry['consecutive_429'] = int(entry.get('consecutive_429') or 0) + 1
-
-    with _lock:
-        _update_store_unlocked(_mutate)
+    _record_telemetry(_pair_key(provider_id, key_name),
+                      {'rate_limited': 1, 'streak_add': 1})
 
 
 def record_gateway_error(provider_id: str, key_name: str,
@@ -107,7 +88,7 @@ def record_gateway_error(provider_id: str, key_name: str,
     These say "the upstream behind the gateway is sick", never "this key is
     sick" — and they hit every key on the provider uniformly, so feeding
     them into the daily success-rate column both wrecks the card's honesty
-    and TRIPS the auto-disable gate (2026-08-03 sankuai 502 storm: 813
+    and TRIPS the auto-disable gate (2026-08-03 example-corp 502 storm: 813
     failures in ~2h auto-disabled 2 of 3 healthy keys for the day; only the
     third key's success volume plus the last-resort guard kept service up).
 
@@ -125,14 +106,7 @@ def record_gateway_error(provider_id: str, key_name: str,
     """
     if not key_name:
         return
-    pk = _pair_key(provider_id, key_name)
-
-    def _mutate(stats, _overrides):
-        entry = _entry_for_update(stats, pk)
-        entry['gateway_errors'] = int(entry.get('gateway_errors') or 0) + 1
-
-    with _lock:
-        _update_store_unlocked(_mutate)
+    _record_telemetry(_pair_key(provider_id, key_name), {'gateway_errors': 1})
 
 
 def mark_key_exhausted(provider_id: str, key_name: str,
@@ -149,7 +123,7 @@ def mark_key_exhausted(provider_id: str, key_name: str,
             (``exhausted_models``) instead of flipping the key-wide
             ``exhausted`` flag. This matters on AGGREGATING GATEWAYS where
             one key proxies several upstream vendors (2026-07-28 incident:
-            a qwen→Aliyun ``insufficient_quota`` on ``sankuai_key_1``
+            a qwen→Aliyun ``insufficient_quota`` on ``example_corp_key_1``
             key-wide-exhausted the key, cross-vendor poisoning kimi→Moonshot
             capacity routed through the same key). A single-vendor account
             converges to the same end state — each sibling model trips its
@@ -160,7 +134,7 @@ def mark_key_exhausted(provider_id: str, key_name: str,
             ``model=''`` is also passed DELIBERATELY for HTTP 402 Payment
             Required (owner ruling 2026-07-29): a 402 is emitted by the
             gateway's OWN credit-validation layer about the ACCOUNT's
-            credit pool (sankuai: ext.error.source=AIGC, stage=validation),
+            credit pool (example-corp: ext.error.source=AIGC, stage=validation),
             so every model on the key is dead and the key-wide flag is the
             honest stop — per-model there would just burn one live 402
             per remaining model before converging.
@@ -195,7 +169,6 @@ def mark_key_exhausted(provider_id: str, key_name: str,
         if reason:
             entry['last_error'] = str(reason)[:200]
 
-    with _lock:
-        _update_store_unlocked(_mutate)
+    _commit_decision(_mutate, day_scoped=True)
     logger.warning('[KeyStats] %s exhausted for today (model=%s): %s',
                    pk, model or '<key-wide>', (reason or '')[:200])

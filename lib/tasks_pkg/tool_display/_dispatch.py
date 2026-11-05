@@ -26,6 +26,7 @@ from lib.tools.conversation import (
 from lib.tools.image_edit import IMAGE_EDIT_TOOL_NAMES
 from lib.tools.image_gen import IMAGE_GEN_TOOL_NAMES
 from lib.tools.project import PROJECT_TOOL_NAMES
+from lib.tools.video_inspect import VIDEO_INSPECT_TOOL_NAMES
 
 from lib.tools.tool_result_artifacts import TOOL_RESULT_ARTIFACT_NAMES
 from lib.tasks_pkg.tool_display._renderers import (
@@ -41,8 +42,10 @@ from lib.tasks_pkg.tool_display._renderers import (
     _tool_display_human_guidance,
     _tool_display_image_gen,
     _tool_display_inspect_image,
+    _tool_display_inspect_video,
     _tool_display_execute,
     _tool_display_evolution,
+    _tool_display_exploration,
     _tool_display_knowledge,
     _tool_display_local_serve,
     _tool_display_memory,
@@ -180,9 +183,11 @@ def _build_display_dispatch_table():
     for name in LOCAL_SERVE_TOOL_NAMES:
         table[name] = _tool_display_local_serve
 
-    # Desktop tools
+    # Desktop tools, and the durable wait for an offline device
     for name in DESKTOP_TOOL_NAMES:
         table[name] = _tool_display_desktop
+    from lib.desktop.device_waits import AWAIT_DEVICE_TOOL
+    table[AWAIT_DEVICE_TOOL['function']['name']] = _tool_display_desktop
 
     # Swarm tools
     for name in SWARM_TOOL_NAMES:
@@ -195,6 +200,10 @@ def _build_display_dispatch_table():
     # Image inspection tool (zoom/rotate/crop viewer)
     for name in IMAGE_EDIT_TOOL_NAMES:
         table[name] = _tool_display_inspect_image
+
+    # Video inspection tool (key frames / probe / transcript viewer)
+    for name in VIDEO_INSPECT_TOOL_NAMES:
+        table[name] = _tool_display_inspect_video
 
     # Motion-video pipeline tools (env/storyboard/static gates/render/probe/
     # concat/narrate/mux) — friendly labels naming the scene / files, no
@@ -214,6 +223,8 @@ def _build_display_dispatch_table():
     for name in ('evolution_teach', 'evolution_material', 'evolution_coordinate',
                  'evolution_reindex'):
         table[name] = _tool_display_evolution
+    for name in ('get_exploration', 'manage_exploration'):
+        table[name] = _tool_display_exploration
 
     # LaTeX paper build pipeline (compile / layout / arXiv import) plus the
     # citation and quality families.

@@ -22,7 +22,7 @@ from runtime_guards import resolve_resource_budget
 logger = get_logger(__name__)
 _TRANSIENT_READ_ISSUES = frozenset({
     'codex_command_timeout', 'codex_command_unavailable',
-    'codex_home_storage_full',
+    'codex_home_storage_full', 'codex_home_unavailable',
     'desktop_login_stale', 'desktop_login_unavailable', 'desktop_disconnected',
 })
 
@@ -104,6 +104,11 @@ def resolve_reference(reference: dict, *, refresh: bool = False) -> dict:
     """Read one bound source and retain failure metadata in the incident stream."""
     started = time.monotonic()
     snapshot = _resolve_reference(reference, refresh=refresh)
+    if refresh:
+        # A refreshing read may renew the native login or the desktop copy;
+        # passive reads in the same token snapshot must observe the result.
+        from lib.oauth.token_store import forget_token_snapshot
+        forget_token_snapshot('codex')
     issue = snapshot.get('shared_login_issue')
     if issue:
         source = reference.get('kind') if reference.get('kind') in {'local', 'desktop'} else 'unknown'
@@ -175,8 +180,15 @@ def discover_reference(*, owner_user_id: int, expected_account_id: str = '') -> 
         return None
     from lib.oauth.codex_local_login import read_local_login
     snapshot = read_local_login(expected_account_id=expected_account_id, refresh=True)
+    if snapshot.get('shared_login_issue') == 'codex_home_unavailable':
+        return None  # Restore the authoritative local home; do not select a device.
     kind, agent_id = 'local', ''
     if not snapshot.get('access_token'):
+        from lib.oauth.codex_command_login import explicit_home_is_unavailable
+        if explicit_home_is_unavailable():
+            # Positive ENOSPC/policy attribution may coexist with source loss.
+            # Neither failure authorizes another login while that home is absent.
+            return None
         agents = _agents(owner)
         if len(agents) != 1:
             return None  # No device or ambiguous devices; never pick the latest.

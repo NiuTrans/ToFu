@@ -14,6 +14,7 @@ import {
   type ConversationTurnViewModel,
 } from '../../presentation/conversation-view-model';
 import type { ClassicConversationRendererPorts } from './ports';
+import { iconHtml } from '../../../icons';
 import {
   directClassChild,
   setManagedHtml,
@@ -30,6 +31,7 @@ import { textFor } from './localized-copy';
 import { updateAnswerNavigation } from './answer-navigation';
 
 import { liveStatusPhase, presentLivePhaseLabel } from '../../presentation/live-phase';
+import { swarmAgentPhaseLabel } from '../../presentation/swarm-agent-presentation';
 
 export function renderBackgroundCompletion(
   node: HTMLElement,
@@ -62,6 +64,9 @@ export function renderBackgroundCompletion(
   setText(part(summary, 'bgcmd-output-label', 'span'),
     `${textFor(ports, 'bgCommand.output', 'Command result')} · `);
   setText(part(summary, 'bgcmd-id', 'code'), completion.commandId.slice(0, 128));
+  if (!directClassChild(summary, 'bgcmd-chevron')) {
+    summary.appendChild(disclosureChevron(document, 'bgcmd-chevron'));
+  }
   setText(part(details, 'bgcmd-command', 'pre'), completion.command.slice(0, 2000));
   setText(part(details, 'sw-card-raw-pre', 'pre'), completion.resultPreview.slice(0, 2000)
     || textFor(ports, 'bgCommand.noPayload', 'No result available.'));
@@ -191,24 +196,28 @@ export function renderThinkingBlock(
   details.className = 'thinking-block';
   /* Streaming blocks are created open; once the reasoning closes (next round
    * starts or the turn settles) collapse them again so finished thinking
-   * never towers over the answer. A complete block the reader opened
-   * manually never re-transitions through 'active', so it stays put. */
+   * never towers over the answer. A grouped reply merges every round into
+   * this one disclosure, so it re-enters 'active' each round: only an
+   * automatic opening collapses; the reader's own toggle stays put. */
   const wasActive = details.dataset.state === 'active';
-  if (block.terminal && wasActive) details.open = false;
+  if (block.terminal && wasActive && details.dataset.readerChoice !== 'true') details.open = false;
   details.dataset.state = block.terminal ? 'complete' : 'active';
   let summary = directClassChild<HTMLElement>(details, 'thinking-header');
   if (!summary) {
     summary = document.createElement('summary');
+    const owner = details;
+    summary.addEventListener('click', () => { owner.dataset.readerChoice = 'true'; });
     details.prepend(summary);
   }
   summary.className = 'thinking-header';
-  let stateDot = directClassChild<HTMLElement>(summary, 'thinking-state-dot');
-  if (!stateDot) {
-    stateDot = document.createElement('span');
-    stateDot.className = 'thinking-state-dot';
-    stateDot.setAttribute('aria-hidden', 'true');
-    summary.prepend(stateDot);
+  let glyph = directClassChild<HTMLElement>(summary, 'thinking-icon');
+  if (!glyph) {
+    glyph = document.createElement('span');
+    glyph.className = 'thinking-icon';
+    glyph.setAttribute('aria-hidden', 'true');
+    summary.prepend(glyph);
   }
+  setManagedHtml(glyph, iconHtml('brain'));
   let label = directClassChild<HTMLElement>(summary, 'thinking-label');
   if (!label) {
     label = document.createElement('span');
@@ -292,6 +301,53 @@ export function renderThinkingBlock(
   renderTranslationAlternative(node, block, ports);
 }
 
+/* Client-side tick for the sparse wait phases. The backend only ships a new
+ * elapsed frame on power-of-two heartbeats (RetryPhaseEventBudget), so the
+ * visible counter would otherwise freeze between server frames. We re-anchor
+ * on every real render and advance the number locally once per second. This
+ * costs no network/server work: it only rewrites one text node in place. */
+interface WaitTickState {
+  /** Server-reported elapsed seconds at anchor time. */
+  anchor: number;
+  /** Client clock (ms) when the anchor frame was rendered. */
+  at: number;
+  prefix: string;
+  suffix: string;
+}
+const waitTickStates = new WeakMap<HTMLElement, WaitTickState>();
+let waitTickTimer: ReturnType<typeof setInterval> | null = null;
+
+function waitTickEligible(block: Extract<ConversationBlockViewModel, { kind: 'live-status' }>): boolean {
+  const value = block.value;
+  return value.phase === 'waiting_model'
+    && (value.detailKey === 'stream.phase.waitingForResponse'
+      || value.detailKey === 'stream.phase.waitingQuotaReset'
+      || value.detailKey === 'stream.phase.streamStalled')
+    && typeof value.detailArgs?.elapsed === 'number'
+    && Number.isFinite(value.detailArgs.elapsed);
+}
+
+function ensureWaitTickTimer(): void {
+  if (waitTickTimer != null) return;
+  waitTickTimer = setInterval(() => {
+    /* The WeakMap is not iterable; scan live nodes each second. There is at
+     * most one live-status block per active turn, so this stays trivial. */
+    for (const node of Array.from(
+      document.querySelectorAll<HTMLElement>('.conversation-block--live-status'),
+    )) {
+      const state = waitTickStates.get(node);
+      if (!state) continue;
+      const target = node.querySelector<HTMLElement>('.stream-phase-text');
+      if (!target) continue;
+      const elapsed = state.anchor + Math.floor((Date.now() - state.at) / 1000);
+      const next = state.prefix + elapsed + state.suffix;
+      if (target.textContent !== next) target.textContent = next;
+    }
+  }, 1000);
+  /* Do not keep the event loop alive just for the tick (browser no-op). */
+  (waitTickTimer as unknown as { unref?: () => void }).unref?.();
+}
+
 export function renderLiveStatusBlock(
   node: HTMLElement,
   block: Extract<ConversationBlockViewModel, { kind: 'live-status' }>,
@@ -323,10 +379,8 @@ export function renderLiveStatusBlock(
       { iteration: goal.iteration, role });
     label = `${context}${label ? ' · ' + label : ''}`;
     if (goal.workers.length) label += ' · ' + goal.workers.map(worker =>
-      worker.text + ' · ' + textFor(ports,
-        worker.waitReason === 'capacity' ? 'swarm.wait.capacity' : worker.waitReason === 'dependencies'
-          ? 'swarm.wait.dependencies' : worker.phase === 'pending'
-          ? 'swarm.wait.pending' : 'swarm.phase.' + worker.phase, worker.phase)
+      worker.text + ' · ' + swarmAgentPhaseLabel(worker,
+        (key, fallback, args) => textFor(ports, key, fallback, args))
       + (worker.latestTool ? ' · ' + textFor(ports, 'stream.goal.latestTool',
         'Latest tool: {tool}', { tool: worker.latestTool }) : '')
       + (worker.toolError ? ' · ' + textFor(ports,
@@ -351,6 +405,24 @@ export function renderLiveStatusBlock(
   const textNode = document.createElement('span');
   textNode.className = 'stream-phase-text';
   textNode.textContent = label;
+  if (waitTickEligible(block)) {
+    const elapsed = Number(value.detailArgs!.elapsed);
+    const anchor = String(elapsed);
+    const at = label.indexOf(anchor);
+    if (at >= 0) {
+      waitTickStates.set(node, {
+        anchor: elapsed,
+        at: Date.now(),
+        prefix: label.slice(0, at),
+        suffix: label.slice(at + anchor.length),
+      });
+      ensureWaitTickTimer();
+    } else {
+      waitTickStates.delete(node);
+    }
+  } else {
+    waitTickStates.delete(node);
+  }
   if (phase === 'thinking_active' && value.thinkingLength != null) {
     const counter = document.createElement('span');
     counter.className = 'stream-phase-counter';
@@ -404,8 +476,11 @@ function renderTranslationAlternative(
   // A translated answer needs attribution outside its closed Original fold.
   // With no alternate body (e.g. a reloaded translated input lacking its
   // original), retain the canonical receipt without inventing a disclosure.
+  // The Turn's one translation receipt rides its answer or input; mid-turn
+  // narration never repeats it under every paragraph.
   renderTranslationModel(node, block.kind === 'text' ? block.translationModel : undefined,
     ports, 'bilingual-attribution', block.kind === 'text'
+      && (block.terminal || block.deliverable)
       && ((block.displayMode === 'translated' && Boolean(block.translatedMarkdown?.trim()))
         || Boolean(block.inputTranslationCompleted)));
 

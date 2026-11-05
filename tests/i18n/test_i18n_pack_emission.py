@@ -8,15 +8,17 @@ from pathlib import Path
 
 import pytest
 
+from lib.http_transport.ui_languages import UI_LANGUAGES
 from lib.vite_assets import VITE_MANIFEST, validate_vite_artifact
+from tests._jsdom import require_shipped_graph
 
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
-LANGUAGES = ('zh', 'en')
 
 
 def _manifest() -> dict:
+    require_shipped_graph()
     validate_vite_artifact()
     return json.loads(Path(VITE_MANIFEST).read_text(encoding='utf-8'))
 
@@ -40,7 +42,7 @@ def _reachable_assets(manifest: dict, entry: str) -> set[str]:
 def _locale_assets(manifest: dict) -> dict[str, str]:
     assets = _reachable_assets(manifest, 'frontend/src/main.ts')
     matches = {}
-    for language in LANGUAGES:
+    for language in UI_LANGUAGES:
         pattern = re.compile(
             rf'assets/{language}\.generated-[A-Za-z0-9_-]{{8,}}\.json',
         )
@@ -48,11 +50,11 @@ def _locale_assets(manifest: dict) -> dict[str, str]:
     return matches
 
 
-def test_vite_emits_both_locales_as_distinct_content_hashed_data_assets():
+def test_vite_emits_every_locale_as_a_distinct_content_hashed_data_asset():
     manifest = _manifest()
     files = _locale_assets(manifest)
     assert all(files.values()), files
-    assert len(set(files.values())) == 2
+    assert len(set(files.values())) == len(UI_LANGUAGES)
 
 
 def test_emitted_locale_assets_are_exact_valid_catalogs():
@@ -61,12 +63,12 @@ def test_emitted_locale_assets_are_exact_valid_catalogs():
         emitted = json.loads(
             (Path(VITE_MANIFEST).parent / asset).read_text(encoding='utf-8'),
         )
-        authored = json.loads(
-            (ROOT / f'frontend/src/i18n/locales/{language}.json').read_text(
+        delivered = json.loads(
+            (ROOT / f'frontend/src/i18n/generated/{language}.generated.json').read_text(
                 encoding='utf-8',
             ),
         )
-        assert emitted == authored
+        assert emitted == delivered
 
 
 def test_main_entry_references_locale_data_without_javascript_entries():

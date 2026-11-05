@@ -519,7 +519,7 @@ _IMAGE_TOKENS_DEFAULT = _IMAGE_TOKENS_HIGH  # conservative default
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # Per-tool maximum result chars.  Results exceeding this are persisted
-# to disk + replaced with a preview so a single grep_search or read_files
+# to disk + replaced with a preview so a single search_files or read_files
 # can't eat the entire context window.
 
 # Tools whose results should NEVER be truncated by budget_tool_result.
@@ -553,6 +553,7 @@ _BUDGET_EXEMPT_TOOLS = frozenset({
 TOOL_RESULT_MAX_CHARS: dict[str, int] = {
     'read_files':    0,          # exempt — see _BUDGET_EXEMPT_TOOLS
     'load_skill':    0,          # task-lifetime workflow; L1 owns receipt
+    'search_files':  30_000,
     'grep_search':   30_000,
     'find_files':    20_000,
     'list_dir':      15_000,

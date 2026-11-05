@@ -13,11 +13,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from lib.log import get_logger
+from lib.storage.deadline_policy import observe_storage_service
 from lib.storage.errors import StorageError
 from lib.storage.frame_admission import FrameByteAdmission
-from lib.storage.commit_events import publish_committed_events
+from lib.storage.commit_events import publish_committed_events, publish_committed_operation
 from lib.storage.protocol import (
-    PROTOCOL_VERSION, recv_frame, send_frame, validate_operation,
+    PROTOCOL_VERSION, recv_frame, send_frame, validate_operation, wire_payload,
 )
 from lib.storage.retry_log import retry_log_throttle
 
@@ -204,6 +205,7 @@ class StorageClient:
                     command_id=command_id, priority=priority,
                 )
                 _record_rpc(kind, operation, started_at, 'success')
+                observe_storage_service(kind, operation, time.monotonic() - started_at)
                 return result
             except StorageError as exc:
                 retry_classified = (
@@ -266,7 +268,7 @@ class StorageClient:
             'auth': self._token,
             'kind': kind,
             'operation': operation,
-            'payload': dict(payload or {}),
+            'payload': wire_payload(payload),
             'deadline_unix_ms': (int((time.time() + timeout) * 1000)
                                  if deadline_unix_ms is None else deadline_unix_ms),
         }
@@ -347,6 +349,7 @@ class StorageClient:
             command_id=command_id, priority=priority,
         )
         if not isinstance(result, Mapping) or '_storageCommitContract' not in result:
+            publish_committed_operation(operation)
             return result
         if result.get('_storageCommitContract') != 'storage.committed-events/v1':
             raise StorageError(
@@ -365,6 +368,7 @@ class StorageClient:
         # committed.  Wake subscribers before returning the original semantic
         # value, while keeping observer failures non-fatal in the dispatcher.
         publish_committed_events(events)
+        publish_committed_operation(operation)
         return result.get('value')
 
     def health(self, deadline: float | None = 2.0) -> Any:

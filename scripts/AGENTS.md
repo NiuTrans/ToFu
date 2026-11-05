@@ -17,6 +17,9 @@ an undocumented second source of product policy.
 - `gen_tofudb_ir_contract.py` also consumes `conversation_search_v2.json` for
   native projection limits. Search benchmarks measure a complete logical query,
   including every continuation needed to reach its requested result limit.
+  Its authored owner is `tofudb_contract_codegen/`: per-invocation input capture,
+  ordered domain validation and output projection. Read that directory's guide
+  before changing the generator; the CLI owns only check/write publication.
 - Validation scripts are read-only and return actionable nonzero failures.
   Avoid network access and machine-specific assumptions in release gates.
 - Migration and maintenance tools require explicit targets, preflight,
@@ -24,6 +27,14 @@ an undocumented second source of product policy.
   boundary, atomic replacement, and postcondition verification.
 - Resolve repository/runtime roots safely; never use broad deletion targets,
   unresolved globs, or implicit current-directory authority.
+- `frontend_vendor_assets.mjs` derives standalone KaTeX files, CSS font closure
+  and `lib/http_transport/generated_frontend_vendor.py` from the installed lockfile version.
+  Author the iframe adapter under `frontend/src/artifacts/`; verify generation
+  drift, exported integrity and sandboxed math with the frontend vendor tests.
+- `vite_asset_manifest.mjs` owns candidate admission and complete previous-graph
+  snapshots; `vite_asset_publication.mjs` owns verified assets before the atomic
+  manifest commit. Verify their Node tests and `npm run check:frontend`.
+  Publication policy: `docs/FRONTEND_ARCHITECTURE.md`.
 - Bound concurrency, memory, output, temporary storage, retries, and subprocess
   lifetimes. Redact credentials and user content.
 - Reuse application contracts and storage maintenance ports; do not copy SQL or

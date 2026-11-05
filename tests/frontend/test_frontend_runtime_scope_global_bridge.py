@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from lib.vite_assets import VITE_OUT_DIR, validate_vite_artifact
+from tests._jsdom import require_node_modules, require_shipped_graph
 
 
 pytestmark = pytest.mark.unit
@@ -141,11 +142,9 @@ for (const key of ['navigator', 'location']) {
 """
 
 
-@pytest.mark.skipif(
-    not shutil.which("node") or not (ROOT / "node_modules/jsdom").is_dir(),
-    reason="node + jsdom are required",
-)
 def test_built_runtime_imports_without_undefined_retired_owner():
+    require_node_modules('jsdom')
+    require_shipped_graph()
     harness = ROOT / "tests/_runtime_scope_smoke.cjs"
     loader = ROOT / "tests/_runtime_scope_loader.mjs"
     harness.write_text(_HARNESS, encoding="utf-8")

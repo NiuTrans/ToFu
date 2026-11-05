@@ -13,6 +13,8 @@ from uuid import uuid4
 import threading
 
 from lib.tools.effect_recovery import effect_recovery_policy
+from lib.agent_core.storage_errors import StorageError, TRANSIENT_STORAGE_CODES
+from lib.logging_pkg.log_record_values import text_value
 
 
 class ToolEffectDurabilityError(RuntimeError):
@@ -302,6 +304,16 @@ def _http_exception_kind(exception):
     return 'timeout' if timed_out else 'connection'
 
 
+def is_tool_cancellation(exception):
+    """Recognize cooperative control exceptions, never cancellation-like prose."""
+    from concurrent.futures import CancelledError
+    from lib.llm.llm_errors import AbortedError
+    from lib.tasks_pkg.tool_runtime import ToolCancelled
+    from lib.project_mod.run_command import CommandAdmissionCancelled
+    return isinstance(exception, (AbortedError, CancelledError, ToolCancelled,
+                                  CommandAdmissionCancelled))
+
+
 def tool_exception_result(task, tool_name, round_entry, exception, *, message=None):
     """Project an already-caught execution error, without dispatch or settlement.
 
@@ -310,19 +322,52 @@ def tool_exception_result(task, tool_name, round_entry, exception, *, message=No
     Existing owners still decide which exceptions must propagate as fatal.
     """
     from lib.tools.result_envelope import typed_tool_error
-    from lib.llm.llm_errors import AbortedError
-    from concurrent.futures import CancelledError
+    from lib.project_mod.run_command import CommandAdmissionRefusal
 
-    message = message or f'Tool "{tool_name}" failed with {type(exception).__name__}: {exception}'
+    message = message or f'Tool "{tool_name}" failed with {type(exception).__name__}: {text_value(exception)}'
     if isinstance(exception, TimeoutError):
         return tool_timeout_result(task, tool_name, round_entry, message=message)
+    if isinstance(exception, CommandAdmissionRefusal) and isinstance(round_entry, dict):
+        # A pre-execution write-scope refusal: this process provably never ran
+        # the command (no subprocess or lease existed). Correct the optimistic
+        # `entered`/`unknown` record to `not_started` so the failure settles as
+        # the refusal itself, never as a possible side effect that needs
+        # reconciliation. Only a not-yet-entered record is corrected; a
+        # `returned` record already proves the handler finished.
+        effect = round_entry.get('executionEffect')
+        if isinstance(effect, dict) and effect.get('state') in {'entered', 'unknown'}:
+            round_entry['executionEffect'] = {**effect, 'state': 'not_started'}
     repeatable, effect = _repeatable_effect(task, tool_name, round_entry)
     if (not repeatable and isinstance(effect, dict) and effect.get('operationId')
             and effect.get('state') in {'entered', 'unknown', 'returned'}):
+        if isinstance(exception, StorageError):
+            message += f' [storage code: {exception.code}]'
         return _unknown_effect_error(effect, message)
 
+    if isinstance(exception, StorageError):
+        # Storage's wire replay flag describes one RPC, not the whole tool.
+        # Reuse its canonical transient codes and the admitted tool policy;
+        # an outer storage verdict takes precedence over older nested causes.
+        retryable = repeatable and exception.code in TRANSIENT_STORAGE_CODES
+        if retryable:
+            action = ('Retry through the normal tool gateway and authorization checks; '
+                      'the declared recovery policy permits another attempt. '
+                      'Keep the selected storage authority and source identity. ')
+            if exception.retry_after_ms is not None:
+                action = (f'Wait at least {exception.retry_after_ms} milliseconds before retrying. '
+                          + action)
+        else:
+            action = ('Inspect the storage failure and current owned state before repairing '
+                      'the request or selected authority. Preserve existing data. ')
+            if not repeatable:
+                action += 'Reconcile the prior outcome before repeating this operation. '
+        return typed_tool_error(exception.code, retryable=retryable,
+            next_action=action + 'Continue independent authorized work.',
+            message=message).to_envelope_text()
+
+    cancelled = is_tool_cancellation(exception)
     http_kind = http_status = None
-    if not isinstance(exception, (AbortedError, CancelledError, PermissionError,
+    if not cancelled and not isinstance(exception, (PermissionError,
             FileNotFoundError, NotADirectoryError, ConnectionError)):
         http_kind = _http_exception_kind(exception)
         if http_kind is None:
@@ -330,7 +375,7 @@ def tool_exception_result(task, tool_name, round_entry, exception, *, message=No
     if http_kind == 'timeout':
         return tool_timeout_result(task, tool_name, round_entry, message=message)
     retryable = False
-    if isinstance(exception, (AbortedError, CancelledError)):
+    if cancelled:
         code = 'tool_execution_cancelled'
         action = 'Respect the cancellation; do not resume this operation automatically.'
     elif isinstance(exception, PermissionError):
@@ -361,7 +406,7 @@ def tool_exception_result(task, tool_name, round_entry, exception, *, message=No
         code = 'tool_execution_failed'
         action = ('Inspect and repair the reported runtime or environment failure, '
                   'or use another available tool; do not blindly repeat the same call.')
-    if not isinstance(exception, (AbortedError, CancelledError)):
+    if not cancelled:
         if not repeatable and code not in {
                 'tool_connection_failed', 'tool_http_rate_limited', 'tool_http_unavailable'}:
             action += ' Verify the prior outcome before repeating the operation.'

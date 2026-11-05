@@ -19,6 +19,9 @@ pub(crate) mod sync_head_migration;
 pub(crate) mod diagnostic;
 pub(crate) mod model_context;
 pub(crate) mod event_retirement;
+mod metadata_read;
+mod metadata_summary;
+pub(crate) mod dispatchable_index;
 
 #[path = "turn/snapshot_phase.rs"]
 mod snapshot_phase;
@@ -64,7 +67,7 @@ use crate::generated_tofudb_ir::{
     MAX_WORKER_JOB_PAYLOAD_BYTES, TURN_ACTIVITY_INDEX_NAMESPACE, TURN_DOCUMENT_NAMESPACE,
     TURN_ID_CLAIM_NAMESPACE, TURN_LANE_COMPACTION_INDEX_NAMESPACE, TURN_LANE_COUNT_NAMESPACE,
     TURN_LANE_HEAD_NAMESPACE, TURN_LANE_INDEX_NAMESPACE, TURN_LANE_LIVE_ATTEMPT_NAMESPACE,
-    TURN_PROJECTION_HEAD_NAMESPACE, TURN_SEARCH_DIRTY_NAMESPACE,
+    TURN_METADATA_SUMMARY_NAMESPACE, TURN_PROJECTION_HEAD_NAMESPACE, TURN_SEARCH_DIRTY_NAMESPACE,
     TURN_TOMBSTONE_AGE_INDEX_NAMESPACE, TURN_TOMBSTONE_NAMESPACE, TURN_UPDATED_INDEX_NAMESPACE,
 };
 
@@ -256,6 +259,9 @@ pub struct SteerCommitRequest {
     pub attempt_id: String,
     pub command_id: String,
     pub text: String,
+    /// The steered input's author record (`TurnSteerAuthor`), stored once with
+    /// the record it belongs to; a replayed steer keeps the original.
+    pub author: Option<Value>,
     pub updated_at_ms: u64,
     pub committed_at_ms: u64,
 }
@@ -541,6 +547,7 @@ pub(crate) fn conversation_recoverable_ranges(
         TURN_UPDATED_INDEX_NAMESPACE,
         TURN_TOMBSTONE_NAMESPACE,
         TURN_PROJECTION_HEAD_NAMESPACE,
+        TURN_METADATA_SUMMARY_NAMESPACE,
         ATTEMPT_TIMING_CONVERSATION_INDEX_NAMESPACE,
         ATTEMPT_TURN_DIRECTORY_NAMESPACE,
         ATTEMPT_TURN_COUNT_NAMESPACE,
@@ -691,8 +698,7 @@ fn scan_conversation_identity_namespace(
         let page_limit = (maximum + 1 - rows.len().min(maximum)).min(INDEX_PAGE_ROWS);
         let page = database.entity_scan(transaction, &start, &end, page_limit)?;
         if rows.len() + page.len() > maximum {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "conversation identity scan exceeds its bound",
             ));
         }
@@ -756,8 +762,7 @@ pub(crate) fn conversation_turn_count(
     )?;
     let rows = database.entity_scan(transaction, &start, &end, MAX_DELETE_BRANCH_LANES + 1)?;
     if rows.len() > MAX_DELETE_BRANCH_LANES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "conversation lane count exceeds 256",
         ));
     }
@@ -1210,28 +1215,6 @@ fn remove_directory_entry_indexes(
     )
 }
 
-fn remove_dispatchable_index(
-    database: &AuthorityDatabase,
-    transaction: &mut AuthorityTransaction,
-    attempt: &Map<String, Value>,
-) -> io::Result<()> {
-    if attempt.get("_dispatchMode").and_then(Value::as_str) != Some("conversation_executor") {
-        return Ok(());
-    }
-    let created_at_ms = attempt
-        .get("createdAt")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| invalid_data("attempt creation timestamp is malformed"))?;
-    let attempt_id = attempt
-        .get("attemptId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid_data("attempt identity is malformed"))?;
-    database.entity_delete(
-        transaction,
-        dispatchable_index_key(transaction, created_at_ms, attempt_id)?,
-    )
-}
-
 fn legacy_attempt_key(
     transaction: &AuthorityTransaction,
     attempt_id: &str,
@@ -1601,8 +1584,7 @@ fn store_attempt_turn_directory(
     entries: &[Map<String, Value>],
 ) -> io::Result<()> {
     if entries.len() > MAX_ATTEMPTS_PER_TURN {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "turn attempt history exceeds 64 entries",
         ));
     }
@@ -1613,8 +1595,7 @@ fn store_attempt_turn_directory(
     let encoded = serde_json::to_vec(entries)
         .map_err(|_| invalid_data("attempt Turn directory cannot be encoded"))?;
     if encoded.len() > MAX_ATTEMPT_TURN_DIRECTORY_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "attempt Turn directory exceeds 64 KiB",
         ));
     }
@@ -1686,8 +1667,7 @@ fn encode_tombstone_attempt_ids(attempt_ids: &[String]) -> io::Result<Vec<u8>> {
         push_text_key(&mut encoded, attempt_id)?;
     }
     if encoded.len() > MAX_ATTEMPT_TOMBSTONE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "turn tombstone attempt list exceeds 16 KiB",
         ));
     }
@@ -1946,8 +1926,7 @@ fn scan_lane_compaction_metadata(
         }
     }
     if rows.len() > MAX_TURN_COMPACTION_METADATA_ROWS {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "Turn compaction metadata exceeds 100000 rows",
         ));
     }
@@ -2889,8 +2868,7 @@ fn encode_response(value: &impl Serialize) -> io::Result<Vec<u8>> {
     let encoded =
         serde_json::to_vec(value).map_err(|_| invalid_data("turn response cannot be encoded"))?;
     if encoded.len() > crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "turn response exceeds its bounded streamed payload",
         ));
     }
@@ -3142,6 +3120,16 @@ fn attempt_sync_reference_key(
         ATTEMPT_EVENT_SYNC_REFERENCE_NAMESPACE,
         &encoded,
     )
+}
+
+/// A retained conversation-sync change starting to reference an Attempt's
+/// event stream, exactly as `store_sync_retention_indexes` records it.
+#[cfg(test)]
+pub(crate) fn reference_attempt_events_for_test(database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction, attempt_id: &str, conversation_id: &str,
+    sync_sequence: u64, attempt_sequence: u64) -> io::Result<()> {
+    let key = attempt_sync_reference_key(transaction, attempt_id, conversation_id, sync_sequence)?;
+    database.entity_put(transaction, key, attempt_sequence.to_le_bytes().to_vec())
 }
 
 fn sync_age_index_value(event: &Value) -> io::Result<Vec<u8>> {
@@ -3778,8 +3766,7 @@ fn projection_patch(
     crate::turn_projection_patch::build_projection_patch(before, after, base, target)
         .map(Value::Object)
         .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            crate::resource_exhaustion::domain_bound(
                 "Turn projection patch exceeds its deterministic resource bound",
             )
         })
@@ -4075,30 +4062,19 @@ pub(crate) fn clone_conversation_turns(
     )?;
     let source_epoch =
         crate::conversation_header::execution_epoch(database, transaction, source_conversation_id)?;
-    let mut source_turns = Vec::with_capacity(rows.len());
-    let mut materialized_bytes = 0_usize;
-    for (_, stored) in rows {
+    // Identity remapping must be complete before any projection is rewritten,
+    // yet a long agent conversation is far larger than one authority document.
+    // Pass one therefore retains only Turn identities; pass two materializes,
+    // rewrites and stores one Turn at a time, so peak memory is one Turn rather
+    // than the whole transcript (2026-10-22: cloning a 26 MB conversation could
+    // never succeed, every attempt exhausted the 8 MiB aggregate projection
+    // ceiling and surfaced as an unavailable storage service).
+    let mut turn_ids = BTreeMap::new();
+    for (_, stored) in &rows {
         let turn = public_turn(
-            materialize_turn(database, transaction, &stored)?,
+            materialize_turn(database, transaction, stored)?,
             source_epoch,
         )?;
-        materialized_bytes = materialized_bytes
-            .checked_add(
-                serde_json::to_vec(&turn)
-                    .map_err(|_| invalid_data("source Turn cannot be encoded"))?
-                    .len(),
-            )
-            .filter(|bytes| *bytes <= MAX_LEGACY_DOCUMENT_BYTES)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
-                    "conversation clone exceeds 8 MiB of Turn projection",
-                )
-            })?;
-        source_turns.push(turn);
-    }
-    let mut turn_ids = BTreeMap::new();
-    for turn in &source_turns {
         let source_turn_id = turn
             .get("turnId")
             .and_then(Value::as_str)
@@ -4123,9 +4099,12 @@ pub(crate) fn clone_conversation_turns(
     let mut lane_counts = BTreeMap::<String, u64>::new();
     let mut lane_heads = BTreeMap::<String, u64>::new();
     let mut lane_ordinals = BTreeSet::<(String, u64)>::new();
-    let mut cloned_projection_bytes = 0_usize;
     let claim_owner = transaction.owner_user_id().to_be_bytes().to_vec();
-    for source_turn in source_turns {
+    for (_, stored) in &rows {
+        let source_turn = public_turn(
+            materialize_turn(database, transaction, stored)?,
+            source_epoch,
+        )?;
         let source = source_turn
             .as_object()
             .ok_or_else(|| invalid_data("source Turn is malformed"))?;
@@ -4200,19 +4179,19 @@ pub(crate) fn clone_conversation_turns(
         if is_live {
             terminalize_restored_projection(&mut projection);
         }
-        cloned_projection_bytes = cloned_projection_bytes
-            .checked_add(
-                serde_json::to_vec(&projection)
-                    .map_err(|_| invalid_data("cloned Turn projection cannot be encoded"))?
-                    .len(),
-            )
-            .filter(|bytes| *bytes <= MAX_LEGACY_DOCUMENT_BYTES)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
-                    "conversation clone exceeds 8 MiB of cloned projection",
-                )
-            })?;
+        // The bound is the per-document one the versioned write enforces: the
+        // transcript's total size is not a document and must never be capped by
+        // one. Large projections stage as shared-storage blobs, so an arbitrary
+        // amount of aggregate text stays inside the transaction envelope bound.
+        if serde_json::to_vec(&projection)
+            .map_err(|_| invalid_data("cloned Turn projection cannot be encoded"))?
+            .len()
+            > crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES
+        {
+            return Err(crate::resource_exhaustion::domain_bound(
+                "cloned Turn exceeds its document bound",
+            ));
+        }
         let settlement = if is_live {
             json!({
                 "outcome": "interrupted",
@@ -4251,11 +4230,11 @@ pub(crate) fn clone_conversation_turns(
             destination_conversation_id,
             &destination_turn_id,
         )?;
-        crate::versioned_document::put_with_blob_owner_bounded(
+        let (_, stored) = metadata_summary::put_document(
             database,
             transaction,
             crate::versioned_document::PutRequest {
-                key: document_key.clone(),
+                key: document_key,
                 namespace: DOCUMENT_IDENTITY.to_owned(),
                 logical_key: turn_logical_key(destination_conversation_id, &destination_turn_id),
                 value_json: serde_json::to_vec(&document)
@@ -4263,12 +4242,8 @@ pub(crate) fn clone_conversation_turns(
                 expected_version: Some(0),
                 updated_at_ms: cloned_at_ms,
             },
-            transaction.owner_user_id(),
             crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES,
         )?;
-        let stored = database
-            .entity_get(transaction, &document_key)?
-            .ok_or_else(|| invalid_data("staged cloned Turn disappeared"))?;
         database.entity_put(
             transaction,
             global_identity_claim_key(transaction, TURN_ID_CLAIM_NAMESPACE, &destination_turn_id)?,
@@ -4502,7 +4477,7 @@ pub(crate) fn append_settled_with_receipt_proof(
         &projection_bytes,
     )?;
     let document_key = turn_key(transaction, &request.conversation_id, &request.turn_id)?;
-    let (_, stored) = crate::versioned_document::put_returning_envelope(
+    let (_, stored) = metadata_summary::put_document(
         database,
         transaction,
         crate::versioned_document::PutRequest {
@@ -4513,6 +4488,7 @@ pub(crate) fn append_settled_with_receipt_proof(
             expected_version: Some(0),
             updated_at_ms: request.committed_at_ms,
         },
+        usize::MAX,
     )?;
     drop(_ta_document);
     let _ta_indexes = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_TA_INDEXES);
@@ -4731,7 +4707,7 @@ fn stage_created_turn(
         return Err(conflict("turn identity already exists"));
     }
     let key = turn_key(transaction, conversation_id, turn_id)?;
-    let (_, stored) = crate::versioned_document::put_returning_envelope(
+    let (_, stored) = metadata_summary::put_document(
         database,
         transaction,
         crate::versioned_document::PutRequest {
@@ -4743,6 +4719,7 @@ fn stage_created_turn(
             expected_version: Some(0),
             updated_at_ms: committed_at_ms,
         },
+        usize::MAX,
     )?;
     database.entity_put(
         transaction,
@@ -5459,18 +5436,6 @@ pub(crate) fn queue_activate(
         &binding.attempt_id,
         true,
     )?;
-    if attempt.get("_dispatchMode").and_then(Value::as_str) == Some("conversation_executor") {
-        database.entity_put(
-            transaction,
-            dispatchable_index_key(transaction, created_at_ms, &binding.attempt_id)?,
-            dispatchable_index_value(
-                transaction.owner_user_id(),
-                &request.conversation_id,
-                &binding.output_turn_id,
-                &binding.attempt_id,
-            )?,
-        )?;
-    }
     let revision = crate::conversation_header::advance_for_turn(
         database,
         transaction,
@@ -5924,13 +5889,17 @@ pub(crate) fn steer_commit(
         .iter()
         .any(|record| record.get("blockId").and_then(Value::as_str) == Some(block_id.as_str()))
     {
-        records.push(json!({
+        let mut record = json!({
             "blockId": block_id,
             "commandId": request.command_id,
             "count": 1,
             "previews": [{"text": request.text.chars().take(1200).collect::<String>()}],
             "deliveryState": "pending"
-        }));
+        });
+        if let (Some(author), Some(fields)) = (&request.author, record.as_object_mut()) {
+            fields.insert("author".to_owned(), author.clone());
+        }
+        records.push(record);
     }
     next_projection.insert("_userSteerInjects".to_owned(), Value::Array(records));
     let projection_request = ProjectionUpdateRequest {
@@ -6523,6 +6492,9 @@ fn visible_seal_projection(
     result
 }
 
+// Mirror of lib/turn_initiation.py VALID_INITIATORS and the origin fields of
+// lib/turn_projection_patch.py: an initiator missing here falls back to legacy
+// flags and would surface a nonhuman input as human.
 const VALID_INITIATORS: &[&str] = &[
     "human",
     "autopilot",
@@ -6532,6 +6504,7 @@ const VALID_INITIATORS: &[&str] = &[
     "peer",
     "operator",
     "swarm",
+    "channel",
 ];
 const ORIGIN_FIELDS: &[&str] = &[
     "blockId",
@@ -6542,7 +6515,11 @@ const ORIGIN_FIELDS: &[&str] = &[
     "autopilotRunId",
     "boardTaskId",
     "scheduledTaskId",
+    "channel",
+    "forwardedFrom",
 ];
+const ORIGIN_CHANNEL_FIELDS: &[&str] = &["channel", "thread", "eventIds", "title"];
+const ORIGIN_FORWARDED_FIELDS: &[&str] = &["conversationId", "turnId", "instructionId"];
 const ORIGIN_BRAIN_FIELDS: &[&str] = &[
     "epicId",
     "epicTitle",
@@ -6624,6 +6601,42 @@ fn normalize_visible_origin(message: &Map<String, Value>) -> Option<Map<String, 
         origin.insert("brain".to_owned(), Value::Object(brain));
     } else {
         origin.remove("brain");
+    }
+    let channel = copy_named_fields(origin.get("channel"), ORIGIN_CHANNEL_FIELDS);
+    if channel.get("channel").is_some_and(json_truthy)
+        && channel.get("thread").is_some_and(json_truthy)
+    {
+        let channel = channel
+            .into_iter()
+            .map(|(key, value)| {
+                let value = if key == "eventIds" {
+                    match value {
+                        Value::Array(items) => {
+                            Value::Array(items.iter().map(|item| json!(py_string(item))).collect())
+                        }
+                        _ => json!([]),
+                    }
+                } else {
+                    json!(py_string(&value))
+                };
+                (key, value)
+            })
+            .collect();
+        origin.insert("channel".to_owned(), Value::Object(channel));
+    } else {
+        origin.remove("channel");
+    }
+    // A malformed router forward is not a forward; require_human_turn
+    // verifies a kept pointer before it grants any authority.
+    let forwarded =
+        copy_named_fields(origin.remove("forwardedFrom").as_ref(), ORIGIN_FORWARDED_FIELDS);
+    if forwarded
+        .values()
+        .all(|value| value.as_str().is_some_and(|text| !text.is_empty()))
+        && forwarded.contains_key("conversationId")
+        && forwarded.contains_key("turnId")
+    {
+        origin.insert("forwardedFrom".to_owned(), Value::Object(forwarded));
     }
     let initiator = match origin.get("initiator").and_then(Value::as_str) {
         Some(declared) if VALID_INITIATORS.contains(&declared) => declared.to_owned(),
@@ -7093,7 +7106,7 @@ fn replace_visible_root(
     document.insert("projectionRevision".to_owned(), json!(next_revision));
     document.insert("updatedAt".to_owned(), json!(replacement.updated_at_ms));
     document.remove("_projectionHead");
-    crate::versioned_document::put_with_blob_owner_bounded(
+    metadata_summary::put_document(
         database,
         transaction,
         crate::versioned_document::PutRequest {
@@ -7105,7 +7118,6 @@ fn replace_visible_root(
             expected_version: Some(loaded.physical_version),
             updated_at_ms: replacement.committed_at_ms,
         },
-        transaction.owner_user_id(),
         crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES,
     )?;
     let stored = database
@@ -7705,8 +7717,7 @@ pub(crate) fn visible_sync(
             .len()
             > MAX_LEGACY_DOCUMENT_BYTES
         {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "visible sync event exceeds 8 MiB",
             ));
         }
@@ -7807,8 +7818,7 @@ pub(crate) fn related_announce(
             )
             .filter(|bytes| *bytes <= MAX_LEGACY_DOCUMENT_BYTES)
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                crate::resource_exhaustion::domain_bound(
                     "related Turn projection exceeds 8 MiB",
                 )
             })?;
@@ -7981,7 +7991,7 @@ fn stage_projection_update(
         &request.turn_id,
         projection_head.as_ref(),
     )?;
-    crate::versioned_document::put_with_blob_owner_bounded(
+    metadata_summary::put_document(
         database,
         transaction,
         crate::versioned_document::PutRequest {
@@ -7993,7 +8003,6 @@ fn stage_projection_update(
             expected_version: Some(physical_version),
             updated_at_ms: request.committed_at_ms,
         },
-        transaction.owner_user_id(),
         crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES,
     )?;
     let staged = database
@@ -8068,8 +8077,7 @@ fn collect_deletion_closure(
                 continue;
             }
             if rows.len() == MAX_DELETE_ROWS {
-                return Err(io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                return Err(crate::resource_exhaustion::domain_bound(
                     "turn delete closure exceeds 2000 rows",
                 ));
             }
@@ -8087,8 +8095,7 @@ fn collect_deletion_closure(
                     )
                     .filter(|bytes| *bytes <= maximum)
                     .ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::OutOfMemory,
+                        crate::resource_exhaustion::domain_bound(
                             "Turn compaction materialization exceeds 64 MiB",
                         )
                     })?;
@@ -8158,8 +8165,7 @@ fn collect_deletion_closure(
             continue;
         }
         if seen_lane_ids.len() > MAX_DELETE_BRANCH_LANES {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "turn delete closure exceeds 256 branch lanes",
             ));
         }
@@ -8194,8 +8200,7 @@ fn collect_deletion_closure(
                         )
                         .filter(|bytes| *bytes <= maximum)
                         .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::OutOfMemory,
+                            crate::resource_exhaustion::domain_bound(
                                 "Turn compaction materialization exceeds 64 MiB",
                             )
                         })?;
@@ -8209,8 +8214,7 @@ fn collect_deletion_closure(
                 }
             }
             if rows.len() + pending_turn_ids.len() > MAX_DELETE_ROWS {
-                return Err(io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                return Err(crate::resource_exhaustion::domain_bound(
                     "turn delete closure exceeds 2000 rows",
                 ));
             }
@@ -8508,8 +8512,7 @@ pub(crate) fn compact(
             .checked_add(update.projection_json.len())
             .filter(|bytes| *bytes <= MAX_TURN_COMPACTION_PROJECTION_BYTES)
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                crate::resource_exhaustion::domain_bound(
                     "Turn compaction projections exceed 8 MiB",
                 )
             })?;
@@ -8533,8 +8536,7 @@ pub(crate) fn compact(
             .and_then(|count| count.checked_add(request.projection_updates.len()))
             .is_none_or(|count| count > MAX_DELETE_ROWS)
     {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "Turn compaction mutation set exceeds its bound",
         ));
     }
@@ -8575,12 +8577,11 @@ pub(crate) fn compact(
             .checked_add(document_json.len())
             .filter(|bytes| *bytes <= MAX_TURN_COMPACTION_MATERIALIZED_BYTES)
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                crate::resource_exhaustion::domain_bound(
                     "Turn compaction reparenting exceeds 64 MiB",
                 )
             })?;
-        crate::versioned_document::put_with_blob_owner_bounded(
+        metadata_summary::put_document(
             database,
             transaction,
             crate::versioned_document::PutRequest {
@@ -8591,7 +8592,6 @@ pub(crate) fn compact(
                 expected_version: Some(physical_version),
                 updated_at_ms: request.now_ms,
             },
-            transaction.owner_user_id(),
             crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES,
         )?;
         let staged = database
@@ -8685,7 +8685,7 @@ pub(crate) fn compact(
         &request.conversation_id,
         &request.summary_turn_id,
     )?;
-    crate::versioned_document::put_with_blob_owner_bounded(
+    metadata_summary::put_document(
         database,
         transaction,
         crate::versioned_document::PutRequest {
@@ -8697,7 +8697,6 @@ pub(crate) fn compact(
             expected_version: Some(0),
             updated_at_ms: request.now_ms,
         },
-        transaction.owner_user_id(),
         crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES,
     )?;
     database.entity_put(
@@ -8911,6 +8910,7 @@ fn apply_deletion_rows(
             tombstone_index_key(transaction, conversation_id, deleted_at_ms, turn_id)?;
         let tombstone_age_key =
             tombstone_age_index_key(transaction, deleted_at_ms, conversation_id, turn_id)?;
+        database.entity_delete(transaction, metadata_summary::key(&document_key)?)?;
         database.entity_delete(transaction, document_key)?;
         database.entity_delete(transaction, lane_key)?;
         database.entity_delete(
@@ -9264,6 +9264,22 @@ pub(crate) fn get(
         .map(|value| encode_response(&value)).transpose()
 }
 
+/// Select metadata-only delivery without changing the default full read port.
+/// Both paths retain the original scoped transaction and public normalization.
+pub(crate) fn get_with_projection(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    turn_id: &str,
+    include_projection: bool,
+) -> io::Result<Option<Vec<u8>>> {
+    if include_projection {
+        get(database, transaction, conversation_id, turn_id)
+    } else {
+        metadata_read::get(database, transaction, conversation_id, turn_id)
+    }
+}
+
 /// The caller owns this freshly materialized public projection. Byte-oriented
 /// callers still use get; context composition can retain the parsed tree.
 fn get_public_value(
@@ -9454,8 +9470,7 @@ pub(crate) fn list_delta(
         updated_start = continuation;
     }
     if candidates.len() > MAX_DELTA_ROWS {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "turn delta exceeds 2000 changed rows",
         ));
     }
@@ -9491,8 +9506,7 @@ pub(crate) fn list_delta(
             )
             .filter(|bytes| *bytes <= crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES)
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                crate::resource_exhaustion::domain_bound(
                     "turn delta exceeds its bounded streamed payload",
                 )
             })?;
@@ -9532,8 +9546,7 @@ pub(crate) fn list_delta(
                 .checked_add(turn_id.len() + 3)
                 .filter(|bytes| *bytes <= crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES)
                 .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::OutOfMemory,
+                    crate::resource_exhaustion::domain_bound(
                         "turn delta exceeds its bounded streamed payload",
                     )
                 })?;
@@ -9545,8 +9558,7 @@ pub(crate) fn list_delta(
         tombstone_start = continuation;
     }
     if deleted_turn_ids.len() > MAX_DELTA_ROWS {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "turn delta exceeds 2000 tombstones",
         ));
     }
@@ -9595,8 +9607,7 @@ pub(crate) fn list_values_until(
         let continuation = after_key(&rows.last().unwrap().0, transaction, namespace)?;
         for (_, stored) in rows {
             if turns.len() == MAX_LIST_ROWS {
-                return Err(io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                return Err(crate::resource_exhaustion::domain_bound(
                     "turn list exceeds 10000 rows",
                 ));
             }
@@ -9622,8 +9633,7 @@ pub(crate) fn list_values_until(
                 )
                 .filter(|bytes| *bytes <= crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES)
                 .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::OutOfMemory,
+                    crate::resource_exhaustion::domain_bound(
                         "turn list exceeds its bounded streamed payload",
                     )
                 })?;
@@ -9633,8 +9643,7 @@ pub(crate) fn list_values_until(
             break;
         }
         if page + 1 == MAX_SCAN_PAGES {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "turn list scan exceeds page budget",
             ));
         }
@@ -9787,7 +9796,7 @@ pub(crate) fn materialize_lane_range(
         return Err(invalid_input("lane range starts after its end"));
     }
     if end > MAX_LIST_ROWS as u64 {
-        return Err(io::Error::new(io::ErrorKind::OutOfMemory, "turn list exceeds 10000 rows"));
+        return Err(crate::resource_exhaustion::domain_bound("turn list exceeds 10000 rows"));
     }
     let mut messages = Vec::with_capacity((end - start) as usize);
     let mut cursor = scan_start;
@@ -9855,6 +9864,60 @@ fn legacy_message(turn: Value) -> io::Result<Value> {
         );
     }
     Ok(Value::Object(message))
+}
+
+/// Main-lane sequence of one Turn: the number of main-lane Turns before it
+/// in lane order, the coordinate `legacy_messages` windows by. None when the
+/// Turn is absent or belongs to another lane. Counts the compact lane heads,
+/// which mirror the lane index one-to-one under the same ordinal keys (the
+/// round directory relies on the same invariant), page by page without
+/// materializing a Turn body.
+pub(crate) fn main_lane_sequence(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    turn_id: &str,
+    deadline_elapsed: &mut dyn FnMut() -> bool,
+) -> io::Result<Option<u64>> {
+    let Some(encoded) = metadata_read::get(database, transaction, conversation_id, turn_id)? else {
+        return Ok(None);
+    };
+    let metadata: Value = serde_json::from_slice(&encoded)
+        .map_err(|_| invalid_data("Turn metadata response is malformed"))?;
+    if metadata.get("laneId").and_then(Value::as_str) != Some("main") {
+        return Ok(None);
+    }
+    let ordinal = metadata
+        .get("ordinal")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("Turn ordinal is malformed"))?;
+    let anchor = lane_compaction_index_key(transaction, conversation_id, "main", ordinal)?;
+    if database.entity_get(transaction, &anchor)?.is_none() {
+        return Err(invalid_data("main-lane Turn has no compact lane head"));
+    }
+    let (mut start, _) = EntityKey::prefix_range(
+        transaction.tenant_id(),
+        transaction.owner_user_id(),
+        TURN_LANE_COMPACTION_INDEX_NAMESPACE,
+        &lane_prefix(conversation_id, "main")?,
+    )?;
+    let mut sequence = 0_u64;
+    loop {
+        if deadline_elapsed() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "turn sequence read deadline elapsed",
+            ));
+        }
+        let page = database.entity_scan(transaction, &start, &anchor, INDEX_PAGE_ROWS)?;
+        sequence += page.len() as u64;
+        match page.last() {
+            Some((last, _)) if page.len() == INDEX_PAGE_ROWS => {
+                start = after_key(last, transaction, TURN_LANE_COMPACTION_INDEX_NAMESPACE)?;
+            }
+            _ => return Ok(Some(sequence)),
+        }
+    }
 }
 
 pub(crate) fn legacy_messages(
@@ -9952,8 +10015,7 @@ pub(crate) fn legacy_messages(
         .checked_add(take)
         .is_none_or(|rows| rows > MAX_LIST_ROWS)
     {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "turn list exceeds 10000 rows",
         ));
     }
@@ -10027,8 +10089,7 @@ pub(crate) fn legacy_messages(
             )
             .filter(|bytes| *bytes <= crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES)
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                crate::resource_exhaustion::domain_bound(
                     "turn list exceeds its bounded streamed payload",
                 )
             })?;
@@ -10091,8 +10152,8 @@ fn legacy_messages_full(
                 let response_bytes = serde_json::to_vec(&turns)
                     .map_err(|_| invalid_data("turn response cannot be encoded"))?.len();
                 if response_bytes > crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES {
-                    return Err(io::Error::new(io::ErrorKind::OutOfMemory,
-                        "turn list exceeds its bounded streamed payload"));
+                    return Err(crate::resource_exhaustion::domain_bound(
+                        "turn list exceeds its bounded streamed payload",));
                 }
                 turns.truncate(end);
                 if start != 0 {
@@ -10192,8 +10253,7 @@ pub(crate) fn activity_intervals(
         lane_state.as_ref(),
     )?;
     if lane_count > MAX_LIST_ROWS as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "Turn activity scan exceeds 10000 rows per conversation",
         ));
     }
@@ -10218,8 +10278,7 @@ pub(crate) fn activity_intervals(
         )?;
         for (_, encoded) in rows {
             if *remaining_turn_rows == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                return Err(crate::resource_exhaustion::domain_bound(
                     "Turn activity scan exceeds its aggregate row budget",
                 ));
             }
@@ -10236,8 +10295,7 @@ pub(crate) fn activity_intervals(
             break;
         }
         if page + 1 == MAX_SCAN_PAGES {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "Turn activity scan exceeds its page budget",
             ));
         }
@@ -10275,8 +10333,7 @@ pub(crate) fn activity_intervals(
         )?;
         for (_, stored) in rows {
             if *remaining_turn_rows == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                return Err(crate::resource_exhaustion::domain_bound(
                     "Turn activity scan exceeds its aggregate row budget",
                 ));
             }
@@ -10305,8 +10362,7 @@ pub(crate) fn activity_intervals(
             break;
         }
         if page + 1 == MAX_SCAN_PAGES {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "legacy Turn activity scan exceeds its page budget",
             ));
         }
@@ -10518,6 +10574,7 @@ fn store_attempt_document(
     update_attempt_timing_indexes(database, transaction, &loaded.document, document)?;
     update_attempt_turn_directory(database, transaction, document)?;
     update_recovery_index(database, transaction, &loaded.document, document)?;
+    dispatchable_index::update(database, transaction, &loaded.document, Some(document))?;
     update_attempt_event_retention_index(database, transaction, &loaded.document, document)?;
     crate::versioned_document::put(
         database,
@@ -10654,7 +10711,7 @@ fn update_attempt_turn_lifecycle(
     }
     document.insert("projectionRevision".to_owned(), Value::from(next_revision));
     document.insert("updatedAt".to_owned(), Value::from(updated_at_ms));
-    crate::versioned_document::put_with_blob_owner_bounded(
+    metadata_summary::put_document(
         database,
         transaction,
         crate::versioned_document::PutRequest {
@@ -10666,7 +10723,6 @@ fn update_attempt_turn_lifecycle(
             expected_version: Some(loaded.physical_version),
             updated_at_ms: committed_at_ms,
         },
-        transaction.owner_user_id(),
         crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES,
     )?;
     let staged = database
@@ -10866,10 +10922,7 @@ pub(crate) fn attempt_dispatchable_list(
             || attempt.get("conversationId").and_then(Value::as_str) != Some(conversation_id)
             || attempt.get("turnId").and_then(Value::as_str) != Some(turn_id)
             || attempt.get("createdAt").and_then(Value::as_u64) != Some(created_at_ms)
-            || attempt.get("status").and_then(Value::as_str) != Some("pending")
-            || attempt.get("taskId").and_then(Value::as_str) != Some("")
-            || attempt.get("_queueState").and_then(Value::as_str) != Some("")
-            || attempt.get("_dispatchMode").and_then(Value::as_str) != Some("conversation_executor")
+            || !dispatchable_index::is_dispatchable(&attempt)
         {
             return Err(invalid_data("attempt dispatchable index target differs"));
         }
@@ -10930,8 +10983,7 @@ pub(crate) fn attempt_dispatchable_list(
             .and_then(|bytes| bytes.checked_add(usize::from(!response.is_empty())))
             .is_none_or(|bytes| bytes > MAX_LEGACY_DOCUMENT_BYTES)
         {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "attempt dispatchable response exceeds 8 MiB",
             ));
         }
@@ -11245,7 +11297,7 @@ fn stage_attempt_turn_transition(
     document.insert("kind".to_owned(), Value::String(kind.to_owned()));
     document.insert("updatedAt".to_owned(), Value::from(updated_at_ms));
     let key = turn_key(transaction, conversation_id, turn_id)?;
-    crate::versioned_document::put_with_blob_owner_bounded(
+    metadata_summary::put_document(
         database,
         transaction,
         crate::versioned_document::PutRequest {
@@ -11257,7 +11309,6 @@ fn stage_attempt_turn_transition(
             expected_version: Some(physical_version),
             updated_at_ms: committed_at_ms,
         },
-        transaction.owner_user_id(),
         crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES,
     )?;
     let staged = database
@@ -11432,8 +11483,7 @@ pub(crate) fn attempt_exists_for_task_in_conversation(
     )?;
     for (position, (_, raw)) in candidates.iter().enumerate() {
         if position == MAX_TIMING_TRACE_TASK_CANDIDATES {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "invocation parent candidates exceed their bound",
             ));
         }
@@ -12107,8 +12157,7 @@ pub(crate) fn timing_trace_get(
     )?;
     for (position, (_, raw)) in candidates.iter().enumerate() {
         if position == MAX_TIMING_TRACE_TASK_CANDIDATES {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "timing trace task candidates exceed 100 rows",
             ));
         }
@@ -12278,8 +12327,7 @@ fn lane_tail_turn_ids(
         start = continuation;
     }
     if turn_ids.len() > MAX_DELETE_ROWS {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "regenerate lane tail exceeds 2000 turns",
         ));
     }
@@ -12320,8 +12368,7 @@ fn tombstones_at(
         }
     }
     if rows.len() > MAX_DELETE_ROWS {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "attempt replay tombstones exceed 2000 rows",
         ));
     }
@@ -12484,8 +12531,7 @@ pub(crate) fn attempt_create(
         decode_u64(stored_count, "turn attempt count is malformed")?
     };
     if attempt_count >= MAX_ATTEMPTS_PER_TURN as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "turn attempt history exceeds 64 entries",
         ));
     }
@@ -13120,9 +13166,9 @@ pub(crate) fn attempt_claim(
     if !existing_task_id.is_empty() {
         return encode_response(&Value::Bool(false));
     }
-    remove_dispatchable_index(database, transaction, &attempt)?;
     let previous_attempt = attempt.clone();
     attempt.insert("taskId".to_owned(), Value::String(dispatch_claim));
+    dispatchable_index::update(database, transaction, &previous_attempt, Some(&attempt))?;
     update_attempt_timing_indexes(database, transaction, &previous_attempt, &attempt)?;
     update_attempt_turn_directory(database, transaction, &attempt)?;
     update_recovery_index(database, transaction, &previous_attempt, &attempt)?;
@@ -13193,7 +13239,6 @@ pub(crate) fn attempt_bind(
     if existing_task_id == task_id {
         return encode_response(&public_attempt(&loaded.document)?);
     }
-    remove_dispatchable_index(database, transaction, &loaded.document)?;
     let mut attempt = loaded.document.clone();
     attempt.insert("taskId".to_owned(), Value::String(task_id.to_owned()));
     store_attempt_document(database, transaction, attempt_id, &loaded, &attempt, now_ms)?;
@@ -13501,7 +13546,6 @@ fn validate_settleable_turn_size(
     turn: &Map<String, Value>,
     projection: &Map<String, Value>,
     projection_bytes: usize,
-    attempt: &Map<String, Value>,
     terminal: bool,
 ) -> io::Result<()> {
     let envelope: std::collections::BTreeMap<&str, &Value> = turn.iter()
@@ -13520,14 +13564,14 @@ fn validate_settleable_turn_size(
         // A restart anchor can duplicate part of that history but not more than
         // the projection plus its bounded envelope. Inspect it near the ceiling.
         if materialized_bytes.saturating_add(projection_bytes).saturating_add(reserve) > limit {
-            let recovery_bytes = serde_json::to_vec(&restart_settlement(attempt, projection))
+            let recovery_bytes = serde_json::to_vec(&restart_settlement(projection))
                 .map_err(|_| invalid_data("Turn recovery settlement cannot be encoded"))?.len();
             reserve = reserve.max(recovery_bytes.saturating_add(1024));
         }
     }
     if materialized_bytes.saturating_add(reserve) > limit {
-        return Err(io::Error::new(io::ErrorKind::OutOfMemory,
-            "Turn reconstructed state exceeds its settleable snapshot budget"));
+        return Err(crate::resource_exhaustion::domain_bound(
+            "Turn reconstructed state exceeds its settleable snapshot budget",));
     }
     Ok(())
 }
@@ -13659,7 +13703,7 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
     let frame_candidate = allow_frame_witness && text_append.is_none()
         && execution_frame::classify_patch(request);
     let _load_stage = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_TURN_EVENT_LOAD);
-    let Some((loaded_attempt, loaded_turn)) = load_event_record_state(
+    let Some((loaded_attempt, mut loaded_turn)) = load_event_record_state(
         database, transaction, request, text_append.is_none() && !frame_candidate,
     )? else {
         return encode_response(&json!({"applied": false}));
@@ -13670,7 +13714,7 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
         .ok_or_else(|| invalid_data("attempt task identity is malformed"))?;
     let starts_attempt = !request.terminal && attempt_status == "pending";
 
-    let mut turn = loaded_turn.document.clone();
+    let turn = &loaded_turn.document;
     let mut verified_stable_segments = loaded_turn.verified_stable_segments.clone();
     let turn_id = turn
         .get("turnId")
@@ -13706,16 +13750,19 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
         execution_frame::append_from_witness(database, transaction, &loaded_turn,
             request, &loaded_attempt.conversation_id, &turn_id)?
     } else { None };
+    // The fast append helpers have finished borrowing the original loaded
+    // document. Transfer its private reconstruction buffer instead of copying
+    // the complete history into another Turn before applying one event.
+    let mut turn = std::mem::take(&mut loaded_turn.document);
     if (text_append.is_some() || frame_candidate) && text_update.is_none() && frame_update.is_none() {
         if let Some(head) = &loaded_turn.projection_head {
             verified_stable_segments = materialize_projection_head(database, transaction, &mut turn, head)?;
         }
     }
-    let previous_projection = turn
-        .get("projection")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    let previous_projection = match turn.remove("projection") {
+        Some(Value::Object(projection)) => projection,
+        _ => Map::new(),
+    };
 
     drop(_load_stage);
     let _projection_stage = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_TURN_EVENT_PROJECTION);
@@ -13736,8 +13783,7 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
             next_revision,
         )
         .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            crate::resource_exhaustion::domain_bound(
                 "Turn event patch exceeds its bound",
             )
         })?;
@@ -13768,7 +13814,7 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
         } else {
             previous_projection.clone()
         };
-        let next = crate::turn_projection_patch::apply_projection_patch(Some(&patch_base), patch)
+        let next = crate::turn_projection_patch::apply_projection_patch_owned(patch_base, patch)
             .map_err(|_| invalid_input("Turn projection patch is invalid"))?;
         // normalize_for_patch already compared these exact old trees; reuse
         // that result as well as its no-op proof instead of walking them twice.
@@ -13782,8 +13828,7 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
                 next_revision,
             )
             .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                crate::resource_exhaustion::domain_bound(
                     "Turn repair patch exceeds its bound",
                 )
             })?
@@ -13798,8 +13843,7 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
             next_revision,
         )
         .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            crate::resource_exhaustion::domain_bound(
                 "Turn event patch exceeds its bound",
             )
         })?;
@@ -13859,8 +13903,7 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
             next_revision,
         )
         .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            crate::resource_exhaustion::domain_bound(
                 "terminal Turn event patch exceeds its bound",
             )
         })?;
@@ -13913,7 +13956,7 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
             .map_err(|_| invalid_data("Turn projection cannot be encoded"))?.len();
     }
     validate_settleable_turn_size(
-        &turn, &next_projection, projection_bytes, &attempt, request.terminal,
+        &turn, &next_projection, projection_bytes, request.terminal,
     )?;
 
     let mut next_projection_head = if let Some(update) = &text_update {
@@ -13944,7 +13987,7 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
         );
         turn.remove("_projectionHead");
     }
-    crate::versioned_document::put_with_blob_owner_bounded(
+    metadata_summary::put_document(
         database,
         transaction,
         crate::versioned_document::PutRequest {
@@ -13956,7 +13999,6 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
             expected_version: Some(loaded_turn.physical_version),
             updated_at_ms: request.now_ms,
         },
-        transaction.owner_user_id(),
         crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES,
     )?;
     let staged = database
@@ -14414,7 +14456,11 @@ fn recovery_replay_prefix(rounds: &[Value]) -> RecoveryReplayPrefix {
     }
 }
 
-fn restart_settlement(attempt: &Map<String, Value>, projection: &Map<String, Value>) -> Value {
+/// Every option rewinds an unfinished prose tail and resends from the last
+/// complete message: no provider continues a bare trailing assistant turn
+/// (Claude 4.6+ and Gemini 3.6+ reject it; OpenAI-style APIs answer it as a
+/// new message). Mirrors `lib/turn_lifecycle.py::_settlement`.
+fn restart_settlement(projection: &Map<String, Value>) -> Value {
     let content = projection
         .get("content")
         .and_then(Value::as_str)
@@ -14426,30 +14472,14 @@ fn restart_settlement(attempt: &Map<String, Value>, projection: &Map<String, Val
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let prefix = recovery_replay_prefix(rounds);
-    let model = attempt
-        .get("_config")
-        .and_then(Value::as_object)
-        .and_then(|config| config.get("model"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let supports_prefill = !model.is_empty()
-        && !model.contains("claude")
-        && !model.contains("anthropic")
-        && !model.contains("fable");
     let mut options = Vec::new();
-    if !content.is_empty() && supports_prefill {
-        options.push(json!({
-            "operation": "continue",
-            "anchor": {"type": "lossless_prefill", "contentChars": content.chars().count()}
-        }));
-    } else if content.is_empty() && (prefix.replayable_rows > 0 || thinking_is_present) {
+    if content.is_empty() && (prefix.replayable_rows > 0 || thinking_is_present) {
         options.push(json!({
             "operation": "continue",
             "anchor": {"type": "replay_only", "contentChars": 0}
         }));
     }
-    if prefix.replayable_rows > 0 {
+    if prefix.replayable_rows > 0 || !content.is_empty() {
         options.push(json!({
             "operation": "checkpoint_resume",
             "anchor": {
@@ -14510,6 +14540,7 @@ pub(crate) fn recover(
     transaction: &mut AuthorityTransaction,
     request: &RecoverRequest,
 ) -> io::Result<Vec<u8>> {
+    dispatchable_index::repair(database, transaction, request.created_before_ms)?;
     let (start, namespace_end) = EntityKey::prefix_range(
         transaction.tenant_id(),
         transaction.owner_user_id(),
@@ -14546,8 +14577,7 @@ pub(crate) fn recover(
         }
     }
     if rows.len() > MAX_RECOVERY_INDEX_ROWS_PER_OWNER {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "live Turn recovery index exceeds 10000 rows",
         ));
     }
@@ -14594,8 +14624,15 @@ pub(crate) fn recover(
             remaining += 1;
             continue;
         }
-        let loaded_attempt = load_attempt_for_update(database, transaction, &attempt_id)?
-            .ok_or_else(|| invalid_data("attempt recovery target is missing"))?;
+        let Some(loaded_attempt) = load_attempt_for_update(database, transaction, &attempt_id)? else {
+            if dispatchable_index::deleted_attempt_witness(database, transaction,
+                text("conversationId")?, text("turnId")?, &attempt_id, created_at_ms, None)?
+            {
+                database.entity_delete(transaction, index_key)?;
+                continue;
+            }
+            return Err(invalid_data("attempt recovery target is missing"));
+        };
         if !attempt_is_live(&loaded_attempt.document)
             || recovery_index_value(&loaded_attempt.document, indexed_projection_bytes)?
                 != encoded_locator
@@ -14628,7 +14665,7 @@ pub(crate) fn recover(
         effect_interruption::record_interrupted_file_effects(&mut projection,
             text("conversationId")?, text("turnId")?, &attempt_id,
             loaded_attempt.document.get("taskId").and_then(Value::as_str).unwrap_or(""));
-        let settlement = restart_settlement(&loaded_attempt.document, &projection);
+        let settlement = restart_settlement(&projection);
         let mut attempt = loaded_attempt.document.clone();
         attempt.insert("status".to_owned(), Value::String("interrupted".to_owned()));
         attempt.insert("settledAt".to_owned(), Value::from(request.now_ms));
@@ -14679,7 +14716,7 @@ pub(crate) fn recover(
         turn.insert("updatedAt".to_owned(), Value::from(request.now_ms));
         // Recovery folds the projection head into a snapshot, which can exceed
         // the request-literal bound after patch growth. Match the Turn reader's bound.
-        crate::versioned_document::put_with_blob_owner_bounded(
+        metadata_summary::put_document(
             database,
             transaction,
             crate::versioned_document::PutRequest {
@@ -14691,7 +14728,6 @@ pub(crate) fn recover(
                 expected_version: Some(loaded_turn.physical_version),
                 updated_at_ms: request.now_ms,
             },
-            transaction.owner_user_id(),
             crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES,
         )?;
         let staged = database
@@ -14896,8 +14932,7 @@ pub(crate) fn events_list(
     }
     let encoded = serde_json::to_vec(&Value::Array(events))?;
     if encoded.len() > MAX_ATTEMPT_EVENT_PAGE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "hydrated event response exceeds its page budget",
         ));
     }
@@ -15072,38 +15107,29 @@ pub(crate) fn events_prune(
                 "attempt retention cursor exceeds its event head",
             ));
         }
-        let available = usize::try_from(head - next_sequence + 1).unwrap_or(usize::MAX);
-        let row_budget = request.max_rows - deleted_rows;
-        let retiring = available.min(row_budget);
-        let range_start = attempt_event_key(transaction, &attempt_id, next_sequence)?;
-        let completes_attempt = retiring == available;
-        let range_end = if completes_attempt {
-            EntityKey::prefix_range(
-                transaction.tenant_id(),
-                transaction.owner_user_id(),
-                ATTEMPT_EVENT_NAMESPACE,
-                &attempt_event_prefix(&attempt_id)?,
-            )?
-            .1
-        } else {
-            attempt_event_key(transaction, &attempt_id, next_sequence + retiring as u64)?
-        };
-        database.entity_retire_range(transaction, &range_start, &range_end)?;
-        deleted_rows += retiring;
-        if completes_attempt {
+        // The completion (head and index deletes) or cursor write that follows
+        // and the IR's command receipt must still fit the same overlay delta.
+        let cursor_bytes = crate::entity::overlay_write_bytes(index_key.encoded().len(),
+            Some(attempt_event_retention_index_value(&loaded.document, u64::MAX)?.len()));
+        let completion_bytes = crate::entity::overlay_write_bytes(head_key.encoded().len(), None)
+            + crate::entity::overlay_write_bytes(index_key.encoded().len(), None);
+        let deletion = delete_attempt_event_rows(database, transaction, &attempt_id,
+            next_sequence, head, request.max_rows - deleted_rows,
+            cursor_bytes.max(completion_bytes) + max_receipt_write_bytes(transaction)?)?;
+        deleted_rows += deletion.deleted;
+        if deletion.exhausted {
             database.entity_delete(transaction, head_key)?;
             database.entity_delete(transaction, index_key.clone())?;
             deleted_attempts += 1;
             completed_candidates += 1;
         } else {
-            database.entity_put(
-                transaction,
-                index_key.clone(),
-                attempt_event_retention_index_value(
-                    &loaded.document,
-                    next_sequence + retiring as u64,
-                )?,
-            )?;
+            if deletion.deleted != 0 {
+                database.entity_put(
+                    transaction,
+                    index_key.clone(),
+                    attempt_event_retention_index_value(&loaded.document, deletion.next_sequence)?,
+                )?;
+            }
             break;
         }
     }
@@ -15114,6 +15140,76 @@ pub(crate) fn events_prune(
         "deleted_attempts": deleted_attempts,
         "remaining": remaining,
     }))
+}
+
+/// Outcome of point-deleting one Attempt's retained event rows.
+struct EventRowDeletion {
+    deleted: usize,
+    next_sequence: u64,
+    /// No retained row remains at or after `next_sequence`.
+    exhausted: bool,
+}
+
+/// Exact point deletes of one Attempt's event rows from `next_sequence`: at
+/// most `row_budget` rows, and only as many as the transaction's overlay
+/// delta can still carry beside `reserved_bytes` of later writes. Retention
+/// therefore commits as an ordinary rebaseable overlay write; a structural
+/// range retirement would drain the whole overlay under the writer and could
+/// never be prepared outside it. Each deleted row is witnessed by the scan
+/// that found it, so a concurrent change refuses a prepared commit.
+fn delete_attempt_event_rows(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    attempt_id: &str,
+    next_sequence: u64,
+    head: u64,
+    row_budget: usize,
+    reserved_bytes: usize,
+) -> io::Result<EventRowDeletion> {
+    let prefix = attempt_event_prefix(attempt_id)?;
+    let (_, end) = EntityKey::prefix_range(transaction.tenant_id(), transaction.owner_user_id(),
+        ATTEMPT_EVENT_NAMESPACE, &prefix)?;
+    let mut start = attempt_event_key(transaction, attempt_id, next_sequence)?;
+    // Every row key of one Attempt has the same encoded length.
+    let row_bytes = crate::entity::overlay_write_bytes(start.encoded().len(), None);
+    let room = database.entity_overlay_delta_room(transaction).saturating_sub(reserved_bytes);
+    let mut remaining = row_budget.min(room / row_bytes);
+    let mut deletion = EventRowDeletion { deleted: 0, next_sequence, exhausted: next_sequence > head };
+    while remaining != 0 && !deletion.exhausted {
+        let page_limit = remaining.min(crate::generated_tofudb_ir::MAX_ENTITY_RANGE_ROWS);
+        let rows = database.entity_scan(transaction, &start, &end, page_limit)?;
+        for (key, _) in &rows {
+            let key_bytes = key.key_bytes();
+            if key_bytes.len() != prefix.len() + 8 || !key_bytes.starts_with(&prefix) {
+                return Err(invalid_data("attempt event key identity is malformed"));
+            }
+            let sequence = u64::from_be_bytes(key_bytes[prefix.len()..].try_into()
+                .expect("attempt event sequence is eight bytes"));
+            if sequence > head {
+                return Err(invalid_data("attempt event exceeds its event head"));
+            }
+            database.entity_delete(transaction, key.clone())?;
+            deletion.next_sequence = sequence.checked_add(1)
+                .ok_or_else(|| invalid_data("attempt event sequence overflows"))?;
+        }
+        deletion.deleted += rows.len();
+        remaining -= rows.len();
+        deletion.exhausted = rows.len() < page_limit || deletion.next_sequence > head;
+        if let Some((last, _)) = rows.last() {
+            start = after_key(last, transaction, ATTEMPT_EVENT_NAMESPACE)?;
+        }
+    }
+    Ok(deletion)
+}
+
+/// Overlay delta bytes of the largest command receipt the IR may attach after
+/// a retention step. Receipt keys hash the command ID, so any ID yields the
+/// exact key length.
+fn max_receipt_write_bytes(transaction: &AuthorityTransaction) -> io::Result<usize> {
+    let key = crate::receipt::command_receipt_entity_key(
+        transaction.tenant_id(), transaction.owner_user_id(), "retention")?;
+    Ok(crate::entity::overlay_write_bytes(key.encoded().len(),
+        Some(crate::receipt::MAX_RECEIPT_ENTRY_BYTES)))
 }
 
 pub(crate) fn sync_prune(
@@ -15728,8 +15824,8 @@ impl SyncSnapshotResponse {
         let encoded = crate::response_json::EncodedResponse::from_value(Value::Object(response))
             .map_err(|_| invalid_data("turn response cannot be encoded"))?;
         if encoded.len() > crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES {
-            return Err(io::Error::new(io::ErrorKind::OutOfMemory,
-                "turn response exceeds its bounded streamed payload"));
+            return Err(crate::resource_exhaustion::domain_bound(
+                "turn response exceeds its bounded streamed payload",));
         }
         Ok(encoded)
     }
@@ -16045,8 +16141,7 @@ pub(crate) fn sync_changes(
                 .filter(|bytes| *bytes <= MAX_LEGACY_DOCUMENT_BYTES)
             else {
                 if events.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::OutOfMemory,
+                    return Err(crate::resource_exhaustion::domain_bound(
                         "conversation sync page exceeds 8 MiB",
                     ));
                 }
@@ -16112,6 +16207,14 @@ mod append_settled_hotpath_tests {
 mod projection_retirement_tests {
     include!("turn_projection_retirement_tests.rs");
 }
+
+#[cfg(test)]
+#[path = "turn/metadata_read_tests.rs"]
+mod metadata_read_tests;
+
+#[cfg(test)]
+#[path = "turn/event_prune_tests.rs"]
+mod event_prune_tests;
 
 pub(crate) fn main_turn_count(
     database: &AuthorityDatabase,

@@ -151,9 +151,29 @@ const context = vm.createContext({
   atob: (value) => Buffer.from(value, 'base64').toString('binary'),
 });
 
-vm.runInContext(fs.readFileSync(backgroundPath, 'utf8'), context, {
-  filename: backgroundPath,
-});
+require('./support/browser_worker_loader.cjs').loadBrowserWorker(context, backgroundPath);
+
+// Observe receipt behavior without exposing or mutating the outbox's storage.
+vm.runInContext(`
+function _probeQueuedResults() {
+  const receipts = [], rows = [];
+  while (true) {
+    const receipt = bridgeOutbox.begin(bridgeConnection());
+    if (!receipt.items.length) { receipt.acknowledge(); break; }
+    rows.push(...receipt.items); receipts.push(receipt);
+  }
+  for (const receipt of receipts.reverse()) receipt.rollback();
+  return rows;
+}
+function _probeTakeResults() {
+  const receipt = bridgeOutbox.begin(bridgeConnection());
+  receipt.acknowledge();
+  return receipt.items;
+}
+function _probeClearResults() {
+  while (_probeTakeResults().length) {}
+}
+`, context);
 
 async function emitCapturedTraffic(tabId) {
   debuggerEvents.emit(
@@ -207,6 +227,277 @@ async function fetchProbe() {
   return {result, limits, operations, debuggerCommands, publicBlankRejected};
 }
 
+async function pollLifecycleProbe() {
+  const scenario = mode.split(':')[1];
+  const requests = [];
+  const executions = [];
+  const timers = new Map();
+  let nextTimer = 0;
+  context.setTimeout = (callback, delay) => {
+    const id = ++nextTimer;
+    timers.set(id, {callback, delay});
+    return id;
+  };
+  context.clearTimeout = id => timers.delete(id);
+  context.fetch = (url, options) => new Promise((resolve, reject) => {
+    requests.push({url, options, resolve, reject});
+  });
+  context.executeAndReport = command => executions.push(command.id);
+  const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+  const status = () => {
+    let value;
+    chrome.runtime.onMessage.emit({type: 'getStatus'}, {}, answer => { value = answer; });
+    return JSON.parse(JSON.stringify(value));
+  };
+  vm.runInContext(`
+    SERVER_URL = 'https://first.example'; CLIENT_ID = 'device'; BRIDGE_SECRET = 'first-key';
+    bridgeOutbox.enqueue(bridgeConnection(), {id: 'first-result', result: {text: 'private first-server result'}});
+    startPolling();
+  `, context);
+  const first = requests[0];
+  let finishBody;
+  if (scenario === 'body') {
+    first.resolve({ok: true, status: 200, json: () => new Promise(resolve => { finishBody = resolve; })});
+    await flush();
+    if (!finishBody) throw new Error('poll did not start reading response body');
+  }
+  vm.runInContext('stopPolling()', context);
+  const stopped = status();
+  const aborted = first.options.signal.aborted;
+  const timersAfterStop = timers.size;
+  if (scenario === 'stop' || scenario === 'body') {
+    const late = {commands: [{id: 'retired-command'}]};
+    if (finishBody) finishBody(late);
+    else first.resolve({ok: true, status: 200, json: async () => late});
+    await flush();
+    return {aborted, timersAfterStop, stopped, afterLate: status(), executions,
+      timersAfterLate: timers.size};
+  }
+  if (scenario === 'switch') vm.runInContext("SERVER_URL = 'https://second.example';", context);
+  vm.runInContext('startPolling()', context);
+  const second = requests[1];
+  if (scenario === 'restart') {
+    first.resolve({ok: false, status: 401, json: async () => ({error: 'bridge_auth_required'})});
+    await flush();
+    const afterStale = status();
+    second.resolve({ok: true, status: 200, json: async () => ({commands: [{id: 'fresh-command'}]})});
+    await flush();
+    const afterFresh = status();
+    vm.runInContext('stopPolling()', context);
+    return {aborted, timersAfterStop, afterStale, afterFresh, executions};
+  }
+  first.reject(new Error('late first-server transport failure'));
+  await flush();
+  second.resolve({ok: true, status: 200, json: async () => ({commands: []})});
+  await flush();
+  const next = [...timers.entries()].find(([, timer]) => timer.delay === 100);
+  if (!next) throw new Error('next poll was not scheduled');
+  timers.delete(next[0]); next[1].callback();
+  await flush();
+  const newServerResultIds = requests.filter(request => request.url.startsWith('https://second.example'))
+    .flatMap(request => JSON.parse(request.options.body).results.map(result => result.id));
+  vm.runInContext('stopPolling()', context);
+  const whileAway = status();
+  vm.runInContext("SERVER_URL = 'https://first.example'; startPolling();", context);
+  const returning = requests.at(-1);
+  const returnedIds = JSON.parse(returning.options.body).results.map(row => row.id);
+  returning.resolve({ok: true, status: 200, json: async () => ({commands: []})});
+  await flush();
+  vm.runInContext('stopPolling()', context);
+  return {aborted, newServerResultIds, returnedIds, executions,
+    status: whileAway, afterReturn: status()};
+}
+
+function workerStatus() {
+  let value;
+  chrome.runtime.onMessage.emit({type: 'getStatus'}, {}, answer => { value = answer; });
+  return JSON.parse(JSON.stringify(value));
+}
+
+async function pollCommandResourceFailureProbe() {
+  const timers = new Map(); let nextTimer = 0;
+  context.setTimeout = (callback, delay) => { const id = ++nextTimer; timers.set(id, {callback, delay}); return id; };
+  context.clearTimeout = id => timers.delete(id);
+  context._createTemporaryTabScope = () => { throw new Error('resource setup failed'); };
+  context.fetch = async () => ({ok: true, status: 200,
+    json: async () => ({commands: [{id: 'first', type: 'test'}, {id: 'second', type: 'test'}]})});
+  vm.runInContext("SERVER_URL = 'https://tofu.test'; CLIENT_ID = 'device';", context);
+  await vm.runInContext('startPolling()', context);
+  const results = vm.runInContext('_probeQueuedResults()', context);
+  const status = workerStatus(), delays = [...timers.values()].map(timer => timer.delay);
+  vm.runInContext('stopPolling()', context);
+  return {results, status, delays};
+}
+
+async function authBackoffProbe() {
+  const timers = new Map(), responses = [], requests = [], badges = [];
+  let nextTimer = 0, repairs = 0, kind = 'bridge';
+  context.setTimeout = (callback, delay) => {
+    const id = ++nextTimer; timers.set(id, {callback, delay}); return id;
+  };
+  context.clearTimeout = id => timers.delete(id);
+  chrome.action.setBadgeText = value => badges.push(value.text);
+  context.attemptAutoRepair = async () => { repairs += 1; return false; };
+  context.fetch = async (url, options) => {
+    requests.push({url, headers: options.headers, credentials: options.credentials,
+      extVersion: JSON.parse(options.body).extVersion, responseKind: kind,
+      results: JSON.parse(options.body).results.map(row => row.id)});
+    return {ok: kind === 'success', status: kind === 'success' ? 200 : 401,
+      json: async () => kind === 'success' ? {commands: []}
+        : kind === 'bridge' ? {error: 'bridge_auth_required'} : null};
+  };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const record = () => ({status: workerStatus(), timerCount: timers.size,
+    delay: [...timers.values()][0]?.delay, badge: badges.at(-1)});
+  const fire = async () => {
+    const [id, timer] = [...timers.entries()][0];
+    timers.delete(id); timer.callback(); await flush();
+  };
+  vm.runInContext(`SERVER_URL = 'https://tofu.test'; CLIENT_ID = 'device'; BRIDGE_SECRET = 'initial';
+    bridgeOutbox.enqueue(bridgeConnection(), {id: 'completion', result: {ok:true}});`, context);
+  await vm.runInContext('startPolling()', context); responses.push(record());
+  for (let index = 1; index < 8; index++) { await fire(); responses.push(record()); }
+  kind = 'success'; await fire(); const success = record();
+  kind = 'proxy'; await fire(); const proxy = record();
+  kind = 'bridge';
+  for (let index = 1; index < 5; index++) await fire();
+  const parked = record(), beforeSecret = requests.length;
+  kind = 'success'; vm.runInContext("setBridgeSecret('replacement')", context); await flush();
+  const afterSecret = record();
+  vm.runInContext('stopPolling()', context);
+  return {responses, success, proxy, parked, afterSecret, beforeSecret,
+    requests, repairs, timersAfterStop: timers.size};
+}
+
+async function deviceDownloadConnectionProbe() {
+  const kind = mode.split(':')[1];
+  const changed = listeners();
+  let finish, searches = 0;
+  chrome.downloads = {
+    onChanged: changed,
+    download: () => new Promise(resolve => { finish = () => resolve(42); }),
+    search: async () => [{id: 42, state: ++searches === 1 ? 'in_progress' : 'complete'}],
+  };
+  vm.runInContext("SERVER_URL = 'https://first.example'; CLIENT_ID = 'issuing-device';", context);
+  const command = kind === 'start' ? 'download' : 'wait_download';
+  const pending = vm.runInContext(`executeCommand('${command}', {url: 'https://file.test/a', downloadId: 42})`, context);
+  await new Promise(resolve => setImmediate(resolve));
+  vm.runInContext("SERVER_URL = 'https://second.example'; CLIENT_ID = 'new-device';", context);
+  if (kind === 'start') finish();
+  else changed.emit({id: 42, state: {current: 'complete'}});
+  return {result: await pending};
+}
+
+async function repairFlowProbe() {
+  const scenario = mode.split(':')[1];
+  const existing = scenario.startsWith('existing') || scenario === 'singleflight';
+  const refused = scenario.includes('refused') || scenario === 'cooldown';
+  const server = 'https://tofu.test/proxy/15000';
+  const scriptCalls = [], mintCalls = [], ledgerAtWait = [];
+  let finishMint;
+  vm.runInContext(`SERVER_URL = '${server}'; BRIDGE_SECRET = 'initial';`, context);
+  chrome.tabs.query = async () => existing ? [{id: 17, url: server + '/app'}] : [];
+  context.waitForTabLoad = async () => {
+    ledgerAtWait.push({...sessionData});
+    return {id: 7, status: 'complete'};
+  };
+  chrome.scripting.executeScript = async details => {
+    scriptCalls.push({target: details.target, world: details.world, args: details.args});
+    const page = vm.createContext({URL, window: {location: {href: server + '/app'},
+      Api: {desktop: {mintToken: async name => {
+        mintCalls.push(name);
+        if (scenario === 'singleflight') await new Promise(resolve => { finishMint = resolve; });
+        return refused ? {} : {token: 'fresh-owned-key'};
+      }}}}});
+    return [{result: await vm.runInContext(
+      `(${details.func.toString()})(...${JSON.stringify(details.args)})`, page)}];
+  };
+  let second, busy, outcome;
+  if (scenario === 'foreground-refused') {
+    outcome = await new Promise(resolve => chrome.runtime.onMessage.emit(
+      {type: 'repairNow'}, {}, resolve));
+  } else {
+    const first = vm.runInContext('attemptAutoRepair()', context);
+    if (scenario === 'singleflight') {
+      await new Promise(resolve => setImmediate(resolve));
+      busy = workerStatus().repairBusy;
+      second = await vm.runInContext('attemptAutoRepair()', context);
+      if (!finishMint) throw new Error('repair did not reach mint');
+      finishMint();
+    }
+    outcome = await first;
+    if (scenario === 'cooldown') second = await vm.runInContext('attemptAutoRepair()', context);
+  }
+  return {outcome, second, busy, scriptCalls, mintCalls, createdTabOptions,
+    removedTabIds, ledgerAtWait, ledgerAfter: {...sessionData}, status: workerStatus(),
+    secret: vm.runInContext("buildHeaders()['X-Bridge-Secret']", context)};
+}
+
+async function repairReaperProbe() {
+  const removed = [], server = 'https://tofu.test/proxy/15000';
+  const cases = [
+    {id: 1, url: server + '/app', status: 'complete'},
+    {id: 2, url: server + '/app', status: 'loading'},
+    {id: 3, url: server + '9/app', status: 'loading'},
+    {id: 4, url: 'https://tofu.test.evil/proxy/15000', status: 'loading'},
+    {id: 5, url: 'about:blank', status: 'loading'},
+  ];
+  chrome.storage.local.get = async () => ({serverUrl: server});
+  chrome.tabs.remove = async id => removed.push(id);
+  for (const tab of cases) {
+    context.__reaperId = tab.id;
+    vm.runInContext('chrome.storage.session.set({[REPAIR_TAB_SESSION_KEY]: __reaperId})', context);
+    chrome.tabs.get = async () => tab;
+    chrome.runtime.onStartup.emit();
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  return {removed, ledgerAfter: {...sessionData}};
+}
+
+async function repairConnectionSwitchProbe() {
+  const change = mode.split(':')[1];
+  let finishMint;
+  chrome.tabs.query = async () => [{id: 7, url: 'https://first.example/app', title: 'Tofu'}];
+  chrome.scripting.executeScript = () => new Promise(resolve => { finishMint = resolve; });
+  vm.runInContext("SERVER_URL = 'https://first.example'; BRIDGE_SECRET = 'initial';", context);
+  const repair = vm.runInContext('attemptAutoRepair()', context);
+  await new Promise(resolve => setImmediate(resolve));
+  if (!finishMint) throw new Error('repair did not reach the owned page');
+  vm.runInContext(change === 'server'
+    ? "SERVER_URL = 'https://second.example'; BRIDGE_SECRET = 'replacement';"
+    : "setBridgeSecret('replacement');", context);
+  finishMint([{result: {token: 'stale-minted-key'}}]);
+  const repaired = await repair;
+  return {repaired, secret: vm.runInContext("buildHeaders()['X-Bridge-Secret']", context),
+    createdTabOptions, status: workerStatus()};
+}
+
+async function repairIdentityProbe() {
+  const server = 'https://tofu.test/proxy/15000';
+  const candidates = {
+    exact: server, child: server + '/app', prefix: server + '9/app',
+    otherHost: 'https://tofu.test.evil/proxy/15000',
+    otherPort: 'https://tofu.test:444/proxy/15000',
+    malformed: 'not-a-url',
+  };
+  context.__repairCandidates = candidates;
+  vm.runInContext(`SERVER_URL = '${server}';`, context);
+  const tabs = vm.runInContext(`Object.fromEntries(Object.entries(__repairCandidates)
+    .map(([key,url]) => [key, _isOwnServerTab({url})]))`, context);
+  const pageMint = vm.runInContext('_tofuMintBridgeKey', context);
+  const pages = {};
+  for (const [name, url] of Object.entries(candidates)) {
+    let calls = 0;
+    const page = vm.createContext({URL, location: {href: url},
+      window: {location: {href: url}, Api: {desktop: {mintToken: async () => {
+        calls += 1; return {token: 'synthetic-owned-token'};
+      }}}}});
+    const result = await vm.runInContext(`(${pageMint.toString()})(${JSON.stringify(server)})`, page);
+    pages[name] = {calls, result};
+  }
+  return {tabs, pages};
+}
+
 async function protocolProbe() {
   const scheduled = [];
   const cleared = [];
@@ -230,14 +521,13 @@ async function protocolProbe() {
     SERVER_URL = 'https://tofu.test';
     CLIENT_ID = 'probe-client';
     BRIDGE_SECRET = 'probe-secret';
-    pollActive = true;
-    _resultQueue.push({id: 'completed-result', result: {ok: true}});
+    bridgeOutbox.enqueue(bridgeConnection(), {id: 'completed-result', result: {ok: true}});
   `, context);
-  await vm.runInContext('poll()', context);
+  await vm.runInContext('startPolling()', context);
   const state = vm.runInContext(`({
-    queue: _resultQueue.map((item) => item.id),
-    connected,
-    lastError,
+    queue: _probeQueuedResults().map((item) => item.id),
+    connected: bridgeTransport.status().connected,
+    lastError: bridgeTransport.status().lastError,
     upgradeDelay: UPGRADE_RETRY_DELAY,
     ordinaryDelay: POLL_RETRY_DELAY,
   })`, context);
@@ -268,34 +558,33 @@ async function rateLimitProbe() {
     SERVER_URL = 'https://tofu.test';
     CLIENT_ID = 'probe-client';
     BRIDGE_SECRET = 'probe-secret';
-    pollActive = true;
-    _resultQueue.push({id: 'completed-result', result: {ok: true}});
+    bridgeOutbox.enqueue(bridgeConnection(), {id: 'completed-result', result: {ok: true}});
   `, context);
-  await vm.runInContext('poll()', context);
+  await vm.runInContext('startPolling()', context);
   const state = vm.runInContext(`({
-    queue: _resultQueue.map((item) => item.id),
-    connected,
-    lastError,
+    queue: _probeQueuedResults().map((item) => item.id),
+    connected: bridgeTransport.status().connected,
+    lastError: bridgeTransport.status().lastError,
   })`, context);
   return {state, scheduled};
 }
 
 function resultBatchProbe() {
   const small = vm.runInContext(`(() => {
-    _resultQueue.splice(0, _resultQueue.length);
+    _probeClearResults();
     for (let index = 0; index < 40; index += 1) {
-      _resultQueue.push({id: 'small-' + index, result: {ok: true}});
+      bridgeOutbox.enqueue(bridgeConnection(), {id: 'small-' + index, result: {ok: true}});
     }
-    const batch = _takeBoundedResultBatch();
+    const batch = _probeTakeResults();
     return {
       batchIds: batch.map((item) => item.id),
-      remainingIds: _resultQueue.map((item) => item.id),
+      remainingIds: _probeQueuedResults().map((item) => item.id),
     };
   })()`, context);
   const oversize = vm.runInContext(`(() => {
-    _resultQueue.splice(0, _resultQueue.length);
-    _resultQueue.push({id: 'oversize', result: {data: 'x'.repeat(13 * 1024 * 1024)}});
-    const batch = _takeBoundedResultBatch();
+    _probeClearResults();
+    bridgeOutbox.enqueue(bridgeConnection(), {id: 'oversize', result: {data: 'x'.repeat(13 * 1024 * 1024)}});
+    const batch = _probeTakeResults();
     return {id: batch[0].id, result: batch[0].result, error: batch[0].error};
   })()`, context);
   return {small, oversize};
@@ -315,21 +604,20 @@ async function payloadLimitProbe() {
     SERVER_URL = 'https://tofu.test';
     CLIENT_ID = 'probe-client';
     BRIDGE_SECRET = 'probe-secret';
-    pollActive = true;
-    _resultQueue.splice(0, _resultQueue.length);
+    _probeClearResults();
     for (let index = 0; index < 4; index += 1) {
-      _resultQueue.push({id: 'result-' + index, result: {ok: true}});
+      bridgeOutbox.enqueue(bridgeConnection(), {id: 'result-' + index, result: {ok: true}});
     }
   `, context);
-  await vm.runInContext('poll()', context);
+  await vm.runInContext('startPolling()', context);
   const preserved = vm.runInContext(
-    '_resultQueue.map((item) => item.id)', context);
+    '_probeQueuedResults().map((item) => item.id)', context);
   const nextBatch = vm.runInContext(
-    '_takeBoundedResultBatch().map((item) => item.id)', context);
+    '_probeTakeResults().map((item) => item.id)', context);
   return {
     preserved,
     nextBatch,
-    batchLimit: vm.runInContext('_pollResultBatchMax', context),
+    batchLimit: nextBatch.length,
     scheduled,
   };
 }
@@ -348,14 +636,13 @@ async function transportFailureProbe() {
     SERVER_URL = 'https://tofu.test';
     CLIENT_ID = 'probe-client';
     BRIDGE_SECRET = 'probe-secret';
-    pollActive = true;
-    _resultQueue.splice(0, _resultQueue.length);
-    _resultQueue.push({id: 'completed-result', result: {ok: true}});
+    _probeClearResults();
+    bridgeOutbox.enqueue(bridgeConnection(), {id: 'completed-result', result: {ok: true}});
   `, context);
-  await vm.runInContext('poll()', context);
+  await vm.runInContext('startPolling()', context);
   return {
     queue: vm.runInContext(
-      '_resultQueue.map((item) => item.id)', context),
+      '_probeQueuedResults().map((item) => item.id)', context),
     scheduled,
   };
 }
@@ -422,6 +709,67 @@ async function researchHintBudgetProbe() {
   };
 }
 
+async function researchOriginProbe() {
+  const phase = mode.split(':')[1];
+  const foreign = 'https://outside.test/private';
+  const execute = chrome.scripting.executeScript;
+  if (phase === 'initial') {
+    const update = chrome.tabs.update;
+    chrome.tabs.update = async (...args) => {
+      const tab = await update(...args);
+      currentUrl = foreign;
+      return {...tab, url: foreign};
+    };
+  }
+  chrome.scripting.executeScript = async details => {
+    const name = details.func && details.func.name;
+    operations.push(`origin-probe:${name}:${currentUrl}`);
+    if ((phase === 'signals' && name === '_researchPageSignals') ||
+        (phase === 'snapshot' && name === '_captureContentSnapshot')) {
+      return [{result: {originMismatch: foreign}}];
+    }
+    if (currentUrl === foreign) {
+      const result = {text: 'FOREIGN_PRIVATE_CONTENT', records: [],
+        fingerprint: 'foreign', initialState: {}, initialStatePayloads: {}};
+      if (name === '_captureContentSnapshot') currentUrl = 'https://example.test/list';
+      return [{result}];
+    }
+    const result = await execute(details);
+    if (phase === 'scroll' && name === '_researchScrollStep') currentUrl = foreign;
+    if (phase === 'pagination' && name === '_researchAdvancePagination') {
+      currentUrl = foreign;
+      return [{result: {advanced: true, kind: 'click'}}];
+    }
+    return result;
+  };
+  return researchProbe();
+}
+
+async function researchOriginRealmProbe() {
+  const rows = [];
+  const origin = 'https://example.test';
+  for (const [name, args] of [
+    ['_researchPageSignals', [60000, origin]],
+    ['_captureContentSnapshot', [60000, '', origin]],
+    ['_researchScrollStep', [origin]],
+    ['_researchAdvancePagination', ['auto', origin]],
+  ]) {
+    let documentReads = 0;
+    const page = vm.createContext({
+      location: new URL('https://outside.test/private'),
+      document: new Proxy({}, {get() { documentReads++; throw new Error('Foreign DOM read'); }}),
+    });
+    const source = vm.runInContext(`${name}.toString()`, context);
+    try {
+      const result = vm.runInContext(`(${source})(...${JSON.stringify(args)})`, page);
+      rows.push({name, result, documentReads});
+    } catch (error) {
+      rows.push({name, error: String(error), documentReads});
+    }
+  }
+  return rows;
+}
+
 async function fileTransferProbe() {
   const targetUrl = 'https://files.example.test/download?signature=once';
   const targetChunks = [
@@ -432,6 +780,8 @@ async function fileTransferProbe() {
   const uploadedChunks = [];
   const controls = [];
   let targetFetches = 0;
+  const serverRequests = [];
+  const switching = mode === 'fileTransferConnectionSwitch';
 
   function targetResponse() {
     let index = 0;
@@ -465,9 +815,13 @@ async function fileTransferProbe() {
   context.fetch = async (url, options = {}) => {
     if (url === targetUrl) {
       targetFetches += 1;
+      if (switching) vm.runInContext(`SERVER_URL = 'https://other-server.test';
+        CLIENT_ID = 'other-device'; BRIDGE_SECRET = 'other-secret';`, context);
       return targetResponse();
     }
     const value = String(url);
+    serverRequests.push({url: value, clientId: options.headers['X-Browser-Client-Id'],
+      secret: options.headers['X-Bridge-Secret']});
     if (value.endsWith('/start')) {
       controls.push({kind: 'start', body: JSON.parse(options.body)});
       return {ok: true, status: 200, json: async () => ({ok: true})};
@@ -506,6 +860,7 @@ async function fileTransferProbe() {
   })`, context);
   return {
     result,
+    serverRequests,
     targetFetches,
     chunkLengths: uploadedChunks.map((row) => row.bytes.length),
     chunkSequences: uploadedChunks.map((row) => row.sequence),
@@ -728,7 +1083,7 @@ async function fileTransferTimeoutProbe() {
       chunkBytes: 16384, timeoutMs: 30000,
     }})`, context);
   return {
-    result: vm.runInContext('_resultQueue[0]', context), requests,
+    result: vm.runInContext('_probeQueuedResults()[0]', context), requests,
     readerCancelled, bodyCancelled, cleanupHasFreshSignal,
     upstreamAborted: Boolean(transferSignal && transferSignal.aborted),
     activeTimers: timers.size,
@@ -1160,7 +1515,7 @@ async function temporaryTabTimeoutProbe() {
   for (let i = 0; i < 100; i++) await Promise.resolve();
   return {
     removedAtTimeout, removedEventually: removed, operations, sessionData,
-    results: vm.runInContext('_resultQueue.slice()', context),
+    results: vm.runInContext('_probeQueuedResults()', context),
     captures: vm.runInContext('_networkCaptures.size', context),
   };
 }
@@ -1196,13 +1551,13 @@ async function temporaryTabCapacityProbe() {
   for (let i = 0; i < 200; i++) await Promise.resolve();
   for (const timer of [...timers.values()]) if (timer.delay === 35000) timer.callback();
   await Promise.all(executions);
-  const results = vm.runInContext('_resultQueue.slice()', context);
+  const results = vm.runInContext('_probeQueuedResults()', context);
   chrome.debugger.attach = async () => {};
   vm.runInContext('waitForTabLoad = async () => {}; _waitForCapturedPageSettle = async () => {};', context);
   await vm.runInContext(`executeAndReport({id: 'after-timeouts', type: 'fetch_url', params: {url: 'https://example.test/app'}})`, context);
   return {
     peakTabs, remainingTabs: live.size, sessionData,
-    results, recoveredResult: vm.runInContext('_resultQueue[_resultQueue.length - 1]', context),
+    results, recoveredResult: vm.runInContext('_probeQueuedResults().at(-1)', context),
   };
 }
 
@@ -1303,7 +1658,7 @@ async function demandResourceBurstProbe() {
 async function fileProbeFailureProbe() {
   context.fetch = async () => { throw new Error('probe unavailable'); };
   await vm.runInContext(`executeAndReport({id: 'probe-failed', type: 'fetch_url', params: {url: 'https://example.test/app'}})`, context);
-  return {operations, result: vm.runInContext('_resultQueue[0]', context)};
+  return {operations, result: vm.runInContext('_probeQueuedResults()[0]', context)};
 }
 
 async function temporaryTabFailureProbe() {
@@ -1319,7 +1674,7 @@ async function temporaryTabFailureProbe() {
   if (phase === 'navigation') chrome.tabs.update = async () => { throw new Error('navigation blocked'); };
   vm.runInContext('waitForTabLoad = async () => {}; _waitForCapturedPageSettle = async () => {};', context);
   await vm.runInContext(`executeAndReport({id: 'failed-operation', type: 'fetch_url', params: {url: 'https://example.test/app'}})`, context);
-  return {operations, sessionData, removedTabIds, result: vm.runInContext('_resultQueue[0]', context)};
+  return {operations, sessionData, removedTabIds, result: vm.runInContext('_probeQueuedResults()[0]', context)};
 }
 
 async function selfUpdateProbe() {
@@ -1348,16 +1703,36 @@ async function selfUpdateProbe() {
 
   // Queued results live only in worker memory → defer, never drop.
   vm.runInContext(
-    "_resultQueue.push({id: 'held-result', result: {ok: true}});", context);
+    "bridgeOutbox.enqueue(bridgeConnection(), {id: 'held-result', result: {ok: true}});", context);
   chrome.alarms.onAlarm.emit({name: 'keepAlive'});
   await flush();
   const busyDeferred = runtimeCalls.reload;
-  vm.runInContext('_resultQueue.splice(0, _resultQueue.length);', context);
-
-  return {sameVersionReloads, afterDiskUpgrade, busyDeferred};
+  vm.runInContext('globalThis.__leasedUpdate = bridgeOutbox.begin(bridgeConnection());', context);
+  chrome.alarms.onAlarm.emit({name: 'keepAlive'});
+  await flush();
+  const leasedDeferred = runtimeCalls.reload;
+  vm.runInContext('__leasedUpdate.acknowledge();', context);
+  chrome.alarms.onAlarm.emit({name: 'keepAlive'});
+  await flush();
+  return {sameVersionReloads, afterDiskUpgrade, busyDeferred, leasedDeferred,
+    afterAcknowledgement: runtimeCalls.reload};
 }
 
 const probes = {
+  frameAuthority: () => require('./support/browser_frame_authority_probe.cjs')({context, chrome, vm}),
+  authBackoff: authBackoffProbe,
+  pollCommandResourceFailure: pollCommandResourceFailureProbe,
+  ...Object.fromEntries(['start', 'wait'].map(kind => [
+    `deviceDownloadConnection:${kind}`, deviceDownloadConnectionProbe])),
+  repairReaper: repairReaperProbe,
+  ...Object.fromEntries(['existing', 'existing-refused', 'hidden-success', 'hidden-refused',
+    'foreground-refused', 'cooldown', 'singleflight'].map(scenario => [
+    `repairFlow:${scenario}`, repairFlowProbe])),
+  repairIdentity: repairIdentityProbe,
+  ...Object.fromEntries(['server', 'secret'].map(change => [
+    `repairConnectionSwitch:${change}`, repairConnectionSwitchProbe])),
+  ...Object.fromEntries(['stop', 'body', 'restart', 'switch'].map(scenario => [
+    `pollLifecycle:${scenario}`, pollLifecycleProbe])),
   customControls: customControlsProbe,
   customControlInteract: customControlInteractProbe,
   isolatedInteraction: isolatedInteractionProbe,
@@ -1382,12 +1757,16 @@ const probes = {
     'start-json', 'chunk-json', 'complete-json', 'startRejected',
   ].map((phase) => [`fileTransferTimeout:${phase}`, fileTransferTimeoutProbe])),
   fileTransfer: fileTransferProbe,
+  fileTransferConnectionSwitch: fileTransferProbe,
   protocol426: protocolProbe,
   rate429: rateLimitProbe,
   resultBatch: resultBatchProbe,
   payload413: payloadLimitProbe,
   transportFailure: transportFailureProbe,
   research: researchProbe,
+  ...Object.fromEntries(['initial', 'scroll', 'signals', 'snapshot', 'pagination']
+    .map(phase => [`researchOrigin:${phase}`, researchOriginProbe])),
+  researchOriginRealm: researchOriginRealmProbe,
   researchHintBudget: researchHintBudgetProbe,
   pagination: paginationProbe,
 };

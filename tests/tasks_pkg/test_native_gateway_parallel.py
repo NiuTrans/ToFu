@@ -149,8 +149,21 @@ def test_approval_request_uses_its_exact_call_id_with_prepared_siblings():
         gateway.close()
 
 
-@pytest.mark.parametrize('qualification', [None, [], ['todo_write'], ['fetch_url', 'fetch_url']])
-def test_application_derives_qualification_and_binds_original_response_declarations(monkeypatch, qualification):
+@pytest.mark.parametrize('selection,expected', [
+    ({}, 'concurrent'),
+    ({'concurrent_tool_dispatch': True}, 'concurrent'),
+    ({'concurrent_tool_dispatch': False}, ['fetch_url']),
+    ({'parallel_tool_names': []}, []),
+    ({'parallel_tool_names': ['fetch_url']}, ['fetch_url']),
+    ({'parallel_tool_names': ['todo_write']}, 'parallel tools'),
+    ({'parallel_tool_names': ['fetch_url', 'fetch_url']}, 'parallel tools'),
+    ({'concurrent_tool_dispatch': True, 'parallel_tool_names': []}, 'excludes read qualification'),
+    ({'concurrent_tool_dispatch': 'yes'}, 'excludes read qualification'),
+])
+def test_application_selects_concurrent_dispatch_unless_qualification_is_explicit(
+        monkeypatch, selection, expected):
+    """Owner decision 2026-10-28: the application composition starts every call
+    of a round at once; an explicit qualification keeps the read scheduler."""
     from pathlib import Path
     from lib.agent_core.abort_signal import AbortSignal
     from lib.tasks_pkg.native_execution import run_native_task
@@ -163,8 +176,13 @@ def test_application_derives_qualification_and_binds_original_response_declarati
     observed = []
     async def native(client, route, configuration, **ports):
         observed.append(configuration)
-        assert configuration['parallel_tool_names'] == (['fetch_url'] if qualification is None else qualification)
-        if configuration['parallel_tool_names']:
+        if expected == 'concurrent':
+            assert configuration['concurrent_tool_dispatch'] is True
+            assert 'parallel_tool_names' not in configuration and gateway._concurrent
+        else:
+            assert configuration['parallel_tool_names'] == expected
+            assert 'concurrent_tool_dispatch' not in configuration and not gateway._concurrent
+        if expected:
             assert configuration['tool_sibling_control'] is True
             assert ports['round_policy'].response_policy.__self__ is gateway
     monkeypatch.setattr('lib.tasks_pkg.native_execution.run_native_route', native)
@@ -175,14 +193,14 @@ def test_application_derives_qualification_and_binds_original_response_declarati
             decision_policy=None, pending_calls=16, pending_bytes=65536)
         settings = dict(owner_user_id=1, task_id=owner['id'], tools=compile_native_tool_catalog(owner, definitions),
             terminal_persistence=dict(operation_id='commit', attempts=1, ack_ms=1000, frame_bytes=65536))
-        if qualification is not None: settings['parallel_tool_names'] = qualification
+        settings.update(selection)
         async def run():
             await run_native_task(client, object(), settings, task=owner, executor=executor,
                 callbacks={}, working_directory=Path('/tmp'), gateway=gateway,
                 round_policy=SimpleNamespace(prepare=lambda request: []))
-        if qualification and qualification != ['fetch_url']:
-            with pytest.raises(ValueError, match='parallel tools'): asyncio.run(run())
-            assert not observed
+        if isinstance(expected, str) and expected != 'concurrent':
+            with pytest.raises(ValueError, match=expected): asyncio.run(run())
+            assert not observed and not gateway._concurrent
         else:
             asyncio.run(run())
             assert len(observed) == 1

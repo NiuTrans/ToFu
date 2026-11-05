@@ -157,7 +157,7 @@ def run_pre_hooks(tool_name: str, args: dict, task: dict) -> HookResult | None:
 
     Returns the first blocking result encountered (action='block').  For
     'modify' results, the args dict is mutated IN PLACE so every downstream
-    consumer (parallel pool, serial dispatch, executor) sees the rewrite.
+    consumer (dispatch worker, executor) sees the rewrite.
     Returns None if no hook blocks.
     """
     if not _pre_hooks:return None
@@ -309,64 +309,43 @@ def _run_command_safety_hook(tool_name: str, args: dict,
     # mrltpk1t43e0mw). Delegate to the argument-parsing depth/workspace guard
     # that run_command itself uses, so only a genuine root-ish delete (``/``,
     # ``/mnt``, ``~``, ``/*``) is refused while ``/tmp/scoped/path`` passes.
+    # The hook runs without a known cwd: the guard's anchor/containment rules
+    # that need one defer to the executor's cwd-aware pass (run_command.py).
     try:
-        from lib.project_mod.command_analysis import _is_catastrophic_delete
-        _bad_target = _is_catastrophic_delete(command)
+        from lib.project_mod.command_analysis import (
+            _catastrophic_delete_detail, delete_refusal_message)
+        _bad = _catastrophic_delete_detail(command)
     except Exception as e:
         logger.debug('[Hooks] catastrophic-delete parse failed for %r: %s',
                      command[:80], e)
-        _bad_target = None
-    if _bad_target:
+        _bad = None
+    if _bad:
         return HookResult(
             action='block',
-            message=f'Blocked catastrophic delete of {_bad_target}',
+            message='Blocked catastrophic delete: ' + delete_refusal_message(_bad),
             additional_context=(
-                'Scope the deletion to a specific subdirectory instead of a '
-                'filesystem or home root — e.g. a build/output folder under the '
-                'project, or a path under /tmp. Re-issue run_command with that '
-                'narrower target (deleting a scoped subpath like '
-                '/tmp/my-workdir is allowed). Do not retry the identical command.'
-            ),
-        )
-    # The depth parser expands ``~`` to the (deep) real home path, so a bare
-    # ``rm -rf ~`` / ``rm -rf $HOME`` passes rule 1 — but wiping the whole home
-    # dir is never a legitimate agent action. Catch the bare home-root form
-    # explicitly (a SCOPED ``rm -rf ~/old_build`` is left alone).
-    import re as _re
-    if _re.search(r'\b(?:rm|rmdir)\b[^|;&]*\s(?:~|\$HOME)(?:/\s|/?$|\s)',
-                  ' ' + command.strip() + ' '):
-        return HookResult(
-            action='block',
-            message='Blocked catastrophic delete of home root (~)',
-            additional_context=(
-                'Deleting the entire home directory is refused. Target a '
-                'specific subpath instead (e.g. ~/some-scoped-dir) and retry.'
+                'Re-issue run_command with a literal scoped path (a build/'
+                'output folder under the project, or a path under /tmp). '
+                'Do not retry the identical command.'
             ),
         )
 
-    # ── Other hard-blocked structural patterns (non-delete) ──
-    # These are STRUCTURE, not scoped paths, so a substring test is adequate
-    # (and still tolerant of quoted mentions in benign diagnostics is out of
-    # scope here — run_command's own dangerous-pattern guard masks quotes).
-    _DANGEROUS_PATTERNS = [
-        'mkfs.',
-        ':(){:|:&};:',  # fork bomb
-        'dd if=/dev/zero of=/dev/',
-        'chmod -r 777 /',
-    ]
-    cmd_lower = command.lower().strip()
-    for pattern in _DANGEROUS_PATTERNS:
-        if pattern in cmd_lower:
-            return HookResult(
-                action='block',
-                message=f'Blocked dangerous command pattern: {pattern}',
-                additional_context=(
-                    'This command is refused for safety. If you need the '
-                    'underlying result, find a non-destructive alternative that '
-                    'does not match this pattern, and do not retry the identical '
-                    'command.'
-                ),
-            )
+    # ── Other dangerous commands (non-delete) ──
+    # The same structural judge as run_command and the desktop agent: program
+    # words of what a shell would run, never quoted text or heredoc data.
+    from lib.project_mod.command_analysis import dangerous_command_rule
+    rule = dangerous_command_rule(command)
+    if rule:
+        return HookResult(
+            action='block',
+            message=f'Blocked dangerous command pattern: {rule}',
+            additional_context=(
+                'This command is refused for safety. If you need the '
+                'underlying result, find a non-destructive alternative that '
+                'does not match this pattern, and do not retry the identical '
+                'command.'
+            ),
+        )
 
     return None
 

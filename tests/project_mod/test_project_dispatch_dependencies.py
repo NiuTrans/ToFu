@@ -20,11 +20,20 @@ pytestmark = pytest.mark.unit
 def dependency_context(context, monkeypatch):
     c = context
     c.turns, c.attempts, c.workspaces = {}, {}, {}
-    c.evidence_reads = []
+    c.evidence_reads, c.turn_body_reads = [], []
+    # True replays the former port use: every Turn read returned its projection body.
+    c.bodies_for_metadata_reads = False
     source_get = c.repo.turn_get
     def turns(conv, turn, **kw):
         c.evidence_reads.append(('turn', turn))
-        return deepcopy(c.turns[turn]) if turn in c.turns else source_get(conv, turn, **kw)
+        if kw.get('include_projection', True):
+            c.turn_body_reads.append(turn)
+        if turn not in c.turns:
+            return source_get(conv, turn, **kw)
+        value = deepcopy(c.turns[turn])
+        if value is not None and not kw.get('include_projection', True) and not c.bodies_for_metadata_reads:
+            value.pop('projection')
+        return value
     def attempts(identity, **kw):
         c.evidence_reads.append(('attempt', identity))
         return deepcopy(c.attempts.get(identity))
@@ -206,6 +215,65 @@ def test_transitive_fences_and_single_snapshot_memo(dependency_context):
     c.repo.revoke(first['id'], 1)
     assert all(item['status'] == 'invalid' for item in c.repo.dependency_states(row))
     with pytest.raises(ProjectDispatchError): c.repo.validate(c.repo.admission(row['id']))
+
+
+def prerequisite_body_reads(c):
+    return [turn for turn in c.turn_body_reads if turn in c.turns]
+
+
+def test_prerequisite_evidence_reads_turn_metadata_never_bodies(dependency_context):
+    c = dependency_context
+    first = completed(c, 'first', reviewed=True)
+    middle = completed(c, 'middle', [reference(first)], reviewed=True)
+    for turn in c.turns.values():
+        turn['projection']['toolRounds'] = [{'toolContent': 'evidence ' * 20000}]
+    c.evidence_reads.clear(); c.turn_body_reads.clear()
+    row = dependent(c, [reference(first), reference(middle)])
+    view = c.service.view(row['id'], principal=c.principal)
+    assert [state['status'] for state in view['dependencyStates']] == ['ready', 'ready']
+    assert c.service.dispatch(row['id'], principal=c.principal)['dispatch'] == 'accepted'
+    assert {turn for kind, turn in c.evidence_reads if kind == 'turn' and turn in c.turns} == {
+        'turn-first', 'turn-middle'}
+    assert prerequisite_body_reads(c) == []
+
+
+@pytest.mark.parametrize('change,expected', [
+    ('none', ('ready', 'ready')), ('content', ('ready', 'ready')),
+    ('revision', ('invalid', 'result_changed')), ('actor', ('invalid', 'result_changed')),
+    ('conversation', ('invalid', 'result_changed')), ('turn_id', ('invalid', 'result_changed')),
+    ('owner', ('invalid', 'result_changed')), ('bool_owner', ('invalid', 'result_changed')),
+    ('bool_revision', ('invalid', 'result_changed')), ('running', ('invalid', 'result_changed')),
+    ('missing', ('unknown', 'evidence_unavailable')), ('unavailable', ('unknown', 'evidence_unavailable')),
+])
+def test_metadata_evidence_matches_former_body_evidence(dependency_context, change, expected):
+    c = dependency_context
+    first = completed(c, 'first', reviewed=True)
+    middle = completed(c, 'middle', [reference(first)], reviewed=True)
+    row = dependent(c, [reference(first), reference(middle)])
+    turn = c.turns['turn-first']
+    if change == 'content': turn['projection'] = {'content': 'a different body at the same revision'}
+    if change == 'revision': turn['projectionRevision'] = 6
+    if change == 'actor': turn['actor'] = 'human'
+    if change == 'conversation': turn['conversationId'] = 'another-recipient'
+    if change == 'turn_id': turn['turnId'] = 'another-turn'
+    if change == 'owner': turn['user_id'] = 8
+    if change == 'bool_owner': turn['owner_user_id'] = True
+    if change == 'bool_revision': turn['projectionRevision'] = True
+    if change == 'running': c.attempts['attempt-first']['status'] = 'running'
+    if change == 'missing': c.turns['turn-first'] = None
+    if change == 'unavailable':
+        port = c.repo.turn_get
+        def unavailable(conv, identity, **kw):
+            if identity == 'turn-first':
+                raise StorageError('database_timeout', 'unavailable')
+            return port(conv, identity, **kw)
+        c.repo.turn_get = unavailable
+    c.turn_body_reads.clear()
+    metadata = c.repo.dependency_states(row)
+    assert prerequisite_body_reads(c) == []
+    assert [(state['status'], state['reason']) for state in metadata] == [expected, expected]
+    c.bodies_for_metadata_reads = True
+    assert c.repo.dependency_states(row) == metadata
 
 
 def test_deadline_history_retained_but_own_deadline_enforced(dependency_context):
@@ -606,3 +674,32 @@ def test_binding_aba_invalidates_old_result_pins_and_new_grant_cannot_borrow_the
     with pytest.raises(ValueError):
         dependent(c, [reference(prior)], command='fresh-after-aba')
     assert c.repo.read(row['id'])['execution'] is None
+
+
+def test_history_page_evaluates_dependency_rows_against_its_own_snapshot(dependency_context, monkeypatch):
+    """A page loads the dispatch record once; dependency rows reuse that snapshot.
+
+    Each row's states equal the former per-row reload's, and Stop, binding,
+    conversation, Turn and attempt evidence stay live reads of every build.
+    """
+    from lib.project_dispatch.repository import CONTRACT
+    c = dependency_context
+    prior = completed(c, reviewed=True)
+    rows = [dependent(c, [reference(prior)], command=f'dependent-{number}') for number in range(3)]
+    reloaded = {row['id']: c.repo.dependency_states(row) for row in rows}
+    assert all(states[0]['status'] == 'ready' for states in reloaded.values())
+    namespaces, query = [], c.client.query
+
+    def counted(operation, args):
+        namespaces.append(args['namespace'])
+        return query(operation, args)
+    monkeypatch.setattr(c.client, 'query', counted)
+    c.evidence_reads.clear()
+    page = c.service.history_page(principal=c.principal)
+    assert {view['assignmentId']: view['dependencyStates'] for view in page['assignments']
+            if 'dependencyStates' in view} == reloaded
+    assert namespaces.count(NAMESPACE) == 1
+    assert set(namespaces) == {NAMESPACE, CONTRACT['stopNamespace']}
+    # Every dependency row still reads its prerequisite's attempt and Turn metadata.
+    assert c.evidence_reads.count(('attempt', 'attempt-prerequisite')) == len(rows) + 1
+    assert c.evidence_reads.count(('turn', 'turn-prerequisite')) == len(rows) + 1

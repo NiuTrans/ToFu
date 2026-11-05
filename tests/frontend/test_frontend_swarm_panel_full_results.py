@@ -15,7 +15,6 @@ surface that silently drops the tail is worse than none.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -26,12 +25,6 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -202,8 +195,6 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_panel_renders_full_results():
     harness = os.path.join(HERE, '_swarm_full_results_harness.js')
     with open(harness, 'w') as f:
@@ -228,8 +219,6 @@ def test_panel_renders_full_results():
     assert output.count('PASS') >= 24, f'expected >=24 PASS, got:\n{output}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_slice_removal_is_load_bearing():
     """NEUTER: restore the ``.slice(0, 1200)`` cap and prove the 5,000-char
     answer is then clipped — confirming the removal is the load-bearing edit

@@ -20,6 +20,7 @@ from lib.log import get_logger
 from lib.project_mod.config import (
     BINARY_EXTENSIONS,
     IGNORE_DIRS,
+    IGNORE_FILES,
     MAX_GREP_RESULTS,
 )
 from lib.project_mod.config import (
@@ -29,7 +30,6 @@ from lib.project_mod.scanner import (
     _estimate_lines,
     _fmt_size,
     _safe_path,
-    _should_ignore,
 )
 from lib.project_mod.grep_engine import SearchRequest, run_search
 from lib.project_mod import grep_timeout_circuit, tree_index
@@ -357,11 +357,42 @@ def _line_range_validation_error(path, start_line, end_line) -> str:
     return ''
 
 
-def _read_absolute_file(path: str, start_line=None, end_line=None):
+def _unrooted_text_snapshot(path: str):
+    """Descriptor-pinned bytes of an absolute UTF-8 text file, or ``None``.
+
+    The filesystem root is the semantic root, so the snapshot names the same
+    canonical absolute path an edit resolves to whether or not a containing
+    tree is registered now or later. Evidence conditions match project reads:
+    media/document formats, non-UTF-8 or NUL-bearing bytes, symlinked path
+    components and files changing mid-read return ``None``. Like
+    ``read_local_file``, a non-regular node is never opened.
+    """
+    from lib.file_reader import IMAGE_EXTENSIONS, OFFICE_EXTENSIONS, PDF_EXTENSIONS
+    target = os.path.abspath(os.path.expanduser(path))
+    if os.path.splitext(target)[1].lower() in (
+            IMAGE_EXTENSIONS | PDF_EXTENSIONS | OFFICE_EXTENSIONS):
+        return None
+    from lib.artifacts.file_snapshot import read_project_snapshot
+    try:
+        if not stat.S_ISREG(os.lstat(target).st_mode):
+            return None
+        return read_project_snapshot(target, [os.sep], include_bytes=True,
+                                     utf8_text=True, allow_empty=True)
+    except (OSError, ValueError) as error:
+        logger.debug('[ReadTools] absolute read snapshot unavailable for %s: %s', path, error)
+        return None
+
+
+def _read_absolute_file(path: str, start_line=None, end_line=None, *, read_observations=None):
     """Read a file by absolute path, supporting images, PDFs, Office docs, and text.
 
-    Delegates to ``lib.file_reader.read_local_file`` for binary format detection
-    and encoding handling.  Adds line-range support on top for text results.
+    Delegates to ``lib.file_reader`` for binary format detection and encoding
+    handling.  Adds line-range support on top for text results.
+
+    UTF-8 text renders from one descriptor-pinned snapshot, and a successful
+    read appends its host-owned observation to ``read_observations`` exactly
+    like a registered-root read. Without a snapshot the file is displayed
+    but issues no read-before-edit or freshness evidence.
 
     Args:
         path: Absolute file path (may start with ~ for home expansion).
@@ -383,8 +414,14 @@ def _read_absolute_file(path: str, start_line=None, end_line=None):
         logger.debug('[ReadTools] absolute read denied for %s: %s', path, e)
         return f'Error: {e}'
 
-    from lib.file_reader import read_local_file as _read_local
-    result = _read_local(path)
+    snapshot = _unrooted_text_snapshot(path)
+    if snapshot is None:
+        from lib.file_reader import read_local_file as _read_local
+        result = _read_local(path)
+    else:
+        from lib.file_reader import render_text_bytes
+        result = render_text_bytes(snapshot.content, os.path.basename(snapshot.path),
+                                   snapshot.size)
 
     # Images return a dict — line ranges don't apply
     if isinstance(result, dict) and result.get('__screenshot__'):
@@ -410,8 +447,12 @@ def _read_absolute_file(path: str, start_line=None, end_line=None):
                     f'is empty or out of bounds for {filename} ({total} lines).')
         sliced = '\n'.join(lines[s:e])
         header = f'File: {filename} (lines {s + 1}-{e} of {total})\n'
-        return header + sliced
+        result = header + sliced
 
+    if (snapshot is not None and isinstance(read_observations, list)
+            and not result.startswith('Error:')):
+        from lib.write_freshness import observation_from_snapshot
+        read_observations.append(observation_from_snapshot(snapshot))
     return result
 
 
@@ -496,8 +537,10 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat
         if _head:
             _nontext = sum(1 for b in _head if b < 8 or (13 < b < 32 and b != 27))
             if b'\x00' in _head or _nontext > len(_head) * 0.30:
+                from lib.file_reader import video_reader_hint
                 return (f'[Binary file: {rel_path} ({_fmt_size(sz)}) — not shown. '
-                        f'Content is not valid text. Images are read via the native '
+                        f'Content is not valid text.{video_reader_hint(_head, rel_path)} '
+                        f'Images are read via the native '
                         f'image protocol; other binaries (archives, compiled objects) '
                         f'cannot be read as text.]')
     except OSError as e:
@@ -841,7 +884,8 @@ def tool_read_files(base, reads, *, result_items=None, task=None, source_capture
 
         # Route: absolute paths → _read_absolute_file (images, PDFs, Office, text)
         if _is_absolute_path(rel_path):
-            result = _read_absolute_file(rel_path, sl, el)
+            result = _read_absolute_file(rel_path, sl, el,
+                                         read_observations=read_observations)
             # SVG reads as text (model sees the markup); ALSO signal its
             # source so the frontend can render it inline like an image.
             if isinstance(result, str) and not result.startswith('Error:'):
@@ -924,7 +968,7 @@ def tool_inspect_image(base, path, *, crop=None, rotate=0, zoom=None, grid=False
          then transformed in memory. This is how a chat-uploaded image (which
          has NO filesystem path the model can name) is inspected — the fix for
          the model inventing a bogus ``/dev/null`` path.
-      2. **Filesystem path** — absolute / ~ paths pass straight through,
+      2. **Filesystem path** — absolute / ~ paths pass the remote-caller guard like read_files,
          project-relative paths resolve under ``base``; delegates to
          :func:`lib.file_reader.inspect_image_file`.
 
@@ -945,6 +989,12 @@ def tool_inspect_image(base, path, *, crop=None, rotate=0, zoom=None, grid=False
                                    crop=crop, rotate=rotate, zoom=zoom, grid=grid)
 
     if _is_absolute_path(path):
+        from lib.project_mod.abs_path_guard import AbsPathDenied, enforce_abs_read
+        try:
+            enforce_abs_read(path)
+        except AbsPathDenied as e:
+            logger.debug('[Tools] inspect_image absolute read denied for %s: %s', path, e)
+            return f'Error: {e}'
         target = path
     else:
         try:
@@ -954,6 +1004,83 @@ def tool_inspect_image(base, path, *, crop=None, rotate=0, zoom=None, grid=False
             return str(e)
     from lib.file_reader import inspect_image_file
     return inspect_image_file(target, crop=crop, rotate=rotate, zoom=zoom, grid=grid)
+
+
+# ═══════════════════════════════════════════════════════
+#  inspect_video
+# ═══════════════════════════════════════════════════════
+
+def tool_inspect_video(base, path, *, start=None, end=None, messages=None,
+                       user_id=None, model=''):
+    """Key frames (as images), probe facts and transcript of one local video.
+
+    Resolution mirrors :func:`tool_inspect_image`:
+      1. **Chat video attachment** (``att_media_<id>``) — the owner-scoped
+         durable original via :func:`lib.attachments.resolve_attachment`.
+      2. **Filesystem path** — absolute / ``~`` paths (e.g. server-staged
+         downloads) pass the remote-caller guard like read_files;
+         project-relative paths resolve under ``base``.
+
+    Delegates to :func:`lib.video_analysis.inspect_video_file` and returns its
+    multi-image batch dict (text for a text-only model), or a typed tool error.
+    """
+    from lib import video_analysis
+    from lib.tools.result_envelope import typed_tool_error
+
+    def _error(code, message, next_action, retryable=False):
+        return typed_tool_error(code, retryable=retryable, next_action=next_action,
+                                message=message).to_model_text()
+
+    if not isinstance(path, str) or not path.strip():
+        return _error('video_path_required', 'inspect_video requires a "path" string.',
+                      'Pass a video or audio path (project-relative or absolute) '
+                      'or an att_media_<id> chat video reference.')
+    path = path.strip()
+    if path.startswith('file://'):
+        path = path[7:]
+    try:
+        owner_user_id = int(user_id) if user_id else None
+    except (TypeError, ValueError):
+        owner_user_id = None
+
+    source_name = ''
+    from lib.attachments import is_attachment_ref, resolve_attachment
+    if is_attachment_ref(path):
+        resolved = resolve_attachment(path, messages=messages, user_id=owner_user_id)
+        if not resolved:
+            return _error('video_attachment_unresolved',
+                          f'Could not resolve attachment reference {path!r}.',
+                          'Use the exact att_media_<id> reference shown with the chat '
+                          'attachment; the upload may be deleted or still processing.')
+        if resolved.get('kind') != 'video' or not resolved.get('path'):
+            return _error('video_not_a_video',
+                          f'Reference {path!r} is a {resolved.get("kind") or "non-video"} '
+                          'attachment, not a video.',
+                          'Use inspect_image for image attachments and read_files for '
+                          'documents.')
+        target = str(resolved['path'])
+        source_name = str(resolved.get('name') or '')
+    elif _is_absolute_path(path):
+        from lib.project_mod.abs_path_guard import AbsPathDenied, enforce_abs_read
+        try:
+            enforce_abs_read(path)
+        except AbsPathDenied as error:
+            return _error('video_path_denied', str(error),
+                          'Inspect a video inside a registered workspace root.')
+        target = os.path.abspath(os.path.expanduser(path))
+    else:
+        try:
+            target = _safe_path(base, path)
+        except ValueError as error:
+            return _error('video_path_invalid', f'{error}: {path}',
+                          'Pass an absolute path, or a project-relative path while a '
+                          'project is attached.')
+    try:
+        return video_analysis.inspect_video_file(
+            target, start=start, end=end, owner_user_id=owner_user_id,
+            model=model or '', source_name=source_name)
+    except video_analysis.VideoInspectError as error:
+        return _error(error.code, error.message, error.next_action, error.retryable)
 
 
 # ═══════════════════════════════════════════════════════
@@ -1034,7 +1161,14 @@ def _build_rg_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, c
     if count_only:
         cmd = ['rg', '-ci', '--color=never', '--no-heading']
     else:
-        cmd = ['rg', '-ni', '--color=never', '--no-heading']
+        # --null ends every printed path at NUL; see _RG_MATCH_LINE.
+        cmd = ['rg', '-ni', '--null', '--color=never', '--no-heading']
+    # Hidden files are project sources (.github/, .gitignore, .env.example);
+    # ignore rules and IGNORE_DIRS (which include .git) decide what is pruned.
+    cmd.append('--hidden')
+    # Silent per-file errors leave stderr for rejected requests only (see
+    # _backend_rejected_request). Never shorten: rg's -s means case-sensitive.
+    cmd.append('--no-messages')
     # Skip ignored dirs — ALL of them, in a deterministic order.
     # (Was list(IGNORE_DIRS)[:30]: once the set grew past 30 entries the
     # per-process hash order silently dropped arbitrary exclusions, so
@@ -1065,18 +1199,24 @@ def _build_grep_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
     if count_only:
         cmd = ['grep', '-rci', '--color=never', '-I']
     else:
-        cmd = ['grep', '-rni', '--color=never', '-I']
+        cmd = ['grep', '-rni', '--null', '--color=never', '-I']
+    cmd.append('--no-messages')  # same stderr contract as _build_rg_cmd
     # See _build_rg_cmd: complete, deterministic exclusions (no [:30] cap).
-    for d in sorted(IGNORE_DIRS):
-        cmd.extend(['--exclude-dir', d])
-    # GNU grep doesn't have --ignore-file, so parse .gitignore manually
+    # GNU grep searches hidden files by default and also applies
+    # --exclude-dir to a command-line directory, so the explicitly requested
+    # target's own name must never be among the exclusions.
+    target_name = os.path.basename(os.path.normpath(target))
+    excluded = sorted(IGNORE_DIRS)
+    # GNU grep doesn't have --ignore-file, so parse the ignore files manually
     #   and add --exclude-dir for directory patterns found there.
     if base:
-        gitignore = os.path.join(base, '.gitignore')
-        if os.path.isfile(gitignore):
-            gi_dirs = _load_gitignore_dirs(gitignore)
-            for d in gi_dirs:
-                cmd.extend(['--exclude-dir', d])
+        for rule_file in tree_index.IGNORE_RULE_FILES:
+            rule_path = os.path.join(base, rule_file)
+            if os.path.isfile(rule_path):
+                excluded.extend(_load_gitignore_dirs(rule_path))
+    for d in excluded:
+        if d != target_name:
+            cmd.extend(['--exclude-dir', d])
     if include:
         cmd.extend(['--include', include])
     if ctx_n > 0 and not count_only:
@@ -1086,18 +1226,47 @@ def _build_grep_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
     return cmd
 
 
-_DISPLAY_PATH_LINE = re.compile(r'^(?P<path>.+):(?P<line>\d+):')
-_DISPLAY_BARE_LINE = re.compile(r'^(?P<line>\d+):')
+def _backend_rejected_request(result):
+    """True when rg/grep refused the request itself and searched nothing.
+
+    Both backends run with ``--no-messages``, which silences per-file errors,
+    so exit status 2 with stderr text means an invalid regex or include glob.
+    The empty stdout of such a run is not a "no matches" result.
+    """
+    return (result is not None and result.returncode == 2
+            and bool(result.stderr.strip()) and not result.stdout.strip())
+
+
+_REJECTION_HINTS = {
+    'rg': ('`pattern` is a Rust regex: escape ( ) [ ] { } . * + ? | ^ $ \\ '
+           'with a backslash to match them literally; `include` is a glob '
+           'such as `*.py`.'),
+    'grep': ('This fallback runs GNU grep basic regular expressions, where '
+             '`(` is literal and `\\(` opens a group.'),
+}
+
+
+def _format_backend_rejection(result, backend):
+    """Model-facing text for a request the search backend refused to run."""
+    lines = result.stderr.decode('utf-8', errors='replace').strip().splitlines()
+    detail = '\n'.join(re.sub(r'^(?:rg|grep): ', '', line) for line in lines)
+    if len(detail) > 1000:
+        detail = detail[:1000] + '…'
+    return (f'Invalid pattern: {detail}\n'
+            f'Nothing was searched. {_REJECTION_HINTS[backend]}')
+
+
+_RECORD_MATCH_LINE_NUMBER = re.compile(r'(?P<line>\d+):')
 
 
 def _parse_display_match(stripped):
-    """``(path, lineno)`` for one displayed match line; '' path when bare."""
-    match = _DISPLAY_PATH_LINE.match(stripped)
+    """``(path, lineno)`` for one match record; '' path when bare."""
+    path, nul, rest = stripped.partition('\0')
+    if not nul:
+        path, rest = '', stripped
+    match = _RECORD_MATCH_LINE_NUMBER.match(rest)
     if match:
-        return match.group('path'), int(match.group('line'))
-    match = _DISPLAY_BARE_LINE.match(stripped)
-    if match:
-        return '', int(match.group('line'))
+        return path, int(match.group('line'))
     return None, None
 
 
@@ -1173,40 +1342,22 @@ def _render_withheld(shown, fired, max_total_chars, last_lineno,
     return [line1, line2]
 
 
-_GROUP_PATH_LINE = re.compile(
-    r'^(?P<path>.+?)(?P<sep>[:-])(?P<line>\d+)(?P=sep)')
-
-
 def _group_grep_lines(rel_lines):
     """Collapse per-line path prefixes into one header per file run.
 
-    Multi-file rg/grep repeat ``path:`` (match) / ``path-`` (context) on
-    every line; consecutive lines from one file share a single header
-    instead, which removes the largest structural repetition of a capped
-    result (a 40-char path x 50 matches is ~2 KB). ``--`` group separators
-    close the current run so a file with disjoint match groups re-announces
-    itself. Single-file searches already omit the path, and are detected by
-    the absence of any non-numeric path prefix (a bare ``12:34:content``
-    line would otherwise parse as path ``12``); they pass through unchanged.
+    Multi-file searches print ``path\\0lineno:content`` (match) and
+    ``path\\0lineno-content`` (context) records; consecutive lines from one
+    file share a single header instead, which removes the largest structural
+    repetition of a capped result (a 40-char path x 50 matches is ~2 KB).
+    ``--`` group separators close the current run so a file with disjoint
+    match groups re-announces itself. Single-file searches print bare
+    records without a path, which pass through unchanged.
     """
-    parsed = []
-    multi_file = False
-    for line in rel_lines:
-        if line == '--':
-            parsed.append((None, None, line))
-            continue
-        match = _GROUP_PATH_LINE.match(line)
-        if match and not match.group('path').isdigit():
-            multi_file = True
-            parsed.append((match.group('path'), match.group('sep'), line))
-        else:
-            parsed.append((None, None, line))
-    if not multi_file:
-        return rel_lines
     grouped = []
     current = None
-    for path, sep, line in parsed:
-        if path is None:
+    for line in rel_lines:
+        path, nul, rest = line.partition('\0')
+        if not nul:
             grouped.append(line)
             if line == '--':
                 current = None
@@ -1214,7 +1365,7 @@ def _group_grep_lines(rel_lines):
         if path != current:
             grouped.append(path)
             current = path
-        grouped.append(line[len(path) + 1:])
+        grouped.append(rest)
     return grouped
 
 
@@ -1260,9 +1411,10 @@ def _format_grep_output(base, raw_output, pattern, include, ctx_n,
     max_line_len = 300
     max_total_chars = 20000 if ctx_n > 0 else 12000
     bp = base + '/'
-    # rg/grep with -C N emits three kinds of lines:
-    #   match     "<path>:<lineno>:<content>"   (separator ':')
-    #   context   "<path>-<lineno>-<content>"   (separator '-')
+    # rg/grep with -C N emits three kinds of lines (no "<path>\0" prefix when
+    # searching a single file):
+    #   match     "<path>\0<lineno>:<content>"   (separator ':')
+    #   context   "<path>\0<lineno>-<content>"   (separator '-')
     #   group sep "--"
     # `cap` must apply to MATCH lines only — otherwise context inflates the
     # apparent count and prematurely truncates real results when ctx_n>0.
@@ -1336,14 +1488,16 @@ def grep_result_was_truncated(result):
         marker in result for marker in _GREP_TRUNCATION_MARKERS)
 
 
-# Real-match line discriminator for rg/grep output. Two emitted shapes:
-#   multi-file : "<path>:<lineno>:<content>"   (path prefix present)
+# Real-match line discriminator for rg/grep output. Path-printing searches
+# run with --null, so two record shapes are emitted:
+#   multi-file : "<path>\0<lineno>:<content>"  (path ends at NUL)
 #   single-file: "<lineno>:<content>"          (rg/grep omit the path when
-#                                               searching exactly one file)
-# The path prefix is therefore optional. Context lines use '-' after the
-# line number ("<path>-<lineno>-..." / "<lineno>-...") and group separators
-# are literal "--", so neither matches.
-_RG_MATCH_LINE = re.compile(r'^(?:.+?:)?\d+:')
+#                                              searching exactly one file)
+# Context lines use '-' after the line number and group separators are
+# literal "--", so neither matches. Because the path is NUL-terminated, a
+# ':' inside a path or the content (log timestamps, host:port) cannot shift
+# the split or make a context line look like a match.
+_RG_MATCH_LINE = re.compile(r'^(?:[^\0]*\0)?\d+:')
 
 
 def _get_io_timeout(base, default=60):
@@ -1394,32 +1548,33 @@ def _load_gitignore_dirs(gitignore_path):
 
 
 def _load_gitignore_patterns(base):
-    """Load .gitignore patterns from project root for Python fallback walkers.
+    """Load root ``.gitignore``/``.ignore`` patterns for Python fallback walkers.
 
-    Returns a list of compiled (pattern, is_negation) tuples, or empty list
-    if no .gitignore exists.  Supports basic glob patterns and directory
+    Returns a list of (pattern, is_negation) tuples, or an empty list when
+    neither file exists.  Supports basic glob patterns and directory
     markers (trailing /).  Does NOT support full gitignore spec (nested
-    .gitignore, ** globstar, etc.) — this is a best-effort optimization
+    files, ** globstar, etc.) — this is a best-effort optimization
     for the rare case when rg/fd are unavailable.
     """
-    gi_path = os.path.join(base, '.gitignore')
-    if not os.path.isfile(gi_path):
-        return []
     patterns = []
-    try:
-        with open(gi_path, errors='replace') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                negated = line.startswith('!')
-                if negated:
-                    line = line[1:]
-                # Normalize: strip leading / (anchored patterns → treat as relative)
-                line = line.lstrip('/')
-                patterns.append((line, negated))
-    except OSError as e:
-        logger.debug('[Tools] Failed to read .gitignore: %s', e)
+    for rule_file in tree_index.IGNORE_RULE_FILES:
+        gi_path = os.path.join(base, rule_file)
+        if not os.path.isfile(gi_path):
+            continue
+        try:
+            with open(gi_path, errors='replace') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    negated = line.startswith('!')
+                    if negated:
+                        line = line[1:]
+                    # Normalize: strip leading / (anchored patterns → treat as relative)
+                    line = line.lstrip('/')
+                    patterns.append((line, negated))
+        except OSError as e:
+            logger.debug('[Tools] Failed to read %s: %s', rule_file, e)
     return patterns
 
 
@@ -1438,11 +1593,16 @@ def _gitignore_match(rel_path, is_dir, patterns):
             if not is_dir:
                 continue
             pat = pat.rstrip('/')
-        # Match against both the full relative path and just the basename
         basename = os.path.basename(rel_path)
-        matched = (fnmatch.fnmatch(rel_path, pat)
-                   or fnmatch.fnmatch(basename, pat)
-                   or fnmatch.fnmatch(rel_path, f'**/{pat}'))
+        if '/' not in pat:
+            # gitignore: a slash-free pattern names one path component. The
+            # walkers test every component as they descend, so matching the
+            # basename alone keeps an explicitly requested subtree of an
+            # ignored directory searchable (fnmatch's * also matches '/').
+            matched = fnmatch.fnmatch(basename, pat)
+        else:
+            matched = (fnmatch.fnmatch(rel_path, pat)
+                       or fnmatch.fnmatch(rel_path, f'**/{pat}'))
         if matched:
             ignored = not negated
     return ignored
@@ -1651,8 +1811,9 @@ def _run_index_chunks(base, pattern, ctx_n, cap, count_only, cands, deadline,
     pin the profile explicitly and skip the probe.
 
     Returns ``(stdout_bytes, timed_out, unavailable, withheld)``.
-    ``unavailable`` means the rg binary vanished (caller should fall through
-    to the GNU path).  *withheld* carries remainder evidence when the cap
+    ``unavailable`` means the chunk search could not run — the rg binary
+    vanished or rg rejected the request — so the caller retries through the
+    live backend, which reports the cause.  *withheld* carries remainder evidence when the cap
     stopped the scan: per-chunk drain counts plus an exact count pass over
     the skipped tail.
     """
@@ -1667,7 +1828,7 @@ def _run_index_chunks(base, pattern, ctx_n, cap, count_only, cands, deadline,
             return False
 
     def _mk_cmd(chunk):
-        flags = ['-ci'] if count_only else ['-ni']
+        flags = ['-ci'] if count_only else ['-ni', '--null']
         # --no-messages: a candidate deleted between index snapshot and search
         # must not leak "No such file" errors into results (NB: GNU grep's
         # -s means no-messages, but rg's -s means --case-sensitive — do NOT
@@ -1695,7 +1856,7 @@ def _run_index_chunks(base, pattern, ctx_n, cap, count_only, cands, deadline,
                             cancel_event=cancel_event)
         res = run_search(req)
         dt = time.perf_counter() - t0
-        if res.unavailable:
+        if res.unavailable or _backend_rejected_request(res):
             return i, b'', False, True, dt, res
         return i, res.stdout, res.timed_out, False, dt, res
 
@@ -1968,16 +2129,31 @@ def _grep_via_index(base, target, pattern, include, ctx_n, cap, count_only,
         if entry is None:
             return None
         rel_target = os.path.relpath(target_abs, base_abs)
+        rel_prefix = '' if rel_target == '.' else rel_target
+        if not tree_index.covers(entry, rel_prefix):
+            return None  # pruned or newer subtree: the live walk searches it
         cands, total_bytes = tree_index.grep_candidates(
-            entry, '' if rel_target == '.' else rel_target, include)
+            entry, rel_prefix, include)
         if not cands:
             formatted = _format_grep_output(
                 base, '', pattern, include, ctx_n, cap, count_only,
                 from_line=from_line)
             return _with_tree_index_freshness(formatted, entry)
-        raw, timed_out, unavailable, withheld = _run_index_chunks(
-            base, pattern, ctx_n, cap, count_only, cands,
-            time.monotonic() + io_timeout, total_bytes, from_line=from_line)
+        from lib.project_mod.content_shadow import candidate_view
+        deadline = time.monotonic() + io_timeout
+        with candidate_view(base_abs, cands, entry=entry) as view:
+            raw, timed_out, unavailable, withheld = _run_index_chunks(
+                base, pattern, ctx_n, cap, count_only, view.paths,
+                deadline, total_bytes, from_line=from_line)
+            if view.replacements and not view.current():
+                # Never report a cached match after a concurrent source edit.
+                # The original deadline and normal partial-result rules apply.
+                raw, timed_out, unavailable, withheld = _run_index_chunks(
+                    base, pattern, ctx_n, cap, count_only, cands,
+                    deadline, total_bytes, from_line=from_line)
+            else:
+                raw = view.rewrite(raw)
+                withheld = view.rewrite_withheld(withheld)
         if unavailable:
             return None  # Incomplete index search: retry through the live backend.
         text = raw.decode('utf-8', errors='replace')
@@ -2014,6 +2190,8 @@ def _run_rg(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
                            io_timeout, pattern[:60], target, len(stdout))
             return _format_grep_timeout(base, target, pattern, include, ctx_n, cap,
                                         count_only, io_timeout, stdout, 'rg_timeout')
+        if _backend_rejected_request(result):
+            return _format_backend_rejection(result, 'rg')
         grep_timeout_circuit.record_success(owner_user_id, target, include)
         return _format_grep_output(
             base, stdout, pattern, include, ctx_n, cap, count_only,
@@ -2041,6 +2219,8 @@ def _run_gnu_grep(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
                            io_timeout, pattern[:60], target, len(stdout))
             return _format_grep_timeout(base, target, pattern, include, ctx_n, cap,
                                         count_only, io_timeout, stdout, 'grep_timeout')
+        if _backend_rejected_request(result):
+            return _format_backend_rejection(result, 'grep')
         grep_timeout_circuit.record_success(owner_user_id, target, include)
         return _format_grep_output(
             base, stdout, pattern, include, ctx_n, cap, count_only,
@@ -2066,10 +2246,10 @@ def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS,
     timeout_val = _get_io_timeout(base, default=40)
     deadline = time.time() + timeout_val
     for root, dirs, files in os.walk(target):
-        # Prune ignored, hidden, and .gitignore-matched directories
+        # Prune IGNORE_DIRS and ignore-rule-matched directories
         pruned = []
         for d in dirs:
-            if d in IGNORE_DIRS or d.startswith('.'):
+            if d in IGNORE_DIRS:
                 continue
             if gi_patterns:
                 d_rel = os.path.relpath(os.path.join(root, d), base)
@@ -2080,7 +2260,8 @@ def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS,
         for fname in files:
             if include and not fnmatch.fnmatch(fname, include):
                 continue
-            if _should_ignore(fname):
+            if (fname in IGNORE_FILES
+                    or os.path.splitext(fname)[1].lower() in BINARY_EXTENSIONS):
                 continue
             fp = os.path.join(root, fname)
             # .gitignore check for files
@@ -2156,8 +2337,11 @@ def _find_via_index(base, target, pattern, cap, *, case_sensitive=False):
         if entry is None:
             return None
         rel_target = os.path.relpath(target_abs, base_abs)
+        rel_prefix = '' if rel_target == '.' else rel_target
+        if not tree_index.covers(entry, rel_prefix):
+            return None  # pruned or newer subtree: the live walk searches it
         rows = tree_index.find_matching(
-            entry, '' if rel_target == '.' else rel_target, pattern, cap,
+            entry, rel_prefix, pattern, cap,
             case_sensitive=case_sensitive)
         notice = _tree_index_freshness_notice(entry)
         if notice:
@@ -2180,14 +2364,15 @@ def _fd_find(target, base, pattern, cap, *, case_sensitive=False,
            '--type', 'f',
            '--max-results', str(cap)]
     cmd.append('--case-sensitive' if case_sensitive else '--ignore-case')
+    # Hidden files are searched in both modes; only ignore handling differs.
+    cmd.append('--hidden')
     if respect_project_ignores:
-        # Exclude ignored dirs + hidden dirs.
         for d in sorted(IGNORE_DIRS):
             cmd.extend(['--exclude', d])
     else:
-        # A translated shell ``find`` must not silently omit hidden or ignored
-        # files merely because the project navigation index does.
-        cmd.extend(['--hidden', '--no-ignore'])
+        # A translated shell ``find`` must not silently omit ignored files
+        # merely because the project navigation index does.
+        cmd.append('--no-ignore')
     # fd auto-respects .gitignore only inside a git repo (.git/ present).
     # Explicitly point fd at .gitignore when there is no .git/ dir.
     if respect_project_ignores and base:
@@ -2266,8 +2451,7 @@ def _python_find(target, base, pattern, cap, *, case_sensitive=False,
                                      entry.path, exc)
                         continue
                     if is_dir:
-                        if respect_project_ignores and (
-                                name in IGNORE_DIRS or name.startswith('.')):
+                        if respect_project_ignores and name in IGNORE_DIRS:
                             continue
                         rel = os.path.relpath(entry.path, base)
                         if gi_patterns and _gitignore_match(
@@ -2275,8 +2459,7 @@ def _python_find(target, base, pattern, cap, *, case_sensitive=False,
                             continue
                         child_directories.append((entry.path, depth + 1))
                         continue
-                    if not is_file or (
-                            respect_project_ignores and name.startswith('.')):
+                    if not is_file:
                         continue
                     comparable = name if case_sensitive else name.lower()
                     if not fnmatch.fnmatchcase(

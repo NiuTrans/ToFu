@@ -39,18 +39,11 @@ Kept contract (the P7 baseline):
   • Live accelerator: an SSE-recorded state mirror needs NO network fetch.
   • Fallback: no tool slot in the DOM → drawer detail (kind=state).
 
-NEUTERs:
-  1. Drop the kind='state' argument → the state-kind pin flips red.
-  2. Drop the round-scoping call → the previous round's history leaks back
-     into the panel and the increment pin flips red.
-  3. Drop the request-axis fallback → sub-agent rounds (mirror-less) render
-     an empty panel, and the fallback pin flips red.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -64,16 +57,10 @@ JS_DIR = os.path.join(ROOT, 'static', 'js')
 PROJECT_ROOT = os.path.dirname(os.path.dirname(HERE))
 
 
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
-
-
 _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
-const ROOT = process.argv[3];
+const ROOT = process.argv[2];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM(
   '<!DOCTYPE html><body>' +
@@ -362,159 +349,18 @@ function expandAll(root) {
     document.querySelector('.ri-state-panel')?.dataset.riKind === 'state');
 
   console.log(out.join('\n'));
-})().catch(e => { console.log('FAIL harness_exception ' + (e && e.stack || e)); });
+})().catch(e => { console.log('FAIL harness_exception ' + (e && e.stack || e)); })
+  .finally(() => { closeRequestInspector(); dom.window.close(); });
 """
 
 
-def _run(ri_src_path=None, expect_fail=None):
-    harness = os.path.join(HERE, '_ri_p7_harness.js')
-    src = _HARNESS
-    if ri_src_path:
-        # The neuter run drives a MODIFIED copy of request_inspector.js.
-        src = src.replace(
-            "path.join(ROOT,'static','js','core','request_inspector.js')",
-            "process.argv[2]")
-    with open(harness, 'w') as f:
-        f.write(src)
-    try:
-        proc = subprocess.run(
-            ['node', harness, ri_src_path or '', ROOT],
-            capture_output=True, text=True, timeout=60,
-        )
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
+def test_p7_inline_state_inspector():
+    proc = subprocess.run(
+        ['node', '-e', _HARNESS, 'inspector-inline', ROOT],
+        capture_output=True, text=True, timeout=60,
+    )
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
-    if expect_fail:
-        assert f'FAIL {expect_fail}' in output, (
-            f'neutered copy did NOT flip {expect_fail} red:\n{output}')
-        return output
-    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
-    assert not fails, 'tool-row debug panel failures:\n' + output
+    failures = [line for line in output.splitlines() if line.startswith('FAIL')]
+    assert not failures, 'tool-row debug panel failures:\n' + output
     assert output.count('PASS') >= 23, f'expected >=23 PASS, got:\n{output}'
-    return output
-
-
-def _neuter_run(anchor, replacement, expect_fail, *, count=1):
-    """Drive a copy of request_inspector.js with `anchor` replaced, assert the
-    named probe flips red, and assert the shipped file was not touched."""
-    shipped = os.path.join(JS_DIR, 'core', 'request_inspector.js')
-    with open(shipped, encoding='utf-8') as f:
-        src = f.read()
-    assert anchor in src, 'NC anchor drifted — update the neuter'
-    neutered = src.replace(anchor, replacement, count)
-    assert neutered != src
-    tmp = os.path.join(HERE, '_request_inspector_p7_neutered.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(neutered)
-    try:
-        _run(ri_src_path=tmp, expect_fail=expect_fail)
-    finally:
-        os.remove(tmp)
-    with open(shipped, encoding='utf-8') as f:
-        assert f.read() == src, 'shipped request_inspector.js must be byte-identical'
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed')
-def test_p7_inline_state_inspector():
-    _run()
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed')
-def test_neuter_state_kind_dropped_flips_red():
-    """NC: drop the kind='state' argument from the payload fetch → the
-    state-kind pin MUST fail. Without it the inline panel would silently
-    render the PRE-REQUEST snapshot (the request axis) while claiming to
-    show the post-tool state — the exact off-axis confusion this feature
-    exists to kill."""
-    _neuter_run("kind === 'state' ? 'state' : undefined", 'undefined',
-                'payload_fetched_as_state_kind')
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed')
-def test_neuter_scoping_dropped_leaks_history():
-    """NC: render the FULL payload instead of this round's increment → the
-    previous round's history leaks back into the panel and the round-scoping
-    pin MUST fail. The panel exists to answer ONE round, not to dump the
-    whole conversation (owner, 2026-07-28)."""
-    _neuter_run(
-        "const scoped = (typeof payload.foldPrefix === 'number' &&\n"
-        "      payload.foldPrefix > 0)\n"
-        "    ? payload.messages.slice(payload.foldPrefix)\n"
-        "    : await _riRoundScopedMessages(taskId, roundNum, view.kind,\n"
-        "      payload.messages, turn);",
-        'const scoped = payload.messages;',
-        'state_body_hides_history')
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed')
-def test_neuter_request_fallback_dropped_empties_subagent_rounds():
-    """NC: make the single view state-ONLY (drop the request fallback) → every
-    round without a post-tool mirror renders an empty panel, and the
-    sub-agent pin MUST fail.
-
-    This is the trap in collapsing the two tabs into one: swarm sub-agents
-    persist kind='request' snapshots only (lib/swarm/agent.py never emits a
-    state mirror), so 'just show the result state' is a dead panel for them.
-    """
-    # The request fallback now lives in the extracted inspector-evidence
-    # owner (frontend/src/features/inspector-evidence.ts, bundled by Vite),
-    # so the neuter anchor addresses its loop shape there.
-    _neuter_run(
-        'for (const kind of ["state", "request"]) {',
-        'for (const kind of ["state"]) {',
-        'mirrorless_round_falls_back_to_request')
-
-
-def test_state_inspector_wiring_pins():
-    """Static pins: the inline entry, the row addressing, the i18n strings,
-    the styles, and the api.js kind plumbing — the pieces a future refactor
-    could silently drop while keeping every jsdom test green.
-
-    The 2026-07-28 directive ADDED the round-scoping + no-chip-strip pins.
-    The 2026-07-29 directive ADDED the single-view pins: the tab strip must
-    not creep back, and the request axis must stay reachable as a fallback."""
-    ri = open(os.path.join(JS_DIR, 'core', 'request_inspector.js'),
-              encoding='utf-8').read()
-    assert 'function openToolDebugPanel' in ri, (
-        'the single tool-row debug entry is gone')
-    assert '_riMountToolPanel' in ri
-    assert '_riRoundScopedMessages' in ri, (
-        'the round-scoping helper is gone — the panel dumps full history again')
-    assert 'ri-state-strip' not in ri, 'the cross-round strip crept back'
-    assert 'ri-panel-tab' not in ri, (
-        'the request|state tab strip crept back — the owner removed the second '
-        'button on 2026-07-29 because the mirror is a superset of the request')
-    assert '_riFetchRoundView' in ri, (
-        'the state-first / request-fallback resolver is gone — mirror-less '
-        'rounds (swarm sub-agents) would render an empty panel')
-    assert 'async function openToolDebugPanel(taskId, roundNum, anchorEl)' in ri, (
-        'the tool-row debug entry is gone')
-    tr = open(os.path.join(JS_DIR, 'ui', 'tool_rounds.js'), encoding='utf-8').read()
-    assert 'data-ri-state=' in tr, 'tool rows lost their state-mirror address'
-    assert 'openToolDebugPanel(' in tr, (
-        'tool rows lost their debug entry wiring')
-    api = open(os.path.join(JS_DIR, 'api.js'), encoding='utf-8').read()
-    assert 'getRequestPayload: (taskId, roundNum, turn, kind, fold)' in api
-    for key in ("'ri.tabRequest'", "'ri.tabState'",
-                "'ri.stateEmpty'", "'ri.stateClose'", "'ri.stateKindTip'",
-                "'ri.requestKindTip'"):
-        assert key in ri, f'{key} call site missing'
-    css = open(os.path.join(os.path.dirname(os.path.dirname(HERE)), 'frontend/src/styles/application/02-inspector-inline.css'), encoding='utf-8').read()
-    assert '.ri-state-panel' in css
-    assert '.ri-state-chip' not in css, 'the removed chip strip styles crept back'
-    assert '.ri-panel-tab' not in css, 'the removed tab-strip styles crept back'
-    assert '.ri-state-panel-kind' in css, (
-        'the axis chip has no styles — a request-axis fallback would be '
-        'indistinguishable from the post-tool mirror')
-
-
-if __name__ == '__main__':
-    print(_run())

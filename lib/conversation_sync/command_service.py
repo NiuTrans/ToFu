@@ -22,17 +22,19 @@ from lib.conversation_sync.execution_identity import (
     capture_execution_identity, public_execution_fields, restore_execution_identity,
 )
 from lib.conversation_sync.settings_policy import public_conversation_defaults
-from lib.error_envelope import make_envelope, task_start_failure_cause
+from lib.error_envelope import BadRequest, make_envelope, task_start_failure_cause
 from lib.conversation_sync.dispatch_contract import (
     ATTEMPT_DISPATCH_REQUEST_STARTED_AT_MS_CONFIG_KEY,
     CONVERSATION_EXECUTOR_DISPATCH_MODE,
 )
 from lib.conversation_sync.dispatch_contract import (
+    DEFERRED_INPUT_TRANSLATION_CONFIG_KEY,
     RESUME_MODEL_SWITCH_FROM_CONFIG_KEY,
 )
 from lib.log import get_logger
 
 from lib.llm.diagnostic_timing import timed_call
+from lib.observability import measure_task_startup
 from lib.translate.observability import observed_turn_command
 from lib.plan_contract import plan_execution_document
 from lib.tool_results.tool_round_replay import (
@@ -60,13 +62,32 @@ from lib.turn_lifecycle import (
     get_conversation_revision,
     get_turn,
     list_dispatchable_attempts,
+    projection_with_committed_steer_authors,
     record_turn_perception,
     update_turn_projection,
 )
-from lib.turn_projection_segments import public_value_with_stable_segments
+from lib.turn_projection_segments import (
+    projection_with_restored_browser_evidence,
+    public_turn_with_stable_segments,
+    public_value_with_stable_segments,
+)
 
 
 logger = get_logger(__name__)
+
+def _owes_input_translation(
+    projection: Any, config: Mapping[str, Any],
+) -> bool:
+    """Whether an authored input still needs send-path translation."""
+    if not isinstance(projection, Mapping) or projection.get("_translateDone"):
+        return False
+    content = projection.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return False
+    from lib.conv_config import resolve_auto_translate
+
+    return bool(resolve_auto_translate(config))
+
 
 def _durable_dispatch_config(
     config: Mapping[str, Any], request_started_at: float,
@@ -83,7 +104,6 @@ def _durable_dispatch_config(
 #: can observe a pause → switch-model → continue sequence.
 _RESUME_MODEL_SWITCH_OPERATIONS = frozenset({
     "continue", "checkpoint_resume", "answer_guidance"})
-
 
 def _resume_model_switch_from(
     conversation_id: str,
@@ -131,6 +151,22 @@ def _without_client_plan_authority(
     if not allow_proposed_plan:
         result.pop("proposedPlan", None)
     return result
+
+
+def _steer_text_with_reply_quotes(text: str, quotes: Any) -> str:
+    """Prefix steer text with the message's reply quotes as Markdown blockquotes.
+
+    A queued turn keeps ``replyQuotes`` on its projection for the model; a
+    steer delivers only text, so the quoted context travels inside it.
+    """
+    blocks = [
+        "\n".join("> " + line for line in quote.splitlines())
+        for quote in (quotes if isinstance(quotes, list) else ())
+        if isinstance(quote, str) and quote.strip()
+    ]
+    if not blocks:
+        return text
+    return "\n\n".join(blocks) + "\n\n" + text
 
 
 BuildUserMessage = Callable[
@@ -246,10 +282,10 @@ class ConversationTurnCommandService:
         data = dict(body)
         command_id = str(data.get("commandId") or "")
         if not command_id:
-            raise ValueError("commandId required")
+            raise BadRequest("commandId required", field="commandId")
         config = data.get("config") or {}
         if not isinstance(config, Mapping):
-            raise ValueError("config object required")
+            raise BadRequest("config object required", field="config")
         from lib.tasks_pkg.plan_mode import (
             normalize_interaction_mode_conversation_settings,
             normalize_interaction_mode_runtime_config,
@@ -279,12 +315,21 @@ class ConversationTurnCommandService:
             '_goalRecoveryAbortAfterTs',
         ):
             config.pop(internal_goal_key, None)
+        # Server-authored: only an input built by this command can owe it.
+        config.pop(DEFERRED_INPUT_TRANSLATION_CONFIG_KEY, None)
         input_projection = data.get("inputTurn")
         raw_message = data.get("message")
+        command_identity = {'conversation_id': conversation_id, 'user_id': user_id}
         if input_projection is None and isinstance(raw_message, Mapping):
-            input_projection = self._build_user_message(
-                raw_message, config, conversation_id, user_id
-            )
+            with measure_task_startup('input_build', identity=command_identity):
+                input_projection = self._build_user_message(
+                    raw_message, config, conversation_id, user_id
+                )
+            # Acceptance never waits on a translator. The accepted attempt's
+            # start translates the authored text; the worker joins it before
+            # its first model request (lib.tasks_pkg.input_translation).
+            if _owes_input_translation(input_projection, config):
+                config[DEFERRED_INPUT_TRANSLATION_CONFIG_KEY] = True
         if input_projection is None:
             input_projection = data.get("input", raw_message or "")
         if isinstance(input_projection, Mapping):
@@ -375,6 +420,7 @@ class ConversationTurnCommandService:
                 ("autopilot", "autopilotEnabled"),
                 ("activeFlow", "activeFlow"),
                 ("imageGenMode", "imageGenMode"),
+                ("delegateMode", "delegateMode"),
             ):
                 if runtime_key in config:
                     persisted_settings[settings_key] = config[runtime_key]
@@ -410,44 +456,64 @@ class ConversationTurnCommandService:
                 interaction_mode_generated_turn_identity(config)
             )
         try:
-            result = timed_call('turn_persist', create_turn_pair,
-                conversation_id,
-                command_id=command_id,
-                input_projection=input_projection,
-                config=_durable_dispatch_config(config, request_started_at),
-                lane_id=str(data.get("laneId") or "main"),
-                parent_turn_id=data.get("parentTurnId"),
-                kind=output_kind,
-                output_actor=output_actor,
-                run_id=str(data.get("runId") or ""),
-                user_id=user_id,
-                input_actor=str(data.get("inputActor") or "human"),
-                input_kind=str(data.get("inputKind") or "input"),
-                require_parent_is_lane_tail=bool(
-                    data.get("requireParentIsLaneTail", False)
-                ),
-                expected_parent_projection_revision=trusted_usage_recovery_revision,
-                require_parent_not_stopped=bool(
-                    data.get("requireParentNotStopped", False)
-                ),
-                # A Goal continuation is a fresh conversation command, not
-                # an in-attempt orchestration child. Its virtual-user actor
-                # must therefore honor the same single-live-lane fence as a
-                # human input. Only the trusted internal objective boundary
-                # can enable this authority.
-                require_lane_idle=(trusted_goal_continuation or trusted_dispatch is not None
-                                   or trusted_usage_recovery_revision is not None),
-                reject_if_human_queued=(trusted_goal_continuation or trusted_dispatch is not None
-                                        or trusted_usage_recovery_revision is not None),
-                conversation_defaults=conversation_defaults,
-                dispatch_mode=CONVERSATION_EXECUTOR_DISPATCH_MODE,
-                input_presentation_id=f"{command_id}:input",
-                output_presentation_id=f"{command_id}:output",
-            )
+            with measure_task_startup('turn_persist', identity=command_identity) as bind_identity:
+                result = timed_call('turn_persist', create_turn_pair,
+                    conversation_id,
+                    command_id=command_id,
+                    input_projection=input_projection,
+                    config=_durable_dispatch_config(config, request_started_at),
+                    lane_id=str(data.get("laneId") or "main"),
+                    parent_turn_id=data.get("parentTurnId"),
+                    kind=output_kind,
+                    output_actor=output_actor,
+                    run_id=str(data.get("runId") or ""),
+                    user_id=user_id,
+                    input_actor=str(data.get("inputActor") or "human"),
+                    input_kind=str(data.get("inputKind") or "input"),
+                    require_parent_is_lane_tail=bool(
+                        data.get("requireParentIsLaneTail", False)
+                    ),
+                    expected_parent_projection_revision=trusted_usage_recovery_revision,
+                    require_parent_not_stopped=bool(
+                        data.get("requireParentNotStopped", False)
+                    ),
+                    # A Goal continuation is a fresh conversation command, not
+                    # an in-attempt orchestration child. Its virtual-user actor
+                    # must therefore honor the same single-live-lane fence as a
+                    # human input. Only the trusted internal objective boundary
+                    # can enable this authority.
+                    require_lane_idle=(trusted_goal_continuation or trusted_dispatch is not None
+                                       or trusted_usage_recovery_revision is not None),
+                    reject_if_human_queued=(trusted_goal_continuation or trusted_dispatch is not None
+                                            or trusted_usage_recovery_revision is not None),
+                    conversation_defaults=conversation_defaults,
+                    dispatch_mode=CONVERSATION_EXECUTOR_DISPATCH_MODE,
+                    input_presentation_id=f"{command_id}:input",
+                    output_presentation_id=f"{command_id}:output",
+                )
+                turn_identity = {
+                    'turn_id': result['turn']['turnId'],
+                    'attempt_id': result['attempt']['attemptId'],
+                }
+                if trusted_dispatch is not None:
+                    trusted_dispatch.continue_execution(
+                        result['turn']['turnId'], result['attempt']['attemptId'])
+                bind_identity(turn_identity)
         except LifecycleConflict as exc:
             if (exc.code != "lane_busy" or trusted_dispatch is not None
                     or trusted_usage_recovery_revision is not None):
                 raise
+            if (config.get(DEFERRED_INPUT_TRANSLATION_CONFIG_KEY)
+                    and str(data.get("injectMode") or "").strip().lower() == "steer"):
+                # A steer enters the live model at once and has no attempt
+                # start to own its translation; a queued input keeps the
+                # deferral and translates when its own attempt starts.
+                from lib.chat.turn_builder import translate_input_projection
+
+                input_projection = translate_input_projection(
+                    input_projection, config, user_id=user_id,
+                    conv_id=conversation_id)
+                config.pop(DEFERRED_INPUT_TRANSLATION_CONFIG_KEY, None)
             delivered = self._deliver_while_running(
                 conversation_id,
                 user_id,
@@ -474,23 +540,26 @@ class ConversationTurnCommandService:
                 self._fail_attempt_start(result['attempt'], user_id, attempt_start_error_envelope(error))
                 raise
         self._retain_accepted_attachments(input_projection, user_id)
-        timed_call('executor_start', self._start_accepted_attempt,
-            result,
-            user_id,
-            config,
-            data,
-            abort_after_ts=cancellation_started_at,
-            execution_clock=execution_clock,
-        )
-        result["turn"] = timed_call('acknowledgement_read', get_turn,
-            conversation_id, result["turn"]["turnId"], user_id=user_id
-        )
-        result["attempt"] = timed_call('acknowledgement_read', get_attempt,
-            result["attempt"]["attemptId"], user_id=user_id
-        )
-        result["conversationRevision"] = timed_call('acknowledgement_read', get_conversation_revision,
-            conversation_id, user_id=user_id
-        )
+        attempt_identity = {**command_identity, **turn_identity}
+        with measure_task_startup('executor_start', identity=attempt_identity):
+            timed_call('executor_start', self._start_accepted_attempt,
+                result,
+                user_id,
+                config,
+                data,
+                abort_after_ts=cancellation_started_at,
+                execution_clock=execution_clock,
+            )
+        with measure_task_startup('acknowledgement', identity=attempt_identity):
+            result["turn"] = timed_call('acknowledgement_read', get_turn,
+                conversation_id, result["turn"]["turnId"], user_id=user_id
+            )
+            result["attempt"] = timed_call('acknowledgement_read', get_attempt,
+                result["attempt"]["attemptId"], user_id=user_id
+            )
+            result["conversationRevision"] = timed_call('acknowledgement_read', get_conversation_revision,
+                conversation_id, user_id=user_id
+            )
         result["conversationId"] = conversation_id
         return CommandOutcome(_public_result(result))
 
@@ -644,21 +713,21 @@ class ConversationTurnCommandService:
         actor = str(data.get("actor") or "")
         projection = data.get("projection")
         if not command_id:
-            raise ValueError("commandId required")
+            raise BadRequest("commandId required", field="commandId")
         if not actor:
-            raise ValueError("actor required")
+            raise BadRequest("actor required", field="actor")
         if not isinstance(projection, Mapping):
-            raise ValueError("projection object required")
+            raise BadRequest("projection object required", field="projection")
         settlement = data.get("settlement")
         if settlement is not None and not isinstance(settlement, Mapping):
-            raise ValueError("settlement object required")
+            raise BadRequest("settlement object required", field="settlement")
         conversation_defaults = data.get("conversation")
         if isinstance(conversation_defaults, Mapping):
             conversation_defaults = public_conversation_defaults(conversation_defaults)
         if conversation_defaults is not None and not isinstance(
             conversation_defaults, Mapping
         ):
-            raise ValueError("conversation object required")
+            raise BadRequest("conversation object required", field="conversation")
         result = append_settled_turn(
             conversation_id,
             command_id=command_id,
@@ -683,6 +752,23 @@ class ConversationTurnCommandService:
         result["conversationId"] = conversation_id
         return CommandOutcome(_public_result(result))
 
+    def resume_turn(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        user_id: Any,
+        body: Mapping[str, Any],
+        *,
+        request_started_at: float,
+        execution_clock: ExecutionClock | None = None,
+        principal=None,
+        trusted_dispatch=None,
+    ) -> CommandOutcome:
+        return self.create_attempt(
+            conversation_id, turn_id, user_id, body,
+            request_started_at=request_started_at, execution_clock=execution_clock,
+            principal=principal, trusted_dispatch=trusted_dispatch)
+
     def create_attempt(
         self,
         conversation_id: str,
@@ -693,25 +779,31 @@ class ConversationTurnCommandService:
         request_started_at: float,
         execution_clock: ExecutionClock | None = None,
         principal=None,
+        trusted_dispatch=None,
     ) -> CommandOutcome:
         data = dict(body)
         command_id = str(data.get("commandId") or "")
         operation = str(data.get("operation") or "")
         expected = data.get("expectedProjectionRevision")
         if not command_id:
-            raise ValueError("commandId required")
+            raise BadRequest("commandId required", field="commandId")
         if expected is None:
-            raise ValueError("expectedProjectionRevision required")
+            raise BadRequest(
+                "expectedProjectionRevision required", field="expectedProjectionRevision")
         guidance_id = data.get('guidanceId')
         if guidance_id is not None:
             if operation != 'answer_guidance':
-                raise ValueError('guidanceId is only valid for answer_guidance')
+                raise BadRequest(
+                    'guidanceId is only valid for answer_guidance', field='guidanceId')
             from lib.human_gate_contract import require_human_gate_request_id, MAX_HUMAN_GATE_RESPONSE_LENGTH
-            guidance_id = require_human_gate_request_id(guidance_id, field='guidanceId')
+            try:
+                guidance_id = require_human_gate_request_id(guidance_id, field='guidanceId')
+            except ValueError as exc:
+                raise BadRequest(str(exc), field='guidanceId') from exc
             response = data.get('humanResponse')
             if (not isinstance(response, str) or not response.strip()
                     or len(response) > MAX_HUMAN_GATE_RESPONSE_LENGTH):
-                raise ValueError('Invalid live humanResponse')
+                raise BadRequest('Invalid live humanResponse', field='humanResponse')
             from lib.turn_lifecycle import accept_live_guidance_answer
             result = accept_live_guidance_answer(
                 conversation_id, turn_id, guidance_id=guidance_id,
@@ -732,13 +824,20 @@ class ConversationTurnCommandService:
         config = data.get("config") or {}
 
         if not isinstance(config, Mapping):
-            raise ValueError("config object required")
+            raise BadRequest("config object required", field="config")
         config = dict(config)
         config.pop('_goalRecoverySourceRunId', None)
         config.pop('_goalRecoveryAbortAfterTs', None)
         from lib.tasks_pkg.plan_mode import normalize_interaction_mode_runtime_config
-        config = _capture_task_principal_tenant(
-            normalize_interaction_mode_runtime_config(config),user_id,principal)
+        if trusted_dispatch is not None:
+            from lib.project_dispatch.admission import TrustedDispatch
+            if not isinstance(trusted_dispatch, TrustedDispatch):
+                raise PermissionError('Project dispatch requires internal validated admission')
+            config = trusted_dispatch.capture(
+                normalize_interaction_mode_runtime_config(config), user_id, principal, conversation_id)
+        else:
+            config = _capture_task_principal_tenant(
+                normalize_interaction_mode_runtime_config(config),user_id,principal)
 
         from lib.conversation_sync.workspace import resolve_workspace_config
         config = resolve_workspace_config(config, conversation_id, user_id)
@@ -759,10 +858,11 @@ class ConversationTurnCommandService:
         human_response = data.get("humanResponse")
         if operation == "answer_guidance":
             if not isinstance(human_response, str) or not human_response.strip():
-                raise ValueError("humanResponse required for answer_guidance")
+                raise BadRequest(
+                    "humanResponse required for answer_guidance", field="humanResponse")
             if len(human_response) > 32768:
-                raise ValueError(
-                    "humanResponse exceeds the 32768-character limit")
+                raise BadRequest(
+                    "humanResponse exceeds the 32768-character limit", field="humanResponse")
             answer_turn = get_turn(conversation_id, turn_id, user_id=user_id)
             answer_anchor = _answer_guidance_anchor(answer_turn)
             # The durable command may have committed while its HTTP ACK was
@@ -780,11 +880,14 @@ class ConversationTurnCommandService:
                                        or {}).get("_humanGuidanceAnswer")
             if isinstance(accepted_answer, Mapping):
                 if accepted_answer.get("response") != human_response:
-                    raise ValueError("answer_guidance command already accepted a different response")
+                    raise BadRequest(
+                        "answer_guidance command already accepted a different response",
+                        field="humanResponse")
                 answer_anchor = accepted_answer
             elif answer_anchor is None:
-                raise ValueError(
-                    "answer_guidance is not available for the current settlement")
+                raise BadRequest(
+                    "answer_guidance is not available for the current settlement",
+                    field="operation")
             else:
                 from lib.human_gate_contract import require_declared_choice_response
                 rounds = (answer_turn.get("projection") or {}).get("toolRounds") or []
@@ -802,7 +905,8 @@ class ConversationTurnCommandService:
                 "response": human_response,
             }
         elif human_response is not None:
-            raise ValueError("humanResponse is only valid for answer_guidance")
+            raise BadRequest(
+                "humanResponse is only valid for answer_guidance", field="humanResponse")
         # A new attempt retains only the server-accepted review scope. Public
         # config was stripped above and cannot select another task's review.
         from lib.acceptance.continuity import review_source
@@ -828,14 +932,21 @@ class ConversationTurnCommandService:
 
             user_id=user_id,
         )
-        self._start_accepted_attempt(
-            result,
-            user_id,
-            config,
-            data,
-            abort_after_ts=request_started_at,
-            execution_clock=execution_clock,
-        )
+        if trusted_dispatch is not None:
+            trusted_dispatch.continue_execution(turn_id, result['attempt']['attemptId'])
+        try:
+            self._start_accepted_attempt(
+                result,
+                user_id,
+                config,
+                data,
+                abort_after_ts=request_started_at,
+                execution_clock=execution_clock,
+            )
+        except BaseException:
+            if trusted_dispatch is not None:
+                trusted_dispatch.checked()
+            raise
         result["turn"] = get_turn(conversation_id, turn_id, user_id=user_id)
         result["attempt"] = get_attempt(
             result["attempt"]["attemptId"], user_id=user_id
@@ -871,15 +982,16 @@ class ConversationTurnCommandService:
         context_mode = str(data.get("contextMode") or "")
         raw_config = data.get("config") or {}
         if not command_id:
-            raise ValueError("commandId required")
+            raise BadRequest("commandId required", field="commandId")
         if expected is None:
-            raise ValueError("expectedProjectionRevision required")
+            raise BadRequest(
+                "expectedProjectionRevision required", field="expectedProjectionRevision")
         if not expected_plan_id:
-            raise ValueError("planId required")
+            raise BadRequest("planId required", field="planId")
         if context_mode not in {"current", "fresh"}:
-            raise ValueError("contextMode must be current or fresh")
+            raise BadRequest("contextMode must be current or fresh", field="contextMode")
         if not isinstance(raw_config, Mapping):
-            raise ValueError("config object required")
+            raise BadRequest("config object required", field="config")
 
         source = get_turn(conversation_id, turn_id, user_id=user_id)
         source_revision = int(source.get("projectionRevision") or 0)
@@ -890,16 +1002,16 @@ class ConversationTurnCommandService:
                 source,
             )
         if source.get("actor") not in {"assistant", "planner"}:
-            raise ValueError("plan source must be an assistant or planner turn")
+            raise BadRequest("plan source must be an assistant or planner turn")
         if source.get("status") != "completed":
-            raise ValueError("plan source must be completed")
+            raise BadRequest("plan source must be completed")
         projection = source.get("projection") or {}
         proposed_plan = (
             projection.get("proposedPlan")
             if isinstance(projection, Mapping) else None
         )
         if not isinstance(proposed_plan, Mapping):
-            raise ValueError("turn has no authoritative proposed plan")
+            raise BadRequest("turn has no authoritative proposed plan")
         plan_id = str(proposed_plan.get("planId") or "")
         if plan_id != expected_plan_id:
             raise LifecycleConflict(
@@ -983,17 +1095,29 @@ class ConversationTurnCommandService:
         expected = body.get("expectedProjectionRevision")
         projection = body.get("projection")
         if expected is None:
-            raise ValueError("expectedProjectionRevision required")
+            raise BadRequest(
+                "expectedProjectionRevision required", field="expectedProjectionRevision")
         if not isinstance(projection, Mapping):
-            raise ValueError("projection object required")
+            raise BadRequest("projection object required", field="projection")
         current = get_turn(conversation_id, turn_id, user_id=user_id)
-        safe_projection = _without_client_plan_authority(projection)
+        # The edit was built from the browser read view of this exact
+        # revision (the storage CAS below fences it); put back the evidence
+        # that view omitted before the whole projection is replaced.
+        authority = public_turn_with_stable_segments(current)
+        safe_projection = _without_client_plan_authority(
+            projection_with_restored_browser_evidence(
+                projection,
+                authority.get("projection") if isinstance(authority, Mapping) else None,
+            )
+        )
         current_projection = current.get("projection") or {}
         if isinstance(current_projection, Mapping):
             for field in ("proposedPlan", "planExecution"):
                 value = current_projection.get(field)
                 if isinstance(value, Mapping):
                     safe_projection[field] = dict(value)
+        safe_projection = projection_with_committed_steer_authors(
+            safe_projection, current_projection)
         return CommandOutcome(_public_result(update_turn_projection(
             conversation_id,
             turn_id,
@@ -1019,9 +1143,10 @@ class ConversationTurnCommandService:
         command_id = str(body.get("commandId") or "")
         expected = body.get("expectedProjectionRevision")
         if not command_id:
-            raise ValueError("commandId required")
+            raise BadRequest("commandId required", field="commandId")
         if expected is None:
-            raise ValueError("expectedProjectionRevision required")
+            raise BadRequest(
+                "expectedProjectionRevision required", field="expectedProjectionRevision")
 
         source_state = "applied" if operation == "undo" else "undone"
         pending_state = "undoing" if operation == "undo" else "redoing"
@@ -1030,12 +1155,12 @@ class ConversationTurnCommandService:
         projection = dict(turn.get("projection") or {})
         raw_block = projection.get("fileChanges")
         if not isinstance(raw_block, Mapping) or not raw_block.get("files"):
-            raise ValueError("turn has no authoritative file changes block")
+            raise BadRequest("turn has no authoritative file changes block")
         block = dict(raw_block)
         from lib.conversation_sync.file_change_policy import local_undo_available
         if block.get('undoAvailable') is False or not local_undo_available(
                 block['files'], truncated=block.get('truncated', False)):
-            raise ValueError('Undo is unavailable for these file changes')
+            raise BadRequest('Undo is unavailable for these file changes')
         state = str(block.get("state") or "applied")
         replay = block.get("commandId") == command_id
         if replay and state == target_state:
@@ -1048,7 +1173,7 @@ class ConversationTurnCommandService:
             })
         if not (replay and state == pending_state):
             if state != source_state:
-                raise ValueError(
+                raise BadRequest(
                     f"file changes are {state}; cannot {operation}")
             pending_projection = dict(projection)
             pending_projection["fileChanges"] = {
@@ -1076,13 +1201,13 @@ class ConversationTurnCommandService:
                 command_id=command_id, state=source_state,
                 error="The turn has no executor task identity.",
             )
-            raise ValueError("turn has no executor task identity")
+            raise BadRequest("turn has no executor task identity")
 
         try:
             effect = dict(self._mutate_file_changes(
                 operation, task_id, conversation_id, user_id))
             if effect.get("ok") is False:
-                raise ValueError(str(effect.get("error") or "file operation failed"))
+                raise BadRequest(str(effect.get("error") or "file operation failed"))
         except Exception as exc:
             try:
                 self._settle_file_changes_projection(
@@ -1121,7 +1246,11 @@ class ConversationTurnCommandService:
             projection = dict(current.get("projection") or {})
             raw_block = projection.get("fileChanges")
             if not isinstance(raw_block, Mapping):
-                raise ValueError("file changes block disappeared")
+                raise LifecycleConflict(
+                    "stale_projection",
+                    "The file changes block disappeared before this command settled.",
+                    current,
+                )
             block = dict(raw_block)
             if block.get("commandId") != command_id:
                 raise LifecycleConflict(
@@ -1163,7 +1292,8 @@ class ConversationTurnCommandService:
     ) -> CommandOutcome:
         expected = body.get("expectedProjectionRevision")
         if expected is None:
-            raise ValueError("expectedProjectionRevision required")
+            raise BadRequest(
+                "expectedProjectionRevision required", field="expectedProjectionRevision")
         return CommandOutcome(_public_result(create_branch_lane(
             conversation_id,
             turn_id,
@@ -1202,10 +1332,18 @@ class ConversationTurnCommandService:
             notify_legacy_clients=False,
         )
 
-    def abort_project_attempt(self, attempt_id: str, user_id: Any) -> CommandOutcome:
-        """Internal exact-grant cancel, not a human conversation-wide Stop."""
+    def abort_project_attempt(self, attempt_id: str, user_id: Any, *,
+                              provenance: str = '') -> CommandOutcome:
+        """Internal exact-grant cancel, not a human conversation-wide Stop.
+
+        The withdrawn grant names the stop and ``provenance`` who withdrew it;
+        a Stop that came first keeps its cause.
+        """
+        from lib.turn_verdict import DISPATCH_GRANT_REVOKED
         return CommandOutcome(
-            dict(abort_attempt(attempt_id, user_id=user_id, withdraw_dispatch=False) or {}),
+            dict(abort_attempt(attempt_id, user_id=user_id, withdraw_dispatch=False,
+                               abort_reason=DISPATCH_GRANT_REVOKED,
+                               abort_detail=provenance) or {}),
             notify_legacy_clients=False,
         )
 
@@ -1320,6 +1458,11 @@ class ConversationTurnCommandService:
                 "_turnOwnerUserId": user_id,
                 "excludeLast": True,
             })
+            # Every conversation turn — ordinary chat, Goal Mode, Flow and their
+            # resumes alike — keeps going when a provider receipt is missing:
+            # the account records the paid lower bound, keeps the receipt
+            # incomplete, and only an explicit finite cap stops spend.
+            config["_unknownUsagePolicy"] = "continue"
             projection = turn.get("projection") or {}
             config.update(_resume_executor_config(
                 operation, projection, config.get("_humanGuidanceAnswer")))
@@ -1357,8 +1500,10 @@ class ConversationTurnCommandService:
 
             if isinstance(exc, ModelRoutingError):
                 model_ref = config.get("modelRef")
-                model = (str(model_ref.get("model_id") or "")
-                         if isinstance(model_ref, Mapping) else str(config.get("model") or ""))
+                # Provider-scoped pending selections ({provider_id, offering_id})
+                # carry no model_id; the request name the user picked is config.model.
+                model = str((model_ref.get("model_id") if isinstance(model_ref, Mapping) else None)
+                            or config.get("model") or "")
                 if exc.kind == "model_route_unavailable":
                     envelope = make_envelope(
                         "task_start_failed",
@@ -1469,20 +1614,30 @@ class ConversationTurnCommandService:
             from lib.agent_inbox import enqueue_after_durable_commit
             from lib.agent_inbox._steer_preview import steer_preview_images
 
-            steer_text = str(
-                (user_message or {}).get("content")
-                or (input_projection if isinstance(input_projection, str) else "")
-                or (
-                    (raw_message or {}).get("text")
-                    if isinstance(raw_message, Mapping)
-                    else ""
-                )
+            steer_text = _steer_text_with_reply_quotes(
+                str(
+                    (user_message or {}).get("content")
+                    or (input_projection if isinstance(input_projection, str) else "")
+                    or (
+                        (raw_message or {}).get("text")
+                        if isinstance(raw_message, Mapping)
+                        else ""
+                    )
+                ),
+                (user_message or {}).get("replyQuotes"),
             )
             # The full user message (images included) rides the inbox item's
             # ``_user_msg`` extra; project its display image dicts once here so
             # BOTH the durable pending record and the delivered chip render the
             # operator's attachments instead of silently dropping them.
             steer_images = steer_preview_images({"_user_msg": user_message or {}})
+            # The steer has no Turn of its own: record its author so a genuine
+            # human message stays forwardable as its own words (ROUTER.md R2).
+            from lib.turn_initiation import steer_author
+            author = steer_author(
+                user_message or {"content": steer_text},
+                actor=str(data.get("inputActor") or "human"),
+            )
             command_id = str(data.get("commandId") or "")
             attempt_id = str((conflict.turn or {}).get("currentAttemptId") or "")
             committed: dict[str, Any] | None = None
@@ -1500,12 +1655,14 @@ class ConversationTurnCommandService:
                             text=steer_text,
                             user_id=user_id,
                             images=steer_images or None,
+                            author=author,
                         ),
                         priority="next",
                         mode="user-steer",
                         extra={
                             "injectionId": command_id,
                             "blockId": f"injection:user-steer:{command_id}",
+                            "steerAuthor": author,
                             "_user_msg": user_message
                             or {"role": "user", "content": steer_text},
                             "config": dict(config),
@@ -1693,22 +1850,13 @@ def _answer_guidance_executor_config(
         "responseType": str(gap_round.get("guidanceType") or "free_text"),
         "userResponse": response,
     }]
-    content = projection.get("content") or ""
-    config: dict[str, Any] = {
-        "resumePrefill": content,
-        "contentPrefix": content,
+    return {
         "checkpointImages": projection.get("images") or [],
         # Retained pre-gap rows plus the now-answered question round. Every
         # entry must pass the replay scan: prepare_resume_state rejects a
         # causal gap anywhere in checkpointToolRounds.
         "checkpointToolRounds": [rounds[p] for p in retained] + [completed],
     }
-    thinking_prefix = projection.get("thinking") or ""
-    if content and thinking_prefix:
-        # Same display-continuity rule as a lossless continue: only a prose
-        # lane that survives intact keeps its thinking tail accumulating.
-        config["thinkingPrefix"] = thinking_prefix
-    return config
 
 
 _RESUME_FILE_CARRY_OPERATIONS = frozenset({
@@ -1827,28 +1975,20 @@ def _resume_executor_config(
 ) -> dict[str, Any]:
     """Executor resume authorities derived from the settled projection.
 
-    Lossless continue must replay the turn's completed tool rounds too:
-    prefill alone restarts the prose while the model goes blind to every
-    tool fact it produced before the interruption.  Retention mirrors the
-    checkpoint_resume anchor (pre-gap rows minus discarded provider-attempt
-    artifacts); replay inside the executor still uses the causal prefix.
+    Every resume replays the retained checkpoint and regenerates from the last
+    complete message. No operation seeds the interrupted prose or thinking:
+    the model never saw it as a continuation, so a seed would display text the
+    regenerated reply repeats. Continue replays the turn's completed tool
+    rounds so the model keeps every fact it produced before the interruption.
+    Retention mirrors the checkpoint_resume anchor (pre-gap rows minus
+    discarded provider-attempt artifacts); replay inside the executor still
+    uses the causal prefix.
     """
     if operation == "continue":
-        prefix = projection.get("content") or ""
         config: dict[str, Any] = {
-            "resumePrefill": prefix,
-            "contentPrefix": prefix,
             "checkpointImages": projection.get("images") or [],
         }
         tool_rounds = projection.get("toolRounds")
-        # Display continuity only: while the prose lane continues seamlessly
-        # via prefill, the thinking lane keeps accumulating from the
-        # interrupted tail instead of restarting blank. When the prose lane
-        # is empty the write boundary already moved the thinking tail into
-        # ``rolledBack``, so no seed is wanted here.
-        thinking_prefix = projection.get("thinking") or ""
-        if prefix and thinking_prefix:
-            config["thinkingPrefix"] = thinking_prefix
         if isinstance(tool_rounds, list) and tool_rounds:
             replay_prefix = scan_replayable_tool_round_prefix(tool_rounds)
             _, retained = checkpoint_retention_positions(
@@ -1861,7 +2001,6 @@ def _resume_executor_config(
         return config
     if operation == "checkpoint_resume":
         config = {
-            "contentPrefix": projection.get("content") or "",
             "checkpointToolRounds": projection.get("toolRounds") or [],
             "checkpointImages": projection.get("images") or [],
         }

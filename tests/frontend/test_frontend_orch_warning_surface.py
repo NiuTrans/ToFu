@@ -14,7 +14,6 @@ jsdom. Skips when node+jsdom are absent.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -25,12 +24,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 from tests._runtime_sections import orchestration_legacy_test_root
 
 ROOT = orchestration_legacy_test_root()
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -96,8 +89,6 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_orch_warning_text_surfaces():
     harness = os.path.join(HERE, '_orch_warning_surface_harness.js')
     with open(harness, 'w', encoding='utf-8') as f:

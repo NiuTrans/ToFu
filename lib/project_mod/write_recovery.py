@@ -3,7 +3,8 @@
 Entry points: recover_pending_writes and recover_locked. Recovery never restores
 user files. It records proven published writes, reclaims proven private aborted
 stages, and preserves conflicting evidence with a visible failure. Every caller
-uses the same per-session lock as journal writers before touching journal cache.
+uses the same per-session lock as journal writers before touching journal cache;
+without intent evidence (has_pending_intents) there is nothing to lock for.
 """
 import base64
 import os
@@ -24,7 +25,11 @@ def recover_locked(base_path, store):
     pending = store.read()
     if not pending:
         return 0
-    rows = mods._load_from_disk(os.path.dirname(store.directory))
+    session_dir = os.path.dirname(store.directory)
+    rows = mods._load_from_disk(session_dir)
+    # Intent evidence marks a crashed or failed writer, whose packed payloads
+    # may now be unreferenced.
+    mods._sweep_crash_artifacts(session_dir, rows, crash_evidence=True)
     committed = {row.get('changeId') for row in rows}
     recovered = 0
     for record in pending:
@@ -58,10 +63,24 @@ def recover_locked(base_path, store):
     return recovered
 
 
+def has_pending_intents(session_dir):
+    """Whether prepared-write evidence exists, listed without admission.
+
+    Evidence that a crashed writer left behind is stable, so it is always seen.
+    An intent created while the listing runs belongs to a writer that is still
+    live and acknowledges it itself; missing it never skips a needed recovery.
+    """
+    try:
+        with os.scandir(os.path.join(session_dir, 'write-intents-v1')) as entries:
+            return any(entry.name.endswith('.json') for entry in entries)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def recover_pending_writes(base_path):
     from lib.project_mod import modifications as mods
-    session_dir = mods._get_session_dir(base_path)
-    if not session_dir or not os.path.isdir(os.path.join(session_dir, 'write-intents-v1')):
+    session_dir = mods._get_session_dir(base_path, create=False)
+    if not session_dir or not has_pending_intents(session_dir):
         return 0
     with locked_session(session_dir) as state:
         # Journal listeners may request a projection within an active writer or

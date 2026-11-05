@@ -679,3 +679,91 @@ def _turn_event_record(session: Session, payload: Mapping[str, Any], *,
         "model_continuation_status": continuation_status,
         "_conversationSyncAttemptEvents": [event_result["event"]] + child_terminal_events,
     }
+
+
+def _validate_turn_event_batch(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], int, str]:
+    """Admit only a structural run of one task attempt within the RPC bound."""
+    from lib.storage.generated_task_event_delivery_contract import (
+        STRUCTURAL_BATCH_MAX_EVENTS, STRUCTURAL_BATCH_MAX_WIRE_BYTES)
+    from lib.storage.protocol import canonical_json
+    entries = payload.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise StorageError("database_protocol_error", "Invalid turn event batch")
+    user_id = _integer(payload, "user_id", minimum=1)
+    identity = None
+    previous_sequence = -1
+    rows = wire_bytes = 0
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise StorageError("database_protocol_error", "Invalid turn event batch entry")
+        task_event = entry.get("task_event")
+        event_payload = entry.get("event_payload")
+        if (type(entry.get("user_id")) is not int or entry["user_id"] != user_id
+                or entry.get("terminal")
+                or entry.get("background_command_ack") is not None
+                or (entry.get("event_type") or "projection_updated") != "projection_updated"
+                or (isinstance(event_payload, Mapping)
+                    and event_payload.get("updateKind") == "tool_effect")
+                or not isinstance(task_event, Mapping)):
+            raise StorageError(
+                "database_protocol_error",
+                "Turn event batch entries must be carried structural events")
+        entry_identity = (
+            entry.get("attempt_id"), entry.get("task_id"),
+            entry.get("flow_root_attempt_id") or "")
+        if identity is not None and entry_identity != identity:
+            raise StorageError(
+                "database_protocol_error", "Turn event batch spans tasks or attempts")
+        identity = entry_identity
+        preceding = task_event.get("preceding_events", [])
+        if not isinstance(preceding, list):
+            raise StorageError("database_protocol_error", "Invalid progress event batch size")
+        for row in [*preceding, task_event]:
+            if not isinstance(row, Mapping):
+                raise StorageError("database_protocol_error", "Invalid turn event batch row")
+            sequence = row.get("sequence")
+            event = row.get("event")
+            if (row.get("task_id") != entry.get("task_id") or type(sequence) is not int
+                    or sequence <= previous_sequence
+                    or (isinstance(event, Mapping) and event.get("type") == "tool_effect")):
+                raise StorageError(
+                    "database_protocol_error",
+                    "Turn event batch rows must form one ascending task stream")
+            previous_sequence = sequence
+            rows += 1
+            wire_bytes += len(canonical_json(event))
+    if rows > STRUCTURAL_BATCH_MAX_EVENTS or wire_bytes > STRUCTURAL_BATCH_MAX_WIRE_BYTES:
+        raise StorageError(
+            "database_protocol_error", "Turn event batch exceeds the storage event RPC bound")
+    return entries, user_id, str(identity[0] or "")
+
+
+def _turn_event_record_batch(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Run K ordinary ``turn.event.record`` entries in this one transaction.
+
+    Any refused entry raises and the caller rolls back every entry. The result
+    keeps each entry's ordinary record result, in order, so change capture
+    publishes exactly the sync events K sequential records would.
+    """
+    entries, user_id, attempt_id = _validate_turn_event_batch(payload)
+    results: list[dict[str, Any]] = []
+    try:
+        for entry in entries:
+            result = _turn_event_record(session, entry)
+            if results and bool(result.get("applied")) != bool(results[0].get("applied")):
+                raise StorageError(
+                    "database_conflict",
+                    "Turn event batch entries diverged inside one transaction")
+            results.append(result)
+    except BaseException:
+        # Applied entries already advanced this attempt's reconstructible
+        # baseline; the rollback must not leave it ahead of the durable row.
+        cache = getattr(session, "turn_projection_cache", None)
+        applied = results[0] if results and results[0].get("applied") else {}
+        events = applied.get("_conversationSyncAttemptEvents") or []
+        if isinstance(cache, TurnProjectionCache) and events:
+            cache.discard(projection_cache_key(
+                session.backend, user_id, str(events[0].get("conversationId") or ""),
+                str(events[0].get("turnId") or ""), attempt_id))
+        raise
+    return results

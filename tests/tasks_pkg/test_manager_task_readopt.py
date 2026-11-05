@@ -267,6 +267,106 @@ def test_readopt_seeds_stale_attempt_fence_still_unwinds(
     assert task['abort_event'].is_set()
 
 
+def _admission_wait_event():
+    return {'type': 'workspace_admission_wait', 'roundNum': 3,
+            'toolCallId': 'call-1', 'toolName': 'run_command',
+            'waitStartedAtMs': 1, 'waitEndedAtMs': 2, 'waitedMs': 1,
+            'mode': 'write', 'lockDomain': 'workspace', 'lockRoot': 'repo',
+            'outcome': 'admitted'}
+
+
+@pytest.mark.parametrize('retirement', [
+    {'status': 'done'},          # settled, then evicted after retention
+    {'_discarded_at': 1.0},      # deliberately unregistered while running
+])
+def test_detached_command_view_never_resurrects_or_aborts_its_retired_turn(
+        monkeypatch, chat_runtime_cleanup, retirement):
+    """A handed-off command outlives its turn. Its late admission evidence
+    must not re-adopt the retired task or plant the stale-attempt abort that
+    the command itself observes."""
+    import lib.tasks_pkg.manager._events as _events
+    import lib.turn_lifecycle as turn_lifecycle
+    from lib.tasks_pkg.handlers._background_command import DetachableCommandTask
+
+    monkeypatch.setattr(_events, '_probe_durable_next_seq', lambda _tid: 3188)
+    captured = _wire_persist_and_push(monkeypatch)
+    monkeypatch.setattr(turn_lifecycle, 'record_task_event',
+                        lambda *a, **k: False)
+    monkeypatch.setattr(turn_lifecycle, 'get_attempt',
+                        lambda *a, **k: {'status': 'completed', 'taskId': 't-handoff'})
+    parent = _chat_task('t-handoff', _turnId='turn-1', _attemptId='att-1',
+                        convId='conv-1')
+    command_view = DetachableCommandTask(parent)
+    command_view.detach()
+    parent.update(retirement)
+
+    _events.append_event(command_view, _admission_wait_event())
+
+    assert chat_runtime_cleanup.get('t-handoff') is None
+    assert captured == {'persist': [], 'push': []}
+    assert command_view.get('aborted') is False
+    assert not parent['abort_event'].is_set()
+
+
+def test_settled_turn_ignores_its_handed_off_commands_late_admission_wait(
+        monkeypatch, chat_runtime_cleanup):
+    """Within the retention window the settled row is still registered; the
+    evidence of a wait that ended after settlement has no live turn to join."""
+    import time
+
+    import lib.turn_lifecycle as turn_lifecycle
+    from lib.agent_core.execution_clock import ExecutionClock
+    from lib.project_mod.workspace_lease import AdmissionWait
+    from lib.tasks_pkg.executor._admission_wait import observe_admission_wait
+    from lib.tasks_pkg.handlers._background_command import DetachableCommandTask
+
+    captured = _wire_persist_and_push(monkeypatch)
+    recorded = []
+    monkeypatch.setattr(turn_lifecycle, 'record_task_event',
+                        lambda *a, **k: recorded.append(a) or False)
+    monkeypatch.setattr(turn_lifecycle, 'get_attempt',
+                        lambda *a, **k: {'status': 'completed', 'taskId': 't-retained'})
+    parent = _chat_task('t-retained', _turnId='turn-1', _attemptId='att-1',
+                        convId='conv-1', _executionClock=ExecutionClock.start())
+    assert chat_runtime_cleanup.adopt(parent) is True
+    command_view = DetachableCommandTask(parent)
+    command_view.detach()
+    parent['status'] = 'done'
+    now = time.monotonic()
+
+    observe_admission_wait(command_view, AdmissionWait(
+        started_monotonic=now - 5044, ended_monotonic=now, mode='write',
+        lock_domain='workspace', lock_root='repo', outcome='admitted',
+        waiter_tool='run_command', tool_call_id='call-1', round_num=3))
+
+    assert parent['events'] == []
+    assert recorded == []
+    assert captured == {'persist': [], 'push': []}
+    assert command_view.get('aborted') is False
+    assert not parent['abort_event'].is_set()
+
+
+@pytest.mark.parametrize('detached', [False, True])
+def test_command_view_still_explains_its_live_turn(
+        monkeypatch, chat_runtime_cleanup, detached):
+    """While the turn runs, a handed-off command's wait still reaches its
+    Turn Trace (clamped to the tool span there)."""
+    import lib.tasks_pkg.manager._events as _events
+    from lib.tasks_pkg.handlers._background_command import DetachableCommandTask
+
+    captured = _wire_persist_and_push(monkeypatch)
+    parent = _chat_task('t-live-turn')
+    assert chat_runtime_cleanup.adopt(parent) is True
+    command_view = DetachableCommandTask(parent)
+    if detached:
+        command_view.detach()
+
+    _events.append_event(command_view, _admission_wait_event())
+
+    assert captured['push'] == ['t-live-turn']
+    assert [event['type'] for event in parent['events']] == ['workspace_admission_wait']
+
+
 # ── discard_task tombstone ────────────────────────────────────
 
 

@@ -9,7 +9,7 @@ import pytest
 
 from lib.identity import PrincipalContext
 from lib.project_dispatch.repository import (
-    LIMITS, NAMESPACE, ProjectDispatchError, ProjectDispatchRepository,
+    CONTRACT, LIMITS, NAMESPACE, ProjectDispatchError, ProjectDispatchRepository,
 )
 from lib.storage.errors import StorageError
 
@@ -96,9 +96,12 @@ def context():
             'projectionRevision': 3, 'projection': {'role': 'user', 'content': 'Please consult'}}
     turn_calls = []
 
-    def turn_get(conversation_id, turn_id, *, user_id):
+    def turn_get(conversation_id, turn_id, *, user_id, include_projection=True):
         turn_calls.append((conversation_id, turn_id, user_id))
-        return deepcopy(turn)
+        value = deepcopy(turn)
+        if not include_projection:
+            value.pop('projection')
+        return value
 
     principal = PrincipalContext.user(subject_id='user:7', owner_user_id=7,
                                       tenant_id='tenant-a', scopes=['chat'])
@@ -202,11 +205,11 @@ def test_full_admission_and_scope_validation(context, field, value):
 @pytest.mark.parametrize('mutation', [
     lambda r: r.update(unexpected=True),
     lambda r: r['budget'].update(maxTokens=True),
-    lambda r: r['budget'].update(maxModelRequests=65),
+    lambda r: r['budget'].update(maxModelRequests=0),
     lambda r: r['budget'].update(deadline=float('nan')),
     lambda r: r['budget'].update(deadline=float('inf')),
     lambda r: r['authorizationSource'].update(projectionRevision=0),
-    lambda r: r.update(brief='x' * 4097),
+    lambda r: r.update(brief='x' * (CONTRACT['$defs']['request']['properties']['brief']['maxLength'] + 1)),
 ])
 def test_request_schema_rejects_invalid_input(context, mutation):
     mutation(context.request)
@@ -338,6 +341,21 @@ def test_capacity_has_no_eviction_and_replay_still_works(context):
     assert authorize(c) == a and c.client.puts == 1
 
 
+def test_only_server_restart_pause_is_resume_eligible(context, monkeypatch):
+    c = context
+    a = authorize(c)
+    c.repo.bind_execution(a['id'], 'worker-turn', 'worker-attempt')
+    c.repo.attempt_get = lambda *args, **kwargs: {'status': 'completed'}
+    assert not c.repo.restart_paused(c.repo.read(a['id']))
+    c.repo.attempt_get = lambda *args, **kwargs: {'status': 'interrupted'}
+    c.repo.turn_get = lambda *args, **kwargs: {
+        'status': 'interrupted', 'settlement': {'cause': 'user_abort'}}
+    assert not c.repo.restart_paused(c.repo.read(a['id']))
+    c.repo.turn_get = lambda *args, **kwargs: {
+        'status': 'interrupted', 'settlement': {'cause': 'server_restart'}}
+    assert c.repo.restart_paused(c.repo.read(a['id']))
+
+
 def test_immutable_execution_binding_revoke_and_stale_revision(context):
     c = context
     a = authorize(c)
@@ -447,7 +465,7 @@ def test_corrupt_storage_fails_closed(context, corruption):
     elif corruption == 'duplicate':
         value['assignments'].append(deepcopy(a))
     elif corruption == 'request':
-        value['assignments'][0]['request']['budget']['maxModelRequests'] = 100
+        value['assignments'][0]['request']['budget']['maxModelRequests'] = 0
     elif corruption == 'tenant':
         value['assignments'][0]['grant']['tenant'] = ''
     elif corruption == 'execution':

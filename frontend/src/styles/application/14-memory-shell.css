@@ -1,0 +1,43 @@
+/* Memory frame and palette precede the shared mobile modal policy. Body styles load on feature intent. */
+
+.memory-modal{
+  --m-white:     #faf8f3;
+  --m-cream:     #f2ecda;
+  --m-skin:      #e4d6bf;
+  --m-board:     #35302a;
+  --m-board-lit: #443c32;
+  --m-gold:      #c9993f;
+  --m-gold-dim:  #a87d2e;
+  --m-gold-glow: rgba(201,153,63,0.18);
+  --m-ink:       #1a1814;
+  --m-ink-soft:  #3d362c;
+  --m-ink-faint: #6b6050;
+  --m-done:      #4ade80;
+  --m-blocked:   #f87171;
+  --m-accent:    #6e56cf;
+  --m-shadow:    6px 6px 0 var(--m-ink);
+  --m-shadow-sm: 3px 3px 0 var(--m-ink);
+  --m-shadow-xs: 2px 2px 0 var(--m-ink);
+  --m-border:    2.5px solid var(--m-ink);
+  --m-border-sm: 1.5px solid var(--m-ink);
+  --m-radius:    0px;
+}
+.memory-modal{
+  width:620px;
+  max-width:95vw;
+  padding:0;
+  border-radius:var(--m-radius);
+  display:flex;
+  flex-direction:column;
+  max-height:85vh;
+  max-height:calc(var(--vh100,100vh)*0.85);
+  overflow:hidden;
+  background:var(--m-white);
+  border:3px solid var(--m-ink);
+  box-shadow:var(--m-shadow);
+  color:var(--m-ink);
+  font-family:'Inter','SF Pro',-apple-system,system-ui,sans-serif;
+  animation:memorySlam .22s cubic-bezier(.2,1.2,.4,1) both;
+}
+.memory-modal{position:relative}
+[data-theme="light"] .memory-modal{border-color:rgba(26,24,20,0.15) !important;box-shadow:4px 4px 16px rgba(0,0,0,0.08) !important}

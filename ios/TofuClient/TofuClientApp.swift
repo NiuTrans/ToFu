@@ -35,7 +35,7 @@ struct TofuClientApp: App {
     var body: some Scene {
         WindowGroup {
             RootView(model: model)
-                .task { await model.migrateOnLaunch() }
+                .task { await model.reload() }
         }
     }
 }

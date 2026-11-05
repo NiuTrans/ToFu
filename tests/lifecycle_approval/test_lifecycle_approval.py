@@ -52,6 +52,21 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 SCRIPT = os.path.join(ROOT, 'restart_15000.sh')
 
 
+def _ss_lists_sockets() -> bool:
+    try:
+        return subprocess.run(['ss', '-ltn'], capture_output=True,
+                              timeout=10).returncode == 0
+    except OSError:
+        return False
+
+
+# The script identifies the :PORT listener with ss and refuses to run without
+# it; cases that need it to find (or kill) a real listener cannot run here.
+requires_ss = pytest.mark.skipif(
+    not _ss_lists_sockets(),
+    reason='restart_15000.sh identifies listeners with ss (iproute2), absent on this host')
+
+
 def _fresh_store(tmp):
     la._APPROVALS_FILE = os.path.join(tmp, 'approvals.json')
     la._STATE_FILE = os.path.join(tmp, 'state.json')
@@ -379,6 +394,53 @@ class TestRealScriptGate:
         assert result.returncode == 3
         assert 'unisolated test process' in result.stdout
 
+    def test_missing_ss_refuses_before_touching_a_listener(self):
+        """Without ss no listener is visible: refuse instead of skipping the
+        approval gate and falling back to signalling server.py by name."""
+        tmpdir = _isolated_lifecycle_root()
+        test_port = _free_port()
+        tools = os.path.join(tmpdir, 'bin')
+        os.makedirs(tools)
+        with open(os.path.join(tools, 'ss'), 'w', encoding='utf-8') as stream:
+            stream.write('#!/bin/sh\nexit 127\n')
+        os.chmod(os.path.join(tools, 'ss'), 0o755)
+        with open(SCRIPT, encoding='utf-8') as stream:
+            ported = stream.read().replace('PORT=15000', f'PORT={test_port}', 1)
+        ported = _defang_pgrep_fallback(ported)
+        ported = _allow_isolated_lifecycle_test(ported, tmpdir, test_port)
+        ported = ported.replace('#!/usr/bin/env bash\n', '#!/usr/bin/env bash\n'
+                                f'export PATH={shlex.quote(tools)}:"$PATH"\n', 1)
+        copied_script = os.path.join(tmpdir, 'without-ss.sh')
+        with open(copied_script, 'w', encoding='utf-8') as stream:
+            stream.write(ported)
+        os.chmod(copied_script, 0o755)
+        dummy = subprocess.Popen(
+            [sys.executable, '-m', 'http.server', str(test_port)],
+            cwd=tmpdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            for _ in range(50):
+                if _port_listening(test_port):
+                    break
+                time.sleep(0.1)
+            assert _port_listening(test_port)
+
+            rc, output = _run_orphaned(
+                copied_script, timeout=30, target_pid=dummy.pid)
+
+            assert rc == 2, output
+            assert "'ss' (iproute2) is unavailable" in output
+            assert '[1/5]' not in output and '[pre/5c]' not in output
+            assert _port_listening(test_port) and dummy.poll() is None
+        finally:
+            dummy.terminate()
+            try:
+                dummy.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                dummy.kill()
+                dummy.wait(timeout=5)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @requires_ss
     def test_mismatched_test_target_pid_refuses_and_listener_survives(self):
         tmpdir = _isolated_lifecycle_root()
         test_port = _free_port()
@@ -419,6 +481,7 @@ class TestRealScriptGate:
                 dummy.wait(timeout=5)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    @requires_ss
     @pytest.mark.skipif(_OPENSOURCE, reason='legacy live-process fault injection is internal-only')
     def test_noninteractive_run_refuses_and_server_survives(self):
         """A detached non-interactive run must refuse on an isolated listener.
@@ -469,6 +532,7 @@ class TestRealScriptGate:
                 dummy.wait(timeout=5)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    @requires_ss
     @pytest.mark.skipif(_OPENSOURCE, reason='legacy live-process fault injection is internal-only')
     def test_neutered_gate_kills_dummy_on_test_port(self):
         """NEUTER A/B: strip the [pre/5c] block and retarget to a test port —
@@ -672,6 +736,7 @@ class TestRestartLockInheritance:
                 except OSError:
                     pass
 
+    @requires_ss
     @pytest.mark.skipif(_OPENSOURCE, reason='legacy live-process fault injection is internal-only')
     def test_relaunched_child_does_not_hold_restart_lock(self):
         tmpdir = _isolated_lifecycle_root()

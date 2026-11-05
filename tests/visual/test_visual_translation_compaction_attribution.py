@@ -30,6 +30,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from tests.support.frontend_visual import frontend_visual_origin as frontend_visual_origin  # noqa: F401 — pytest fixture
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 ROOT = Path(__file__).resolve().parents[2]
@@ -174,11 +175,18 @@ def _order_and_attribution(page, language):
     answer = page.locator('[data-turn-id="visual-answer"]')
     historical = page.locator('[data-turn-id="visual-historical"]')
 
-    # Completed-turn process cards are materialized only when history is opened.
-    for turn in (answer, historical):
-        process = turn.locator('details.conversation-history-process')
-        if process.count() and not process.evaluate('node => node.open'):
-            process.locator(':scope > summary').click()
+    original_focus = page.evaluate_handle('document.activeElement')
+
+    historical.locator('.activity-event--compaction').wait_for(state='visible')
+    historical_text = historical.locator('.conversation-block--text .bilingual-attribution').inner_text()
+    assert "Luna" not in historical_text and "Sol" not in historical_text
+    assert historical_text == ("翻译模型未报告" if language == "zh" else "Translation model not reported")
+    historical_card = historical.locator('.activity-event--compaction')
+    historical_model = historical_card.locator('.activity-event__compaction-model')
+    # An unrecorded summarizer renders no invented name; the tooltip stays honest.
+    assert historical_model.inner_text() == ''
+    unknown = "压缩模型未记录" if language == "zh" else "Summary model not recorded"
+    assert unknown in (historical_model.get_attribute('title') or '')
     page.wait_for_function("""() => document.querySelector(
       '[data-turn-id="visual-answer"] .conversation-block--text .bilingual-attribution')
     """)
@@ -193,18 +201,37 @@ def _order_and_attribution(page, language):
     assert 'Sol' in footer_text and 'Luna' not in footer_text
     card = answer.locator('.activity-event--compaction')
     assert card.is_visible()
-    assert summary_label in card.inner_text()
     assert main_label not in card.inner_text()
     assert 'final rendered prompt' not in card.inner_text()
-    assert ("发送前请求过大" if language == "zh" else "Request too large before sending") in card.inner_text()
-    diagnostics = card.locator('details.activity-event__compaction-details')
+    assert ("发送内容过大" if language == "zh" else "Message too large to send") in card.inner_text()
+    diagnostics = card
+    disclosure = card.locator(':scope > summary.activity-event__compaction-summary')
+    assert disclosure.count() == 1
+    assert ("详情" if language == "zh" else "Details") not in disclosure.inner_text()
+    # The snapshot action is inline in the header, always visible, no fold needed.
+    snapshot = disclosure.locator('button[data-conversation-action="open-compaction"]')
+    assert snapshot.count() == 1
+    assert snapshot.is_visible()
+    assert disclosure.evaluate("node => getComputedStyle(node).listStyleType") == 'none'
+    assert disclosure.locator('.activity-event__compaction-model').inner_text() == 'Luna'
+    assert summary_label in (disclosure.locator('.activity-event__compaction-model').get_attribute('title') or '')
+    if page.viewport_size['width'] >= 600:
+        inline = disclosure.evaluate("""node => {
+          const status=node.querySelector('.activity-event__summary').getBoundingClientRect();
+          const model=node.querySelector('.activity-event__compaction-model').getBoundingClientRect();
+          return Math.abs(status.top-model.top);
+        }""")
+        assert inline <= 3, inline
 
-    original_focus = page.evaluate_handle('document.activeElement')
-    diagnostics.locator('summary').focus()
-    page.keyboard.press('Enter')
+    disclosure.locator('.activity-event__compaction-model').click()
     assert diagnostics.evaluate('node => node.open')
     assert main_label in card.inner_text()
     assert 'final rendered prompt' in card.inner_text()
+    disclosure.focus()
+    page.keyboard.press('Space')
+    assert not diagnostics.evaluate('node => node.open')
+    page.keyboard.press('Enter')
+    assert diagnostics.evaluate('node => node.open')
     page.keyboard.press('Space')
     assert not diagnostics.evaluate('node => node.open')
 
@@ -214,20 +241,13 @@ def _order_and_attribution(page, language):
     assert card.evaluate('node => node.scrollWidth <= node.clientWidth + 1')
 
     assert card.locator('[data-conversation-action="open-compaction"]').get_attribute('data-operation') == 'visual-archive'
-    # Actual Chromium geometry as well as DOM chronology.
+    # A reply without tool calls mounts its process rows inline, before the prose.
     assert card.bounding_box()["y"] < answer.locator('.conversation-block--text .md-content').first.bounding_box()["y"]
     assert answer.evaluate("""node => {
       const card = node.querySelector('.activity-event--compaction');
       const prose = node.querySelector('.conversation-block--text');
       return !!(card.compareDocumentPosition(prose) & Node.DOCUMENT_POSITION_FOLLOWING);
     }""")
-    historical_text = historical.locator('.conversation-block--text .bilingual-attribution').inner_text()
-    assert "Luna" not in historical_text and "Sol" not in historical_text
-    assert historical_text == ("翻译模型未报告" if language == "zh" else "Translation model not reported")
-    historical_card = historical.locator('.activity-event--compaction')
-    assert summary_label not in historical_card.inner_text()
-    assert ("压缩模型：Sol" if language == "zh" else "Summary model: Sol") not in historical_card.inner_text()
-    assert ("压缩模型未记录" if language == "zh" else "Summary model not recorded") in historical_card.inner_text()
     return answer
 
 
@@ -244,12 +264,16 @@ def test_real_app_translation_and_preflight_replay(browser, live_server, languag
     page.set_default_timeout(15000)
     snapshot, blocked_mutations = _install_fixture(page, live_server, language, theme)
 
+    from tests.conftest import _dismiss_onboarding_modals
+
     page_errors = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
     try:
         page.goto(live_server, wait_until="domcontentloaded")
 
         page.wait_for_function("() => window.TofuModules?.version === 3")
+        # The keyless test server opens first-run onboarding over the transcript.
+        _dismiss_onboarding_modals(page)
         item = page.locator(f'.conv-item[data-conv-id="{CONVERSATION}"]').first
         item.wait_for(state="attached")
         # Invoke the real sidebar handler even when the narrow rail is closed.
@@ -286,6 +310,7 @@ def test_real_app_translation_and_preflight_replay(browser, live_server, languag
         page.reload(wait_until="domcontentloaded")
 
         page.wait_for_function("() => window.TofuModules?.version === 3")
+        _dismiss_onboarding_modals(page)
         item = page.locator(f'.conv-item[data-conv-id="{CONVERSATION}"]').first
         item.wait_for(state="attached")
         item.evaluate("node => node.click()")
@@ -300,6 +325,7 @@ def test_real_app_translation_and_preflight_replay(browser, live_server, languag
 
 
 def _composer_harness(tmp_path):
+    require_node_modules('vite')
     bundle = tmp_path / "composer-status.js"
     result = subprocess.run([
         str(ROOT / "scripts/vite_test_bundle.mjs"),
@@ -345,17 +371,26 @@ def test_visual_successful_composer_translation_clears(browser, frontend_visual_
         context.close()
 
 
-@pytest.mark.parametrize("language,theme,width", [("en", "light", 1440), ("zh", "dark", 390)])
+@pytest.mark.parametrize("language,theme,width", [
+    ("en", "light", 1440), ("zh", "dark", 390),
+    ("zh", "tofu", 1440), ("en", "tofu", 390),
+])
 def test_visual_translation_compaction_owner_graph(browser, frontend_visual_origin, tmp_path, language, theme, width):
     """Visual tier stays runnable even when native app prerequisites are absent.
 
     Uses the actual surface controller, view model and classic renderers with
     bounded plain-text Markdown/localization ports, not a backend substitute.
     """
+    require_node_modules('vite')
+    entry = tmp_path / "conversation-owner.ts"
+    entry.write_text(
+        f"export * from '{ROOT}/frontend/src/conversation/index.ts';\n"
+        f"export {{setLanguage}} from '{ROOT}/frontend/src/i18n/index.ts';\n"
+    )
     bundle = tmp_path / "conversation-owner.js"
     result = subprocess.run([
         str(ROOT / "scripts/vite_test_bundle.mjs"),
-        str(ROOT / "frontend/src/conversation/index.ts"), "--bundle", "--format=iife",
+        str(entry), "--bundle", "--format=iife",
         "--platform=browser", "--global-name=ConversationOwner", f"--outfile={bundle}",
     ], cwd=ROOT, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
@@ -366,7 +401,8 @@ def test_visual_translation_compaction_owner_graph(browser, frontend_visual_orig
     try:
         page.goto(frontend_visual_origin, wait_until="load")
         page.add_script_tag(content=bundle.read_text())
-        page.evaluate(r"""({snapshot,labels,language,theme}) => {
+        page.evaluate(r"""async ({snapshot,labels,language,theme}) => {
+          await ConversationOwner.setLanguage(language);
           document.documentElement.lang=language;
           document.documentElement.dataset.theme=theme;
           document.body.innerHTML='<main id="fixture" style="width:100%;max-width:800px;padding:16px;box-sizing:border-box;margin:auto"></main>';
@@ -391,6 +427,9 @@ def test_visual_translation_compaction_owner_graph(browser, frontend_visual_orig
           controller.render({id:snapshot.conversationId},state);
         }""", {"snapshot": _snapshot(), "labels": labels, "language": language, "theme": theme})
         answer = _order_and_attribution(page, language)
+        OUT.mkdir(parents=True, exist_ok=True)
+        answer.locator('.activity-event--compaction').screenshot(
+            path=str(OUT / f"compaction-receipt-{language}-{theme}-{width}.png"), animations="disabled")
         # Original-display mode puts one model beside Translation/译文, never
         # on the main execution footer or twice on the translated answer.
         human = page.locator('[data-turn-id="visual-input"]')

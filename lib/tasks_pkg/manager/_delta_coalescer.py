@@ -12,6 +12,7 @@ before every structural event and at the provider-stream boundary.
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 import threading
 import time
 from typing import Callable
@@ -29,10 +30,13 @@ TEXT_DELTA_MAX_CHARS = 256
 class BoundedTextDeltaCoalescer:
     """Emit lossless text deltas with a leading edge and bounded trailing edge.
 
-    ``emit`` is serialized under the same lock as ``add``/``flush``. If the
-    worker reaches storage first, the provider callback therefore applies
-    backpressure instead of growing another in-memory buffer or overtaking the
-    durable event sequence.
+    ``emit`` runs under the buffer lock that ``add``/``flush`` take, so a
+    provider callback waits for an emit in progress instead of overtaking the
+    durable event sequence. ``emit_order`` names the lock ``emit`` itself takes
+    to sequence the event; every emitter holds it before the buffer lock. An
+    emitter waiting for another producer therefore holds no buffer lock:
+    provider text keeps buffering, and once ``max_chars`` are pending the
+    provider's own emit waits in that same order (backpressure).
     """
 
     def __init__(
@@ -43,12 +47,14 @@ class BoundedTextDeltaCoalescer:
         delay_s: float = TEXT_DELTA_COALESCE_S,
         max_chars: int = TEXT_DELTA_MAX_CHARS,
         flush_deadline: Callable[[], float | None] | None = None,
+        emit_order: Callable[[], AbstractContextManager] = nullcontext,
     ) -> None:
         self._emit = emit
         self._accumulate = accumulate
         self._delay_s = max(0.001, float(delay_s))
         self._max_chars = max(1, int(max_chars))
         self._deadline_observation = flush_deadline
+        self._emit_order = emit_order
         self._condition = threading.Condition()
         self._flush_deadline: float | None = None
         self._worker: threading.Thread | None = None
@@ -68,6 +74,9 @@ class BoundedTextDeltaCoalescer:
         if not content and not thinking:
             return
         chunk_chars = len(content) + len(thinking)
+        # An observation of the committed cadence (its own process lock); it
+        # can only shorten the window, so read it before this buffer's lock.
+        observed = None if self._deadline_observation is None else self._deadline_observation()
         with self._condition:
             if self._closed:
                 raise RuntimeError('text delta coalescer is closed')
@@ -86,6 +95,21 @@ class BoundedTextDeltaCoalescer:
                 self._pending_thinking.append(thinking)
             self._pending_chars += chunk_chars
             self._peak_pending_chars = max(self._peak_pending_chars, self._pending_chars)
+            if self._first_emitted and self._pending_chars < self._max_chars:
+                deadline = self._flush_deadline
+                if deadline is None:
+                    deadline = time.monotonic() + self._delay_s
+                if observed is not None:
+                    deadline = min(deadline, observed)
+                if deadline != self._flush_deadline:
+                    self._flush_deadline = deadline
+                    self._ensure_worker_locked()
+                    self._condition.notify_all()
+                return
+        # The leading edge and the character bound emit now, in order.
+        with self._emit_order(), self._condition:
+            if self._closed:
+                return
             if not self._first_emitted:
                 # Use the same retained buffer as every later flush. If the
                 # synchronous leading-edge emit fails, close/error handling
@@ -93,27 +117,14 @@ class BoundedTextDeltaCoalescer:
                 # task projection.
                 self._flush_locked()
                 self._first_emitted = True
-                return
-            if self._pending_chars >= self._max_chars:
+            elif self._pending_chars >= self._max_chars:
                 self._flush_deadline = None
                 self._flush_locked()
                 self._condition.notify_all()
-            else:
-                deadline = self._flush_deadline
-                if deadline is None:
-                    deadline = time.monotonic() + self._delay_s
-                if self._deadline_observation is not None:
-                    observed = self._deadline_observation()
-                    if observed is not None:
-                        deadline = min(deadline, observed)
-                if deadline != self._flush_deadline:
-                    self._flush_deadline = deadline
-                    self._ensure_worker_locked()
-                    self._condition.notify_all()
 
     def flush(self) -> bool:
         """Synchronously emit pending text before a structural boundary."""
-        with self._condition:
+        with self._emit_order(), self._condition:
             if self._closed:
                 return False
             self._flush_deadline = None
@@ -124,7 +135,7 @@ class BoundedTextDeltaCoalescer:
     def close(self) -> bool:
         """Flush once and prevent late worker/provider emissions."""
         error: BaseException | None = None
-        with self._condition:
+        with self._emit_order(), self._condition:
             if self._closed:
                 return False
             self._flush_deadline = None
@@ -182,17 +193,22 @@ class BoundedTextDeltaCoalescer:
                     if remaining > 0:
                         self._condition.wait(remaining)
                         continue
-                    self._flush_deadline = None
-                    try:
-                        self._flush_locked()
-                    except BaseException as exc:
-                        # Pending parts clear only after a successful emit.
-                        # The next callback or boundary flush retries them.
-                        logger.exception(
-                            'background text-delta flush failed: %s', exc)
                     break
                 if self._closed:
                     return
+            try:
+                # Wait for the event order without the buffer lock: provider
+                # text keeps buffering meanwhile. Recheck what is still due.
+                with self._emit_order(), self._condition:
+                    deadline = self._flush_deadline
+                    if self._closed or deadline is None or deadline > time.monotonic():
+                        continue
+                    self._flush_deadline = None
+                    self._flush_locked()
+            except BaseException as exc:
+                # Pending parts clear only after a successful emit.
+                # The next callback or boundary flush retries them.
+                logger.exception('background text-delta flush failed: %s', exc)
 
     def _flush_locked(self) -> bool:
         if self._pending_chars <= 0:
@@ -254,6 +270,7 @@ class TaskTextDeltaCoalescer:
             delay_s=delay_s,
             max_chars=max_chars,
             flush_deadline=deadline,
+            emit_order=self._event_order,
         )
 
     def on_thinking(self, value: str) -> None:
@@ -300,6 +317,10 @@ class TaskTextDeltaCoalescer:
     @property
     def stats(self) -> dict[str, int]:
         return self._coalescer.stats
+
+    def _event_order(self) -> AbstractContextManager:
+        from lib.tasks_pkg.event_delivery import task_event_ordering
+        return task_event_ordering(self._task)
 
     def _accumulate(self, content: str, thinking: str) -> None:
         with self._task['content_lock']:

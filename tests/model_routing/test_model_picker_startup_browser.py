@@ -88,7 +88,10 @@ def test_booting_picker_recovers_on_ready_without_reload(browser, live_server, f
         page.locator('#presetDropdownList [data-value="alpha"]').first.click()
         page.locator('#presetToggle').click()
         expect(page.locator('#thinkingDepthSection')).to_be_visible()
-        expect(page.locator('#thinkingDepthRange')).to_have_attribute('max', '3')
+        # Native low/high/max rungs; default is a separate reset action and
+        # the server's restoration mapping parks the saved medium intent.
+        expect(page.locator('#thinkingDepthRange')).to_be_enabled()
+        expect(page.locator('#thinkingDepthRange')).to_have_attribute('max', '2')
         assert not js_errors, js_errors
     finally:
         context.close()
@@ -212,7 +215,8 @@ def test_timed_out_picker_recovers_without_reload(browser, live_server):
         page.locator('#presetDropdownList [data-value="alpha"]').first.click()
         page.locator('#presetToggle').click()
         expect(page.locator('#thinkingDepthSection')).to_be_visible()
-        expect(page.locator('#thinkingDepthRange')).to_have_attribute('max', '3')
+        expect(page.locator('#thinkingDepthRange')).to_be_enabled()
+        expect(page.locator('#thinkingDepthRange')).to_have_attribute('max', '2')
         assert not js_errors, js_errors
     finally:
         context.close()
@@ -302,12 +306,14 @@ def test_recent_models_refresh_after_pick_and_other_tab_use(browser, live_server
         page.locator('#presetToggle').click()
         expect(page.locator(recent_selector)).to_have_count(2)
         page.locator('#presetDropdownList [data-value="recent-test-0"]').first.click()
-        # Explicitly close even if the picker intentionally remains open after a pick.
-        page.locator('#userInput').click()
+        # The long list overlays the composer; use the public close gesture.
+        page.keyboard.press('Escape')
+        expect(page.locator('#presetDropdownList')).not_to_be_visible()
         page.locator('#presetToggle').click()
         expect(page.locator(recent_selector).first).to_have_attribute('data-value', 'recent-test-0')
         expect(page.locator(recent_selector).first).to_have_class(re.compile(r'\bactive\b'))
-        page.locator('#userInput').click()
+        page.keyboard.press('Escape')
+        expect(page.locator('#presetDropdownList')).not_to_be_visible()
         other = context.new_page()
         other.goto(live_server, wait_until='domcontentloaded')
         other.evaluate("localStorage.setItem('tofu_recent_models', '[\"beta\",\"recent-test-0\"]')")

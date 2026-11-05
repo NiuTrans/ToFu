@@ -15,7 +15,8 @@ This module is called by ``read_files`` (via ``_read_absolute_file`` in
 Internally split into:
   - ``_router``  — extension categories / limits / ``read_local_file`` dispatch.
   - ``_image``   — ``_read_image`` / ``inspect_image_file`` / ``_compress_image``.
-  - ``_docs``    — ``_read_pdf`` / ``_read_office`` / ``_read_text``.
+  - ``_docs``    — ``_read_pdf`` / ``_read_office`` / ``_read_text`` /
+    ``render_text_bytes``.
 
 The import path is UNCHANGED: ``from lib.file_reader import X`` works exactly
 as before for every previously-public symbol. Private helpers used by the
@@ -24,7 +25,13 @@ test-suite (``_compress_image``, ``_INSPECT_MAX_PX``) are re-exported too.
 
 from lib.log import get_logger
 
-from ._docs import _read_office, _read_pdf, _read_text
+from ._docs import (
+    _read_office,
+    _read_pdf,
+    _read_text,
+    render_text_bytes,
+    video_reader_hint,
+)
 from ._image import (
     _IMAGE_MAGICS,
     _INSPECT_JPEG_QUALITY,

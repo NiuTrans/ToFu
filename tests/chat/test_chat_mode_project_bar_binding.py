@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from tests._runtime_sections import _require_frontend_bundler, runtime_section
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,19 +61,26 @@ new Function('module', 'exports', ts.transpileModule(fs.readFileSync(
   {compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS}}
 ).outputText)(modelOwner, modelOwner.exports);
 const {createConversationModelController, captureComposerModel, commitComposerModel} = modelOwner.exports;
+const navigationOwner = {exports: {}};
+new Function('module', 'exports', ts.transpileModule(fs.readFileSync(
+  'frontend/src/features/project-conversation-navigation.ts', 'utf8'),
+  {compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS}}
+).outputText)(navigationOwner, navigationOwner.exports);
+const _projectConversationNavigation = navigationOwner.exports.createProjectConversationNavigation();
 const _conversationModelController = createConversationModelController({
   hasDraft: () => _hasProjectComposerDraft(), selection: () => captureComposerModel(config),
 });
 var runtimeScope = globalThis;
 var composerTranslationStatus = {refresh() {}};
 function renderComposerModelNotice() {}
+function holdComposerModelNotice() {}
 var conversations = [], activeConvId = null, chatMode = 'chat';
 var pendingImages = [], pendingPdfTexts = [], pendingVideos = [], _pendingLogClean = null;
 var searchMode = 'multi', fetchEnabled = true, codeExecEnabled = true;
 var browserEnabled = false, desktopEnabled = false, memoryEnabled = true;
 var schedulerEnabled = false, autopilotEnabled = false, activeFlow = '';
 var imageGenEnabled = false, imageGenMode = false, humanGuidanceEnabled = false;
-var autoTranslate = false, planMode = false, autoApplyWrites = true;
+var autoTranslate = false, planMode = false, delegateMode = false, autoApplyWrites = true;
 var _igSelectedModel = null, _igSelectedProviderId = '', _igSelectedCount = 1;
 var _igSelectedAspect = '1:1', _igSelectedResolution = '1K';
 var config = {model: null, thinkingDepth: null, _modelIsProvisional: true};
@@ -83,6 +91,7 @@ var request = async paths => ({ok: true, json: async () => ({path: paths[0]})});
 var Api = {project: {
   setPaths: async (...args) => {calls.push(args); return request(...args);},
   clear: async () => {clears++;},
+  status: async () => null,
 }};
 const {JSDOM} = require('jsdom');
 const dom = new JSDOM(fs.readFileSync('index.html', 'utf8'));
@@ -161,8 +170,7 @@ def _run(driver: str) -> None:
     # TOFU_REQUIRE_FRONTEND=1) instead of this file's former node-only check.
     _require_frontend_bundler()
     node = shutil.which('node')
-    if not node:
-        pytest.skip('node unavailable')
+    require_node_modules('jsdom', 'vite', 'typescript')
     src = '\n'.join(runtime_section(name, scope_prelude=False) for name in (
         'main.js', 'main/main_conv_lifecycle.js', 'main/main_toolbar_ui.js',
         'main/main_send_pipeline.js',
@@ -416,7 +424,7 @@ def test_build_toolbar_overrides_carries_provider_chip_pick(provisional):
     # preference stays blank. _buildToolbarOverrides must forward the live pick
     # into the submitted overrides, or the backend resolver falls back to the
     # blank conv value and auto-routes away from the provider the user pinned
-    # (the "catpaw selected but dispatched to sankuai" bug).
+    # (the "catpaw selected but dispatched to example-corp" bug).
     _run(r'''
 const target = saved('target'); setup(target); activeConvId = target.id;
 serverModel = 'kimi-k3';

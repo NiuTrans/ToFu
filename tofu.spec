@@ -112,6 +112,9 @@ _candidate_datas = [
     (os.path.join(ROOT, 'static'), 'static'),
     # Imported by lib.vite_assets even when no frontend authoring source ships.
     (os.path.join(ROOT, 'frontend', 'authoring-inputs.json'), 'frontend'),
+    # UI language list: lib.vite_assets and the request language resolver.
+    (os.path.join(ROOT, 'frontend', 'src', 'i18n', 'languages.json'),
+     os.path.join('frontend', 'src', 'i18n')),
     (os.path.join(ROOT, 'frontend', 'src', 'application-shell', 'fragments'),
      os.path.join('frontend', 'src', 'application-shell', 'fragments')),
     # Runtime download selection loads the single release policy by path.

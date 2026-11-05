@@ -166,6 +166,46 @@ def test_stale_attempt_persistence_fence_is_not_duplicated_as_error(caplog):
     assert persistence_records[0].levelno == logging.DEBUG
 
 
+def _delivery_failures():
+    from lib.tasks_pkg.event_delivery import EventDeliveryError, EventDeliveryRevoked
+    return [
+        # Every frame after the first stale rejection meets the revoked lane.
+        (EventDeliveryRevoked('Task event publication authority was revoked'),
+         logging.DEBUG),
+        (EventDeliveryError('Earlier task event is not durable'), logging.ERROR),
+    ]
+
+
+@pytest.mark.parametrize('case', range(2))
+def test_revoked_publication_is_a_supersession_not_a_persistence_error(
+        monkeypatch, caplog, case):
+    """Storage's revocation proof withholds the push below ERROR; real
+    durability failures keep their ERROR record."""
+    failure, expected_level = _delivery_failures()[case]
+    pushed = []
+    monkeypatch.setattr('lib.agent_core.push.push_event',
+                        lambda *args, **kwargs: pushed.append(args))
+    rt = TaskRuntime('test', push_channel='test')
+    task = rt.create(user_id=1)
+
+    def reject(_sequence):
+        raise failure
+
+    with caplog.at_level(logging.DEBUG, logger='lib.agent_core.task_runtime'):
+        sequence = rt.append_event(
+            task['id'],
+            {'type': 'workspace_admission_wait', 'attemptId': 'attempt-settled'},
+            before_push=reject,
+        )
+
+    withheld = [record for record in caplog.records
+                if 'withholding push' in record.getMessage()]
+    assert sequence == 0
+    assert pushed == []
+    assert task['_pushWithheldCount'] == 1
+    assert [record.levelno for record in withheld] == [expected_level]
+
+
 def test_push_withheld_logs_classified_surface_and_recovery(caplog):
     """A wedge episode must bracket in the ops log: the classified storage
     surface at open (str(StorageError) alone is an unactionable bare code)

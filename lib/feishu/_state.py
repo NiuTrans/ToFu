@@ -37,13 +37,14 @@ APP_ID = os.getenv('FEISHU_APP_ID', '')
 APP_SECRET = os.getenv('FEISHU_APP_SECRET', '')
 ENABLED = bool(APP_ID and APP_SECRET)
 
-# Comma-separated open_id list — empty = allow all
+# Comma-separated open_id admission list. Default deny: an empty list admits
+# only senders mapped in FEISHU_USER_OWNER_MAP (lib/feishu/authority.py).
 _allowed_raw = os.getenv('FEISHU_ALLOWED_USERS', '')
 ALLOWED_USERS = set(filter(None, _allowed_raw.split(',')))
 
 DEFAULT_PROJECT_PATH = os.getenv(
     'FEISHU_DEFAULT_PROJECT',
-    os.path.expanduser('~/Projects/tofu'),
+    os.path.expanduser('~/tofu'),
 )
 WORKSPACE_ROOT = os.getenv(
     'FEISHU_WORKSPACE_ROOT',

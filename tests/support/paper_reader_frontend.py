@@ -1,11 +1,10 @@
 """Shared native Paper adapter harness with controllable PDF transport faults."""
 from __future__ import annotations
 import json
-import shutil
 import subprocess
 from pathlib import Path
-import pytest
 from tests._esm_feature_harness import compile_feature_owner
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 SETUP = r"""
@@ -50,8 +49,7 @@ const stop=()=>window._destroyPaperPdfViewer();
 
 
 def run_paper_adapter(tmp_path: Path, body: str) -> dict:
-    if not shutil.which('node') or not (ROOT / 'node_modules/jsdom').is_dir():
-        pytest.skip('Node/jsdom unavailable')
+    require_node_modules('jsdom', 'vite')
     built = tmp_path / 'paper-adapter.js'
     compiled = compile_feature_owner(ROOT / 'scripts/vite_test_bundle.mjs',
                                      ROOT / 'frontend/src/features/paper/pdf-viewer.ts', built, tmp_path)

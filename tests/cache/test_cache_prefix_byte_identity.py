@@ -313,15 +313,15 @@ def test_image_downscale_is_a_byte_fixpoint_once_capped():
             {'type': 'image_url', 'image_url': {'url': uri}}]}]
 
     m = mk()
-    _downscale_oversized_images(m, MODEL)
+    m = _downscale_oversized_images(m, MODEL)
     once = _image_url_in(m[0])
-    _downscale_oversized_images(m, MODEL)   # second pass — must be a no-op
+    m = _downscale_oversized_images(m, MODEL)   # second pass — must be a no-op
     twice = _image_url_in(m[0])
     assert once == twice, 'downscale is not idempotent on an already-capped image'
 
     ma, mb = mk(), mk()
-    _downscale_oversized_images(ma, MODEL)
-    _downscale_oversized_images(mb, MODEL)
+    ma = _downscale_oversized_images(ma, MODEL)
+    mb = _downscale_oversized_images(mb, MODEL)
     assert _image_url_in(ma[0]) == _image_url_in(mb[0]), (
         'downscale re-encode is non-deterministic across independent runs')
 

@@ -170,9 +170,10 @@ window.addEventListener('tofu:language-change', function () {
   if (typeof paperMode === 'undefined' || !paperMode) {
     const active = conversations.find(item => item.id === activeConvId);
     const topbar = document.getElementById('topbarTitle');
-    if (topbar && active?.title === 'New Chat') {
-      topbar.textContent = _conversationDisplayTitle(
-        active.title, t('chat.newConversation'));
+    const shown = active ? _conversationDisplayTitle(active.title, t('chat.newConversation')) : '';
+    // The default sentinel and server role titles are shown through a localized label.
+    if (topbar && active && shown !== active.title) {
+      topbar.textContent = shown;
     } else if (topbar && !activeConvId
         && !topbar.querySelector('.topbar-folder-badge')) {
       topbar.textContent = _conversationDisplayTitle(
@@ -292,7 +293,10 @@ function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
   const folderIds = new Set(safeFolders.map(f => f.id));
   const countMap = {};
   let uncategorizedCount = 0;
+  // Router chats open from the main coordinator's card, never as rows; a count must match the rows.
+  const routerIds = new Set(runtimeScope.routerConversationIds?.() || []);
   for (const c of safeConvs) {
+    if (routerIds.has(c.id)) continue;
     if (c.folderId && folderIds.has(c.folderId)) {
       countMap[c.folderId] = (countMap[c.folderId] || 0) + 1;
     } else {
@@ -680,7 +684,8 @@ function renderConversationList() {
 
     _sidebarSearchController.clear();
     _lastRenderedSearchQuery = "";   // reset when exiting search mode
-    statsEl.classList.remove("visible");
+    // Runs on every projected Turn change of any conversation.
+    if (statsEl.classList.contains("visible")) statsEl.classList.remove("visible");
     const all = conversations.filter((c) =>
       (runtimeScope.ConversationTurnRead?.ordered?.(c)?.length || 0) > 0
       || (c._serverTurnCount || 0) > 0 || c._turnSnapshotRequired || Number.isInteger(c._serverRev));
@@ -719,8 +724,18 @@ function renderConversationList() {
     }
     // else: folders loaded and empty — show everything (no folders exist)
 
+    /* Coordinators and the conversations they started render in their groups:
+     * the pinned entry, or a replaced Coordinator's row above the list. */
     const coordinatorId = document.querySelector('#projectCoordinatorEntry [data-coordinator-id]')?.dataset.coordinatorId;
-    if (coordinatorId) filtered = filtered.filter(c => c.id !== coordinatorId);
+    // Router chats open from the main coordinator's card, never as rows.
+    const routerIds = new Set(runtimeScope.routerConversationIds?.() || []);
+    if (routerIds.size) filtered = filtered.filter(c => !routerIds.has(c.id));
+    const coordinatorGroups = runtimeScope.coordinatorConversationGroups;
+    coordinatorGroups?.refresh(filtered);
+    /* A view whose conversations all sit in Coordinator groups is not empty. */
+    const viewHasConversations = filtered.length > 0;
+    filtered = filtered.filter(c => c.id !== coordinatorId && !c._coordinatorSource
+      && !coordinatorGroups?.hasHistoryRow(c.id));
 
     /* ── Split hash: struct (row identity/order/title/date/folder) vs status
      *    (active / streaming / translating / memory-prefetch / awaiting-human).
@@ -732,7 +747,7 @@ function renderConversationList() {
      * by _buildConvItemHTML under the debug flag — include it in the struct
      * hash or toggling debug mode in Settings early-returns here and the
      * buttons only appear on the next full page load. */
-    const _structHash = `AF${_activeFolderId||''}|FL${foldersReady?1:0}|DBG${(typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode)?1:0}|CG${[..._collapsedConvGroups].sort().join('.')}|F${folderHash}|` +
+    const _structHash = `AF${_activeFolderId||''}|FL${foldersReady?1:0}|DBG${(typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode)?1:0}|CG${[..._collapsedConvGroups].sort().join('.')}|VC${viewHasConversations?1:0}|F${folderHash}|` +
       filtered.map(c => `${c.id}|${c.title}|${c.updatedAt||""}|${c.folderId||""}|${(c.projectSummary && c.projectSummary.text) ? "S" : ""}`).join("\n");
     const _statusHash = filtered.map(c => {
       const f = _convStatusFlags(c);
@@ -769,7 +784,7 @@ function renderConversationList() {
     let listHtml = null;  // non-null only for the empty / special states below
 
     /* ── Empty state ── */
-    if (filtered.length === 0 && (_activeFolderId || folders.length > 0)) {
+    if (filtered.length === 0 && !viewHasConversations && (_activeFolderId || folders.length > 0)) {
       const isUncategorized = !_activeFolderId;
       const emptyIcon = isUncategorized
         ? `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;margin-bottom:8px"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>`
@@ -842,7 +857,7 @@ function _renderSearchResults(results, query, listEl, statsEl, isPartial) {
     return;
   }
   const items = results.map(
-    ({ conv: c, matchField, matchSnippet, matchRole }) => {
+    ({ conv: c, matchField, matchSnippet, matchRole, matchTurnId, matchTurnOrdinal }) => {
       const tHtml =
         matchField === "title"
           ? highlightMatch(_conversationDisplayTitle(
@@ -860,7 +875,11 @@ function _renderSearchResults(results, query, listEl, statsEl, isPartial) {
           snip = `<div class="conv-item-snippet">${ico} ${rl}: ${highlightMatch(matchSnippet, query)}</div>`;
         }
       }
-      return _buildConvItemHTML(c, tHtml, snip);
+      /* A body hit names its live Turn: activating the row opens it there. */
+      const matchTurn = typeof matchTurnId === "string" && matchTurnId
+        && Number.isSafeInteger(matchTurnOrdinal) && matchTurnOrdinal >= 0
+        ? { turnId: matchTurnId, ordinal: matchTurnOrdinal } : null;
+      return _buildConvItemHTML(c, tHtml, snip, matchTurn);
     },
   );
   const newHtml = items.join("");
@@ -875,6 +894,7 @@ function _renderSearchResults(results, query, listEl, statsEl, isPartial) {
 const _CONV_DEL_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>`;
 const _CONV_CP_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
 const _CONV_DUP_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="14" height="14" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>`;
+const _CONV_EXPORT_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
 const _CONV_FOLDER_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
 const _CONV_RENAME_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>`;
 
@@ -961,7 +981,7 @@ function _convStatusHtml(f) {
     statusTag = `<span class="conv-status-tag conv-status-memprefetch">${t('sidebar.memoryPrefetchTag')}</span>`;
   } else if (f.streaming) {
     statusTag = f.unconfirmed
-      ? `<span class="conv-status-tag conv-status-streaming conv-state-unconfirmed" title="${t('sidebar.stateUnconfirmed')}">${t('sidebar.answering')}?</span>`
+      ? `<span class="conv-status-tag conv-state-unconfirmed" title="${t('sidebar.stateUnconfirmed')}">${t('sidebar.syncingTag')}</span>`
       : f.rateLimited
         ? `<span class="conv-status-tag conv-status-ratelimit" title="${t('sidebar.rateLimited')}">${t('sidebar.rateLimitedTag')}</span>`
         : `<span class="conv-status-tag conv-status-streaming">${t('sidebar.answering')}</span>`;
@@ -1030,30 +1050,40 @@ function refreshBackgroundConversationStatuses(conversationIds) {
   }
 }
 
-function _buildConvItemHTML(c, titleHtml, snippetHtml) {
+function _buildConvItemHTML(c, titleHtml, snippetHtml, matchTurn = null) {
   const f = _convStatusFlags(c);
   const { dotHtml, statusTag } = _convStatusHtml(f);
   const eid = escapeHtml(c.id);
+  const turnAttrs = matchTurn
+    ? ` data-match-turn-id="${escapeHtml(matchTurn.turnId)}" data-match-turn-ordinal="${matchTurn.ordinal}"`
+    : '';
   const isActive = c.id === activeConvId ? " active" : "";
   const feishuBadge = c.source === 'feishu' ? `<span class="conv-feishu-badge" title="${t('sidebar.feishuConv')}">Feishu</span>` : '';
   const copyBadge = c.clonedFrom ? `<span class="conv-copy-badge" title="${t('sidebar.copyBadgeTip')}">${t('sidebar.copyBadge')}</span>` : '';
+  const coordinatorBadge = c._coordinatorSource ? `<span class="conv-coordinator-badge">${t('projectCoordination.coordinator')}</span>` : '';
   // Sidebar conversation summaries are paused: backend generation is disabled,
   // so the row intentionally has no dormant presentation/action surface.
   const summaryBadge = '';
   const _isDebug = typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode;
   const copyIdBtn = _isDebug ? `<button class="conv-action-btn conv-copy-id" data-conv-id="${eid}" title="${t('sidebar.copyConvId')}">${_CONV_CP_SVG}</button>` : '';
   const folderClass = c.folderId ? ' in-folder' : '';
-  return `<div class="conv-item${isActive}${folderClass}" data-conv-id="${eid}" draggable="true" title="ID: ${eid}">${dotHtml}<div class="conv-text"><div class="conv-title">${feishuBadge}${summaryBadge}${titleHtml}</div>${snippetHtml || ""}<div class="conv-date">${formatConvTime(c.updatedAt || c.createdAt)}${copyBadge}${statusTag}</div></div><div class="conv-actions">${copyIdBtn}<button class="conv-action-btn conv-rename" data-conv-id="${eid}" title="${t('sidebar.renameConv')}">${_CONV_RENAME_SVG}</button><button class="conv-action-btn conv-ref" data-conv-id="${eid}" data-conv-title="${escapeHtml(c.title || 'Untitled')}" title="${t('sidebar.refConv')}">@</button><button class="conv-action-btn conv-folder-assign" data-conv-id="${eid}" title="${t('sidebar.moveToFolder')}">${_CONV_FOLDER_SVG}</button><button class="conv-action-btn conv-dup" data-conv-id="${eid}" title="${t('sidebar.duplicate')}">${_CONV_DUP_SVG}</button><button class="conv-action-btn conv-delete" data-conv-id="${eid}" title="${t('sidebar.deleteConv')}">${_CONV_DEL_SVG}</button></div></div>`;
+  return `<div class="conv-item${isActive}${folderClass}" data-conv-id="${eid}"${turnAttrs} draggable="true" title="ID: ${eid}">${dotHtml}<div class="conv-text"><div class="conv-title">${feishuBadge}${summaryBadge}${titleHtml}</div>${snippetHtml || ""}<div class="conv-date">${formatConvTime(c.updatedAt || c.createdAt)}${copyBadge}${coordinatorBadge}${statusTag}</div></div><div class="conv-actions">${copyIdBtn}<button class="conv-action-btn conv-rename" data-conv-id="${eid}" title="${t('sidebar.renameConv')}">${_CONV_RENAME_SVG}</button><button class="conv-action-btn conv-ref" data-conv-id="${eid}" data-conv-title="${escapeHtml(c.title || 'Untitled')}" title="${t('sidebar.refConv')}">@</button><button class="conv-action-btn conv-folder-assign" data-conv-id="${eid}" title="${t('sidebar.moveToFolder')}">${_CONV_FOLDER_SVG}</button><button class="conv-action-btn conv-export" data-conv-id="${eid}" title="${t('sidebar.exportTranscript')}">${_CONV_EXPORT_SVG}</button><button class="conv-action-btn conv-dup" data-conv-id="${eid}" title="${t('sidebar.duplicate')}">${_CONV_DUP_SVG}</button><button class="conv-action-btn conv-delete" data-conv-id="${eid}" title="${t('sidebar.deleteConv')}">${_CONV_DEL_SVG}</button></div></div>`;
 }
 
 function highlightMatch(text, query) {
   if (!query) return escapeHtml(text);
-  const e = escapeHtml(text);
-  const q = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return e.replace(
-    new RegExp(`(${q})`, "gi"),
-    '<span class="sidebar-search-highlight">$1</span>',
-  );
+  // Match the raw text, then escape each piece: matching escaped text would
+  // split entities ("amp" inside &amp;) and never find "<" or "&".
+  const raw = text ? String(text) : "";
+  const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+  let html = "";
+  let last = 0;
+  for (const match of raw.matchAll(pattern)) {
+    html += escapeHtml(raw.slice(last, match.index));
+    html += `<span class="sidebar-search-highlight">${escapeHtml(match[0])}</span>`;
+    last = match.index + match[0].length;
+  }
+  return html + escapeHtml(raw.slice(last));
 }
 
 /* ── Two-tier search: instant title match (local) + async content search (server) ── */

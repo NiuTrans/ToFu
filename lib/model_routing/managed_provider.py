@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from lib.log import get_logger
 
@@ -68,56 +68,57 @@ def connection_urls(document: Mapping[str, Any]) -> dict[str, list[str]]:
 def remove_provider_resources(
     document: Mapping[str, Any], provider_id: str,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Return a copy without one Provider and its transitively owned rows."""
-
+    """Return a detached candidate and sorted, unique cleanup references."""
     result = copy.deepcopy(dict(document))
+    references = remove_provider_resources_in_place(result, provider_id)
+    return result, sorted(set(references))
+
+
+def remove_provider_resources_in_place(
+    document: dict[str, Any], provider_id: str,
+) -> list[str]:
+    """Remove a Provider's owned rows from a caller-owned candidate.
+
+    Only the candidate aggregate is changed. Returned secret references are
+    cleanup candidates in credential order, including duplicates; callers must
+    commit first and retain references still used by the committed aggregate.
+    Models and Creators are independent catalog entities and remain untouched.
+    """
     access_ids = {
-        row["provider_access_id"]
-        for row in result["provider_accesses"]
+        row["provider_access_id"] for row in document["provider_accesses"]
         if row["provider_id"] == provider_id
     }
     connection_ids = {
-        row["connection_id"]
-        for row in result["connections"]
+        row["connection_id"] for row in document["connections"]
         if row["provider_access_id"] in access_ids
     }
     offering_ids = {
-        row["offering_id"]
-        for row in result["offerings"]
+        row["offering_id"] for row in document["offerings"]
         if row["provider_access_id"] in access_ids
     }
-    secret_references = sorted({
-        row["secret_reference"]
-        for row in result["credentials"]
-        if row["provider_access_id"] in access_ids
-        and row.get("secret_reference")
-    })
-    result["providers"] = [
-        row for row in result["providers"]
-        if row["provider_id"] != provider_id
+    secret_references = [
+        row["secret_reference"] for row in document["credentials"]
+        if row["provider_access_id"] in access_ids and row.get("secret_reference")
     ]
-    result["provider_accesses"] = [
-        row for row in result["provider_accesses"]
-        if row["provider_access_id"] not in access_ids
-    ]
-    result["connections"] = [
-        row for row in result["connections"]
-        if row["connection_id"] not in connection_ids
-    ]
-    result["credentials"] = [
-        row for row in result["credentials"]
-        if row["provider_access_id"] not in access_ids
-    ]
-    result["offerings"] = [
-        row for row in result["offerings"]
+    document["providers"] = [
+        row for row in document["providers"] if row["provider_id"] != provider_id]
+    document["provider_accesses"] = [
+        row for row in document["provider_accesses"]
+        if row["provider_id"] != provider_id]
+    document["connections"] = [
+        row for row in document["connections"]
+        if row["connection_id"] not in connection_ids]
+    document["credentials"] = [
+        row for row in document["credentials"]
+        if row["provider_access_id"] not in access_ids]
+    document["offerings"] = [
+        row for row in document["offerings"]
+        if row["offering_id"] not in offering_ids]
+    document["deployments"] = [
+        row for row in document["deployments"]
         if row["offering_id"] not in offering_ids
-    ]
-    result["deployments"] = [
-        row for row in result["deployments"]
-        if row["offering_id"] not in offering_ids
-        and row["connection_id"] not in connection_ids
-    ]
-    return result, secret_references
+        and row["connection_id"] not in connection_ids]
+    return secret_references
 
 
 def _preserve_user_configuration(
@@ -261,18 +262,26 @@ def _preserve_user_configuration(
     return preserved
 
 
+def unreferenced_secret_references(
+    document: Mapping[str, Any], references: Iterable[str],
+) -> list[str]:
+    """Select cleanup candidates absent from an owner's committed aggregate."""
+    active = {
+        row.get("secret_reference") for row in document["credentials"]
+        if row.get("secret_reference")
+    }
+    return [reference for reference in references if reference and reference not in active]
+
+
 def _delete_unreferenced_secrets(
     repository: RepositoryPort,
     boundary: OwnerBoundary,
     references: set[str],
     authority: StoredAuthority | None,
 ) -> None:
-    active = {
-        row.get("secret_reference")
-        for row in (authority.document["credentials"] if authority else [])
-        if row.get("secret_reference")
-    }
-    for reference in sorted(references - active):
+    for reference in unreferenced_secret_references(
+        authority.document if authority else {"credentials": []}, sorted(references),
+    ):
         try:
             repository.delete_secret(boundary, reference)
         except Exception as exc:
@@ -448,5 +457,7 @@ __all__ = [
     "connection_urls",
     "delete_managed_provider",
     "remove_provider_resources",
+    "remove_provider_resources_in_place",
     "replace_managed_provider",
+    "unreferenced_secret_references",
 ]

@@ -109,6 +109,21 @@ def tokenize(text: str) -> list[str]:
     return tokens
 
 
+def subject_terms(query: str) -> set[str]:
+    """Query-subject terms for evidence coverage, in the ``tokenize`` space.
+
+    A lone CJK character counts only when no subject bigram contains it.
+    ``tokenize`` also emits the characters of a two-character run, but a longer
+    run in a page yields bigrams only, so those characters could never match
+    there and would understate the coverage of pages that contain the subject.
+    Ranking and excerpts keep the unchanged ``tokenize`` model.
+    """
+    terms = set(tokenize(query_subject(query)))
+    bigram_chars = {char for term in terms
+                    if len(term) == 2 and _CJK_RUN.fullmatch(term) for char in term}
+    return terms - bigram_chars
+
+
 def query_subject(query: str) -> str:
     """Remove retrieval constraints, preserving quoted subject literals.
 

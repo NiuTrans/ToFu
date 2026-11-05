@@ -62,12 +62,14 @@ def invoke_gateway(monkeypatch):
 
     monkeypatch.setattr(gateway, '_execute_normalized', execute_children)
     monkeypatch.setattr(gateway, '_finalize', lambda *a, **k: None)
+    monkeypatch.delenv('TOFU_PTC_TIER', raising=False)
+    cfg = {'tools': {'programmaticCalling': 'on'}}
 
     def invoke(arguments, **overrides):
         faults.update(overrides)
         call_id, content, aborted = gateway.handle_execute_tools(
             task, {}, EXECUTE_TOOLS_NAME, 'gateway', arguments,
-            1, {'llmRound': 1}, {}, None, False)
+            1, {'llmRound': 1}, cfg, None, False)
         assert call_id == 'gateway'
         assert not aborted
         payload = json.loads(content)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import itertools
 import os
 from pathlib import Path
 import shutil
@@ -119,12 +120,22 @@ def test_preflight_fails_closed_on_atomic_replace_error(tmp_path, monkeypatch):
     assert not list(data_dir.glob('.storage-preflight-*'))
 
 
-def test_preflight_fails_closed_when_fsync_profile_exceeds_bound(
+def test_slow_filesystem_preflight_reports_latency_without_refusing(
         tmp_path, monkeypatch):
+    """Hardware never limits work: a durable filesystem starts however slow.
+
+    A fake clock makes the probe take ten minutes; the retired latency knob an
+    old environment may still carry is ignored.
+    """
+    clock = itertools.count(0.0, 600.0)
+    monkeypatch.setattr(
+        preflight, 'time', SimpleNamespace(monotonic=lambda: next(clock)))
     monkeypatch.setenv('TOFU_STORAGE_PREFLIGHT_MAX_MS', '0')
+    data_dir = tmp_path / 'data'
 
-    with pytest.raises(StorageError) as raised:
-        preflight.run_filesystem_preflight(tmp_path / 'data')
+    report = preflight.run_filesystem_preflight(data_dir)
 
-    assert raised.value.code == 'database_unavailable'
-    assert 'latency' in raised.value.message.lower()
+    assert report.fsync_ms == 600_000
+    assert report.atomic_replace is True
+    assert report.file_lock is True
+    assert not list(data_dir.glob('.storage-preflight-*'))

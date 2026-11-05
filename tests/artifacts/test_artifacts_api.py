@@ -344,6 +344,26 @@ class TestRoutes:
         assert body['error'] == 'pdf_render_failed'
         assert secret not in str(body)
 
+    def test_broken_pdf_module_is_an_internal_error_not_a_503(
+            self, flask_app, flask_client, monkeypatch):
+        """Playwright unavailability is the typed PdfRenderError (503). A
+        first-party module that cannot import is a deterministic server
+        fault: a logged, redacted 500, never a retry-later 503."""
+        import sys
+        from lib.artifacts import create_artifact
+        with flask_app.app_context():
+            meta = create_artifact(
+                conv_id='conv-pdf-error', content='# PDF import\n',
+                format='markdown', source='write_file', title='pdf.md')
+
+        monkeypatch.setitem(sys.modules, 'lib.artifacts.pdf_export', None)
+        response = flask_client.get(
+            f'/api/artifacts/{meta["id"]}/export?format=pdf')
+        assert response.status_code == 500
+        raw = response.get_data(as_text=True)
+        assert 'pdf_subsystem_unavailable' not in raw
+        assert 'sys.modules' not in raw
+
     def test_full_round_trip(self, flask_app, flask_client):
         from lib.artifacts import create_artifact
         body = '# Routed\n\nHello.'

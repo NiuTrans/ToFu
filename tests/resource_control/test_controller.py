@@ -26,32 +26,42 @@ class Owner:
         return ResourcePort(lambda: self.value, self.resize, 1, 32, **kw)
 
 
-def test_growth_requires_sustained_demand_and_headroom():
+def test_growth_requires_sustained_demand():
     now = [0.]
     controller = ResourceController(clock=lambda: now[0])
     owner = Owner(waiting=3)
-    controller.bind('execution.root', owner.port(growth_cost_bytes=100))
-    for t, headroom in [(0, None), (5, None), (10, 50), (15, 200)]:
-        now[0] = t
-        controller.tick(headroom_bytes=headroom)
-        assert owner.value.capacity == (3 if t == 15 else 2)
+    controller.bind('execution.root', owner.port())
+    controller.tick()
+    assert owner.value.capacity == 2
+    now[0] = 5
+    controller.tick()
+    assert owner.value.capacity == 3
     # An unresolved throughput trial cannot repeatedly grow every cooldown.
-    now[0] = 35
-    controller.tick(headroom_bytes=200)
+    now[0] = 25
+    controller.tick()
     assert owner.value.capacity == 3
 
 
-def test_pressure_drains_but_keeps_active_work_and_buffers():
-    controller = ResourceController()
-    owner = Owner(capacity=8, used=8, waiting=2)
-    buffer = Owner(capacity=16, used=15)
-    controller.bind('execution.root', owner.port())
-    controller.bind('storage.frames', buffer.port())
-    state = controller.tick(memory_pressure=True)['resources']
-    assert state['execution.root']['effective'] == 6
-    assert state['execution.root']['used'] == 8
-    assert state['execution.root']['status'] == 'draining'
-    assert state['storage.frames']['effective'] == 16
+def test_tick_has_no_memory_input_and_never_shrinks_saturated_capacity():
+    import inspect
+    assert list(inspect.signature(ResourceController.tick).parameters) == ['self']
+    now = [0.]
+    controller = ResourceController(clock=lambda: now[0])
+    owners = {
+        'execution.root': Owner(capacity=8, used=8),
+        'execution.child': Owner(capacity=32, used=40),
+        'storage.rpc': Owner(capacity=4, used=4),
+        'storage.frames': Owner(capacity=16, used=16),
+    }
+    initial = {key: owner.value.capacity for key, owner in owners.items()}
+    for key, owner in owners.items():
+        controller.bind(key, owner.port())
+    for t in range(0, 600, 5):
+        now[0] = t
+        controller.tick()
+    for key, owner in owners.items():
+        assert owner.applied == [], key
+        assert owner.value.capacity == initial[key], key
 
 
 def test_dependency_order_and_failure_are_truthful():
@@ -133,7 +143,7 @@ def test_owned_lease_releases_once_even_after_controller_shutdown():
     from lib.resource_control import install_controller, uninstall_controller
     from lib.resource_control.adapters import bind_swarm
     controller = ResourceController()
-    controller.launch_policy = {'automatic': True, 'child_maximum': 2, 'task_bytes': 64}
+    controller.launch_policy = {'automatic': True, 'child_maximum': 2}
     gate = SwarmExecutionAccounting(capacity=2, waiter_capacity=10)
     install_controller(controller)
     try:
@@ -185,64 +195,21 @@ def test_failures_are_not_counted_as_productive_throughput():
     assert owner.value.capacity == 2
 
 
-def test_pressure_stops_new_work_even_when_launch_envelope_is_large():
-    controller = ResourceController()
-    owner = Owner(capacity=32, used=4)
-    controller.bind('execution.child', owner.port())
-    result = controller.tick(memory_pressure=True)['resources']['execution.child']
-    assert result['effective'] == 3 and result['used'] == 4
-    assert result['status'] == 'draining'
-
-
-@pytest.mark.parametrize('headroom,expected', [(None, 3), (200, 5), (2100, 24)])
-def test_pressure_recovery_restores_healthy_envelope_with_measured_headroom(headroom, expected):
+def test_growth_respects_external_ceiling_and_dependency_pressure():
     now = [0.]
     controller = ResourceController(clock=lambda: now[0])
-    owner = Owner(capacity=24, used=4, waiting=20)
-    controller.bind('execution.root', owner.port(growth_cost_bytes=100))
-    controller.tick(memory_pressure=True, headroom_bytes=0)
-    assert owner.value.capacity == 3
-    assert owner.value.used == 4
-    for t in (15, 20):
-        now[0] = t
-        state = controller.tick(headroom_bytes=headroom)['resources']['execution.root']
-    assert owner.value.capacity == expected
-    assert owner.value.used == 4
-    if expected > 3:
-        assert state['reason'] == 'pressure_recovered'
-
-
-def test_pressure_recovery_respects_external_ceiling_and_dependency_pressure():
-    now = [0.]
-    controller = ResourceController(clock=lambda: now[0])
-    root = Owner(capacity=24, used=4, waiting=20)
+    root = Owner(capacity=8, used=8, waiting=20)
     downstream = Owner(capacity=8, pressure=True)
-    controller.bind('execution.root', root.port(growth_cost_bytes=100))
+    controller.bind('execution.root', root.port())
     controller.bind('model.requests', downstream.port(automatic=False))
-    controller.tick(memory_pressure=True, headroom_bytes=0)
+    for t in (0, 5, 10):
+        now[0] = t
+        controller.tick()
+    assert root.value.capacity == 8
+    downstream.value = replace(downstream.value, pressure=False)
+    root.value = replace(root.value, ceiling=9)
     for t in (15, 20):
         now[0] = t
-        controller.tick(headroom_bytes=10000)
-    assert root.value.capacity == 3
-    downstream.value = replace(downstream.value, pressure=False)
-    root.value = replace(root.value, ceiling=6)
-    for t in (25, 30):
-        now[0] = t
-        controller.tick(headroom_bytes=10000)
-    assert root.value.capacity == 6
-
-
-def test_sustained_pressure_never_restores_capacity():
-    now = [0.]
-    controller = ResourceController(clock=lambda: now[0])
-    root = Owner(capacity=24, used=4, waiting=20)
-    controller.bind('execution.root', root.port(growth_cost_bytes=100))
-    for t in (0, 15, 30, 45):
-        now[0] = t
-        controller.tick(memory_pressure=True, headroom_bytes=10000)
-    assert root.value.capacity == 1
-    assert root.value.used == 4
-    for t in (60, 65):
-        now[0] = t
-        controller.tick(headroom_bytes=10000)
-    assert root.value.capacity == 24
+        controller.tick()
+    assert root.value.capacity == 9
+    assert root.value.used == 8

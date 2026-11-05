@@ -137,7 +137,11 @@ def advanced_compact(messages: list, conv_id: str = '',
     if not advanced_steps:
         return 0
 
-    # Cache-prefix boundary (same source of truth as L1).
+    # Cache-prefix boundary (same source of truth as L1): the whole previous
+    # request stays protected. Advanced steps get no sent-step price admission
+    # (only L1 runs that dry-run economics), so they edit only messages added
+    # since that request; structural arms that must rewrite cached history
+    # opt in through ``ignore_cache_prefix``.
     cache_prefix_count = 0
     if conv_id:
         try:

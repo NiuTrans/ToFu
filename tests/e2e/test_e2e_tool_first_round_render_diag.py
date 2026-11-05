@@ -14,6 +14,8 @@ swapped)?
 """
 from __future__ import annotations
 
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+
 import json
 import time
 
@@ -108,17 +110,17 @@ def _install_llm_stubs():
     import lib.tasks_pkg.handlers.search._core as search_core
 
     saved = {
-        'llm_fb': llm_fb.stream_llm_response,
+        'llm_fb': _fallback_transport.stream_llm_response,
         'search_core': search_core.perform_web_search,
         'tofu': getattr(tofu_search, 'perform_web_search', None),
     }
-    llm_fb.stream_llm_response = _stub_stream_llm_response_factory()
+    _fallback_transport.stream_llm_response = _stub_stream_llm_response_factory()
     tofu_search.perform_web_search = _stub_perform_web_search
     search_core.perform_web_search = _stub_perform_web_search
     try:
         yield
     finally:
-        llm_fb.stream_llm_response = saved['llm_fb']
+        _fallback_transport.stream_llm_response = saved['llm_fb']
         search_core.perform_web_search = saved['search_core']
         if saved['tofu'] is not None:
             tofu_search.perform_web_search = saved['tofu']

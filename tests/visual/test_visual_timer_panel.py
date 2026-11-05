@@ -10,6 +10,8 @@ outcome, compact progress) with raw record fields tucked behind <details>.
 from __future__ import annotations
 
 import os
+import tempfile
+import uuid
 
 import pytest
 
@@ -118,6 +120,52 @@ def test_timer_panel_renders_human_cards(page, seeded_timers):
     shot = os.path.join(_SCREENSHOT_DIR, 'timer_panel_cards.png')
     page.locator('#timerPanel').screenshot(path=shot)
     print(f'\n  timer panel screenshot: {shot}')
+
+
+def test_timer_check_now_reports_unmet_condition_without_delivering(page, seeded_timers):
+    """The default action runs the watcher's own predicate through the real
+    route, names the unmet condition and keeps watching; forced delivery is a
+    separate button that comes after it."""
+    from lib.scheduler import timer as timer_mod
+
+    marker = os.path.join(tempfile.gettempdir(),
+                          f'tofu-visual-timer-{uuid.uuid4().hex}.ready')
+    code = timer_mod.create_timer(
+        user_id=_USER, conv_id='visual_timer_conv', check_instruction='',
+        condition_command=f'test -f {marker}',
+        continuation_message='Read the completed result',
+        poll_interval=3600, max_polls=5)
+    try:
+        _wait_ready(page)
+        _drain(page)
+        _invoke_action(page, 'toggleTimerPanel')
+        card = page.locator('#timerPanelContent .timer-panel-item').filter(
+            has_text=code['id'])
+        card.wait_for(state='visible')
+        check_button = card.locator('.tpi-btn-check')
+        force_button = card.locator('.tpi-btn-trigger')
+        assert check_button.is_visible() and force_button.is_visible()
+        check_box = check_button.bounding_box()
+        force_box = force_button.bounding_box()
+        card_box = card.bounding_box()
+        assert (check_box['y'], check_box['x']) < (force_box['y'], force_box['x'])
+        for box in (check_box, force_box):
+            assert box['x'] + box['width'] <= card_box['x'] + card_box['width'] + 1
+
+        check_button.click()
+        toast = page.locator('#toastContainer .toast').filter(has_text='exit=1')
+        toast.last.wait_for(state='visible', timeout=20000)
+        card.locator('.tpi-btn-check').wait_for(state='visible')
+
+        row = timer_mod.get_timer(code['id'], user_id=_USER)
+        assert row['status'] == 'active'
+        assert row['poll_count'] == 1 and row['last_poll_decision'] == 'wait'
+        assert not _hard_errors(page)
+        os.makedirs(_SCREENSHOT_DIR, exist_ok=True)
+        page.locator('#timerPanel').screenshot(
+            path=os.path.join(_SCREENSHOT_DIR, 'timer_check_now.png'))
+    finally:
+        timer_mod.cancel_timer(code['id'], user_id=_USER)
 
 
 def test_timer_panel_distinguishes_ready_dispatch_and_code_evidence(page, seeded_timers):

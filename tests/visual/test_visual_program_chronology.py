@@ -124,8 +124,10 @@ def test_childless_program_keeps_authored_chronology_and_reader_disclosures(
       render();
     }""")
 
-    expected = ['thinking-11', 'program:gateway-11', 'thinking-12',
-                'narration-12', 'tool:read-12']
+    # Grouped reply: one reasoning disclosure (keyed by its first round), the
+    # tool panel (open while live, latched open after settling), then prose.
+    expected = ['thinking-11', 'layout:tool-panel', 'program:gateway-11',
+                'tool:read-12', 'narration-12']
 
     def assert_timeline(phase, block_ids):
         snapshot = page.evaluate("""() => ({
@@ -149,8 +151,8 @@ def test_childless_program_keeps_authored_chronology_and_reader_disclosures(
         assert snapshot['ids'] == block_ids
         assert snapshot['programCards'] == 1
         assert snapshot['gatewayDuplicates'] == 0
-        assert snapshot['thinking'] == (['Round eleven'] if len(block_ids) == 2
-                                        else ['Round eleven', 'Round twelve'])
+        assert snapshot['thinking'] == (['Round eleven'] if len(block_ids) == 3
+                                        else ['Round eleven\n\nRound twelve'])
         assert snapshot['scrollWidth'] <= snapshot['viewport'] + 1
         assert all(box['height'] > 0 and 0 <= box['left'] < box['right'] <= width + 1
                    for box in snapshot['boxes'])
@@ -162,7 +164,7 @@ def test_childless_program_keeps_authored_chronology_and_reader_disclosures(
     program_card = page.locator('.ptc-card')
     program_code = program_card.locator('.ptc-code')
     try:
-        assert_timeline('running-initial', expected[:2])
+        assert_timeline('running-initial', expected[:3])
         assert program_card.get_attribute('data-program-attention') == 'running'
         assert not first_thinking.evaluate('(node) => node.open')
         first_header.focus()
@@ -186,25 +188,18 @@ def test_childless_program_keeps_authored_chronology_and_reader_disclosures(
             '[data-block-id="tool:read-12"] summary').first.inner_text()
         assert page.locator('[data-block-id="narration-12"]').inner_text() == (
             'Reading the synthetic round twelve evidence.')
-        second_thinking = page.locator('[data-block-id="thinking-12"] .thinking-block')
-        assert page.locator('.thinking-block').count() == 2
-        assert not second_thinking.evaluate('(node) => node.open')
-        second_thinking.locator(':scope > summary').click()
-        assert second_thinking.locator('.thinking-text').inner_text() == 'Round twelve'
-        assert first_thinking.locator('.thinking-text').inner_text() == 'Round eleven'
-        # Independent reader choices must not be coupled by thinking coalescing.
-        second_thinking.locator(':scope > summary').click()
-        assert first_thinking.evaluate('(node) => node.open')
+        # Later reasoning joins the one open disclosure without replacing it.
+        assert page.locator('.thinking-block').count() == 1
+        assert first_thinking.locator('.thinking-text').inner_text().split() == [
+            'Round', 'eleven', 'Round', 'twelve']
         first_header.focus()
 
         page.evaluate('programChronology.complete()')
         assert_timeline('completed', expected)
         assert page.evaluate('programChronology.readersRetained()')
-        assert not second_thinking.evaluate('(node) => node.open')
         page.evaluate('() => { for (let i = 0; i < 3; i++) programChronology.replay(); }')
         assert_timeline('replay', expected)
         assert page.evaluate('programChronology.readersRetained()')
-        assert not second_thinking.evaluate('(node) => node.open')
     finally:
         page.evaluate('programChronology.dispose()')
     # frontend_visual_page also fails teardown on every uncaught page error.

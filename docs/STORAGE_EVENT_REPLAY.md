@@ -169,33 +169,43 @@ two 64-bit counter fields total 540 bytes; this excludes table/index/page
 allocation and is not RSS or a throughput result. Physical growth and
 steady-state append/retention latency require separate capacity measurements.
 
-## Materialized task-event page size
+## Task-event page size
 
-Problem: `event.list` can select individually valid image-bearing snapshots whose
-combined replay envelopes exceed the native 8 MiB materialized-page boundary.
-Reporting this deterministic rejection as `database_resource_exhausted` hides its
-cause behind dispatch's deliberately sanitized error text and incorrectly asks
-clients to retry an unchanged page as transient authority pressure.
+Problem: a materialized `event.list` response has no private byte quota; it is
+streamed in response chunks. One page's selected events are, however, read by a
+single stream point read whose stored bytes are bounded by
+`maximumStreamReadBytes` (8 MiB, `contracts/tofudb_ir_v1.json`). Events above the
+inline event bound are stored as payload references, so many medium inline
+events (snapshots, tool results) can exceed that bound while every event is
+individually readable. Reported as bare invalid input, the refusal reached the
+wire as an opaque `database_protocol_error`, readers did not shrink the page, and
+the Request Inspector answered 503 for whole rounds.
 
-Decision: the authority reports the existing non-retryable
-`storage_payload_too_large` code for that boundary. Request Inspector halves its
-positive page limit at the **same** sequence cursor, down to one row, preserving
-all payload bytes and chronological snapshot dependencies. Both ordinary reads
-and source-fenced long-history continuation share this classification. A
-one-row rejection, corruption, protocol error, or generic availability failure
-remains an explicit failed read; it is not EOF and never creates a successful
-partial transcript. The 8 MiB cap, owner fences and source guards are unchanged.
+Decision: the bound is a size bound end to end. The stream point read reports the
+existing non-retryable `storage_payload_too_large` code. Request Inspector (both
+ordinary reads and source-fenced long-history continuation) and Turn Trace halve
+their positive page limit at the **same** sequence cursor, down to one row,
+preserving all payload bytes and chronological snapshot dependencies. Engines
+built before this classification report the same refusal as a
+`database_protocol_error` whose sanitized message is only its code; readers treat
+exactly that signature as the size refusal, never a protocol error carrying client
+or fence text. A one-row rejection, corruption, other protocol error, or generic
+availability failure remains an explicit failed read; it is not EOF and never
+creates a successful partial transcript. The 8 MiB bound, owner fences and source
+guards are unchanged.
 
 Alternatives rejected: treating all resource exhaustion as page size would hide
-real admission pressure; enlarging response budgets merely moves the failure;
-truncating page payloads destroys diagnostic/wire evidence. Old engines that
-sanitize the size failure into generic exhaustion require normal engine
-deployment to gain this distinction; application source changes alone cannot
-repair an already-running older native authority.
+real admission pressure; enlarging the stream-read bound merely moves the failure;
+truncating page payloads destroys diagnostic/wire evidence. Splitting one page into
+several bounded point reads inside the engine would change `event.list` paging for
+every caller (including cold replay) and is a separate contract decision. The
+engine classification takes effect only after a normal engine rebuild and
+deployment; the application readers handle both engines after an ordinary restart.
 
 Verification: native
-`event_list_materialized_page_overflow_is_payload_size_not_availability` and
-`tests/diagnostics/test_request_inspector_page_size.py` exercise complete exact
-paging, sparse cursors, bounded retries, one-row failure and unrelated errors.
+`event_list_selection_beyond_stream_read_bound_is_payload_size_not_protocol_error`,
+`tests/diagnostics/test_request_inspector_page_size.py` and Turn Trace's
+`test_event_page_size_refusal_halves_the_page_at_the_same_cursor` exercise complete
+exact paging, bounded retries, one-row failure and unrelated errors.
 
 <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

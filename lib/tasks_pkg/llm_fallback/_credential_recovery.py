@@ -24,7 +24,10 @@ def call_with_credential_recovery(call, *, abort_check=None, on_retry=None,
     Callers retain request construction, route authority, usage and phase
     ownership. No returned provider work or untyped failure is retried here.
     """
-    from lib.llm.llm_errors import LocalRequestPreparationError, SubscriptionCredentialUnavailableError
+    from lib.llm.llm_errors import (
+        LocalRequestPreparationError,
+        SubscriptionCredentialUnavailableError,
+    )
     deadline = time.monotonic() + _CREDENTIAL_PREPARE_RECOVERY_SECONDS
     for attempt in range(1, _CREDENTIAL_PREPARE_MAX_ATTEMPTS + 1):
         if abort_check is not None and abort_check():

@@ -12,6 +12,7 @@ import { mountProgramSources } from './source-reader';
 import { mountCurrentExperiment } from './current-experiment';
 import { programLimitHint } from './limits';
 import { mountExecutionOptions, executionPolicyText } from './execution-options';
+import {mountSkillSelection} from '../../skills/selection';
 import { mountHypothesisComparison } from './hypothesis-comparison';
 import { mountExperimentCharts } from './experiment-charts';
 import { mountResourceLauncher } from '../../../rich-response/resource-launcher';
@@ -79,6 +80,7 @@ function replanDetails(proposal: ReplanProposal): HTMLDetailsElement {
 export function mountProgramWorkbench(root: HTMLElement, ports: {
   api: ProgramApi; path: string; navigate: (path: string) => void; openTask: (id: string) => void;
   draftOwner?: () => unknown; draftScope?: string; draftStorage?: Storage;
+  openConversation?: (id: string) => void;
 }) {
   let state: ProgramState = emptyProgramState();
   let path = ports.path, selectedId = '', epoch = 0, disposed = false, busy = false;
@@ -103,8 +105,9 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
   const sidebar = node('aside', 'exp-sidebar');
   const brand = node('a', 'exp-brand', 'Tofu'); brand.href = '#/evolution';
   sidebar.append(brand, node('p', 'exp-kicker', copy('title')));
-  const newButton = createButton({label: copy('new'), variant: 'primary', onClick: () => ports.navigate('evolution/programs/new')});
-  sidebar.append(newButton, node('h2', 'exp-sidebar-heading', copy('programs')));
+  const chatEntry = createButton({label: copy('startInChat'), variant: 'primary', onClick: () => ports.navigate('chat')});
+  const newButton = createButton({label: copy('advancedCreate'), onClick: () => ports.navigate('evolution/programs/new')});
+  sidebar.append(chatEntry, node('p', 'exp-muted', copy('chatEntryHint')), newButton, node('h2', 'exp-sidebar-heading', copy('programs')));
   const catalog = node('nav', 'exp-catalog'); catalog.setAttribute('aria-label', copy('programs')); sidebar.append(catalog);
   const catalogPager = node('nav', 'exp-catalog-pager'); catalogPager.setAttribute('aria-label', copy('catalogNavigation'));
   const catalogPrevious = createButton({label: copy('catalogPrevious'), size: 'sm', onClick: () => controller.catalogPage('previous')});
@@ -124,6 +127,11 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
   const actions = node('div', 'exp-actions'); head.append(heading, actions);
   const refreshButton = createButton({label: copy('refresh'), size: 'sm', onClick: () => void controller.refresh()});
   actions.append(refreshButton);
+  const returnToChat = createButton({label: copy('continueChat'), variant: 'primary', size: 'sm', onClick: () => {
+    const source = state.program?.chat_source;
+    if (!disposed && state.program?.program_id === selectedId && source) ports.openConversation?.(source.conversation_id);
+  }});
+  returnToChat.dataset.programChat = 'true'; returnToChat.hidden = true; actions.prepend(returnToChat);
   const actionButtons = new Map<ProgramAction, HTMLButtonElement>();
   for (const [action, label, hint] of [
     ['start', 'resume', 'resume'], ['pause', 'pause', 'pauseNote'], ['retry', 'retry', 'retryNote'], ['cancel', 'cancel', 'cancelNote'],
@@ -144,6 +152,7 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
   draftNotice.dataset.draftNotice = 'true'; main.append(draftNotice);
   type DraftControl = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
   let researchSource: CreateProgramBody['research_source'];
+  let researchContext: CreateProgramBody['research_context'];
   const creationIdentity = (route: string) => {
     const hash = window.location.hash.replace(/^#\/?/, '');
     return programmeCreationDraftIdentity(hash.split('?')[0] === route.split('?')[0] ? hash : route);
@@ -162,8 +171,11 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
     if (identity[0] === 'create' && saved.fields.length === 0 && saved.researchSource) {
       saved.fields = controls.map(control => control.name === 'objective' ? saved.seedObjective || '' : control.value);
     }
-    if (identity[0] === 'create') researchSource = saved.researchSource ? {...saved.researchSource} : undefined;
-    if (identity[0] === 'create' && [5, 11, 14].includes(saved.fields.length) && controls.length === 15) {
+    if (identity[0] === 'create') {
+      researchSource = saved.researchSource ? {...saved.researchSource} : undefined;
+      researchContext = saved.researchContext;
+    }
+    if (identity[0] === 'create' && [5, 11, 14, 15].includes(saved.fields.length) && controls.length === 16) {
       saved.fields.push(...controls.slice(saved.fields.length).map(control => control.value));
     }
     if (saved.fields.length !== controls.length) {draftNotice.hidden = false; draftNotice.textContent = copy('draft.unavailable'); return undefined;}
@@ -187,6 +199,7 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
   function saveDraft(identity: string[], controls: DraftControl[], attempt?: DraftAttempt): ProgramDraft {
     const saved: ProgramDraft = {fields: controls.map(control => control.value), ...(attempt ? {attempt: {...attempt}} : {}),
       ...(identity[0] === 'create' && researchSource ? {researchSource: {...researchSource}} : {})};
+    if (identity[0] === 'create' && researchContext) saved.researchContext = researchContext;
     if (disposed) return saved;
     if ((identity[0] === 'create' ? saved.fields.slice(0, 3).some(Boolean) || saved.fields.slice(5).some(Boolean) : saved.fields.some(Boolean)) || attempt) {drafts.save(identity, saved); draftStatus();}
     else drafts.clear(identity);
@@ -211,14 +224,19 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
   const pacing = node('select'); pacing.name = 'advance-mode';
   pacing.append(new Option(copy('pacingContinuous'), ''), new Option(copy('pacingCheckpoint'), 'checkpoint'));
   form.append(createField({label: copy('pacing'), hint: copy('pacingHint'), control: pacing, controlId: 'exp-advance-mode'}).el);
+  const skills = mountSkillSelection(form, {copy, project: () => project.value.trim(), owner: ports.draftOwner, list: ports.api.listInstalledSkills});
+  project.addEventListener('input', skills.reset);
   const submit = createButton({label: copy('start'), variant: 'primary', type: 'submit'});
   const formStatus = node('p', 'exp-form-status'); formStatus.setAttribute('role', 'status');
   const savePlan = createButton({label: copy('savePlan'), onClick: () => void create(false)});
   const createActions = node('div', 'ui-row'); createActions.append(savePlan, submit);
   form.append(createActions, blank(copy('preparationHint')), formStatus); creator.append(form); main.append(creator);
-  const createControls = [objective, acceptance, project, model, replanPolicy, ...executionOptions.controls, pacing];
+  const createControls = [objective, acceptance, project, model, replanPolicy, ...executionOptions.controls, pacing, skills.control];
   const sourceNote = blank(copy('researchSourceNote')); sourceNote.dataset.researchSourceNote = 'true';
   form.prepend(sourceNote);
+  const inheritedContext = node('details'); inheritedContext.dataset.researchContext = 'true';
+  const inheritedText = node('pre', 'exp-research-context'); inheritedContext.append(node('summary', '', copy('inheritedResearch')), inheritedText);
+  form.prepend(inheritedContext);
   const createDefaults = createControls.map(control => control.value);
   const initialCreator = restoreDraft(creatorIdentity, createControls);
   pending = initialCreator?.attempt;
@@ -255,10 +273,12 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
   const policyDetails = node('details', 'exp-execution-options');
   policyDetails.append(node('summary', '', copy('frozenExecutionOptions')));
   const policyText = node('p', 'exp-policy-summary'); policyDetails.append(policyText);
+  const frozenContext = node('details'); frozenContext.dataset.frozenResearchContext = 'true';
+  const frozenContextText = node('pre', 'exp-research-context'); frozenContext.append(node('summary', '', copy('inheritedResearch')), frozenContextText);
   const projectHeading = node('h4', '', copy('project'));
   const projectPath = node('p', 'exp-project-path');
   original.append(node('h2', '', copy('original')), blank(copy('originalNote')), objectiveDetails,
-    originalChecks, originalPolicy, policyDetails, projectHeading, projectPath);
+    originalChecks, originalPolicy, policyDetails, frozenContext, projectHeading, projectPath);
   let objectiveProgramId = '';
   const queue = node('section', 'exp-queue');
   trajectory.append(current, original, queue);
@@ -358,14 +378,16 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
     if (requirements.length > 16 || requirements.some(item => item.length > 600)) {
       formStatus.textContent = copy('invalidAcceptance'); return;
     }
-    let policy: Partial<CreateProgramBody>;
-    try {policy = executionOptions.read();} catch (reason) {formStatus.textContent = issue(reason); return;}
+    let policy: Partial<CreateProgramBody>, selection: string[];
+    try {policy = executionOptions.read(); selection = skills.read();} catch (reason) {formStatus.textContent = issue(reason); return;}
     const body: CreateProgramBody = {objective: objective.value.trim(), auto_replan: replanPolicy.value === 'auto', ...policy,
       ...(pacing.value === 'checkpoint' ? {advance_mode: 'checkpoint' as const} : {}),
       ...(requirements.length ? {acceptance: requirements} : {}),
       ...(project.value.trim() ? {project_path: project.value.trim()} : {}),
       ...(model.value ? {model: JSON.parse(model.value)} : {})};
     if (researchSource) body.research_source = {...researchSource};
+    if (researchContext) body.research_context = researchContext;
+    if (selection.length) body.skill_selection = selection;
     const signature = JSON.stringify(body), captured = epoch, submittedIdentity = [...creatorIdentity];
     // A lost ACK resolves the original request even if its model disappeared;
     // current backend admission still owns any new task dispatch.
@@ -503,8 +525,12 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
     reconcile(human, forms); human.hidden = forms.length === 0;
   }
   function render() {
-    sourceNote.hidden = !researchSource;
     if (disposed) return;
+    returnToChat.hidden = !ports.openConversation || !state.program?.chat_source || state.program.program_id !== selectedId;
+    sourceNote.hidden = !researchSource;
+    inheritedContext.hidden = !researchContext;
+    const inheritedValue = researchContext ? JSON.stringify(researchContext, null, 2) : '';
+    if (inheritedText.textContent !== inheritedValue) inheritedText.textContent = inheritedValue;
     if (!creatorRestored && !creatorTouched) {
       const saved = restoreDraft(creatorIdentity, createControls);
       if (saved) {creatorRestored = true; pending = saved.attempt;}
@@ -588,6 +614,10 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
     changePacing.textContent = copy(program.advance_mode === 'checkpoint' ? 'switchContinuous' : 'switchCheckpoint');
     const frozenPolicy = executionPolicyText(program, state.models, copy);
     if (policyText.textContent !== frozenPolicy) policyText.textContent = frozenPolicy;
+    const frozenResearch = program.execution_options?.research_context;
+    frozenContext.hidden = !frozenResearch;
+    const frozenResearchText = frozenResearch ? JSON.stringify(frozenResearch, null, 2) : '';
+    if (frozenContextText.textContent !== frozenResearchText) frozenContextText.textContent = frozenResearchText;
     if (objectiveProgramId !== program.program_id) {
       objectiveProgramId = program.program_id; objectiveDetails.open = false; policyDetails.open = false;
     }
@@ -698,7 +728,7 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
     if (!parts[2] || parts[2] === 'new') {
       const nextIdentity = creationIdentity(next);
       if (JSON.stringify(nextIdentity) !== JSON.stringify(creatorIdentity)) {
-        saveCreatorDraft(); creatorIdentity = nextIdentity; researchSource = undefined;
+        saveCreatorDraft(); creatorIdentity = nextIdentity; researchSource = undefined; researchContext = undefined; skills.reset();
         createControls.forEach((control,index) => {control.value = createDefaults[index]!;});
         pending = restoreDraft(creatorIdentity, createControls)?.attempt;
         creatorRestored = !!drafts.read(creatorIdentity); creatorTouched = false;
@@ -729,7 +759,7 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
   updateRoute(path); void controller.refresh();
   return {updateRoute, refresh: controller.refresh, dispose() {
     preserveDrafts(); window.removeEventListener('pagehide', preserveDrafts);
-    disposed = true; epoch += 1; controller.dispose();resources.dispose();sources.dispose();currentExperiment.dispose();comparison.dispose(); document.removeEventListener('visibilitychange', visible);
+    disposed = true; epoch += 1; skills.dispose(); controller.dispose();resources.dispose();sources.dispose();currentExperiment.dispose();comparison.dispose(); document.removeEventListener('visibilitychange', visible);
     expansionDrafts.clear(); expansionRequests.clear(); questionForms.clear(); questionDraftSavers.clear(); receiptRows.clear(); memoryRows.clear(); programButtons.clear();
     root.replaceChildren(); root.classList.remove('evo-programs');
   }};

@@ -100,6 +100,7 @@ def test_all_runtime_consumers_delegate_to_the_canonical_parser():
         'lib/server/server_boot_env.py': 'load_dotenv_file',
         'bootstrap_pkg/runtime.py': 'load_dotenv_file',
         'healthcheck.py': 'read_dotenv_values',
+        'server_manager.py': 'read_dotenv_values',
         'serverctl.py': 'read_dotenv_values',
         'serverctl_pkg/support_bundle.py': 'parse_dotenv',
     }
@@ -133,15 +134,16 @@ def test_executable_startup_surfaces_dotenv_failures_as_actionable_errors():
 def test_lifecycle_manager_reader_stays_compatible_with_canonical_syntax(
         tmp_path):
     # server_manager.py is intentionally dependency-light and owns an explicit
-    # allowlist. Keep its reader behavior pinned to the canonical parser even
-    # though it filters the result for the process-launch boundary.
+    # allowlist, but no parser: its view is the canonical parse filtered for
+    # the process-launch boundary, BOM, export and inline-hash rules included.
     from server_manager import SERVER_ENV_KEYS, project_server_env
 
     path = tmp_path / '.env'
     path.write_text(
-        'PORT="15599"\n'
+        '\ufeffPORT="15599"\n'
         "BIND_HOST='127.0.0.1'\n"
-        'TOFU_TLS=0\n'
+        'TOFU_TLS=0 # stays data\n'
+        'export TOFU_DATA_DIR=/export/form/is/not/an/assignment\n'
         'TOFU_AGENT_QUEUE_CAPACITY=96\n'
         'TOFU_AGENT_STUCK_REPLACEMENTS=2\n'
         'IGNORED=value\n',
@@ -150,9 +152,13 @@ def test_lifecycle_manager_reader_stays_compatible_with_canonical_syntax(
         key: value for key, value in read_dotenv_values(path).items()
         if key in SERVER_ENV_KEYS
     }
-    assert project_server_env(str(tmp_path)) == canonical
-    assert canonical['TOFU_AGENT_QUEUE_CAPACITY'] == '96'
-    assert canonical['TOFU_AGENT_STUCK_REPLACEMENTS'] == '2'
+    assert project_server_env(str(tmp_path)) == canonical == {
+        'PORT': '15599',
+        'BIND_HOST': '127.0.0.1',
+        'TOFU_TLS': '0 # stays data',
+        'TOFU_AGENT_QUEUE_CAPACITY': '96',
+        'TOFU_AGENT_STUCK_REPLACEMENTS': '2',
+    }
 
 
 def test_atomic_writer_replaces_all_equivalent_keys_and_preserves_unrelated_text(tmp_path):

@@ -22,7 +22,7 @@ import re
 import time
 from datetime import datetime
 
-from flask import jsonify, request
+from quart import jsonify, request
 
 from tofu_trading.storage import (
     DOMAIN_TRADING,

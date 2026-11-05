@@ -113,6 +113,110 @@ def test_conversation_storage_error_retains_correlated_backend_evidence(
         assert 'StorageError' in incident['exception']
 
 
+def _render_storage_failure(failure, path, caplog):
+    """Answer ``failure`` on ``path``; return status, decoded body and route log."""
+    import asyncio
+    import logging
+
+    from routes.conversation_turn_errors import storage_failure_response
+
+    app = _make_app_ctx()
+
+    async def run():
+        async with app.test_request_context(path):
+            response, status = storage_failure_response(failure, operation='conversation.search')
+            return status, json.loads(await response.get_data(as_text=True))
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger='routes.conversation_turn_errors'):
+        status, body = asyncio.run(run())
+    records = [record for record in caplog.records
+               if record.name == 'routes.conversation_turn_errors']
+    return status, body, records
+
+
+def _storage_failure(code, message='Invalid diagnostic cursor'):
+    from lib.storage.errors import StorageError
+
+    try:
+        raise StorageError(code, message, retry_after_ms=250, operation_id='storage-op')
+    except StorageError as caught:
+        return caught
+
+
+def test_storage_invalid_payload_is_a_typed_bad_request(caplog):
+    """The storage taxonomy's 400 is a client rejection, never an internal fault.
+
+    It keeps the legacy/native string error, the storage receipt fields and the
+    authored storage message, answers the v4 ``bad_request`` problem, and logs
+    one WARNING without a traceback.
+    """
+    failure = _storage_failure('database_invalid_payload')
+
+    status, body, records = _render_storage_failure(
+        failure, '/api/v1/conversations/search', caplog)
+    assert status == 400
+    assert body == {
+        'ok': False, 'error': 'Invalid diagnostic cursor',
+        'storageCode': 'database_invalid_payload', 'retryAfterMs': 250,
+        'operationId': 'storage-op',
+    }
+    assert [record.levelname for record in records] == ['WARNING']
+    assert records[0].tofu_event_name == 'conversation.storage_rejected'
+    assert records[0].tofu_event_fields['storage_code'] == 'database_invalid_payload'
+    assert records[0].tofu_event_fields['storage_operation_id'] == 'storage-op'
+    assert not records[0].exc_info
+
+    status, problem, records = _render_storage_failure(
+        failure, '/api/v4/conversations/search', caplog)
+    assert status == 400
+    assert problem['status'] == 400
+    assert problem['code'] == 'bad_request'
+    assert problem['detail'] == 'Invalid diagnostic cursor'
+    assert [record.levelname for record in records] == ['WARNING']
+
+
+from lib.agent_core.storage_errors import ERROR_CODES as _ERROR_CODES  # noqa: E402
+
+_STORAGE_CODES = sorted(_ERROR_CODES)
+
+
+def test_only_database_invalid_payload_is_a_storage_400():
+    """A new storage 400 must be reviewed as a caller fault, not inherited."""
+    from lib.storage.errors import http_status_for_storage_error
+
+    assert {code for code in _STORAGE_CODES
+            if http_status_for_storage_error(_storage_failure(code)) == 400} == {
+        'database_invalid_payload'}
+
+
+@_pytest.mark.parametrize('code', _STORAGE_CODES)
+def test_storage_failure_response_keeps_each_code_status_and_class(code, caplog):
+    """Only the 400 class changed; every other storage code keeps its answer."""
+    from lib.storage.errors import http_status_for_storage_error
+
+    failure = _storage_failure(code)
+    expected = http_status_for_storage_error(failure)
+    status, body, records = _render_storage_failure(
+        failure, '/api/v1/conversations/search', caplog)
+
+    assert status == expected
+    assert (body['storageCode'], body['operationId'], body['retryAfterMs']) == (
+        code, 'storage-op', 250)
+    alarms = [record for record in records if record.levelno >= 40]
+    if expected in {400, 404, 409}:
+        assert body['error'] == 'Invalid diagnostic cursor'
+    elif expected == 413:
+        assert body['error'].startswith('This turn is too large to save.')
+    elif expected == 503:
+        assert body['error']['kind'] == 'storage_unavailable'
+    else:
+        assert body['error']['kind'] == 'internal'
+        assert [record.exc_info[1] for record in alarms] == [failure]
+    if expected in {400, 404, 409, 413, 503}:
+        assert alarms == []
+
+
 @_pytest.mark.parametrize('cause', ['storage', 'contract', 'exception', 'string', 'none'])
 def test_each_http_500_preserves_request_evidence_through_coalescing(
         cause, tmp_path, monkeypatch):
@@ -788,6 +892,100 @@ def test_safe_route_decorator_async():
 
     asyncio.run(_t())
     _ok('@safe_route (async) stays awaitable; catches async exceptions')
+
+
+@_pytest.mark.parametrize('handler_mode', ['sync', 'async'])
+@_pytest.mark.parametrize('path', ['/api/storage-probe', '/api/v4/storage-probe'])
+def test_safe_route_keeps_the_boundary_status_for_storage_failures(handler_mode, path):
+    """A transient storage outage is a retryable 503, not an internal 500.
+
+    2026-10-27: while storage was fenced, the ``@safe_route`` handlers
+    ``GET /api/v4/optimizer/proposals`` and ``/cost-experiments/report``
+    answered 500 ``internal_error`` with a traceback, while undecorated
+    handlers failing the same way got the boundary's 503 storage response.
+    """
+    import asyncio
+
+    from lib.api_response import safe_route
+    from lib.api_v4 import attach_v4_envelope
+    from lib.http_transport.error_handlers import register_http_error_handlers
+    from lib.storage.errors import StorageError
+
+    failure = StorageError('database_unavailable', 'storage runtime is fenced',
+                           retryable=True, retry_after_ms=3000)
+    if handler_mode == 'async':
+        @safe_route
+        async def storage_probe():
+            raise failure
+    else:
+        @safe_route
+        def storage_probe():
+            raise failure
+
+    app = _make_app_ctx()
+    attach_v4_envelope(app)
+    register_http_error_handlers(app)
+    app.add_url_rule(path, 'storage_probe', storage_probe)
+
+    async def _t():
+        response = await app.test_client().get(path)
+        return response.status_code, await response.get_json()
+
+    status, body = asyncio.run(_t())
+    assert status == 503
+    if path.startswith('/api/v4/'):
+        assert body['code'] == 'storage_unavailable'
+    else:
+        assert body['error'] == 'database_unavailable'
+        assert body['retryAfter'] == 3
+
+
+@_pytest.mark.parametrize('storage_code,link,expected_status', [
+    ('database_unavailable', 'cause', 503),
+    ('database_timeout', 'cause', 503),
+    ('database_integrity', 'cause', 500),
+    ('database_unavailable', 'context', 500),
+])
+def test_uncaught_domain_error_caused_by_transient_storage_is_503(
+        storage_code, link, expected_status):
+    """Domain wrappers keep the storage outage they explicitly declare.
+
+    ``ModelRoutingRepository`` raises ``ModelRoutingError(...) from`` the
+    sidecar's ``StorageError``; an unhandled wrapper reached the boundary as
+    a generic 500 (2026-10-27 GET /api/v4/model-routing, /audio/capabilities).
+    Only an explicit transient cause qualifies: integrity failures and
+    exceptions merely raised while handling an outage stay internal errors.
+    """
+    import asyncio
+
+    from lib.http_transport.error_handlers import register_http_error_handlers
+    from lib.storage.errors import StorageError
+
+    class DomainUnavailable(RuntimeError):
+        pass
+
+    async def wrapped_storage_failure():
+        try:
+            raise StorageError(storage_code, 'sidecar unavailable',
+                               retry_after_ms=2000)
+        except StorageError as failure:
+            if link == 'cause':
+                raise DomainUnavailable('authority unavailable') from failure
+            raise DomainUnavailable('fallback crashed')
+
+    app = _make_app_ctx()
+    register_http_error_handlers(app)
+    app.add_url_rule('/api/domain-probe', 'domain_probe', wrapped_storage_failure)
+
+    async def _t():
+        response = await app.test_client().get('/api/domain-probe')
+        return response.status_code, await response.get_json()
+
+    status, body = asyncio.run(_t())
+    assert status == expected_status, body
+    if expected_status == 503:
+        assert body['error'] == storage_code
+        assert body['retryAfter'] == 2
 
 
 def test_request_id_attached_when_set():

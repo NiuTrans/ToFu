@@ -31,6 +31,7 @@ from lib.http_transport.compat_middleware import (
 from lib.http_transport.compression import register_http_compression
 from lib.http_transport.error_handlers import register_http_error_handlers
 from lib.http_transport.request_lifecycle import register_request_lifecycle
+from lib.http_transport.plugin_frontend import register_plugin_frontend
 from lib.static_serving import (
     RangeGate,
     StaticOffload,
@@ -134,6 +135,7 @@ def configure_application(
     register_http_body_policy(app, policy)
     register_http_compression(app)
     register_method_override(app)
+    register_plugin_frontend(app)
 
     # The Sidecar owns the only database connection lifecycle. Importing the
     # retired in-process database during application assembly is forbidden.
@@ -145,9 +147,7 @@ def configure_application(
     _discover_plugins = (
         os.environ.get('TOFU_DISCOVER_PLUGINS', '').strip().lower()
         in {'1', 'true', 'yes', 'on'})
-    # Keep the historical lifecycle contract visible to import-isolation
-    # checks: register_all(app, start_workers=False)
-    register_all(app, start_workers=False, discover_plugins=_discover_plugins)
+    register_all(app, discover_plugins=_discover_plugins)
 
     # Auth follows blueprint registration so blueprint-local middleware keeps
     # its existing precedence. Quart executes after-request hooks in reverse.

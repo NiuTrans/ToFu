@@ -13,6 +13,9 @@ from __future__ import annotations
 from importlib import import_module
 
 __all__ = [
+    'AgentToolWorkflow',
+    'WorkflowNode',
+    'run_workflow',
     # stage graph
     'STATE_VERSION',
     'Stage',
@@ -67,6 +70,9 @@ __all__ = [
 # Keep that narrow dependency from initializing checkpoint, research, and
 # restart-manifest owners until a production recipe actually needs them.
 _EXPORT_MODULES = {
+    'AgentToolWorkflow': 'lib.production.workflows',
+    'WorkflowNode': 'lib.production.workflows',
+    'run_workflow': 'lib.production.workflows',
     # Stage graph.
     'STATE_VERSION': 'lib.production.stages',
     'Stage': 'lib.production.stages',

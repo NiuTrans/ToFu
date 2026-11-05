@@ -34,6 +34,7 @@ import uuid
 from dataclasses import dataclass
 from typing import List, Optional
 
+from lib.error_envelope import BadRequest
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
 from lib.storage import StorageError, get_storage_client
@@ -141,14 +142,14 @@ def create_user(
     role: str = 'user',
     metadata: Optional[dict] = None,
 ) -> User:
-    """Create a user row. Raises ``ValueError`` on bad input or
+    """Create a user row. Raises ``BadRequest`` on bad input or
     duplicate email.
     """
     email = (email or '').strip().lower()
     if not _EMAIL_RE.match(email):
-        raise ValueError(f'Invalid email: {email!r}')
+        raise BadRequest(f'Invalid email: {email!r}', field='email')
     if role not in USER_ROLES:
-        raise ValueError(f'Invalid role: {role!r}')
+        raise BadRequest(f'Invalid role: {role!r}', field='role')
     user_id = _new_user_id()
     now = int(time.time())
     if metadata is not None and not isinstance(metadata, dict):
@@ -165,7 +166,7 @@ def create_user(
         )
     except StorageError as exc:
         if exc.code == 'database_conflict':
-            raise ValueError('email already registered') from None
+            raise BadRequest('email already registered', field='email') from None
         raise
     audit_log('user_created', user_id=user_id, role=role)
     logger.info('[Users] created user_id=%s role=%s', user_id, role)
@@ -202,26 +203,26 @@ def list_users(*, limit: int = 100, offset: int = 0,
 
 def set_user_status(user_id: str, status: str) -> User:
     if status not in USER_STATUSES:
-        raise ValueError(f'Invalid status: {status!r}')
+        raise BadRequest(f'Invalid status: {status!r}', field='status')
     document = get_storage_client(write=True).command(
         'tenant.user.set_status', {'user_id': user_id, 'status': status},
         f'tenant.user.set_status:{uuid.uuid4().hex}',
     )
     if document is None:
-        raise ValueError(f'No such user: {user_id}')
+        raise BadRequest(f'No such user: {user_id}', field='status')
     audit_log('user_status_changed', user_id=user_id, status=status)
     return User.from_row(document)
 
 
 def update_user_role(user_id: str, role: str) -> User:
     if role not in USER_ROLES:
-        raise ValueError(f'Invalid role: {role!r}')
+        raise BadRequest(f'Invalid role: {role!r}', field='role')
     document = get_storage_client(write=True).command(
         'tenant.user.set_role', {'user_id': user_id, 'role': role},
         f'tenant.user.set_role:{uuid.uuid4().hex}',
     )
     if document is None:
-        raise ValueError(f'No such user: {user_id}')
+        raise BadRequest(f'No such user: {user_id}', field='role')
     audit_log('user_role_changed', user_id=user_id, role=role)
     return User.from_row(document)
 

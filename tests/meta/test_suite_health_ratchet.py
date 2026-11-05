@@ -55,6 +55,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+from functools import cache
 from types import SimpleNamespace
 
 import pytest
@@ -109,11 +110,17 @@ def _census() -> dict:
             pass
 
 
-def test_audit_tool_is_runnable():
+@pytest.fixture(scope='module')
+def read_suite_census():
+    """Read lazily once per module invocation; later invocations collect afresh."""
+    return cache(_census)
+
+
+def test_audit_tool_is_runnable(read_suite_census):
     """The census tool itself must work — a broken tool would make every other
     assertion here vacuously green."""
     assert os.path.isfile(AUDIT), 'scripts/audit_tests.py is missing'
-    census = _census()
+    census = read_suite_census()
     assert census['files'] > 500, (
         f"census only saw {census['files']} test files — it is not reaching the "
         f'suite (expected >1000). A collapsed scan makes this whole guard inert.')
@@ -357,6 +364,41 @@ def test_dead_path_scan_accepts_only_live_native_adapter_identities(
         ('F', 0, 'references missing path static/js/task-mode-missing.js')]
 
 
+@pytest.mark.parametrize('built', [False, True])
+def test_gitignored_build_outputs_are_neither_dead_anchors_nor_sources(
+        tmp_path, monkeypatch, built):
+    """CI audits a clean checkout; a local build must not change the census.
+
+    A gitignored output such as a Vite bundle exists only after a local
+    build. Classifying it by on-disk existence made the same test a dead
+    anchor (F) in CI and a source-text read (G) in every built tree, so no
+    baseline could hold in both.
+    """
+    audit = _load_audit_module()
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    (tmp_path / '.gitignore').write_text('static/vite/\n', encoding='utf-8')
+    test_path = tmp_path / _fixture_test_path('test_build_output.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from pathlib import Path\n'
+        'ROOT = Path(__file__).resolve().parents[1]\n'
+        'def test_bundle():\n'
+        '    bundle = (ROOT / "static/vite/assets/app.js").read_text()\n'
+        '    assert "render(" in bundle\n',
+        encoding='utf-8',
+    )
+    if built:
+        bundle = tmp_path / 'static' / 'vite' / 'assets' / 'app.js'
+        bundle.parent.mkdir(parents=True)
+        bundle.write_text('render();\n', encoding='utf-8')
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+
+    report = audit.analyze_file(_fixture_test_path('test_build_output.py'))
+
+    assert not [item for item in report.findings if item[0] in {'E', 'F', 'G'}]
+
+
 def test_shipped_source_read_is_reported_per_source_identity(
         tmp_path, monkeypatch):
     audit = _load_audit_module()
@@ -406,6 +448,53 @@ def test_path_shaped_business_data_is_not_a_source_read(
     assert not [item for item in report.findings if item[0] == 'G']
 
 
+@pytest.mark.parametrize('reader,missing', [
+    ('    assert (root / "tests/fixture_created.py").read_text() == "ok"\n', False),
+    ('    assert Path("tests/fixture_created.py").read_text() == "ok"\n', True),
+    ('def test_other(root):\n'
+     '    assert (root / "tests/fixture_created.py").read_text() == "ok"\n', True),
+])
+def test_created_fixture_paths_do_not_hide_missing_source_anchors(
+        tmp_path, monkeypatch, reader, missing):
+    audit = _load_audit_module()
+    test_path = tmp_path / _fixture_test_path('test_created_paths.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from pathlib import Path\n'
+        'def test_fixture(root):\n'
+        '    (root / "tests/fixture_created.py").write_text("ok")\n'
+        + reader, encoding='utf-8')
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+
+    report = audit.analyze_file(_fixture_test_path('test_created_paths.py'))
+
+    findings = [item for item in report.findings if item[0] == 'F']
+    assert findings == ([('F', 0, 'references missing path tests/fixture_created.py')]
+                        if missing else [])
+
+
+def test_generated_fixture_source_is_not_a_shipped_source_anchor(tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    owner = tmp_path / 'frontend/src/i18n/languages.generated.ts'
+    owner.parent.mkdir(parents=True)
+    owner.write_text('export type UiLanguage = "zh" | "en" | "ja";\n')
+    test_path = tmp_path / _fixture_test_path('test_fixture_owner.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'def test_generated_language_union(tmp_path):\n'
+        '    source = (tmp_path / "frontend/src/i18n/languages.generated.ts").read_text()\n'
+        '    assert \'export type UiLanguage = "zh" | "en" | "fr";\' in source\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+
+    report = audit.analyze_file(_fixture_test_path('test_fixture_owner.py'))
+
+    assert not [item for item in report.findings if item[0] in {'E', 'F', 'G'}]
+
+
 def test_source_provenance_stays_scoped_to_each_test_function(
         tmp_path, monkeypatch):
     audit = _load_audit_module()
@@ -437,6 +526,127 @@ def test_source_provenance_stays_scoped_to_each_test_function(
     ]
 
 
+def test_audit_uses_pytest_function_collection_rule():
+    audit = _load_audit_module()
+    assert audit._is_test_func(ast.parse('def test_collected():\n    assert True').body[0])
+    assert not audit._is_test_func(ast.parse('def testnot_collected():\n    assert True').body[0])
+
+
+def test_uncalled_nested_helper_is_not_an_executed_assertion(tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    test_path = tmp_path / _fixture_test_path('test_uncalled_helper.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'def test_empty():\n'
+        '    def helper():\n'
+        '        assert subject() == expected\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+    report = audit.analyze_file(_fixture_test_path('test_uncalled_helper.py'))
+    assert [item[0] for item in report.findings] == ['A']
+
+
+@pytest.mark.parametrize('callback', [
+    'def helper():\n    raise RuntimeError("unexpected")\n',
+    'helper = lambda: pytest.fail("unexpected")\n',
+    'class helper:\n    def put_nowait(self, item):\n        raise RuntimeError("unexpected")\n',
+])
+def test_must_not_call_injected_callback_is_an_executed_contract(
+        tmp_path, monkeypatch, callback):
+    audit = _load_audit_module()
+    test_path = tmp_path / _fixture_test_path('test_no_call_contract.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'def test_skips_forbidden_path(monkeypatch):\n'
+        + ''.join('    ' + line + '\n' for line in callback.splitlines())
+        + '    monkeypatch.setattr(subject, "forbidden", helper' + ('()' if callback.startswith('class ') else '') + ')\n'
+        '    subject.skip_forbidden_path()\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+    report = audit.analyze_file(_fixture_test_path('test_no_call_contract.py'))
+    assert not [item for item in report.findings if item[0] == 'A']
+
+
+def test_uncalled_nested_exceptions_are_not_executed_assertions(tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    test_path = tmp_path / _fixture_test_path('test_uncalled_exceptions.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'def test_uncalled_raise():\n'
+        '    def helper():\n'
+        '        raise RuntimeError("unused")\n'
+        'def test_uncalled_fail():\n'
+        '    def helper():\n'
+        '        pytest.fail("unused")\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+    report = audit.analyze_file(_fixture_test_path('test_uncalled_exceptions.py'))
+    assert [item[0] for item in report.findings] == ['A', 'A']
+
+
+def test_executor_callback_assertions_are_recognized(tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    test_path = tmp_path / _fixture_test_path('test_executor_callback.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'def test_parallel():\n'
+        '    with ThreadPoolExecutor(max_workers=4) as pool:\n'
+        '        def worker():\n'
+        '            assert subject() == expected\n'
+        '        list(pool.map(worker, range(4)))\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+    report = audit.analyze_file(_fixture_test_path('test_executor_callback.py'))
+    assert not [item for item in report.findings if item[0] == 'A']
+
+
+def test_approx_without_comparison_is_not_an_assertion(tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    test_path = tmp_path / _fixture_test_path('test_uncounted_approx.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'def test_empty():\n'
+        '    pytest.approx(subject())\n'
+        'def test_compared():\n'
+        '    assert subject() == pytest.approx(expected)\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+    report = audit.analyze_file(_fixture_test_path('test_uncounted_approx.py'))
+    assert [item[0] for item in report.findings] == ['A']
+
+
+def test_local_root_from_file_keeps_real_source_provenance(tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    owner = tmp_path / 'lib' / 'live_owner.py'
+    owner.parent.mkdir()
+    owner.write_text('CURRENT_CONTRACT = 1\n')
+    test_path = tmp_path / _fixture_test_path('test_local_repo_root.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from pathlib import Path\n'
+        'def test_real_source():\n'
+        '    root = Path(__file__).resolve().parents[1]\n'
+        '    source = (root / "lib/live_owner.py").read_text()\n'
+        '    assert "CURRENT_CONTRACT" in source\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+    report = audit.analyze_file(_fixture_test_path('test_local_repo_root.py'))
+    assert not [item for item in report.findings if item[0] == 'E']
+    assert [item[0] for item in report.findings] == ['G']
+
+
 def _finding_digest(census: dict, category: str) -> str:
     finding_keys = sorted({
         f'{relative_path}:{detail}'
@@ -448,12 +658,12 @@ def _finding_digest(census: dict, category: str) -> str:
 
 
 @pytest.mark.skipif(_OPENSOURCE, reason='audit baseline is source-tree-specific; the export deliberately strips referenced files')
-def test_no_category_regressed():
+def test_no_category_regressed(read_suite_census):
     """One-way ratchet over every gated failure mode."""
     with open(BASELINE_PATH, encoding='utf-8') as f:
         baseline_document = json.load(f)
     baseline = baseline_document['counts']
-    census = _census()
+    census = read_suite_census()
     counts = census['counts']
 
     grew = []
@@ -488,7 +698,7 @@ def test_no_category_regressed():
 
 
 @pytest.mark.skipif(_OPENSOURCE, reason='audit baseline is source-tree-specific; the export deliberately strips referenced files')
-def test_baseline_is_not_loose():
+def test_baseline_is_not_loose(read_suite_census):
     """The baseline must track reality DOWNWARD too.
 
     Without this, a category could be cleaned up and then quietly re-dirtied
@@ -500,7 +710,7 @@ def test_baseline_is_not_loose():
     with open(BASELINE_PATH, encoding='utf-8') as f:
         baseline_document = json.load(f)
     baseline = baseline_document['counts']
-    census = _census()
+    census = read_suite_census()
     counts = census['counts']
     loose = [(c, b, counts.get(c, 0)) for c, b in sorted(baseline.items())
              if counts.get(c, 0) < b]
@@ -515,6 +725,44 @@ def test_baseline_is_not_loose():
         _finding_digest(census, 'G'), (
             'G source-text read identities changed; inspect category G '
             'and regenerate the baseline only after the debt shrank')
+
+
+def test_census_reader_observes_one_snapshot_then_refreshes_for_a_new_fixture(monkeypatch):
+    state = {'revision': 1}
+    calls = []
+
+    def census():
+        calls.append(state['revision'])
+        return dict(state)
+
+    monkeypatch.setitem(globals(), '_census', census)
+    first = read_suite_census.__wrapped__()
+    assert first() == {'revision': 1}
+    state['revision'] = 2
+    assert first() == {'revision': 1}
+    second = read_suite_census.__wrapped__()
+    assert second() == {'revision': 2}
+    assert calls == [1, 2]
+
+
+def test_census_reader_retries_failed_reads_without_retaining_the_error(monkeypatch):
+    calls = []
+    failure = RuntimeError('census unavailable')
+
+    def census():
+        calls.append(True)
+        if len(calls) == 1:
+            raise failure
+        return {'revision': 2}
+
+    monkeypatch.setitem(globals(), '_census', census)
+    read = read_suite_census.__wrapped__()
+    with pytest.raises(RuntimeError) as caught:
+        read()
+    assert caught.value is failure
+    assert read() == {'revision': 2}
+    assert read() == {'revision': 2}
+    assert len(calls) == 2
 
 
 def test_event_contract_scan_targets_resolve():
@@ -565,6 +813,32 @@ def test_worker_exception_collection_requires_observation(observed):
     assert bool(audit._swallows(ast.parse(source).body[0])) is not observed
 
 
+@pytest.mark.parametrize('binding', [
+    '    root = _generator_tree(tmp_path)\n',
+    '    with tempfile.TemporaryDirectory() as directory:\n'
+    '        root = Path(directory)\n',
+])
+def test_temporary_tree_named_root_is_not_a_repository_read(binding):
+    """``root``/``*_ROOT`` name the repository by convention only.
+
+    A generator test may call its temporary tree ``root`` and read what it
+    wrote there under a shipped-looking path: that is a fixture. Any binding
+    to the repository keeps the same read a source read.
+    """
+    audit = _load_audit_module()
+    read = '    source = (root / "lib/vite_assets.py").read_text()\n'
+    temporary = ast.parse('def test_generated(tmp_path):\n' + binding + read)
+    repository = ast.parse(
+        'def test_shipped():\n'
+        '    root = Path(__file__).resolve().parents[2]\n' + read)
+    # A ``root`` fixture parameter is not a binding: it still names the
+    # repository, as in test_created_fixture_paths_do_not_hide_missing_source_anchors.
+    parameter = ast.parse('def test_shipped(root):\n' + read)
+    assert audit._shipped_source_reads(temporary) == {}
+    assert len(audit._shipped_source_reads(repository)) == 1
+    assert len(audit._shipped_source_reads(parameter)) == 1
+
+
 def test_parsed_json_is_data_but_raw_json_remains_source():
     audit = _load_audit_module()
     expression = 'Path("frontend/src/i18n/locales/en.json").read_text()'
@@ -572,3 +846,49 @@ def test_parsed_json_is_data_but_raw_json_remains_source():
     raw = ast.parse('source = ' + expression)
     assert audit._shipped_source_reads(parsed) == {}
     assert len(audit._shipped_source_reads(raw)) == 1
+
+
+def test_parsed_json_stays_data_behind_a_reader_helper():
+    """Moving ``json.loads(path.read_text())`` into a helper is the same read."""
+    audit = _load_audit_module()
+    expression = 'Path("frontend/src/i18n/locales/en.json").read_text()'
+    parsed = ast.parse(
+        'def _table():\n    return json.loads(' + expression + ')\n'
+        'def test_table():\n    data = _table()\n')
+    raw = ast.parse(
+        'def _text():\n    return ' + expression + '\n'
+        'def test_text():\n    source = _text()\n')
+    assert audit._shipped_source_reads(parsed) == {}
+    assert len(audit._shipped_source_reads(raw)) == 1
+
+
+def test_reader_helper_is_data_only_when_it_parses_whole_files():
+    """A helper follows the inline rule: whole-file JSON parses are data.
+
+    A helper that reads shipped source, cuts a literal out of it and parses
+    that slice inspects implementation text; its final ``json.loads`` must
+    not hide the read. A helper that parses the whole file and returns a
+    value derived from the data is no source read.
+    """
+    audit = _load_audit_module()
+    sliced = ast.parse(
+        'RUNTIME = Path("frontend/src/runtime/app-runtime.js")\n'
+        'def _table():\n'
+        '    src = RUNTIME.read_text()\n'
+        '    body = src[src.index("{"):]\n'
+        '    return json.loads(body)\n'
+        'def test_table():\n    data = _table()\n')
+    whole_file = ast.parse(
+        'MANIFEST = Path("frontend/src/runtime/sections/manifest.json")\n'
+        'def _manifest():\n'
+        '    return json.loads(MANIFEST.read_text())\n'
+        'def test_manifest():\n    data = _manifest()\n')
+    derived = ast.parse(
+        'PACKAGE = Path("package.json")\n'
+        'def _scripts():\n'
+        '    package = json.loads(PACKAGE.read_text())\n'
+        '    return set(package["scripts"])\n'
+        'def test_scripts():\n    names = _scripts()\n')
+    assert len(audit._shipped_source_reads(sliced)) == 1
+    assert audit._shipped_source_reads(whole_file) == {}
+    assert audit._shipped_source_reads(derived) == {}

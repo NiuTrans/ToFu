@@ -17,13 +17,18 @@ def _seed(client, cid, text, updated=1):
     )
 
 
-def _search_until(client, params, *, minimum_hits=1, timeout_s=5.0):
-    """Wait for the independent replayable projection, never the authority."""
+def _search_until(client, params, *, minimum_hits=1, timeout_s=5.0, settled=None):
+    """Wait for the independent replayable projection, never the authority.
+
+    ``settled`` names the projected state a spec asserts on: the projection
+    can list a conversation before it applies that conversation's later
+    metadata update, so a hit count alone does not prove the final order.
+    """
     deadline = time.monotonic() + timeout_s
     hits = []
     while time.monotonic() < deadline:
         hits = client.query('conversation.search', params)
-        if len(hits) >= minimum_hits:
+        if len(hits) >= minimum_hits and (settled is None or settled(hits)):
             return hits
         time.sleep(0.025)
     return hits
@@ -38,7 +43,7 @@ def test_conversation_search_like_and_snippet(chat_sidecar):
 
     hits = _search_until(client, {
         'user_id': 1, 'query': 'fox', 'limit': 50, 'snippet_radius': 10},
-        minimum_hits=2)
+        minimum_hits=2, settled=lambda found: found[0]['id'] == 'c-gamma')
     ids = [h['id'] for h in hits]
     assert set(ids) == {'c-alpha', 'c-gamma'}, ids
     assert ids[0] == 'c-gamma'  # updated_at DESC ordering

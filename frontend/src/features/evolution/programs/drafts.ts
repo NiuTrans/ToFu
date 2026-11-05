@@ -2,7 +2,8 @@
  * One atomic browser value per authenticated owner/application; explicit reads
  * and writes, no globals, timers, replay, truncation or silent eviction. */
 export interface DraftAttempt {signature: string; key: string; createdId?: string}
-export interface ProgramDraft {fields: string[]; attempt?: DraftAttempt; researchSource?: {task_id: string; idea_id: string}; seedObjective?: string}
+import type {ResearchExecutionContext} from '../../../api/evolution-runs';
+export interface ProgramDraft {fields: string[]; attempt?: DraftAttempt; researchSource?: {task_id: string; idea_id: string}; researchContext?: ResearchExecutionContext; seedObjective?: string}
 export type DraftStatus = 'saved' | 'restored' | 'unavailable' | 'full';
 export const PROGRAM_DRAFT_LIMITS = {entries: 64, bytes: 512 * 1024, fields: 32, fieldChars: 10000} as const;
 type Drafts = Record<string, ProgramDraft>;
@@ -16,6 +17,10 @@ function draft(value: unknown): value is ProgramDraft {
       || typeof record.researchSource.task_id !== 'string' || !record.researchSource.task_id || record.researchSource.task_id.length > 160
       || typeof record.researchSource.idea_id !== 'string' || !record.researchSource.idea_id || record.researchSource.idea_id.length > 160)) return false;
   if (record.seedObjective !== undefined && (typeof record.seedObjective !== 'string' || record.seedObjective.length > 4000)) return false;
+  if (record.researchContext !== undefined && (!record.researchContext
+      || typeof record.researchContext.hypothesis !== 'string' || record.researchContext.hypothesis.length > 12000
+      || !record.researchContext.protocol || typeof record.researchContext.protocol !== 'object' || Array.isArray(record.researchContext.protocol)
+      || !Array.isArray(record.researchContext.capability_bindings) || record.researchContext.capability_bindings.length > 24)) return false;
   const attempt = record.attempt;
   return attempt === undefined || (!!attempt && typeof attempt === 'object'
     && typeof attempt.signature === 'string' && attempt.signature.length <= 32000
@@ -25,6 +30,7 @@ function draft(value: unknown): value is ProgramDraft {
 const copy = (value: ProgramDraft): ProgramDraft => ({fields: [...value.fields],
   ...(value.researchSource ? {researchSource: {...value.researchSource}} : {}),
   ...(value.seedObjective !== undefined ? {seedObjective: value.seedObjective} : {}),
+  ...(value.researchContext ? {researchContext: JSON.parse(JSON.stringify(value.researchContext)) as ResearchExecutionContext} : {}),
   ...(value.attempt ? {attempt: {...value.attempt}} : {})});
 const key = (identity: readonly string[]): string => JSON.stringify(identity);
 const size = (text: string): number => new TextEncoder().encode(text).byteLength;

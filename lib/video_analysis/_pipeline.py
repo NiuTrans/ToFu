@@ -147,7 +147,8 @@ def _process(video_id: str, scratch_path: str, original_name: str, *,
     # ── frames ──
     phase('frames')
     scratch_dir = os.path.dirname(scratch_path)
-    frames = extract_frames(scratch_path, duration_s, scratch_dir)
+    frames = extract_frames(scratch_path, duration_s, scratch_dir,
+                            source_fps=float(probe.get('fps') or 0))
     if not frames:
         fail('frame extraction produced no frames')
         return

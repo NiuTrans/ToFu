@@ -29,7 +29,7 @@ def _tool(name: str, description: str, *properties: str) -> dict[str, Any]:
 
 
 CATALOG = [
-    _tool('grep_search', 'Search file contents by regular expression.',
+    _tool('search_files', 'Search file contents by regular expression.',
           'query', 'path'),
     _tool('find_files', 'Find files by glob pattern.', 'pattern', 'path'),
     _tool('read_files', 'Read one or more text files.', 'paths'),
@@ -83,7 +83,7 @@ CATALOG = [
 # hints and MCP `_meta.aliases`/`_meta.intents`; they are never serialized as
 # model-visible function declarations.
 SEARCH_TEXT_BY_NAME = {
-    'grep_search': (
+    'search_files': (
         'code search symbol references usages occurrences who calls this '
         '代码搜索 查找引用 谁调用了'),
     'find_files': 'locate filenames config files 文件 查找文件 配置文件',
@@ -126,7 +126,7 @@ SEARCH_TEXT_BY_NAME = {
 
 CASES = [
     {
-        'id': 'code_references', 'target': 'grep_search',
+        'id': 'code_references', 'target': 'search_files',
         'intent': 'Find every place a symbol or function is used in the code.',
         'seeds': [
             'Where is this symbol referenced?',

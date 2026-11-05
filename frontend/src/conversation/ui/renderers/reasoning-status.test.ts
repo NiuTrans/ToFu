@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-/** Informational reasoning receipts remain outside evidence disclosures in every surface. */
-import { afterEach, describe, expect, it } from 'vitest';
+/** Reply headers stay content-first; reasoning evidence remains available to diagnostics. */
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import en from '../../../i18n/locales/en.json';
 import zh from '../../../i18n/locales/zh.json';
 import type { TurnProjection, TurnRecord } from '../../../api/conversation-sync.generated';
@@ -12,10 +12,10 @@ import { renderDefaultTurnHeader } from '../surface-default-renderers';
 import { renderTurnHeader } from './turn-chrome';
 import type { ClassicConversationRendererPorts } from './ports';
 
-const receipt = { requestedValue: 'high', actualMode: 'exact', actualValue: 'low' };
+const receipt = { requestedValue: 'high', actualMode: 'exact', actualValue: 'max' };
 const evidence: TurnProjection = { thinkingDepth: 'high', thinking: '',
   lastRoundUsage: { round: 1, reasoningResolution: receipt },
-  usage: { completion_tokens_details: { reasoning_tokens: 2843 },
+  usage: { completion_tokens_details: { reasoning_tokens: 2002 },
     encrypted_content: 'opaque-replay-never-in-dom', _dispatch: { api_key: 'private-never-in-dom' } },
   segments: [{ type: 'text', blockId: 'text:terminal', text: 'Recorded answer', terminal: true, deliverable: true }],
 };
@@ -40,94 +40,85 @@ function ports(locale: 'en' | 'zh' = 'en'): ClassicConversationRendererPorts {
       values && Object.hasOwn(values, name) ? String(values[name]) : token);
   } };
 }
+function expectNoReasoningNotice(container: HTMLElement) {
+  expect(container.querySelector('.conversation-reasoning-status, [data-reasoning-summary]')).toBeNull();
+  expect(container.textContent).not.toMatch(/Last recorded effort|Provider-reported reasoning tokens|Reasoning summary unavailable|最近记录的推理强度|提供方报告的推理 token|推理摘要不可用/);
+}
 afterEach(() => document.body.replaceChildren());
 
-describe('common non-expandable reasoning observability', () => {
-  it.each(['en', 'zh'] as const)('shows honest completed %s status through the real VM and surface', locale => {
+describe('no unsolicited reasoning status in reply headers', () => {
+  it.each(['en', 'zh'] as const)('keeps the %s answer visible without a receipt or empty thinking card', locale => {
     const container = document.createElement('main'); document.body.append(container);
     const surface = createConversationSurface(container, createClassicConversationRenderers(ports(locale)));
+    const turn = source();
+    const before = JSON.stringify(turn);
     try {
-      surface.render(selectConversationViewModel(stateFor(source())));
-      const row = container.querySelector<HTMLElement>('.conversation-reasoning-status')!;
-      expect(row).not.toBeNull();
-      expect(row.closest('[data-conversation-part="turn-header"]')).not.toBeNull();
-      expect(row.closest('details')).toBeNull();
-      expect(row.dataset.reasoningSummary).toBe('unavailable');
-      expect(row.querySelector('.conversation-reasoning-summary')?.textContent)
-        .toBe(locale === 'en' ? 'Reasoning summary unavailable' : '推理摘要不可用');
-      expect(row.querySelector('.conversation-reasoning-effort')?.textContent)
-        .toBe(locale === 'en' ? 'Last recorded effort: Low' : '最近记录的推理强度：低');
-      expect(row.querySelector('.conversation-reasoning-tokens')?.textContent)
-        .toBe(locale === 'en' ? 'Provider-reported reasoning tokens: 2,843' : '提供方报告的推理 token：2,843');
-      expect(row.querySelector('details, summary, button')).toBeNull();
+      surface.render(selectConversationViewModel(stateFor(turn)));
+      expectNoReasoningNotice(container);
       expect(container.querySelector('.thinking-block')).toBeNull();
+      expect(container.querySelector('.md-content')?.textContent).toBe('Recorded answer');
       expect(container.innerHTML).not.toMatch(/opaque-replay-never-in-dom|private-never-in-dom|encrypted_content/);
+      expect(JSON.stringify(turn)).toBe(before);
     } finally { surface.dispose(); }
   });
 
-  it.each(['pending', 'running', 'failed', 'interrupted', 'truncated'] as const)(
-    'does not mistake %s for a finished provider summary', status => {
+  it.each(['pending', 'running', 'completed', 'failed', 'interrupted', 'truncated'] as const)(
+    'omits reasoning notices in both headers for %s replies', status => {
       const vm = selectConversationViewModel(stateFor(source(evidence, status))).mainLane.turns[0];
-      const header = document.createElement('header');
-      renderTurnHeader(header, vm, ports());
-      const row = header.querySelector<HTMLElement>('.conversation-reasoning-status')!;
-      expect(row.dataset.reasoningSummary).toBe(status === 'pending' || status === 'running'
-        ? 'not-received-yet' : status === 'truncated' ? 'unavailable' : 'not-received');
-      expect(row.textContent).not.toMatch(/provider finished|completed thinking|Thinking Process/i);
+      for (const render of [renderTurnHeader, renderDefaultTurnHeader]) {
+        const header = document.createElement('header');
+        render(header, vm, ports());
+        expectNoReasoningNotice(header);
+        expect(header.children.length).toBeGreaterThan(0);
+      }
     });
 
-  it('keeps receipt-only/zero evidence neutral, unknown counts absent and incomplete counts explicit', () => {
+  it.each([
+    { lastRoundUsage: evidence.lastRoundUsage },
+    { ...evidence, usage: { reasoning_tokens: 0 } },
+    { ...evidence, usageComplete: false },
+    { thinkingDepth: 'high' },
+    { apiRounds: [{ round: 1, usage: { reasoning_tokens: 50, _reasoning_resolution: receipt } }] },
+  ] as TurnProjection[])('does not substitute receipt-only, partial or legacy evidence with chrome: %j', projection => {
+    const vm = selectConversationViewModel(stateFor(source(projection))).mainLane.turns[0];
     const header = document.createElement('header');
-    const select = (projection: TurnProjection) => selectConversationViewModel(stateFor(source(projection))).mainLane.turns[0];
-    renderTurnHeader(header, select({ lastRoundUsage: evidence.lastRoundUsage }), ports());
-    expect(header.querySelector('.conversation-reasoning-effort')?.textContent).toContain('Low');
-    expect(header.querySelector('.conversation-reasoning-tokens')).toBeNull();
-    expect(header.querySelector('.conversation-reasoning-summary')).toBeNull();
-    renderTurnHeader(header, select({ ...evidence, usage: { reasoning_tokens: 0 } }), ports());
-    expect(header.querySelector('.conversation-reasoning-tokens')?.textContent).toContain('0');
-    expect(header.querySelector('.conversation-reasoning-summary')).toBeNull();
-    renderTurnHeader(header, select({ ...evidence, usageComplete: false }), ports());
-    expect(header.querySelector('.conversation-reasoning-tokens')?.textContent).toContain('at least 2,843');
-    renderTurnHeader(header, select({ thinkingDepth: 'high' }), ports());
-    expect(header.querySelector('.conversation-reasoning-status')).toBeNull();
+    renderTurnHeader(header, vm, ports());
+    expectNoReasoningNotice(header);
   });
 
-  it('shares the same status in the default surface rather than a classic-only branch', () => {
-    const vm = selectConversationViewModel(stateFor(source())).mainLane.turns[0];
-    const header = document.createElement('header');
-    renderDefaultTurnHeader(header, vm);
-    expect(header.querySelector('.conversation-reasoning-summary')?.textContent).toBe('Reasoning summary unavailable');
-    expect(header.querySelector('details')).toBeNull();
-  });
-
-  it('repaints late usage/effort without rebuilding an unchanged answer or leaving stale notices', () => {
+  it.each(['classic', 'default'] as const)('does not repaint the %s header or replace an answer for late metering', mode => {
     const container = document.createElement('main'); document.body.append(container);
-    const surface = createConversationSurface(container, createClassicConversationRenderers(ports()));
+    const renderHeader = mode === 'classic'
+      ? vi.fn((node: HTMLElement, turn: Parameters<typeof renderTurnHeader>[1]) => renderTurnHeader(node, turn, ports()))
+      : vi.fn(renderDefaultTurnHeader);
+    const options = mode === 'classic'
+      ? { ...createClassicConversationRenderers(ports()), renderTurnHeader: renderHeader }
+      : { renderTurnHeader: renderHeader };
+    const surface = createConversationSurface(container, options);
     const state = stateFor(source({ ...evidence, usage: undefined, lastRoundUsage: undefined }));
     try {
       surface.render(selectConversationViewModel(state));
-      const answer = container.querySelector('.md-content')!;
-      expect(container.querySelector('.conversation-reasoning-status')).toBeNull();
+      const selector = mode === 'classic' ? '.md-content' : '.conversation-block__markdown';
+      const answer = container.querySelector(selector);
+      expect(answer).not.toBeNull();
+      expect(renderHeader).toHaveBeenCalledTimes(1);
       state.turnsById.reply = { ...state.turnsById.reply!, projectionRevision: 2,
         projection: { ...state.turnsById.reply!.projection, usage: evidence.usage, lastRoundUsage: evidence.lastRoundUsage } };
       surface.render(selectConversationViewModel(state));
-      expect(container.querySelector('.conversation-reasoning-summary')?.textContent).toBe('Reasoning summary unavailable');
-      expect(container.querySelector('.md-content')).toBe(answer);
-      const row = container.querySelector('.conversation-reasoning-status');
+      expectNoReasoningNotice(container);
+      expect(container.querySelector(selector)).toBe(answer);
+      expect(renderHeader).toHaveBeenCalledTimes(1);
       state.turnsById.reply = { ...state.turnsById.reply!, projectionRevision: 3,
         projection: { ...state.turnsById.reply!.projection,
           lastRoundUsage: { reasoningResolution: { ...receipt, actualValue: 'high' } } } };
       surface.render(selectConversationViewModel(state));
-      expect(container.querySelector('.conversation-reasoning-effort')?.textContent).toContain('High');
-      expect(container.querySelector('.conversation-reasoning-status')).toBe(row);
-      state.turnsById.reply = { ...state.turnsById.reply!, projectionRevision: 4, projection: { content: 'Recorded answer' } };
-      surface.render(selectConversationViewModel(state));
-      expect(container.querySelector('.conversation-reasoning-status')).toBeNull();
-      expect(container.querySelector('.md-content')).toBe(answer);
+      expectNoReasoningNotice(container);
+      expect(container.querySelector(selector)).toBe(answer);
+      expect(renderHeader).toHaveBeenCalledTimes(1);
     } finally { surface.dispose(); }
   });
 
-  it('keeps readable thinking collapse, translation and reader focus unchanged', () => {
+  it('preserves readable thinking, translation, open state and reader focus across usage updates', () => {
     const thinking = { type: 'thinking' as const, blockId: 'readable', text: 'Readable summary',
       translatedText: '可读的摘要', llmRound: 0, terminal: true };
     const turn = source({ ...evidence, thinking: 'Readable summary', segments: [thinking, ...evidence.segments!] });
@@ -136,9 +127,6 @@ describe('common non-expandable reasoning observability', () => {
     const surface = createConversationSurface(container, createClassicConversationRenderers(ports('zh')));
     try {
       surface.render(selectConversationViewModel(state));
-      expect(container.querySelector('.conversation-reasoning-status')).toBeNull();
-      const process = container.querySelector<HTMLDetailsElement>('.conversation-history-process');
-      if (process) { process.open = true; process.dispatchEvent(new Event('toggle')); }
       const details = container.querySelector<HTMLDetailsElement>('.thinking-block')!;
       expect(details).not.toBeNull();
       expect(details.open).toBe(false);
@@ -151,70 +139,39 @@ describe('common non-expandable reasoning observability', () => {
       expect(container.querySelector('.thinking-block')).toBe(details);
       expect(details.open).toBe(true);
       expect(document.activeElement).toBe(summary);
-      expect(container.querySelector('.conversation-reasoning-status')).toBeNull();
+      expectNoReasoningNotice(container);
     } finally { surface.dispose(); }
   });
 
-  it('never interpolates arbitrary effort prose or opaque replay into the DOM', () => {
-    const header = document.createElement('header');
+  it('does not expose arbitrary effort strings or encrypted replay in the header', () => {
     const turn = source({ ...evidence, lastRoundUsage: { reasoningResolution: {
-      ...receipt, actualValue: '<img src=x onerror=alert(1)>', reason: 'encrypted_content: opaque-replay-never-in-dom',
+      ...receipt, actualValue: '<img src=x onerror=alert(1)>', reason: 'opaque-replay-never-in-dom',
     } } });
+    const header = document.createElement('header');
     renderTurnHeader(header, selectConversationViewModel(stateFor(turn)).mainLane.turns[0], ports());
-    expect(header.querySelector('.conversation-reasoning-effort')).toBeNull();
-    expect(header.querySelector('.conversation-reasoning-summary')?.textContent).toBe('Reasoning summary unavailable');
-    expect(header.innerHTML).not.toMatch(/<img|encrypted_content|opaque-replay-never-in-dom/);
+    expectNoReasoningNotice(header);
+    expect(header.innerHTML).not.toMatch(/<img|encrypted_content|opaque-replay-never-in-dom|private-never-in-dom/);
+  });
+
+  it('does not add a notice when a resumed attempt receives new scoped metering', () => {
+    const turn = { ...source(), projectionRevision: 7 };
+    const state = stateFor(turn);
+    const container = document.createElement('main'); document.body.append(container);
+    const surface = createConversationSurface(container, createClassicConversationRenderers(ports()));
+    try {
+      surface.render(selectConversationViewModel(state));
+      expectNoReasoningNotice(container);
+      state.attemptsById.resumed = { attemptId: 'resumed', turnId: turn.turnId,
+        taskId: 'new-task', operation: 'checkpoint_resume', baseProjectionRevision: 7 };
+      state.turnsById.reply = { ...turn, status: 'pending', currentAttemptId: 'resumed', projectionRevision: 8 };
+      surface.render(selectConversationViewModel(state));
+      expectNoReasoningNotice(container);
+      state.turnsById.reply = { ...state.turnsById.reply!, status: 'running', projectionRevision: 9,
+        projection: { ...turn.projection, apiRounds: [{ round: 1,
+          attemptId: 'resumed', taskId: 'new-task', usage: { reasoning_tokens: 50 } }] } };
+      surface.render(selectConversationViewModel(state));
+      expectNoReasoningNotice(container);
+      expect(container.querySelector('.thinking-block')).toBeNull();
+    } finally { surface.dispose(); }
   });
 });
-
-it('does not resurrect inherited reasoning information after a real resume ACK or unrelated update', () => {
-  const turn = { ...source(), projectionRevision: 7 };
-  const state = stateFor(turn);
-  const container = document.createElement('main'); document.body.append(container);
-  const surface = createConversationSurface(container, createClassicConversationRenderers(ports()));
-  try {
-    surface.render(selectConversationViewModel(state));
-    expect(container.querySelector('.conversation-reasoning-summary')?.textContent).toBe('Reasoning summary unavailable');
-    state.attemptsById.resumed = { attemptId: 'resumed', turnId: turn.turnId,
-      taskId: 'new-task', operation: 'checkpoint_resume', baseProjectionRevision: 7 };
-    state.turnsById.reply = { ...turn, status: 'pending', currentAttemptId: 'resumed', projectionRevision: 8 };
-    surface.render(selectConversationViewModel(state));
-    expect(container.querySelector('.conversation-reasoning-status')).toBeNull();
-    state.turnsById.reply = { ...state.turnsById.reply!, status: 'running', projectionRevision: 9,
-      projection: { ...turn.projection, content: 'Unrelated resumed content delta' } };
-    surface.render(selectConversationViewModel(state));
-    expect(container.querySelector('.conversation-reasoning-status')).toBeNull();
-    // An explicitly current API receipt can meter its own returned round, but
-    // its colliding round number cannot lend identity to the old effort snapshot.
-    state.turnsById.reply = { ...state.turnsById.reply!, projectionRevision: 10,
-      projection: { ...state.turnsById.reply!.projection, apiRounds: [{ round: 1,
-        attemptId: 'resumed', taskId: 'new-task', usage: { reasoning_tokens: 50 } }] } };
-    surface.render(selectConversationViewModel(state));
-    expect(container.querySelector('.conversation-reasoning-summary')?.textContent).toBe('No readable reasoning summary received yet');
-    expect(container.querySelector('.conversation-reasoning-tokens')?.textContent).toContain('last returned round): 50');
-    expect(container.querySelector('.conversation-reasoning-effort')).toBeNull();
-    expect(container.querySelector('.thinking-block')).toBeNull();
-  } finally { surface.dispose(); }
-});
-
-
-it.each([renderTurnHeader, renderDefaultTurnHeader])(
-  'keeps late token fields in fresh-render reading order without replacing retained nodes', render => {
-    const select = (turn: TurnRecord) => selectConversationViewModel(stateFor(turn)).mainLane.turns[0];
-    const header = document.createElement('header');
-    render(header, select(source({ lastRoundUsage: evidence.lastRoundUsage }, 'running')), ports());
-    const row = header.querySelector('.conversation-reasoning-status')!;
-    const effort = row.querySelector('.conversation-reasoning-effort');
-    const summary = row.querySelector('.conversation-reasoning-summary');
-    expect(row.children).toHaveLength(2);
-    render(header, select(source(evidence)), ports());
-    const fresh = document.createElement('header');
-    render(fresh, select(source(evidence)), ports());
-    expect(Array.from(row.children, child => child.className)).toEqual(
-      Array.from(fresh.querySelector('.conversation-reasoning-status')!.children, child => child.className));
-    expect(row.textContent).toBe(fresh.querySelector('.conversation-reasoning-status')!.textContent);
-    expect(header.querySelector('.conversation-reasoning-status')).toBe(row);
-    expect(row.querySelector('.conversation-reasoning-effort')).toBe(effort);
-    expect(row.querySelector('.conversation-reasoning-summary')).toBe(summary);
-  },
-);

@@ -12,7 +12,9 @@ Internal fetchers (_fetch_exchange_rates / _fetch_model_pricing_online) and
 the updater (_update_pricing_locked / _do_update_pricing) live here too.
 ``_pricing_data`` is mutated in place under ``_pricing_lock`` by
 ``_do_update_pricing``; keeping the dict + lock + updater in one module
-guarantees they share the same object by reference.
+guarantees they share the same object by reference. Each update then
+publishes an immutable snapshot by reference swap and stamps the pricing
+revision, so ``get_pricing_data`` readers take no lock.
 """
 
 import re
@@ -22,6 +24,7 @@ import uuid
 
 from lib.log import get_logger
 
+from lib.pricing._revision import bump_pricing_revision
 from lib.pricing._tables import DEFAULT_USD_DISPLAY_RATES, MODEL_PRICING
 
 logger = get_logger(__name__)
@@ -52,6 +55,17 @@ _pricing_data = {
 }
 
 
+def _snapshot_pricing_data():
+    snapshot = dict(_pricing_data)
+    snapshot['usdRates'] = dict(
+        _pricing_data.get('usdRates') or DEFAULT_USD_DISPLAY_RATES)
+    return snapshot
+
+
+# Never mutated after publication; writers swap the reference under the lock.
+_published_pricing_data = _snapshot_pricing_data()
+
+
 def _storage(*, write: bool = False):
     from lib.storage import get_storage_client
     return get_storage_client(write=write)
@@ -64,13 +78,12 @@ def get_pricing_data():
     """Return a thread-safe copy of the current pricing data.
 
     ``usdRates`` is nested, so a shallow top-level copy would let an API caller
-    mutate live exchange-rate state without the lock. Copy that bounded map too.
+    mutate the published exchange-rate map. Copy that bounded map too.
     """
-    with _pricing_lock:
-        snapshot = dict(_pricing_data)
-        snapshot['usdRates'] = dict(
-            _pricing_data.get('usdRates') or DEFAULT_USD_DISPLAY_RATES)
-        return snapshot
+    published = _published_pricing_data
+    snapshot = dict(published)
+    snapshot['usdRates'] = dict(published['usdRates'])
+    return snapshot
 
 
 def get_model_price_display_policy():
@@ -296,6 +309,9 @@ def _do_update_pricing():
                 pricingSource='known_table', pricingUpdated=now_ms,
             )
         data_copy = dict(_pricing_data)
+        global _published_pricing_data
+        _published_pricing_data = _snapshot_pricing_data()
+        bump_pricing_revision()
     # Regenerable cache: one semantic Sidecar write, never a local connection.
     try:
         _storage(write=True).command('record.put', {

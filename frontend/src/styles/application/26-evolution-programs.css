@@ -20,7 +20,7 @@
 .exp-page-head>div:first-child{min-width:0;max-width:58rem;}
 .exp-title{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;font-size:var(--font-size-4xl);line-height:var(--leading-title);font-weight:var(--weight-semibold);overflow-wrap:anywhere;margin:var(--space-2) 0 var(--space-3);white-space:pre-wrap;}
 .exp-objective{margin-block:var(--space-4);}
-.exp-objective-text{white-space:pre-wrap;overflow-wrap:anywhere;max-height:min(24rem,50vh);overflow:auto;padding:var(--space-3);background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);}
+.exp-objective-text,.exp-research-context{white-space:pre-wrap;overflow-wrap:anywhere;max-height:min(24rem,50vh);overflow:auto;padding:var(--space-3);background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);}
 .exp-objective-text:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
 .exp-status,.exp-notice{font-size:var(--font-size-md);color:var(--text-secondary);margin:0;line-height:var(--leading-body);}
 .exp-notice:empty{display:none;}

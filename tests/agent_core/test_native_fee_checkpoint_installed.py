@@ -112,7 +112,7 @@ def test_installed_priced_checkpoint_preserves_fees_before_next_http(tmp_path,mo
                     with publication.open('ab') as output:
                         output.write(b'published\n');output.flush();os.fsync(output.fileno())
                 if with_priced_child:
-                    from lib.billing.cost import transfer_native_child_fees
+                    from lib.billing.native_cost import transfer_native_child_fees
                     child=dict(id='paid-native-child',_userId=owner,status='running',config=task['config'],
                         _parentTaskId=task['id'],_executionBudget=task['_executionBudget'],
                         abort_event=threading.Event(),_executionActualsComplete=True)

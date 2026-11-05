@@ -23,6 +23,8 @@ on:
       - 'lib/cost.py'
       - 'lib/pricing/_provider.py'
       - 'lib/billing/cost.py'
+      - 'lib/billing/cost_types.py'
+      - 'lib/billing/native_cost.py'
       - 'tests/release/test_native_runtime_archive.py'
       - 'lib/agent_core/native_process.py'
       - 'tests/agent_core/test_native_process.py'

@@ -28,11 +28,25 @@ sites propagating into the owning shard). Implementation lives in the `_api_*.py
 shards: `_api_errors.py` (typed errors), `_api_hygiene.py` (body/key hygiene),
 `_api_contention.py` (slot contention metrics), `_api_budget.py` (per-attempt
 budgets), `_api_chat.py` (non-streaming dispatch), `_api_stream_state.py` (stream
-attempt state), `_api_stream.py` (streaming dispatch), `_api_multi.py` (multi-key
+body adaptation and settlement), `_api_retry_state.py` (shared retry state),
+`_api_failures.py` (shared chat/sync-stream/async-stream failure decisions),
+`_api_stream.py` (streaming dispatch), `_api_multi.py` (multi-key
 fan-out). New code goes into the owning shard, never the facade. Shard imports stay
 acyclic and may only point leftward in this layering: `_api_errors` / `_api_hygiene` /
-`_api_contention` (leaf shards, no cross-imports) ← `_api_budget` ← `_api_stream_state` ←
+`_api_contention` (leaf shards, no cross-imports) ← `_api_budget` ←
+`_api_stream_state` / `_api_retry_state` / `_api_failures` ←
 `_api_chat` / `_api_stream` ← `_api_multi`.
+
+`DispatchFailurePolicy` settles a failed slot and updates `DispatchRetryState`;
+loops own transport, cancellable waits and queue timing. `ChatFailurePolicy`
+keeps whole-response transport failures request-scoped and retires stream-only
+models; `ChatRetryState` makes non-stream model exclusions durable and preserves
+its existing subscription-wrapper clock policy. Streaming response-read failures
+rotate a pair. Keep cancellation, one OAuth refresh per request, exclusions and
+attempt budgets aligned through public dispatch tests. Capacity checks must see
+every exclusion that survives a reset; never create another exception ladder.
+The facade's historical `_StreamRetryState` name remains a reference to the
+common state owner, not another implementation.
 
 
 `service.py` is the `LLMService` adapter (`DispatchLLMService` +
@@ -45,10 +59,20 @@ Public dispatcher lifecycle is `get_dispatcher` / `reset_dispatcher` from
 after a committed authority mutation. In-package health/autodiscover may rebuild
 the live slot pool in place.
 
+`slot_pool.py` owns live-slot membership and the selection scopes: a pinned
+context reads only its provider/route group, an unpinned one only configured
+slots. Selection APIs go through `LLMDispatcher._selection_scope`, never a scan
+of every live slot; specs are in `tests/llm_dispatch/test_slot_pool_scopes.py`.
+It also keeps the exact key-health credential index (`key_stats_key_names`)
+that `lib.key_stats` reads for last-resort siblings; every pool mutation keeps
+it current, so never project credentials from a walk over the pool.
+
 `ephemeral.py` owns atomic request-handle registration/disposal without a count
-ceiling. Each execution holds its owner-authorized candidate group. Keep
-registration, rollback, cancellation and observer-failure tests in
-`test_ephemeral_capacity.py`; remaining candidate-selection policy is separate.
+ceiling. Each execution holds its owner-authorized candidate group: prepare
+every slot without a lock, publish the group in one critical section, dispose
+it in one identity pass. Keep registration, rollback, cancellation,
+observer-failure and one-lock-acquisition tests in `test_ephemeral_capacity.py`;
+remaining candidate-selection policy is separate.
 
 Native context admission uses NativeContextPolicy and native_context_scope.
 Verify generated native tool projection, route-window/output isolation, joined

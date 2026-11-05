@@ -1,8 +1,9 @@
 """Bearer credentials and request authentication contexts.
 
-Credential rows live only in the Storage Sidecar.  This package generates
+Credential rows live only in the selected storage authority. This package generates
 one-time plaintext tokens, calls semantic identity operations, and translates
-authenticated rows into :class:`AuthContext`; it owns no cache or shadow file.
+authenticated rows into :class:`AuthContext`; it owns no authentication-result
+cache or credential shadow file. Audit-touch scheduling never grants authority.
 """
 
 from __future__ import annotations

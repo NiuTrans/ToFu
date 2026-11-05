@@ -41,7 +41,7 @@ function _applyAutopilotRunConcluded(conv, rec, runId) {
   const incomingIsBareStop = (rec.reason === 'stopped') && !rec.content;
   if (priorIsCleanReport && incomingIsBareStop) return false;
   const _reason = rec.reason || (prior && prior.reason) || 'task_done';
-  conv.autopilotSummaries[runId] = {
+  const conclusion = {
     runId,
     status: rec.status || 'concluded',
     reason: _reason,
@@ -68,6 +68,9 @@ function _applyAutopilotRunConcluded(conv, rec, runId) {
     unsent: (_reason !== 'task_done')
       && !!(rec.unsent || (prior && prior.unsent)),
   };
+  // Publish one immutable snapshot per receipt. The Surface selector compares
+  // this map by identity; mutating an entry leaves an idle concluded run stale.
+  conv.autopilotSummaries = { ...conv.autopilotSummaries, [runId]: conclusion };
   return true;
 }
 

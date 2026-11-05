@@ -38,6 +38,33 @@ attempt and contiguous revisions, accumulated patch bytes, and the final byte
 witness before replacing its caller's logical projection. An error retains the
 physical descriptor and publishes no partial value. Persisted representation, head rollover/retirement, OCC witnesses and durability are unchanged.
 
+The single-event writer follows the same ownership rule. Text/frame helpers
+first borrow the loaded Turn; after those reads finish, the event writer takes
+its private document and moves the previous projection out of the envelope.
+The normalized patch base is already private and goes directly into the owned
+reducer. The previous projection remains available for guidance preservation,
+repair-patch construction and initial checkpoint creation. Cloning the complete
+Turn and projection before those operations, then cloning the private patch
+base again, repeated unchanged history work on every structural event without
+adding an authority or rollback guarantee.
+
+The production-shaped `execution_frame_runtime_timing_leg` ABBA covers nested
+segment edits, tool-round replacement and the existing witness fast path, each
+with compressible and high-entropy 256 KiB text in both root and segment fields.
+Each of 24 process legs measures 12 samples of 64 independent Strict commits;
+all 288 reopened states, response/head signatures and WAL byte counts agree
+between sources. Nested-edit process CPU medians changed from 119.28 to
+112.69 ms and 149.66 to 136.37 ms per 64 events (5.52% and 8.88% lower).
+High-entropy tool replacement changed from 158.47 to 136.88 ms (13.62% lower).
+These three cases improved in both execution orders. Compressible tool
+replacement has mixed order-level results despite a lower pooled median;
+witness-only controls remain within 2.01%, without a claimed gain. This measures
+the default-allocator native component, not application latency. Shared-host
+fsync variation and a CLI build overlapping the final high-entropy tool pair
+prevent attributing wall-clock differences to this change. Exact producer
+parity, guidance, retirement, text-tail, commit-fault and recovery coverage stays
+in the Turn, execution-frame and projection-patch suites.
+
 Alternatives considered: a parsed-head cache requires version/owner fencing,
 budget accounting and reclamation and leaves cold replay's repeated-copy work;
 skipping JSON, identity, revision or byte-witness checks weakens correctness. Moving copies to another thread would retain their CPU and memory costs.

@@ -6,6 +6,20 @@ This package is the motion-video production recipe. Shared durable stage,
 recovery, and publication behavior lives in `lib/production/`. Read
 `docs/modules/ingest_media.md` and `docs/modules/production.md`.
 
+`_film_workflow.py` declares the complete film as fixed typed nodes and enters
+the shared production executor. `_recipe.py` is its topic-planning subworkflow.
+`service.py::start_motion_video` owns initial-film claim, source materialization
+and submission for HTTP, paper and Chat. Caller validation, dedup identity and
+interactive policy remain explicit; runtime kind is never a source discriminator.
+`engine.py` owns job settlement, reusable scene helpers and revision workers.
+Final media is verified before replacing `final.mp4`; scene/model caches retain
+their existing validation owners instead of trusting a stage receipt alone.
+`media_publication.py` owns candidate byte receipts, media observation and atomic
+replacement. Its callers retain gate policy, authorized paths and task settlement.
+It also selects copy, narration mux or audio-plan mix for both initial films and
+revisions. `revision_media.py` owns the private candidate directory and connects
+revision workers to that boundary; it never writes `final.mp4` before verification.
+
 ## Editing rules
 
 - Keep planning, asset acquisition/generation, scene rendering, assembly,
@@ -44,3 +58,5 @@ failed optional prewarm does not serialize the whole scene batch.
 Run focused `test_motion_video_*` plan, engine, quality-gate, resume, abort, and
 artifact tests. Add production-substrate tests when shared stage semantics are
 affected.
+Final-media changes also run `test_motion_video_revision_publication.py` and
+`test_motion_video_workflow.py`, including the installed-codec case.

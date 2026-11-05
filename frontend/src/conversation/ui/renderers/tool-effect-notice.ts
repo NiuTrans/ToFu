@@ -20,6 +20,7 @@ interface NoticeState {
   controller?: AbortController;
   observation?: ConversationToolEffectInspection;
   failed?: boolean;
+  headerNamesOutcome?: boolean;
 }
 const notices = new WeakMap<HTMLElement, NoticeState>();
 
@@ -52,6 +53,9 @@ function copy(state: NoticeState): { title: string; body: string; variant: 'info
         ? text('tool.effectEvidenceConflict', 'The evidence conflicts with the recorded operation. The outcome remains unknown; review the file or request human guidance before another write.')
         : text('tool.effectEvidenceMissing', 'There is not enough trustworthy evidence to establish the outcome. Missing evidence does not mean the write failed.');
   }
+  // The header chip already says "outcome unknown"; repeating it as this
+  // notice's heading put the same words twice in one card.
+  if (state.headerNamesOutcome) return { title: body, body: '', variant: 'warning' };
   return { title: text('tool.effectUnknown', 'Operation outcome unknown'), body, variant: 'warning' };
 }
 
@@ -83,7 +87,8 @@ function paint(node: HTMLElement, state: NoticeState): void {
 }
 
 export function renderToolEffectNotice(node: HTMLElement, kind: ToolEffectNotice,
-  ports: ClassicConversationRendererPorts, effect?: ToolExecutionEffect): void {
+  ports: ClassicConversationRendererPorts, effect?: ToolExecutionEffect,
+  headerNamesOutcome = false): void {
   if (!kind) { disposeToolEffectNotice(node); return; }
   const reference = effect?.scope === 'attempt' && effect.reconciliation?.kind === 'project_file_write'
     && effect.inspection?.operationId === effect.operationId ? effect.inspection : undefined;
@@ -95,6 +100,7 @@ export function renderToolEffectNotice(node: HTMLElement, kind: ToolEffectNotice
     notices.set(node, state);
   }
   state.ports = ports;
+  state.headerNamesOutcome = headerNamesOutcome;
   if (reference && ports.inspectToolEffect && !state.button) {
     const current = state;
     current.button = createButton({ label: '', variant: 'secondary', size: 'sm', wrap: true,

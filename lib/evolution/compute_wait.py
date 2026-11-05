@@ -1,14 +1,27 @@
 """Durable provider-neutral compute dependency; the existing run reaper owns polling.
 
-Entry points register(task, actor, status), advance(run, version, user_id), park.
+Entry points register(task, actor, status), advance(run, version, user_id), park,
+release(run, user_id, resolution).
 No model loop, submission, cancellation, daemon or provider credential is stored.
 Optional SDK ports load only for an enrolled wait; jobs retain status authority.
+A failed status read (or a success whose exit cannot be verified) keeps the wait
+parked and records where it failed: the bounded error, the raising frame and
+the streak start. Each new failure is logged once with its traceback and
+reported to the owner's Router Watchdog (lib.router.watchdog.signals); the
+first successful read, the end of the wait or cancellation closes that signal.
 """
 from contextlib import ExitStack
+from functools import lru_cache
 from pathlib import Path
 import json
+import os
+import sys
 import time
-from .contracts import EvolutionStateError
+import traceback
+from lib.log import get_logger
+from .contracts import EvolutionStateError, load_schema
+
+logger = get_logger(__name__)
 
 
 def register(task, actor, status):
@@ -63,23 +76,94 @@ def park(run, version, user_id):
     return run
 
 
+@lru_cache(maxsize=1)
+def _last_error_bound():
+    return load_schema('evolution_run_v1.schema.json')['$defs']['compute_wait']['properties']['last_error']['maxLength']
+
+
+def _headline(exc):
+    message=str(exc).strip()
+    return f'{type(exc).__name__}: {message}' if message else type(exc).__name__
+
+
+def _raised_at(exc):
+    """Innermost source frame of the failure, relative to its import root."""
+    frames=[frame for frame in traceback.extract_tb(exc.__traceback__) if not frame.filename.startswith('<')]
+    if not frames:return ''
+    frame=frames[-1]
+    roots=[os.path.join(os.path.abspath(entry),'') for entry in sys.path if entry]
+    root=max((root for root in roots if frame.filename.startswith(root)),key=len,default='')
+    return f'{frame.filename[len(root):]}:{frame.lineno} in {frame.name}'
+
+
+def _close_signal(wait, user_id, resolution):
+    signal_id=wait.pop('watchdog_signal_id',None)
+    if signal_id:
+        from lib.router.watchdog.signals import resolve_compute_stall
+        resolve_compute_stall(user_id,signal_id,resolution)
+
+
+def release(run, user_id, resolution):
+    """The wait ends without a successful read: close its open fault signal."""
+    if run.get('compute_wait'):_close_signal(run['compute_wait'],user_id,resolution)
+
+
+def _stalled(run, version, user_id, *, failure, error, origin, kind, detail, exc=None):
+    """Keep the wait parked and record where the read failed; never resubmit."""
+    from . import runs
+    from lib.router.watchdog.signals import report_compute_stall
+    wait=run['compute_wait']
+    error=error[:_last_error_bound()]
+    changed=(wait.get('last_error'),wait.get('last_error_origin',''))!=(error,origin)
+    if changed:
+        logger.warning('[EvolutionComputeWait] run=%s operation=%s status read failed at %s: %s',
+                       run['run_id'],wait['operation_id'],origin or '-',error,exc_info=exc)
+    wait.setdefault('failed_since',time.time())
+    wait['last_error']=error
+    if origin:wait['last_error_origin']=origin
+    else:wait.pop('last_error_origin',None)
+    previous=wait.get('watchdog_signal_id')
+    if changed or not previous:
+        signal=report_compute_stall(user_id,run_id=run['run_id'],operation_id=wait['operation_id'],
+            project_path=wait['project_root'],failure=failure,since=wait['failed_since'],kind=kind,detail=detail)
+        if signal is not None and signal['signalId']!=previous:
+            wait['watchdog_signal_id']=signal['signalId']
+            if previous:
+                from lib.router.watchdog.signals import resolve_compute_stall
+                resolve_compute_stall(user_id,previous,f'Superseded by {signal["signalId"]}: the read now fails with {failure}.')
+    runs._save(run,version,user_id)
+    return run
+
+
 def advance(run, version, user_id):
     from . import runs
     wait=run['compute_wait']
     if time.time()<wait['next_poll_at']:return run
     if runs._budget_exhausted(run,'executing'):
+        release(run,user_id,'The compute wait ended: the run reached its configured execution budget.')
         run.pop('compute_wait');run.update(status='settling',review=None,error='compute_wait_execution_budget_exhausted')
         return runs._finish(run,runs._save(run,version,user_id),user_id)
     wait['next_poll_at']=time.time()+5
     version=runs._save(run,version,user_id)
     try:observed=status_for_wait(wait,user_id)
     except Exception as exc:
-        wait['last_error']=type(exc).__name__;runs._save(run,version,user_id);return run
+        origin=_raised_at(exc)
+        detail='\n'.join([_headline(exc),f'Raised at {origin}' if origin else '',f'Operation: {wait["operation_id"]}','',
+                          ''.join(traceback.format_exception(exc))])
+        return _stalled(run,version,user_id,failure=type(exc).__name__,error=_headline(exc),origin=origin,
+                        kind='compute_observation_failed',detail=detail,exc=exc)
     if observed['operation_id']!=wait['operation_id'] or observed['plan_hash']!=wait['plan_hash'] or observed['plan']['scope']!=wait['scope']:
         raise EvolutionStateError('compute wait observation identity changed')
-    if observed['phase'] not in ('succeeded','failed','cancelled'):return run
     if observed['phase']=='succeeded' and observed.get('exit_code')!=0:
-        wait['last_error']='successful_exit_unverified';runs._save(run,version,user_id);return run
+        error=f'successful_exit_unverified: exit_code={observed.get("exit_code")!r}'
+        return _stalled(run,version,user_id,failure='successful_exit_unverified',error=error,origin='',
+                        kind='compute_exit_unverified',detail=f'{error}\nOperation: {wait["operation_id"]}\n'
+                        +json.dumps({'registered_compute_status':observed},ensure_ascii=False,default=str))
+    if 'last_error' in wait:
+        _close_signal(wait,user_id,f'The status read succeeded again (phase {observed["phase"]}).')
+        for key in ('last_error','last_error_origin','failed_since'):wait.pop(key,None)
+        if observed['phase'] not in ('succeeded','failed','cancelled'):runs._save(run,version,user_id)
+    if observed['phase'] not in ('succeeded','failed','cancelled'):return run
     run.pop('compute_wait');run['compute_wait_resume']={'task_id':wait['task_id'],'operation_id':wait['operation_id']}
     prompt=runs._execution_prompt(run,user_id)+'\nContinue after the registered compute dependency. '
     prompt+='The original submission instruction has already been satisfied; it is not an instruction to replay it. Do not plan, submit or cancel this existing operation. Observe/collect only when successful; analyse failure without claiming success. Original goal and acceptance remain unchanged.\n'

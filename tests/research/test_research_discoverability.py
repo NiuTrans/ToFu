@@ -34,7 +34,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 import subprocess
 import sys
 
@@ -49,7 +48,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RESEARCH_VIEW_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'evolution', 'research', 'components', 'view.ts')
-ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 pytestmark = pytest.mark.unit
 
 _DIR_A = 'long-context KV-cache compression'
@@ -242,14 +240,6 @@ def test_list_never_leaks_a_real_papers_report(client, fresh_db):
 
 # ═══ 2. ★ The panel must actually render the artifacts ═══
 
-def _node_ok():
-    return (bool(shutil.which('node'))
-            and os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
-            and os.path.isfile(ESBUILD))
-
-
-requires_node = pytest.mark.skipif(
-    not _node_ok(), reason='node/jsdom dev-deps not installed')
 
 _RENDER_HARNESS = r"""
 const fs = require('fs'), path = require('path');
@@ -398,7 +388,6 @@ def _run_render(scenario='live'):
         return json.loads(line[-1])
 
 
-@requires_node
 def test_accepted_idea_title_and_mechanism_reach_the_dom():
     """★ The owner's explicit criterion. The old panel showed three integers;
     the ideas the pipeline paid for were fetched and then discarded."""
@@ -425,7 +414,6 @@ def test_accepted_idea_title_and_mechanism_reach_the_dom():
     assert key, 'an idempotency key must fence ambiguous retries'
 
 
-@requires_node
 def test_novelty_claim_and_falsifiable_prediction_render():
     out = _run_render()
     text = out.get('text') or ''
@@ -435,7 +423,6 @@ def test_novelty_claim_and_falsifiable_prediction_render():
         'falsifiable_prediction was dropped'
 
 
-@requires_node
 def test_rejected_audit_is_collapsed_but_summarised():
     """Owner ruling: default-collapsed WITH a one-line summary, so an honest
     宁缺毋滥 zero is legible instead of an alarming wall of rejections."""
@@ -452,7 +439,6 @@ def test_rejected_audit_is_collapsed_but_summarised():
         f'threshold; text was: {text[:400]}')
 
 
-@requires_node
 def test_survey_markdown_and_gap_map_render():
     out = _run_render()
     text = out.get('text') or ''
@@ -461,7 +447,6 @@ def test_survey_markdown_and_gap_map_render():
         'the open-gap map never rendered'
 
 
-@requires_node
 def test_interrupted_run_does_not_claim_an_honest_zero():
     """A 429-killed run has NO gate verdict. The empty candidate panel must
     say the run was interrupted — the 2026-09-04 incident showed the
@@ -476,7 +461,6 @@ def test_interrupted_run_does_not_claim_an_honest_zero():
         'reached the gate')
 
 
-@requires_node
 def test_panel_rebuilds_from_the_store_with_no_live_job():
     """★ The refresh criterion: no task was ever started on this page, so the
     panel can only be built from the durable lookup."""
@@ -490,7 +474,6 @@ def test_panel_rebuilds_from_the_store_with_no_live_job():
         'the panel did not rebuild from persisted data after a refresh')
 
 
-@requires_node
 def test_completed_workbench_exposes_pipeline_decision_and_reproducibility_ledger():
     """The complete page is an operating surface, not an attractive idea list.
 
@@ -510,7 +493,6 @@ def test_completed_workbench_exposes_pipeline_decision_and_reproducibility_ledge
         'an accepted hypothesis cannot be copied into an experiment workflow')
 
 
-@requires_node
 def test_run_view_is_a_chronological_thread_with_filter_chips():
     """Owner ruling: a run reads as ONE conversation thread in pipeline order
     (evidence → ideas → ledger in this fixture), with kind filter chips and

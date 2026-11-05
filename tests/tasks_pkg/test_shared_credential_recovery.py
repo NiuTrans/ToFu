@@ -1,4 +1,6 @@
 """Pre-ingress credential failures retry the same round without replaying tools."""
+
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
 import pytest
 
 from lib.llm.llm_errors import (AbortedError, LocalRequestPreparationError,
@@ -63,9 +65,9 @@ def test_only_proven_transient_pre_ingress_failures_retry(monkeypatch, clock, er
     def stream(*args, **kwargs):
         calls.append(1)
         raise error
-    monkeypatch.setattr(_call, 'stream_llm_response', stream)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream)
     with pytest.raises(type(error)) as raised:
-        _call._stream_with_credential_recovery(_call.stream_llm_response, {'id': 'task', 'events': []}, {'model': 'same'})
+        recovery.stream_with_credential_recovery(_fallback_transport.stream_llm_response, {'id': 'task', 'events': []}, {'model': 'same'})
     assert raised.value is error
     assert calls == [1]
 
@@ -75,9 +77,9 @@ def test_delivered_tool_callback_prevents_replay(monkeypatch, clock):
     def stream(task, body, **kwargs):
         kwargs['on_tool_call_ready']('side-effect')
         raise _failure()
-    monkeypatch.setattr(_call, 'stream_llm_response', stream)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream)
     with pytest.raises(LocalRequestPreparationError):
-        _call._stream_with_credential_recovery(_call.stream_llm_response,
+        recovery.stream_with_credential_recovery(_fallback_transport.stream_llm_response,
             {'id': 'task', 'events': []}, {}, on_tool_call_ready=tools.append)
     assert tools == ['side-effect']
 
@@ -88,9 +90,9 @@ def test_persistent_failure_is_bounded_and_keeps_final_typed_error(monkeypatch, 
         error = _failure()
         errors.append(error)
         raise error
-    monkeypatch.setattr(_call, 'stream_llm_response', stream)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream)
     with pytest.raises(LocalRequestPreparationError) as raised:
-        _call._stream_with_credential_recovery(_call.stream_llm_response, {'id': 'task', 'events': []}, {})
+        recovery.stream_with_credential_recovery(_fallback_transport.stream_llm_response, {'id': 'task', 'events': []}, {})
     assert len(errors) == 3
     assert raised.value is errors[-1]
 
@@ -105,9 +107,9 @@ def test_cancellation_interrupts_backoff_without_another_attempt(monkeypatch, cl
         clock[0] += seconds
         task['aborted'] = True
     monkeypatch.setattr(recovery.time, 'sleep', sleep)
-    monkeypatch.setattr(_call, 'stream_llm_response', stream)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream)
     with pytest.raises(AbortedError):
-        _call._stream_with_credential_recovery(_call.stream_llm_response, task, {})
+        recovery.stream_with_credential_recovery(_fallback_transport.stream_llm_response, task, {})
     assert calls == [1]
     assert clock[0] <= 0.1
 
@@ -119,9 +121,9 @@ def test_recovery_deadline_prevents_another_attempt(monkeypatch, clock):
         error = _failure()
         errors.append(error)
         raise error
-    monkeypatch.setattr(_call, 'stream_llm_response', stream)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream)
     with pytest.raises(LocalRequestPreparationError) as raised:
-        _call._stream_with_credential_recovery(_call.stream_llm_response, {'id': 'task', 'events': []}, {})
+        recovery.stream_with_credential_recovery(_fallback_transport.stream_llm_response, {'id': 'task', 'events': []}, {})
     assert raised.value is errors[0]
     assert len(errors) == 1
     assert clock[0] == 30

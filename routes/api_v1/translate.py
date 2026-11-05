@@ -5,6 +5,7 @@ Routes:
   POST /api/v1/translate/start          — start async task
   GET  /api/v1/translate/poll/<id>      — poll single task
   POST /api/v1/translate/poll-batch     — poll multiple tasks
+  GET  /api/v1/translate/previews/<conv> — live previews of running turns
   POST /api/v1/translate/abort/<id>     — cancel queued/running task
   POST /api/v1/translate/mt-test        — test MT provider config
 
@@ -28,7 +29,7 @@ from lib.api_response import (
 from lib.error_envelope import from_exception
 from lib.log import get_logger
 from lib.openapi import api_meta
-from lib.request_parser import parse_body
+from lib.request_parser import optional_dict, optional_str, parse_body
 from lib.translate.constants import _SYNC_TRANSLATE_MAX_CHARS
 from lib.translate.errors import (
     TranslationContentRefused,
@@ -293,45 +294,71 @@ def translate_poll_batch_v1():
     return api_ok({'items': results})
 
 
+@api_v1_translate_bp.route('/api/v1/translate/previews/<conv_id>', methods=['GET'])
+@require_auth
+@api_meta(
+    summary="Read completed live translation previews of a conversation's running turns",
+    description=(
+        'Presentation-only: running-turn previews are pushed once per block, '
+        'so a reload, reconnect or unmounted conversation re-reads them here. '
+        'Body: ``{previews: [{turnId, partialByRound}]}``.'),
+    tags=['translate'],
+)
+def translate_previews_v1(conv_id):
+    from lib.translate.incremental import preview_translations_for_conversation
+
+    user_id = int(request_user_id())
+    return api_ok({'previews': preview_translations_for_conversation(
+        conv_id, user_id=user_id)})
+
+
 @api_v1_translate_bp.route('/api/v1/translate/mt-test', methods=['POST'])
 @require_auth
 @api_meta(
     summary='Test a machine translation provider configuration',
-    description='Body: ``{mt_config: {api_key, ...}, text?, source?, target?}``.',
+    description=(
+        'Body: ``{mt_config: {api_key, ...}, text?, source?, target?}``. '
+        'A missing key or a provider failure answers 200 with ``ok: false`` '
+        '(registered legacy carve-out); a malformed field is 400 and a server '
+        'fault a redacted 500.'),
     tags=['translate'],
 )
 def mt_test_v1():
     data = parse_body(exact=('mt_config', 'source', 'target', 'text',))
-    mt_config = data.get('mt_config', {})
-    text = data.get('text', 'Hello, this is a test.')
-    source = data.get('source', 'en')
-    target = data.get('target', 'zh')
+    mt_config = optional_dict(data, 'mt_config')
+    text = optional_str(data, 'text', default='Hello, this is a test.',
+                        strip=False)
+    source = optional_str(data, 'source', default='en')
+    target = optional_str(data, 'target', default='zh')
+    api_key = optional_str(mt_config, 'api_key', strip=False)
+    app_id = optional_str(mt_config, 'app_id', strip=False)
+    api_url = optional_str(mt_config, 'api_url', strip=False)
 
-    if not mt_config.get('api_key'):
+    if not api_key:
         return api_error('API Key 未填写', status=200)
 
-    api_key = mt_config.get('api_key', '')
-    app_id = mt_config.get('app_id', '')
-    api_url = mt_config.get('api_url', '')
-
+    from lib.mt_provider import (
+        MtProviderError, _niutrans_v1, _niutrans_v2, _normalize_lang,
+    )
+    src_lang = _normalize_lang(source)
+    tgt_lang = _normalize_lang(target)
     try:
-        from lib.mt_provider import _niutrans_v1, _niutrans_v2, _normalize_lang
-        src_lang = _normalize_lang(source)
-        tgt_lang = _normalize_lang(target)
-
         if app_id:
             result = _niutrans_v2(
                 text, src_lang, tgt_lang, api_key, app_id, api_url)
         else:
             result = _niutrans_v1(
                 text, src_lang, tgt_lang, api_key, api_url)
-
-        logger.info('[MT-Test.v1] OK: "%s"→"%s" (%s→%s)',
-                    text[:50], result[:50], source, target)
-        return api_ok({'translated': result})
-    except Exception as e:
+    except MtProviderError as e:
+        # The 200 carve-out covers only the provider's typed answer.
         logger.warning('[MT-Test.v1] Failed: %s', e)
         return api_error(str(e), status=200)
+    except Exception as e:
+        return api_internal_error(e, source='api_v1.translate.mt_test')
+
+    logger.info('[MT-Test.v1] OK: "%s"→"%s" (%s→%s)',
+                text[:50], result[:50], source, target)
+    return api_ok({'translated': result})
 
 
 def _abort_translate_task(task_id: str, owner_user_id: int):

@@ -24,11 +24,11 @@ DB-free; skips when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
 from tests._paper_vite import compiled_typescript
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -50,12 +50,6 @@ Object.assign(window, {
   _readerWidthCycle: readerWidthCycle,
 });
 """
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -155,13 +149,9 @@ def _run(paper_js: str) -> subprocess.CompletedProcess:
             pass
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed')
 def test_vite_reader_prefs_apply_and_persist():
     """The native TS owner must satisfy the same browser behavior contract."""
-    esbuild = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
-    if not os.path.isfile(esbuild):
-        pytest.skip('esbuild dev dependency not installed')
+    require_node_modules('jsdom', 'vite')
     with compiled_typescript(
         PAPER_TS,
         contents=_TEST_ENTRY,

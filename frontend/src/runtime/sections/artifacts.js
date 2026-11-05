@@ -947,7 +947,9 @@ import { mountArtifactReview } from '../rich-response/artifact-review';
     const epoch = (_hydrateEpoch.get(conv) || 0) + 1;
     _hydrateEpoch.set(conv, epoch);
     _artifactHints.set(conv, hasArtifacts);
-    if (!runtimeScope.ConversationSurfacePresentation?.ownsConversation?.(conv.id)) return;
+    // A mounted host is enough for bounded presentation reads. It need not
+    // have acknowledged its in-progress canonical DOM commit yet.
+    if (!runtimeScope.ConversationSurfacePresentation?.isMounted?.(conv.id)) return;
     if (hasArtifacts === false) {
       runtimeScope.ConversationSurfacePresentation?.setArtifacts?.(
         conv.id, new Map(),

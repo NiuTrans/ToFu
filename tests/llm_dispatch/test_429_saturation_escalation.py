@@ -14,6 +14,11 @@ signal, not evidence that the model is dead. Deployments may explicitly set a
 positive ``TOFU_429_SATURATION_SECS`` to opt into bounded escalation.
 """
 
+import lib.tasks_pkg.llm_fallback._retry as _fallback_retry
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+import lib.tasks_pkg.llm_fallback._usage as _fallback_usage
+import lib.tasks_pkg.manager._events as _fallback_events
+
 import threading
 import time as _real_time
 
@@ -304,12 +309,12 @@ class TestFallbackSwallowsSaturation:
             return ({'role': 'assistant', 'content': 'recovered'},
                     'stop', {'prompt_tokens': 5, 'completion_tokens': 3})
 
-        monkeypatch.setattr(fb_pkg, 'stream_llm_response', _fake_stream)
-        monkeypatch.setattr(fb_pkg, '_get_fallback_model', lambda task: 'kimi-k3')
-        monkeypatch.setattr(fb_pkg, '_flag_empty_stop_for_retry',
+        monkeypatch.setattr(_fallback_transport, 'stream_llm_response', _fake_stream)
+        monkeypatch.setattr(_fallback_retry, '_get_fallback_model', lambda task: 'kimi-k3')
+        monkeypatch.setattr(_fallback_retry, '_flag_empty_stop_for_retry',
                             lambda *a, **kw: False)
-        monkeypatch.setattr(fb_pkg, '_emit_round_usage', lambda *a, **kw: None)
-        monkeypatch.setattr(fb_pkg, 'append_event',
+        monkeypatch.setattr(_fallback_usage, '_emit_round_usage', lambda *a, **kw: None)
+        monkeypatch.setattr(_fallback_events, 'append_event',
                             lambda task, ev: events.append(ev))
 
         task = {'id': 't-sat-0001', 'convId': 'conv-sat', 'config': {},

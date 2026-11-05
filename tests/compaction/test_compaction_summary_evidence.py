@@ -227,28 +227,41 @@ def test_newest_selection_is_deterministic_chronological_and_globally_bounded():
     assert len(rows) <= owner.EVIDENCE_MAX_ROWS
 
 
-def test_large_result_is_not_fully_encoded_or_json_parsed(monkeypatch):
-    from lib.tasks_pkg.compaction._layer2 import _summary_evidence as owner
+@pytest.fixture
+def owner_parses(monkeypatch):
+    """Record and bound the evidence owner's JSON parses, and only those.
 
+    ``owner.json`` is the process-global module: patching its ``loads`` breaks
+    any lazy import inside the test that runs ``json.load(fp)`` (``cls=``).
+    """
+    from lib.tasks_pkg.compaction._layer2 import _summary_evidence as owner
+    sizes = []
+
+    class OwnerJson:
+        def __getattr__(self, name):
+            return getattr(json, name)
+
+        @staticmethod
+        def loads(value, *args, **kwargs):
+            sizes.append(len(value))
+            assert len(value) <= owner.EVIDENCE_PARSE_CHARS
+            return json.loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(owner, 'json', OwnerJson())
+    return sizes
+
+
+def test_large_result_is_not_fully_encoded_or_json_parsed(owner_parses):
     class LargeText(str):
         def encode(self, *args, **kwargs):
             raise AssertionError('unbounded encoding')
 
-    real_loads = owner.json.loads
-    parsed_sizes = []
-
-    def bounded_loads(value):
-        parsed_sizes.append(len(value))
-        assert len(value) <= owner.EVIDENCE_PARSE_CHARS
-        return real_loads(value)
-
-    monkeypatch.setattr(owner.json, 'loads', bounded_loads)
     payload = LargeText('{"output":"HEAD ' + 'fact ' * 400000 + ' TAIL"}')
     text = _format_messages_for_summary([result(payload, artifactRef='tool-result:stable')])
     assert 'HEAD' in text and 'TAIL' in text
     assert 'tool-result:stable' in text
     assert 'middle omitted' in text
-    assert not parsed_sizes
+    assert not owner_parses
 
 
 def test_reused_objects_remain_distinct_occurrences():
@@ -330,7 +343,7 @@ def default_summary(monkeypatch):
     return generate
 
 
-def test_default_dispatch_bounds_large_results_and_fanout(default_summary, monkeypatch):
+def test_default_dispatch_bounds_large_results_and_fanout(default_summary, owner_parses):
     from lib.tasks_pkg.compaction._layer2 import _summary_evidence as owner
     class LargeText(str):
         def encode(self, *args, **kwargs):
@@ -341,11 +354,6 @@ def test_default_dispatch_bounds_large_results_and_fanout(default_summary, monke
         def __getitem__(self, key):
             assert isinstance(key, slice) and key.stop <= owner.EVIDENCE_MAX_CALLS
             return super().__getitem__(key)
-    loads = owner.json.loads
-    def bounded_loads(value):
-        assert len(value) <= owner.EVIDENCE_PARSE_CHARS
-        return loads(value)
-    monkeypatch.setattr(owner.json, 'loads', bounded_loads)
     messages = [{'role': 'user', 'content': '  Keep exact human text.\n'},
                 {'role': 'assistant', 'tool_calls': Calls([call('probe')] * 10000)},
                 result(LargeText('HEAD failure ' + 'fact ' * 400000 + ' TAIL incomplete'),

@@ -138,6 +138,7 @@ from lib.storage_authority_sql.operations_pkg._worker_jobs import (
     _worker_job_get as _worker_job_get,
     _worker_job_enqueue as _worker_job_enqueue,
     _worker_job_claim_next as _worker_job_claim_next,
+    _worker_job_claim_horizon as _worker_job_claim_horizon,
     _worker_job_heartbeat as _worker_job_heartbeat,
     _worker_job_claim_state as _worker_job_claim_state,
     _worker_job_request_cancel as _worker_job_request_cancel,
@@ -205,8 +206,13 @@ from lib.storage_authority_sql.operations_pkg._runs import (
     _swarm_session_quarantine_ownerless as _swarm_session_quarantine_ownerless,
     _swarm_session_delete as _swarm_session_delete,
     _swarm_agent_save as _swarm_agent_save,
+    _swarm_agent_append as _swarm_agent_append,
+    _swarm_agent_checkpoint_mark as _swarm_agent_checkpoint_mark,
     _swarm_agents_mark_delivered as _swarm_agents_mark_delivered,
+    _swarm_agents_acknowledge_results as _swarm_agents_acknowledge_results,
     _swarm_session_get as _swarm_session_get,
+    _swarm_agents_page as _swarm_agents_page,
+    _swarm_agent_state_get as _swarm_agent_state_get,
     _swarm_resumable_list as _swarm_resumable_list,
 )
 from lib.storage_authority_sql.operations_pkg._papers import (
@@ -447,6 +453,7 @@ from lib.storage_authority_sql.operations_pkg._turns import (
     _turn_attempt_bind as _turn_attempt_bind,
     _turn_attempt_start as _turn_attempt_start,
     _turn_event_record as _turn_event_record,
+    _turn_event_record_batch as _turn_event_record_batch,
 )
 from lib.storage_authority_sql.operations_pkg._worker_dispatch import (
     _CONVERSATION_ATTEMPT_JOB_CONTRACT as _CONVERSATION_ATTEMPT_JOB_CONTRACT,

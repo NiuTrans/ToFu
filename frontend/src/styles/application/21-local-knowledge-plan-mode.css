@@ -1,8 +1,7 @@
 /* ══════════════════════════════════════════════════════════════════
-   Local Knowledge workbench — independent from Settings → Tools
+   Local Knowledge workbench — Settings → Knowledge Base
    ══════════════════════════════════════════════════════════════════ */
-body.kb-open { overflow: hidden; }
-.kb-overlay { padding: var(--space-5); background: rgba(10, 10, 12, .58); backdrop-filter: blur(5px); }
+.kb-overlay { padding: 0; }
 .kb-workbench {
   width: min(1120px, 94vw);
   height: min(860px, calc(var(--vh100, 100vh) - 40px));
@@ -521,6 +520,52 @@ body.kb-open { overflow: hidden; }
   .kb-section-head { gap: 10px; }
   .kb-primary-btn { padding: 0 var(--space-3); }
   .kb-dropzone { padding: var(--space-3) 14px; }
+}
+#settingsTab_knowledge .kb-workbench,
+#settingsTab_knowledge .kb-workbench[data-has-docs="false"] {
+  width: 100%;
+  height: auto;
+  max-height: none;
+  border-radius: var(--radius-md);
+  box-shadow: none;
+}
+#settingsTab_knowledge .kb-workbench[data-has-docs="false"] .kb-body,
+#settingsTab_knowledge .kb-workbench[data-has-docs="false"] .kb-library,
+#settingsTab_knowledge .kb-workbench[data-has-docs="false"] .kb-search-panel {
+  display: flex;
+  flex-direction: column;
+}
+#settingsTab_knowledge .kb-body { grid-template-columns: minmax(0, 1fr); }
+#settingsTab_knowledge .kb-search-panel {
+  border-top: 1px solid var(--border);
+  border-left: 0;
+}
+#settingsTab_knowledge .kb-library { min-height: 260px; }
+#settingsTab_knowledge .kb-search-results { min-height: 120px; }
+#settingsTab_knowledge .kb-workbench[data-has-docs="false"] .kb-panel-foot {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  padding-left: 0;
+  border-top: 1px solid var(--border);
+  border-left: 0;
+}
+#settingsTab_knowledge .kb-workbench[data-has-docs="false"] .kb-library,
+#settingsTab_knowledge .kb-workbench[data-has-docs="false"] .kb-search-panel {
+  padding: var(--space-5);
+}
+@media (max-width: 768px), (max-width: 1024px) and (pointer: coarse) {
+  #settingsTab_knowledge .kb-workbench,
+  #settingsTab_knowledge .kb-workbench[data-has-docs="false"] {
+    height: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+  }
+  #settingsTab_knowledge .kb-library,
+  #settingsTab_knowledge .kb-search-panel,
+  #settingsTab_knowledge .kb-workbench[data-has-docs="false"] .kb-library,
+  #settingsTab_knowledge .kb-workbench[data-has-docs="false"] .kb-search-panel {
+    padding: var(--space-4);
+  }
 }
 @media (max-width: 460px) {
   .kb-workbench[data-has-docs="true"] .kb-drop-icon { display: none; }

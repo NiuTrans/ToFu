@@ -60,8 +60,9 @@ def test_project_js_has_remote_seams():
     assert '_applyRemoteProjectState' in state_src, '缺 bar 合成态函数'
     panel_src = _read(_PROJECT_JS)
     assert '_renderRemoteDevicesSection' in panel_src, '缺远程分组渲染函数'
-    # browseDirectory 必须触发分组渲染(弹窗每次打开/换目录都新鲜)
+    # 打开弹窗必须触发分组渲染(每次打开都新鲜);分组作为共享浏览器的 prelude 挂入
     assert '_renderRemoteDevicesSection()' in panel_src
+    assert 'prelude: document.getElementById("remoteDevicesSection")' in panel_src
 
 
 def test_i18n_remote_group_key():

@@ -159,18 +159,20 @@ class NativeContextPolicy:
                 tid=self.task_id[:8], model=metadata['logical_model'],
                 project_path=self.project_path, project_enabled=self.project_enabled,
                 round_tools=tools)
-            admit_round_context(self.task, request.messages, tools,
+            admission_tools = tools
+            projected = None
+            if self._projection is not None:
+                metadata,template,catalog=json.loads(self._wire_binding)
+                projected=self._projection(metadata,template,catalog,request.messages,request.round)
+                if not isinstance(projected,list) or any(not isinstance(tool,dict) for tool in projected):
+                    raise ValueError('native context wire projection is not canonical')
+                admission_tools = projected
+            admit_round_context(self.task, request.messages, admission_tools,
                 round_num=request.round, model=metadata['logical_model'])
         self._check(request)
         if self.task['abort_event'].is_set():
             raise asyncio.CancelledError
-        if self._projection is not None:
-            metadata,template,catalog=json.loads(self._wire_binding)
-            projected=self._projection(metadata,template,catalog,request.messages,request.round)
-            if not isinstance(projected,list) or any(not isinstance(tool,dict) for tool in projected):
-                raise ValueError('native context wire projection is not canonical')
-            self._check(request)
-            if self.task['abort_event'].is_set():raise asyncio.CancelledError
+        if projected is not None:
             self._wire_tools=json.dumps(projected,ensure_ascii=False,allow_nan=False)
             from lib.tasks_pkg.context_dependencies import observe_wire
             observe_wire(self.task, request.messages)

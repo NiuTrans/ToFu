@@ -8,7 +8,8 @@ export interface MarkdownOptions {
 }
 
 export interface MarkdownParser { parse(source: string): string }
-export interface MarkdownSanitizer { sanitize(html: string): string }
+export interface MarkdownSanitizerConfig { readonly ALLOW_DATA_ATTR: false }
+export interface MarkdownSanitizer { sanitize(html: string, config: MarkdownSanitizerConfig): string }
 export interface MarkdownHighlighter {
   getLanguage(language: string): unknown;
   highlight(text: string, options: { language: string }): { value: string };

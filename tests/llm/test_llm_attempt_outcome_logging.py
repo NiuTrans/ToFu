@@ -1,11 +1,12 @@
 """Provider attempt logs must follow typed stream completion authority."""
 
+
 import logging
 
 import pytest
 
 from lib.llm.stream_result import ProviderStreamResult
-from lib.tasks_pkg.llm_fallback._call import _log_stream_attempt_outcome
+from lib.tasks_pkg.llm_fallback._transport import _log_stream_attempt_outcome
 
 
 pytestmark = pytest.mark.unit

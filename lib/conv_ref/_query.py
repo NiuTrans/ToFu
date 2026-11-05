@@ -32,6 +32,17 @@ def _timestamp_label(value) -> str:
         return str(value)
 
 
+def _match_label(hit) -> str:
+    """Name the matching Turn (or archived text) and its snippet."""
+    where = (f" in Turn {hit['turn_id']}" if hit.get('turn_id')
+             else " in compacted history (no live Turn)")
+    detail = ', '.join(str(part) for part in (hit.get('role'), hit.get('match_field'))
+                       if part)
+    snippet = ' '.join(str(hit.get('snippet') or '').split())
+    return (where + (f" ({detail})" if detail else '')
+            + (f': "{snippet}"' if snippet else ''))
+
+
 def list_conversations(
     keyword=None,
     limit=20,
@@ -42,6 +53,10 @@ def list_conversations(
     user_id,
 ):
     """List other conversations visible to one owning principal.
+
+    The caller's own conversation (``current_conv_id``) is excluded, and every
+    result says so and names it, because ``get_conversation`` is how that
+    conversation recalls its Turns outside the current working view.
 
     ``scope='project'`` filters on ``settings.projectPath``. Keyword matching
     combines a title substring with the authority's bounded full-text search;
@@ -63,7 +78,8 @@ def list_conversations(
     )
 
     keyword_text = str(keyword or "").strip()
-    body_hit_ids = set()
+    # One authority hit per conversation: its best matching chunk.
+    body_hits = {}
     coverage = 'ready'
     coverage_reasons = []
     cursor = None
@@ -74,7 +90,8 @@ def list_conversations(
         for _ in range(4):
             page = search_conversation_page(keyword_text, user_id=owner_id,
                                             limit=200, cursor=cursor)
-            body_hit_ids.update(hit['id'] for hit in page['items'])
+            for hit in page['items']:
+                body_hits.setdefault(hit['id'], hit)
             coverage = page.get('coverage', 'unknown')
             coverage_reasons = list(dict.fromkeys([
                 *coverage_reasons, *page.get('coverage_reasons', []),
@@ -96,6 +113,7 @@ def list_conversations(
         "include_messages": False,
         "settings_keys": ["projectPath"],
     }
+    body_hit_ids = set(body_hits)
     if keyword_text:
         title_snapshots = read_conversations(
             **common_read,
@@ -164,6 +182,25 @@ def list_conversations(
         if effective_scope == "project" and project_path
         else " across your other conversations"
     )
+    # The listing excludes the caller's own conversation; say so, and name
+    # the recall path for its Turns outside the current working view. A body
+    # match there names the Turn, so recall reads that page directly.
+    current_hit = body_hits.get(current_conv_id) if current_conv_id else None
+    if current_hit and current_hit.get('turn_id'):
+        current_note = (
+            f"\nThe current conversation [{current_conv_id}] is not listed, but it "
+            f"matches{_match_label(current_hit)}. Read that page with "
+            f'get_conversation(conversation_id="{current_conv_id}", '
+            f'turn_id="{current_hit["turn_id"]}").'
+        )
+    elif current_conv_id:
+        current_note = (
+            f"\nThe current conversation [{current_conv_id}] is not listed. Read "
+            "its earlier Turns with "
+            f'get_conversation(conversation_id="{current_conv_id}", before=N).'
+        )
+    else:
+        current_note = ''
     if not selected:
         if keyword_text:
             advice = "Try a shorter or different keyword."
@@ -175,8 +212,10 @@ def list_conversations(
                        if incomplete or coverage != 'ready' else '')
             return ConversationListing(
                 f"{status} matching '{keyword_text}'{scope_note}. {advice}{warning} "
-                "Search covers titles and indexed public text, not tool arguments/results.", receipt)
-        return ConversationListing(f"No other conversations found{scope_note}.", receipt)
+                "Search covers titles and indexed public text, not tool arguments/results."
+                + current_note, receipt)
+        return ConversationListing(
+            f"No other conversations found{scope_note}.{current_note}", receipt)
 
     keyword_note = f" matching '{keyword_text}'" if keyword_text else ''
     lines = [f"Found {len(selected)} conversation(s){keyword_note}{scope_note}:\n"]
@@ -189,12 +228,17 @@ def list_conversations(
             f'• [{conversation_id}] "{title}" — {msg_count} messages, '
             f"updated {_timestamp_label(updated)}"
         )
+        hit = body_hits.get(conversation_id)
+        if hit and hit.get('match_field') not in ('title', 'id'):
+            lines.append(f"    ↳ matches{_match_label(hit)}")
     lines.append(
-        '\nUse get_conversation(conversation_id="<id>") to retrieve full content.'
+        '\nUse get_conversation(conversation_id="<id>") to retrieve full content'
+        + ('; add turn_id="<turn>" to read the page around a matching Turn.'
+           if any(hit.get('turn_id') for hit in body_hits.values()) else '.')
     )
     if incomplete or coverage != 'ready':
         lines.append('Search is incomplete or coverage is not ready; results are not exhaustive.')
-    return ConversationListing("\n".join(lines), receipt)
+    return ConversationListing("\n".join(lines) + current_note, receipt)
 
 
 __all__ = ["list_conversations"]

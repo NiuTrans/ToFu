@@ -63,13 +63,20 @@ OPENAPI_SCHEMAS = {'CatpawLocalImportApplyResponse': {'additionalProperties': Fa
                                                            'maxItems': 128,
                                                            'type': 'array'},
                                            'deployments': {'items': {'$ref': '#/$defs/deployment'},
-                                                           'maxItems': 1024,
+                                                           'maxItems': 8192,
                                                            'type': 'array'},
                                            'models': {'items': {'$ref': '#/$defs/model'},
                                                       'maxItems': 1024,
                                                       'type': 'array'},
-                                           'offerings': {'items': {'$ref': '#/$defs/offering'},
-                                                         'maxItems': 512,
+                                           'offerings': {'description': 'Same bound as the '
+                                                                        "authority's "
+                                                                        'reasoning_controls '
+                                                                        'projection, not a listing '
+                                                                        'size: a provider holds '
+                                                                        'its whole /models listing '
+                                                                        'once the owner loads it.',
+                                                         'items': {'$ref': '#/$defs/offering'},
+                                                         'maxItems': 8192,
                                                          'type': 'array'},
                                            'provider': {'$ref': '#/$defs/provider'},
                                            'provider_access': {'$ref': '#/$defs/providerAccess'}},
@@ -100,6 +107,18 @@ OPENAPI_SCHEMAS = {'CatpawLocalImportApplyResponse': {'additionalProperties': Fa
                                                    'secret': {'type': 'string'}},
                                     'required': ['credential_id', 'secret'],
                                     'type': 'object'},
+ 'ListedModelsImportResponse': {'additionalProperties': False,
+                                'properties': {'added_model_count': {'minimum': 0,
+                                                                     'type': 'integer'},
+                                               'listed_model_count': {'minimum': 0,
+                                                                      'type': 'integer'},
+                                               'provider_id': {'minLength': 1, 'type': 'string'},
+                                               'revision': {'$ref': '#/components/schemas/Revision'}},
+                                'required': ['provider_id',
+                                             'listed_model_count',
+                                             'added_model_count',
+                                             'revision'],
+                                'type': 'object'},
  'MigrationCommitResponse': {'additionalProperties': False,
                              'properties': {'migration_receipt': {'additionalProperties': True,
                                                                   'type': 'object'},
@@ -268,7 +287,7 @@ OPENAPI_SCHEMAS = {'CatpawLocalImportApplyResponse': {'additionalProperties': Fa
                                                                                 'maxItems': 128,
                                                                                 'type': 'array'},
                                                                    'model_ids': {'items': {'type': 'string'},
-                                                                                 'maxItems': 1024,
+                                                                                 'maxItems': 8192,
                                                                                  'type': 'array'}},
                                                     'type': 'object'},
                                            'targets': {'description': 'Temporary request names on '
@@ -277,7 +296,7 @@ OPENAPI_SCHEMAS = {'CatpawLocalImportApplyResponse': {'additionalProperties': Fa
                                                                       'never persisted or enabled '
                                                                       'by detection.',
                                                        'items': {'$ref': '#/components/schemas/ProbeCellTarget'},
-                                                       'maxItems': 1024,
+                                                       'maxItems': 8192,
                                                        'minItems': 1,
                                                        'type': 'array'},
                                            'timeout': {'type': 'integer'}},
@@ -290,10 +309,15 @@ OPENAPI_SCHEMAS = {'CatpawLocalImportApplyResponse': {'additionalProperties': Fa
                                                    'maxItems': 128,
                                                    'type': 'array'},
                                    'deployments': {'items': {'$ref': '#/$defs/deployment'},
-                                                   'maxItems': 1024,
+                                                   'maxItems': 8192,
                                                    'type': 'array'},
-                                   'offerings': {'items': {'$ref': '#/$defs/offering'},
-                                                 'maxItems': 512,
+                                   'offerings': {'description': "Same bound as the authority's "
+                                                                'reasoning_controls projection, '
+                                                                'not a listing size: a provider '
+                                                                'holds its whole /models listing '
+                                                                'once the owner loads it.',
+                                                 'items': {'$ref': '#/$defs/offering'},
+                                                 'maxItems': 8192,
                                                  'type': 'array'},
                                    'provider': {'$ref': '#/$defs/provider'},
                                    'provider_access': {'anyOf': [{'$ref': '#/$defs/providerAccess'},
@@ -332,7 +356,20 @@ OPENAPI_SCHEMAS = {'CatpawLocalImportApplyResponse': {'additionalProperties': Fa
                                           'brand': {'type': 'string'},
                                           'credential_id': {'type': 'string'},
                                           'error': {'type': 'string'},
-                                          'model_count': {'minimum': 0, 'type': 'integer'},
+                                          'listed_model_count': {'description': 'Distinct models '
+                                                                                'the endpoint '
+                                                                                'lists. Above '
+                                                                                'model_count, the '
+                                                                                'bundle holds the '
+                                                                                'retained part and '
+                                                                                'the rest loads on '
+                                                                                'request.',
+                                                                 'minimum': 0,
+                                                                 'type': 'integer'},
+                                          'model_count': {'description': 'Models in '
+                                                                         'provider_bundle.',
+                                                          'minimum': 0,
+                                                          'type': 'integer'},
                                           'name': {'type': 'string'},
                                           'ok': {'type': 'boolean'},
                                           'provider_bundle': {'$ref': '#/components/schemas/CompiledProviderBundle'}},
@@ -410,14 +447,21 @@ OPENAPI_SCHEMAS = {'CatpawLocalImportApplyResponse': {'additionalProperties': Fa
                                                          'maxItems': 128,
                                                          'type': 'array'},
                                          'deployments': {'items': {'$ref': '#/$defs/deployment'},
-                                                         'maxItems': 1024,
+                                                         'maxItems': 8192,
                                                          'type': 'array'},
                                          'expected_revision': {'$ref': '#/components/schemas/Revision'},
                                          'models': {'items': {'$ref': '#/$defs/model'},
                                                     'maxItems': 1024,
                                                     'type': 'array'},
-                                         'offerings': {'items': {'$ref': '#/$defs/offering'},
-                                                       'maxItems': 512,
+                                         'offerings': {'description': 'Same bound as the '
+                                                                      "authority's "
+                                                                      'reasoning_controls '
+                                                                      'projection, not a listing '
+                                                                      'size: a provider holds its '
+                                                                      'whole /models listing once '
+                                                                      'the owner loads it.',
+                                                       'items': {'$ref': '#/$defs/offering'},
+                                                       'maxItems': 8192,
                                                        'type': 'array'},
                                          'provider': {'$ref': '#/$defs/provider'},
                                          'provider_access': {'$ref': '#/$defs/providerAccess'}},
@@ -548,7 +592,35 @@ EXTERNAL_DEFS = {'__document': {'$defs': {'capabilities': {'items': {'$ref': '#/
                                                                                   'subscription']},
                                                                 'provider_access_id': {'$ref': '#/$defs/identifier'},
                                                                 'quota_policy': {'$ref': '#/$defs/quotaPolicy'},
-                                                                'secret_reference': {'maxLength': 256,
+                                                                'secret_reference': {'description': 'Owner/tenant-scoped '
+                                                                                                    'encrypted '
+                                                                                                    'secret '
+                                                                                                    'reference. '
+                                                                                                    'Delete '
+                                                                                                    'and '
+                                                                                                    'prune '
+                                                                                                    'must '
+                                                                                                    'retain '
+                                                                                                    'references '
+                                                                                                    'in '
+                                                                                                    'the '
+                                                                                                    'current '
+                                                                                                    'aggregate, '
+                                                                                                    'including '
+                                                                                                    'disabled '
+                                                                                                    'credentials, '
+                                                                                                    'within '
+                                                                                                    'the '
+                                                                                                    'cleanup '
+                                                                                                    'transaction. '
+                                                                                                    'Caller '
+                                                                                                    'prune '
+                                                                                                    'references '
+                                                                                                    'are '
+                                                                                                    'additional '
+                                                                                                    'retention '
+                                                                                                    'pins.',
+                                                                                     'maxLength': 256,
                                                                                      'type': 'string'}},
                                                  'required': ['credential_id',
                                                               'provider_access_id',
@@ -824,7 +896,8 @@ EXTERNAL_DEFS = {'__document': {'$defs': {'capabilities': {'items': {'$ref': '#/
                                                                          'type': 'string'}},
                                                'type': 'object'},
                           'migrationMetadata': {'additionalProperties': False,
-                                                'properties': {'migrated_at': {'minimum': 0,
+                                                'properties': {'context_repair_receipt_id': {'$ref': '#/$defs/identifier'},
+                                                               'migrated_at': {'minimum': 0,
                                                                                'type': 'number'},
                                                                'receipt_id': {'$ref': '#/$defs/identifier'},
                                                                'source': {'maxLength': 128,
@@ -1172,7 +1245,21 @@ EXTERNAL_DEFS = {'__document': {'$defs': {'capabilities': {'items': {'$ref': '#/
                                                          'subscription']},
                                        'provider_access_id': {'$ref': '#/$defs/identifier'},
                                        'quota_policy': {'$ref': '#/$defs/quotaPolicy'},
-                                       'secret_reference': {'maxLength': 256, 'type': 'string'}},
+                                       'secret_reference': {'description': 'Owner/tenant-scoped '
+                                                                           'encrypted secret '
+                                                                           'reference. Delete and '
+                                                                           'prune must retain '
+                                                                           'references in the '
+                                                                           'current aggregate, '
+                                                                           'including disabled '
+                                                                           'credentials, within '
+                                                                           'the cleanup '
+                                                                           'transaction. Caller '
+                                                                           'prune references are '
+                                                                           'additional retention '
+                                                                           'pins.',
+                                                            'maxLength': 256,
+                                                            'type': 'string'}},
                         'required': ['credential_id',
                                      'provider_access_id',
                                      'kind',
@@ -1379,7 +1466,8 @@ EXTERNAL_DEFS = {'__document': {'$defs': {'capabilities': {'items': {'$ref': '#/
                                                 'type': 'string'}},
                       'type': 'object'},
  'migrationMetadata': {'additionalProperties': False,
-                       'properties': {'migrated_at': {'minimum': 0, 'type': 'number'},
+                       'properties': {'context_repair_receipt_id': {'$ref': '#/$defs/identifier'},
+                                      'migrated_at': {'minimum': 0, 'type': 'number'},
                                       'receipt_id': {'$ref': '#/$defs/identifier'},
                                       'source': {'maxLength': 128, 'type': 'string'}},
                        'required': ['source', 'migrated_at', 'receipt_id'],
@@ -1597,6 +1685,11 @@ OPERATIONS = {'catpawLocalImportApply': {'method': 'POST',
                                  'request': None,
                                  'response': 'ProbeCellsSnapshot',
                                  'success': 200},
+ 'importListedProviderModels': {'method': 'POST',
+                                'path': '/api/v1/providers/{provider_id}/listed-models/import',
+                                'request': None,
+                                'response': 'ListedModelsImportResponse',
+                                'success': 200},
  'listProviderTemplates': {'method': 'GET',
                            'path': '/api/v1/providers/templates',
                            'request': None,

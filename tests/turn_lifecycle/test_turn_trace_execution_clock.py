@@ -25,7 +25,14 @@ def test_terminal_trace_includes_acceptance_to_first_event_without_observer_dela
     assert result['tEnd'] == 1_005_100
     assert result['totalMs'] == 5100
     assert result['summary']['llmMs'] == 3000
-    assert result['summary']['unattributedMs'] == 2100
+    # Acceptance -> first event is the named startup dispatch window, and the
+    # last round_end -> done stretch is settlement: nothing is left unnamed.
+    assert result['summary']['startupMs'] == 2000
+    assert result['summary']['finalizeMs'] == 100
+    assert result['summary']['unattributedMs'] == 0
+    (dispatch,) = [s for s in result['spans']
+                   if s['kind'] == 'startup' and s['name'] == 'dispatch']
+    assert (dispatch['tStart'], dispatch['tEnd']) == (1_000_000, 1_002_000)
     assert result['coverage'] == 'full'
 
 

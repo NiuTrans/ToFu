@@ -24,6 +24,8 @@ import lib as _lib
 from lib.agent_loop.agent_loop import AbortSignal
 from lib.agent_core.events import Phase, build_phase
 from lib.identity import require_user_id
+from lib.error_envelope import BadRequest
+from lib.turn_lifecycle import LifecycleConflict
 from lib.llm.llm_json import extract_json
 from lib.llm.llm_errors import AbortedError
 from lib.log import audit_log, get_logger
@@ -1283,17 +1285,20 @@ def require_experiment_decision_rule(workspace: Mapping[str, Any]) -> None:
     from .observation_audit import normalize_decision_rule
     protocol = workspace.get('protocol')
     if not isinstance(protocol, Mapping) or 'decision_rule' not in protocol:
-        raise ValueError('research_decision_rule_required: freeze metric direction, '
-                         'effect threshold and SE multiplier before execution')
+        raise BadRequest('research_decision_rule_required: freeze metric direction, '
+                         'effect threshold and SE multiplier before execution',
+                         field='decision_rule')
     normalize_decision_rule(protocol['decision_rule'])
     seeds=protocol.get('random_seeds')
     if (not isinstance(seeds,list) or not 2<=len(seeds)<=32
             or any(type(seed) is not int for seed in seeds) or len(set(seeds))!=len(seeds)):
-        raise ValueError('research_paired_seeds_required: freeze 2..32 distinct integer seeds before execution')
+        raise BadRequest('research_paired_seeds_required: freeze 2..32 distinct integer seeds before execution',
+                         field='random_seeds')
     missing=[key for key in ('dataset','primary_metric','baseline')
              if not isinstance(protocol.get(key),str) or not protocol[key].strip()]
     if missing:
-        raise ValueError('research_measurement_context_required: freeze '+', '.join(missing)+' before execution')
+        raise BadRequest('research_measurement_context_required: freeze '+', '.join(missing)+' before execution',
+                         field='protocol')
 
 
 def run_research_action(task: dict, *, continuation=None) -> None:
@@ -1508,16 +1513,17 @@ def start_research_action(
     clean_direction = str(direction or '').strip()[:2_000]
     clean_action = str(action or '').strip().lower()
     if not clean_direction:
-        raise ValueError('direction is required')
+        raise BadRequest('direction is required', field='direction')
     if clean_action not in ACTIONS:
-        raise ValueError(f'action must be one of {sorted(ACTIONS)}')
+        raise BadRequest(f'action must be one of {sorted(ACTIONS)}', field='action')
     if (isinstance(expected_revision, bool)
             or not isinstance(expected_revision, int)
             or expected_revision < 0):
-        raise ValueError('expected_revision must be a non-negative integer')
+        raise BadRequest('expected_revision must be a non-negative integer', field='expected_revision')
     if clean_action in WRITE_ACTIONS and confirm_external_writes is not True:
-        raise ValueError(
-            f'action={clean_action!r} requires confirm_external_writes=true')
+        raise BadRequest(
+            f'action={clean_action!r} requires confirm_external_writes=true',
+            field='confirm_external_writes')
     from .action_budget import normalize_action_logical_budget
     budget = normalize_action_logical_budget(logical_budget)
     _production.cleanup_stale()
@@ -1532,7 +1538,10 @@ def start_research_action(
     from .workspace import load_workspace
     workspace = load_workspace(clean_direction, 'zh' if lang == 'zh' else 'en', user_id=owner)
     if workspace['revision'] != expected_revision:
-        raise ValueError('research_workspace_stale')
+        raise LifecycleConflict(
+            'research_workspace_stale',
+            f'The saved research workspace is at revision {workspace["revision"]}, '
+            f'not expected_revision {expected_revision}; reload it and retry.')
     if clean_action == 'experiment':
         from .workspace import validate_selection_source
         validate_selection_source(workspace, user_id=owner)

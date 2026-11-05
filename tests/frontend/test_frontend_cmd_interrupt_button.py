@@ -46,6 +46,7 @@ const messages = {
   'toolCmd.backgroundCapacity': 'Background capacity full',
   'project.qrScan': 'Scannable QR code',
   'project.qrScanMulti': 'scannable QR codes',
+  'toolPanel.queued': 'Waiting to start',
 };
 function translate(key, paramsOrFallback) {
   if (typeof paramsOrFallback === 'string') {
@@ -111,6 +112,19 @@ check('unresolvable_task_or_call_has_no_background_action',
   !orphanHtml.includes('ptool-cmd-handoff')
   && !_renderUnifiedToolLine({status:'searching',toolName:'run_command',
     roundNum:5,_taskId:'task',query:'sleep 30'},true).includes('ptool-cmd-handoff'));
+// Announced while the model streams but not started: the slot passes
+// searching=false, and the row must claim no running state or controls.
+const queuedHtml = _renderUnifiedToolLine({
+  status: 'queued', toolName: 'run_command', query: 'make test',
+  roundNum: 6, toolCallId: 'call-6', _taskId: 'task-abc123',
+}, false);
+check('queued_command_shows_waiting_badge_without_running_controls',
+  queuedHtml.includes('ptool-badge-queued')
+  && queuedHtml.includes('Waiting to start')
+  && !queuedHtml.includes('ptool-spinner')
+  && !queuedHtml.includes('ptool-cmd-interrupt')
+  && !queuedHtml.includes('ptool-cmd-handoff')
+  && !queuedHtml.includes('ptool-line-status--err'));
 (async () => {
   let stopped = 0;
   const event = { stopPropagation() { stopped += 1; } };
@@ -202,6 +216,6 @@ def test_cmd_interrupt_lifecycle_contract() -> None:
     run_harness(
         target_js=os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),
         body_js=_HARNESS,
-        expect_pass=18,
+        expect_pass=19,
         label='command interrupt lifecycle',
     )

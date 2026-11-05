@@ -7,7 +7,7 @@ are not text tokens: use the canonical counter, not serialized body byte size.
 """
 
 from lib.llm.llm_errors import PromptTooLongError
-from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY
+from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY, TEXT_COUNT_VIEW_KEY
 
 
 def enforce_body_input_limit(body, *, model, provider_id='', reuse_admission=False,
@@ -17,9 +17,11 @@ def enforce_body_input_limit(body, *, model, provider_id='', reuse_admission=Fal
     A positive count and the caller's reuse hint do not prove content identity:
     messages, system text, or nested tool schemas may have changed in place.
     Always recount with the local backend, whose bounded content-digest cache
-    reuses unchanged text safely. Provider usage anchors and network counters
-    must not participate in this guard. ``reuse_admission`` remains accepted
-    for callers, but cannot authorize skipping this final safety check.
+    reuses unchanged text safely; a task body's provider view adds its owner's
+    digest-keyed counts, and schemas are still re-encoded from content.
+    Provider usage anchors and network counters must not participate in this
+    guard. ``reuse_admission`` remains accepted for callers, but cannot
+    authorize skipping this final safety check.
     """
     from lib.tasks_pkg.compaction._tokens import resolve_model_context_limit
 
@@ -29,17 +31,19 @@ def enforce_body_input_limit(body, *, model, provider_id='', reuse_admission=Fal
     window = (body.get('_route_context_window')
               if body.get('_route_context_model') == model else None)
     window = window or resolve_model_context_limit(model, provider_id)
-    from lib.token_counter import count_tokens
+    from lib.token_counter import count_tokens, request_text_count_view
 
+    view = request_text_count_view(body.get(TEXT_COUNT_VIEW_KEY))
     tokens = count_tokens(
         body.get('messages') or [], model=model,
         system=body.get('system'), tools=body.get('tools'),
-        mode='tiktoken',
+        mode='tiktoken', **({'text_count_memo': view} if view is not None else {}),
     )['tokens']
     if window and tokens > window:
         raise PromptTooLongError(
             'Provider prompt refused before transport: selected model input '
-            f'exceeds its hard context window ({tokens:,} > {window:,} tokens).'
+            f'exceeds its hard context window ({tokens:,} > {window:,} tokens).',
+            origin='local', total_tokens=tokens, context_window_tokens=window,
         )
     body[ADMITTED_INPUT_TOKENS_KEY] = tokens
     if body.get('max_tokens'):

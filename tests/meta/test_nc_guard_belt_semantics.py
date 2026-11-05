@@ -107,3 +107,45 @@ def test_identical_file_untouched(tmp_path, monkeypatch):
     finally:
         cf._nc_source_snapshots.pop(str(target), None)
     assert target.read_text(encoding='utf-8') == 'same\n'
+
+
+@pytest.mark.parametrize('inside_unrelated_repository', [False, True])
+def test_source_snapshot_has_no_git_baseline(tmp_path, monkeypatch, inside_unrelated_repository):
+    """An exported source tree cannot be diagnosed against a missing/parent HEAD."""
+    import subprocess
+    import tests.conftest as cf
+
+    if inside_unrelated_repository:
+        subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    root = tmp_path / 'exported-source'
+    root.mkdir()
+    (root / 'guarded.py').write_text('retained source\n')
+    if inside_unrelated_repository:
+        subprocess.run(['git', 'add', 'exported-source/guarded.py'], cwd=tmp_path, check=True)
+        subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'user.name=Fixture',
+                        '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'unrelated baseline'],
+                       cwd=tmp_path, check=True)
+        (root / 'guarded.py').write_text('independent exported source\n')
+    monkeypatch.setattr(cf, '_ROOT_DIR', str(root))
+    monkeypatch.setattr(cf, '_NC_GUARDED_SOURCES', ['guarded.py'])
+    assert cf.warn_on_nc_source_poison_at_session_start() == []
+
+
+def test_git_checkout_still_reports_guarded_source_drift(tmp_path, monkeypatch):
+    """Validate the real Git exit statuses, including an actual dirty checkout."""
+    import subprocess
+    import tests.conftest as cf
+
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    source = tmp_path / 'guarded.py'
+    source.write_text('retained source\n')
+    subprocess.run(['git', 'add', 'guarded.py'], cwd=tmp_path, check=True)
+    subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'user.name=Fixture',
+                    '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline'],
+                   cwd=tmp_path, check=True)
+    monkeypatch.setattr(cf, '_ROOT_DIR', str(tmp_path))
+    monkeypatch.setattr(cf, '_NC_GUARDED_SOURCES', ['guarded.py'])
+    assert cf.warn_on_nc_source_poison_at_session_start() == []
+    source.write_text('changed source\n')
+    assert cf.warn_on_nc_source_poison_at_session_start() == ['guarded.py']
+    assert source.read_text() == 'changed source\n'

@@ -8,6 +8,7 @@ import time
 
 from lib.artifacts import ArtifactNotFoundError, get_artifact, get_artifact_meta
 from lib.artifacts.review import read_criteria
+from lib.error_envelope import BadRequest
 from lib.storage import StorageError
 from lib.turn_lifecycle import LifecycleNotFound
 from .contract import limit
@@ -65,7 +66,7 @@ class SourceResolver:
                     return 'stale', 'source_version_changed', ''
                 quoted = criterion['text']
                 if capture and source['quote'] != quoted:
-                    raise ValueError('A criterion source must quote its exact current text')
+                    raise BadRequest('A criterion source must quote its exact current text')
                 return 'observed', '', quoted
             if meta['content_sha256'] != source['version']:
                 return 'stale', 'source_version_changed', ''
@@ -75,7 +76,7 @@ class SourceResolver:
                     artifact = get_artifact(identifier, user_id=self.owner)
                     self.contents[identifier] = artifact.get('content', '')
                 if source['quote'] not in self.contents[identifier]:
-                    raise ValueError('Artifact quote was not found in the exact source version')
+                    raise BadRequest('Artifact quote was not found in the exact source version')
             return 'observed', '', source['quote']
         except (ArtifactNotFoundError, LifecycleNotFound):
             return 'unavailable', 'source_unavailable', ''

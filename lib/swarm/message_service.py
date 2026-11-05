@@ -111,7 +111,7 @@ def send(task: dict, args: dict, session, *,
     if (spec is None and not coordinator) or terminal:
         raise RunMessageError('message_target_not_active', 'Target is absent or already settled; use a new explicit assignment')
     binding = (coordinator_binding(session) if coordinator else
-               binding_for(session._parent_task_proxy, spec, session.inbox_key))
+               binding_for(session._parent_task_proxy, spec, session.inbox_key, run_id=session.task_id))
     validate_target(binding)
     repository = RunMessageRepository(binding)
     def active():
@@ -194,7 +194,7 @@ def _uncreated_mailbox_binding(task: dict, agent_id: str, run_id: str,
         spec = SimpleNamespace(id=run_id, retained_agent_id='', retained_run_id='', retained_scope='')
     if spec is None:
         raise RunMessageError('message_run_not_found', 'No recipient in the owned original run matches this exact handle')
-    return binding_for(parent, spec, key)
+    return binding_for(parent, spec, key, run_id=run_id)
 
 
 def read(task: dict, args: dict) -> dict:

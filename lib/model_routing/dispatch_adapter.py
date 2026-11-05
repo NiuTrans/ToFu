@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 import secrets
-from typing import Mapping
+from typing import Callable, ContextManager, Mapping
 from types import MappingProxyType
 
 from lib.llm_dispatch.ephemeral import (
     EphemeralSlotHandle,
-    dispose_ephemeral_slot,
-    mint_ephemeral_slot,
+    dispose_ephemeral_slots,
+    prepare_ephemeral_slot,
+    publish_ephemeral_slots,
 )
 from lib.provider.provider_headers import sanitise_extra_headers
 
@@ -18,13 +20,12 @@ from .credential_envelope import decode_credential_envelope
 from .domain import ModelRoutingError, NativeModelSelection
 from .health import RouteHealthRegistry
 from .inference import candidate_inference_metadata
-from .repository import OwnerBoundary, RepositoryPort
+from .repository import OwnerBoundary, RepositoryPort, StoredAuthority
 from .routing import (
     RouteCandidate,
     RoutePolicy,
     RouteSnapshotBuilder,
-    compile_candidates,
-    compile_model_fallback_candidates,
+    RouteCandidateCompiler,
 )
 
 
@@ -98,29 +99,20 @@ def issued_route_identity(candidate: RouteCandidate, boundary: OwnerBoundary, re
     }
 
 
-def mint_routed_slot_group(
-    repository: RepositoryPort,
-    boundary: OwnerBoundary,
+def _select_route_candidates(
+    authority: StoredAuthority,
     selection: NativeModelSelection,
     *,
-    policy: RoutePolicy | None = None,
-    health: RouteHealthRegistry | None = None,
-    owner_tag: str = "",
-    max_candidates: int | None = None,
-
-    expected_route_identity: Mapping | None = None,
-) -> RoutedSlotGroup:
-    if max_candidates is not None and (isinstance(max_candidates, bool)
-            or not isinstance(max_candidates, int) or max_candidates < 1):
-        raise ModelRoutingError(
-            "max_candidates must be a positive integer or None",
-            kind="model_route_resource_budget_invalid",
-            field="max_candidates",
-        )
-    authority = repository.get(boundary)
+    policy: RoutePolicy | None,
+    health: RouteHealthRegistry | None,
+    max_candidates: int | None,
+    expected_route_identity: Mapping | None,
+) -> list[RouteCandidate]:
+    """Plan one authority snapshot; release its indexes before secret materialization."""
     rejections: dict[str, int] = {}
-    primary_candidates = compile_candidates(
-        authority.document, selection, policy=policy, health=health,
+    compiler = RouteCandidateCompiler(authority.document)
+    primary_candidates = compiler.compile(
+        selection, policy=policy, health=health,
         rejections=rejections, max_candidates=(None
             if expected_route_identity is not None else max_candidates))
     if expected_route_identity is not None:
@@ -128,10 +120,14 @@ def mint_routed_slot_group(
             if candidate_route_identity(candidate, authority.revision) == dict(expected_route_identity)]
         if not primary_candidates:
             raise ModelRoutingError('planned route changed', kind='model_route_changed')
-    if not primary_candidates and (rejections.get('model_registration_incomplete') or rejections.get('model_identity_pending')):
+    if not primary_candidates and rejections.get('model_registration_incomplete'):
         raise ModelRoutingError(
             '模型资料待补全或待验证，请在模型设置中查看缺项 / Model registration is incomplete; inspect missing metadata in Model settings',
             kind='model_registration_incomplete')
+    if not primary_candidates and rejections.get('model_identity_pending'):
+        raise ModelRoutingError(
+            '服务商模型尚未绑定已注册的官方模型 / Model identity is pending: no registered official Model is bound to this provider model',
+            kind='model_identity_pending')
     if not primary_candidates:
         raise ModelRoutingError(
             "no authorized, healthy Deployment satisfies the request"
@@ -146,8 +142,7 @@ def mint_routed_slot_group(
     # identity, preserving the compiler's preferred-provider stability first.
     if (expected_route_identity is None and selection.model is not None
             and (max_candidates is None or len(candidates) < max_candidates)):
-        fallbacks = compile_model_fallback_candidates(
-            authority.document,
+        fallbacks = compiler.compile_fallbacks(
             selection,
             policy=policy,
             health=health,
@@ -178,6 +173,43 @@ def mint_routed_slot_group(
         if (len(candidates) != 1 or candidate_route_identity(candidates[0], authority.revision)
                 != dict(expected_route_identity)):
             raise ModelRoutingError('planned route changed', kind='model_route_changed')
+    return candidates
+
+
+def mint_routed_slot_group(
+    repository: RepositoryPort,
+    boundary: OwnerBoundary,
+    selection: NativeModelSelection,
+    *,
+    policy: RoutePolicy | None = None,
+    health: RouteHealthRegistry | None = None,
+    owner_tag: str = "",
+    max_candidates: int | None = None,
+
+    expected_route_identity: Mapping | None = None,
+    observe_stage: Callable[[str], ContextManager] | None = None,
+) -> RoutedSlotGroup:
+    """Plan one owner snapshot, then mint and publish its whole route group.
+
+    ``observe_stage(name)`` optionally times the ``route`` (authority read
+    and candidate planning) and ``mint`` (credential resolution, slot
+    preparation and the single publication) stages for the caller.
+    """
+    if max_candidates is not None and (isinstance(max_candidates, bool)
+            or not isinstance(max_candidates, int) or max_candidates < 1):
+        raise ModelRoutingError(
+            "max_candidates must be a positive integer or None",
+            kind="model_route_resource_budget_invalid",
+            field="max_candidates",
+        )
+    stage = observe_stage or (lambda _name: nullcontext())
+    with stage("route"):
+        authority = repository.get(boundary)
+        candidates = _select_route_candidates(
+            authority, selection, policy=policy, health=health,
+            max_candidates=max_candidates,
+            expected_route_identity=expected_route_identity,
+        )
     pin_id = f"model-route:{boundary.owner_user_id}:{secrets.token_hex(8)}"
     handles: list[EphemeralSlotHandle] = []
     runnable_candidates: list[RouteCandidate] = []
@@ -188,109 +220,18 @@ def mint_routed_slot_group(
     resolved_secrets: dict[
         tuple[str, str], tuple[str, str, dict[str, str]] | ModelRoutingError
     ] = {}
+    # Endpoint checks (egress DNS validation, reachability probe) run once per
+    # distinct base URL of this group, never across requests.
+    endpoint_verdicts: dict = {}
     try:
-        for candidate in candidates:
-            credential = candidate.credential
-            try:
-                secret_key = (credential["secret_reference"], credential["kind"])
-                decoded = resolved_secrets.get(secret_key)
-                if decoded is None:
-                    try:
-                        secret = repository.resolve_secret(
-                            boundary, credential["secret_reference"]
-                        ) if credential["secret_reference"] else ""
-                        decoded = decode_credential_secret(secret, kind=credential["kind"])
-                    except ModelRoutingError as exc:
-                        if exc.kind not in {
-                            'credential_secret_missing', 'credential_secret_invalid',
-                        }:
-                            raise
-                        decoded = exc
-                    resolved_secrets[secret_key] = decoded
-                if isinstance(decoded, ModelRoutingError):
-                    raise decoded
-                api_key, oauth, secret_headers = decoded
-            except ModelRoutingError as exc:
-                if exc.kind not in {
-                    'credential_secret_missing', 'credential_secret_invalid',
-                }:
-                    raise
-                # A known bad credential cannot mask a later authorized path.
-                # Storage availability and owner-boundary failures still abort.
-                initialization_errors.append(exc)
-                continue
-            logical_model = (
-                candidate.model["model_id"] if candidate.model is not None
-                else candidate.offering["pending_model_id"]
-            )
-            try:
-                handle = mint_ephemeral_slot(
-                    base_url=candidate.connection["base_url"],
-                    api_key=api_key,
-                    model_id=logical_model,
-                    **candidate_inference_metadata(candidate),
-                    wire_model_id=candidate.deployment["wire_model_id"],
-                    owner=owner_tag or f"owner:{boundary.owner_user_id}",
-                    extra_headers={
-                        **(candidate.connection.get("extra_headers") or {}),
-                        **(candidate.deployment.get("extra_headers") or {}),
-                        **secret_headers,
-                    },
-                    capabilities=set(candidate.offering["capabilities"]),
-                    protocol=candidate.connection["protocol"],
-                    oauth=oauth,
-                    adapter=dict(candidate.connection.get("adapter") or {}),
-                    routing_owner_user_id=boundary.owner_user_id,
-                    provider_pin_id=pin_id,
-                )
-            except ValueError as exc:
-                # One stale/unreachable Connection must not mask later
-                # authorized Deployments in the same bounded route group.
-                # No handle exists yet: mint_ephemeral_slot validates endpoint
-                # and model identity before registering it globally.
-                initialization_errors.append(exc)
-                continue
-            handles.append(handle)
-            runnable_candidates.append(candidate)
-
-        if not handles:
-            if initialization_errors and isinstance(initialization_errors[0], ModelRoutingError):
-                raise initialization_errors[0]
-            detail = str(initialization_errors[0]) if initialization_errors else (
-                'no candidate could be initialized')
-            raise ModelRoutingError(
-                detail, kind='model_route_endpoint_invalid')
-
-        for rank, (handle, candidate) in enumerate(
-                zip(handles, runnable_candidates)):
-            credential = candidate.credential
-            slot = handle.slot
-            slot.routing_provider_id = candidate.provider_id
-            slot.route_offering_id = candidate.offering["offering_id"]
-            slot.route_deployment_id = candidate.deployment["deployment_id"]
-            slot.route_connection_id = candidate.connection["connection_id"]
-            slot.route_credential_id = credential["credential_id"]
-            slot.max_output_tokens = int(
-                candidate.deployment.get("max_output_tokens") or 0)
-            snapshot_builder = RouteSnapshotBuilder(selection)
-            if initialization_errors:
-                snapshot_builder.record_degradation(
-                    f'{len(initialization_errors)} route candidate(s) could '
-                    'not be initialized')
-            # A candidate is not an attempted route. Dispatch builds ancestry
-            # from actual invocations, including retries within this group.
-            snapshot_builder.record_transition(
-                source=None, target=candidate,
-                reason="computed_v2_route", kind="initial")
-            slot.route_snapshot = snapshot_builder.finalize(candidate)
-            # A 1 ms score offset loses to the scorer's random jitter, cost,
-            # and inflight penalties. Keep the compiler order explicit.
-            slot.route_rank = rank
-            pricing = candidate.offering.get("actual_pricing") or {}
-            slot.cost_per_1k_tokens = (
-                float(pricing.get("input") or 0.0)
-                + float(pricing.get("output") or 0.0)
-            ) / 2000.0
+        with stage("mint"):
+            _prepare_and_publish_group(
+                repository, boundary, selection, candidates, pin_id=pin_id,
+                owner_tag=owner_tag, handles=handles,
+                runnable_candidates=runnable_candidates,
+                initialization_errors=initialization_errors,
+                resolved_secrets=resolved_secrets,
+                endpoint_verdicts=endpoint_verdicts)
         witness = MappingProxyType(issued_route_identity(
             runnable_candidates[0], boundary, authority.revision))
         return RoutedSlotGroup(pin_id, handles, runnable_candidates, route_identity=witness)
@@ -305,27 +246,146 @@ def mint_routed_slot_group(
         raise
 
 
+def _prepare_and_publish_group(
+    repository: RepositoryPort,
+    boundary: OwnerBoundary,
+    selection: NativeModelSelection,
+    candidates: list[RouteCandidate],
+    *,
+    pin_id: str,
+    owner_tag: str,
+    handles: list[EphemeralSlotHandle],
+    runnable_candidates: list[RouteCandidate],
+    initialization_errors: list,
+    resolved_secrets: dict,
+    endpoint_verdicts: dict,
+) -> None:
+    """Prepare one slot per runnable candidate, then publish them together.
+
+    Appends into the caller's lists so its cleanup owns every prepared
+    handle even when this raises. Route metadata and rank are final before
+    publication; one dispatcher-lock acquisition publishes the group.
+    """
+    for candidate in candidates:
+        credential = candidate.credential
+        try:
+            secret_key = (credential["secret_reference"], credential["kind"])
+            decoded = resolved_secrets.get(secret_key)
+            if decoded is None:
+                try:
+                    secret = repository.resolve_secret(
+                        boundary, credential["secret_reference"]
+                    ) if credential["secret_reference"] else ""
+                    decoded = decode_credential_secret(secret, kind=credential["kind"])
+                except ModelRoutingError as exc:
+                    if exc.kind not in {
+                        'credential_secret_missing', 'credential_secret_invalid',
+                    }:
+                        raise
+                    decoded = exc
+                resolved_secrets[secret_key] = decoded
+            if isinstance(decoded, ModelRoutingError):
+                raise decoded
+            api_key, oauth, secret_headers = decoded
+        except ModelRoutingError as exc:
+            if exc.kind not in {
+                'credential_secret_missing', 'credential_secret_invalid',
+            }:
+                raise
+            # A known bad credential cannot mask a later authorized path.
+            # Storage availability and owner-boundary failures still abort.
+            initialization_errors.append(exc)
+            continue
+        logical_model = (
+            candidate.model["model_id"] if candidate.model is not None
+            else candidate.offering["pending_model_id"]
+        )
+        try:
+            handle = prepare_ephemeral_slot(
+                base_url=candidate.connection["base_url"],
+                api_key=api_key,
+                model_id=logical_model,
+                **candidate_inference_metadata(candidate),
+                wire_model_id=candidate.deployment["wire_model_id"],
+                owner=owner_tag or f"owner:{boundary.owner_user_id}",
+                extra_headers={
+                    **(candidate.connection.get("extra_headers") or {}),
+                    **(candidate.deployment.get("extra_headers") or {}),
+                    **secret_headers,
+                },
+                capabilities=set(candidate.offering["capabilities"]),
+                protocol=candidate.connection["protocol"],
+                oauth=oauth,
+                adapter=dict(candidate.connection.get("adapter") or {}),
+                routing_owner_user_id=boundary.owner_user_id,
+                routing_tenant_id=boundary.tenant_id,
+                provider_pin_id=pin_id,
+                endpoint_verdicts=endpoint_verdicts,
+            )
+        except ValueError as exc:
+            # One stale/unreachable Connection must not mask later
+            # authorized Deployments in the same bounded route group.
+            # Nothing is published yet: preparation validates endpoint and
+            # model identity before anything is registered.
+            initialization_errors.append(exc)
+            continue
+        handles.append(handle)
+        runnable_candidates.append(candidate)
+
+    if not handles:
+        if initialization_errors and isinstance(initialization_errors[0], ModelRoutingError):
+            raise initialization_errors[0]
+        detail = str(initialization_errors[0]) if initialization_errors else (
+            'no candidate could be initialized')
+        raise ModelRoutingError(
+            detail, kind='model_route_endpoint_invalid')
+
+    for rank, (handle, candidate) in enumerate(
+            zip(handles, runnable_candidates)):
+        credential = candidate.credential
+        slot = handle.slot
+        slot.routing_provider_id = candidate.provider_id
+        slot.route_offering_id = candidate.offering["offering_id"]
+        slot.route_deployment_id = candidate.deployment["deployment_id"]
+        slot.route_connection_id = candidate.connection["connection_id"]
+        slot.route_credential_id = credential["credential_id"]
+        slot.max_output_tokens = int(
+            candidate.deployment.get("max_output_tokens") or 0)
+        snapshot_builder = RouteSnapshotBuilder(selection)
+        if initialization_errors:
+            snapshot_builder.record_degradation(
+                f'{len(initialization_errors)} route candidate(s) could '
+                'not be initialized')
+        # A candidate is not an attempted route. Dispatch builds ancestry
+        # from actual invocations, including retries within this group.
+        snapshot_builder.record_transition(
+            source=None, target=candidate,
+            reason="computed_v2_route", kind="initial")
+        slot.route_snapshot = snapshot_builder.finalize(candidate)
+        # A 1 ms score offset loses to the scorer's random jitter, cost,
+        # and inflight penalties. Keep the compiler order explicit.
+        slot.route_rank = rank
+        pricing = candidate.offering.get("actual_pricing") or {}
+        slot.cost_per_1k_tokens = (
+            float(pricing.get("input") or 0.0)
+            + float(pricing.get("output") or 0.0)
+        ) / 2000.0
+    publish_ephemeral_slots(handles)
+
+
 def dispose_routed_slot_group(group: RoutedSlotGroup | None) -> bool:
     if group is None or group.disposed:
         return False
-    disposed = False
-    first_error = None
-    for handle in group.handles:
-        try:
-            disposed = dispose_ephemeral_slot(handle) or disposed
-        except BaseException as exc:
-            # Attempt every sibling release, and leave the group retryable.
-            if first_error is None:
-                first_error = exc
-
-        finally:
-            # Request-scoped plaintext must not survive in a retained handle.
-            # Remove pool membership first; neutralize references even if one
-            # sibling's disposal/audit failed, then attempt all other siblings.
+    try:
+        # One dispatcher-lock acquisition withdraws every sibling by identity;
+        # every sibling's exemption release is attempted even if one fails.
+        disposed = any(dispose_ephemeral_slots(group.handles))
+    finally:
+        # Request-scoped plaintext must not survive in a retained handle,
+        # including when detachment failed and the group stays retryable.
+        for handle in group.handles:
             handle.slot.api_key = ''
             handle.slot.extra_headers = {}
-    if first_error is not None:
-        raise first_error
     group.disposed = True
     return disposed
 

@@ -22,7 +22,6 @@ Proves fully offline:
 Run standalone: ``python3 tests/paper/test_paper_reading_xp_p0.py``
 """
 
-import asyncio
 import json
 import os
 import sys
@@ -412,36 +411,18 @@ def _import_routes_paper():
     return rp
 
 
-def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
-
-
-def test_read_path_v2_payload_not_merged(monkeypatch):
+def test_read_path_v2_payload_not_merged():
     rp = _import_routes_paper()
-    phash = 'v2hash'
+    from lib.paper.artifact_repository import PaperReport
     v2_meta = {'kind': 'insight', 'v': 2,
                'items': {'thesis': 'The bet.',
                          'connections': [{'text': 'b', 'anchor_idx': 1}]},
                'baseline': 3.0}
-    rows = {
-        (phash, config_mod.insight_lang_key('en')): {
-            'report': '## 💡 Insight & Ideas\n\nbody\n', 'meta': v2_meta},
-    }
-
-    class _Repository:
-        def __init__(self, user_id):
-            assert user_id == TEST_OWNER_USER_ID
-
-        def get_report(self, paper_hash, lang):
-            from lib.paper.artifact_repository import PaperReport
-            row = rows.get((paper_hash, lang))
-            return PaperReport(paper_hash, lang, **row) if row else None
-
-    monkeypatch.setattr(rp, 'PaperArtifactRepository', _Repository)
-    payload = _run(rp._load_cached_insight_payload(
-        phash, 'en', user_id=TEST_OWNER_USER_ID))
-    out = _run(rp._append_cached_insight(
-        _REPORT, phash, 'en', user_id=TEST_OWNER_USER_ID))
+    key = config_mod.insight_lang_key('en')
+    siblings = {key: PaperReport(
+        'v2hash', key, '## 💡 Insight & Ideas\n\nbody\n', meta=v2_meta)}
+    out, _, payload, _ = rp._project_prefetched_report_siblings(
+        _REPORT, None, 'v2hash', 'en', siblings)
     assert payload is not None, 'v2 payload not served'
     assert payload['items']['connections'][0]['anchor_idx'] == 1
     assert payload['baseline'] == 3.0
@@ -451,29 +432,15 @@ def test_read_path_v2_payload_not_merged(monkeypatch):
     _ok('读路径:v2 行出结构化负载、正文不合并')
 
 
-def test_read_path_v1_legacy_still_merges(monkeypatch):
+def test_read_path_v1_legacy_still_merges():
     rp = _import_routes_paper()
-    phash = 'v1hash'
-    rows = {
-        (phash, config_mod.insight_lang_key('en')): {
-            'report': '## 💡 Insight & Ideas\n\nlegacy\n',
-            'meta': {'kind': 'insight'}},
-    }
-
-    class _Repository:
-        def __init__(self, user_id):
-            assert user_id == TEST_OWNER_USER_ID
-
-        def get_report(self, paper_hash, lang):
-            from lib.paper.artifact_repository import PaperReport
-            row = rows.get((paper_hash, lang))
-            return PaperReport(paper_hash, lang, **row) if row else None
-
-    monkeypatch.setattr(rp, 'PaperArtifactRepository', _Repository)
-    payload = _run(rp._load_cached_insight_payload(
-        phash, 'en', user_id=TEST_OWNER_USER_ID))
-    out = _run(rp._append_cached_insight(
-        _REPORT, phash, 'en', user_id=TEST_OWNER_USER_ID))
+    from lib.paper.artifact_repository import PaperReport
+    key = config_mod.insight_lang_key('en')
+    siblings = {key: PaperReport(
+        'v1hash', key, '## 💡 Insight & Ideas\n\nlegacy\n',
+        meta={'kind': 'insight'})}
+    out, _, payload, _ = rp._project_prefetched_report_siblings(
+        _REPORT, None, 'v1hash', 'en', siblings)
     assert payload is None, 'v1 row must not produce a structured payload'
     assert '## 💡 Insight & Ideas' in out, 'v1 row must keep the legacy merge'
     _ok('读路径:v1 旧行保持文末合并(向后兼容)')

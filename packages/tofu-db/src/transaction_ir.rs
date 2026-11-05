@@ -144,6 +144,12 @@ pub enum TransactionIrStep {
         physical_updated_at_ms: u64,
         slot: usize,
     },
+    BillingPaymentBind {
+        payment_id: String,
+        payload_json: Vec<u8>,
+        physical_updated_at_ms: u64,
+        slot: usize,
+    },
     BillingPaymentSettle {
         payment_id: String,
         payload_json: Vec<u8>,
@@ -359,6 +365,7 @@ pub enum TransactionIrStep {
         include_messages: bool,
         message_window: usize,
         before_sequence: Option<i64>,
+        anchor_turn_id: Option<String>,
         slot: usize,
     },
     ConversationSettingsUpdate {
@@ -692,6 +699,10 @@ pub enum TransactionIrStep {
         task_kinds: Vec<String>,
         slot: usize,
     },
+    WorkerJobClaimHorizon {
+        task_kinds: Vec<String>,
+        slot: usize,
+    },
     WorkerJobDefer {
         task_id: String,
         worker_id: String,
@@ -789,6 +800,7 @@ pub enum TransactionIrStep {
     TurnGet {
         conversation_id: String,
         turn_id: String,
+        include_projection: bool,
         slot: usize,
     },
     TurnImageGet {
@@ -1228,6 +1240,7 @@ pub enum TransactionIrStep {
         types: Vec<String>,
         type_prefixes: Vec<String>,
         payload_types: Option<Vec<String>>,
+        inspector_projection: bool,
         slot: usize,
     },
     IndexedStreamInspectorSummary {
@@ -1257,6 +1270,9 @@ pub enum TransactionIrStep {
 pub enum TransactionIrResult {
     Literal(Vec<u8>),
     SlotOrLiteral { slot: usize, missing: Vec<u8> },
+    /// A JSON array of distinct initialized slots in this order (a missing
+    /// value encodes as `null`), e.g. one ordinary result per batched step.
+    SlotArray { slots: Vec<usize> },
 }
 
 #[derive(Clone, Debug)]
@@ -1388,6 +1404,8 @@ fn literal_bytes(result: &TransactionIrResult) -> usize {
     match result {
         TransactionIrResult::Literal(value) => value.len(),
         TransactionIrResult::SlotOrLiteral { missing, .. } => missing.len(),
+        // Brackets and separators.
+        TransactionIrResult::SlotArray { slots } => slots.len() + 1,
     }
 }
 
@@ -1490,14 +1508,19 @@ impl TransactionIr {
                     payload_json,
                     ..
                 } if !valid_billing_text(provider, 100, true)
-                    || !valid_billing_text(provider_id, 300, true)
+                    || !valid_billing_text(provider_id, 300, false)
                     || payload_json.is_empty()
                     || payload_json.len()
                         > crate::generated_tofudb_ir::MAX_BILLING_PAYMENT_DOCUMENT_BYTES =>
                 {
                     return Err(invalid_input("invalid billing payment record step"));
                 }
-                TransactionIrStep::BillingPaymentSettle {
+                TransactionIrStep::BillingPaymentBind {
+                    payment_id,
+                    payload_json,
+                    ..
+                }
+                | TransactionIrStep::BillingPaymentSettle {
                     payment_id,
                     payload_json,
                     ..
@@ -1797,6 +1820,7 @@ impl TransactionIr {
                 | TransactionIrStep::BillingPaymentFind { slot, .. }
                 | TransactionIrStep::BillingPaymentList { slot, .. }
                 | TransactionIrStep::BillingPaymentRecord { slot, .. }
+                | TransactionIrStep::BillingPaymentBind { slot, .. }
                 | TransactionIrStep::BillingPaymentSettle { slot, .. }
                 | TransactionIrStep::BillingRedeemCodeApply { slot, .. }
                 | TransactionIrStep::BillingRedeemCodesList { slot, .. }
@@ -2995,6 +3019,7 @@ impl TransactionIr {
                     include_messages,
                     message_window,
                     before_sequence,
+                    anchor_turn_id,
                     slot,
                 } => {
                     let initialized = initialized_slots
@@ -3008,9 +3033,19 @@ impl TransactionIr {
                         || *message_window > 500
                         || before_sequence.is_some() && *message_window == 0
                         || !include_messages && (*message_window != 0 || before_sequence.is_some())
+                        || anchor_turn_id.as_ref().is_some_and(|anchor| {
+                            !(1..=128).contains(&anchor.chars().count())
+                                || *message_window == 0
+                                || before_sequence.is_some()
+                        })
                     {
                         return Err(invalid_input("invalid conversation get step"));
                     }
+                    literal_bytes = literal_bytes
+                        .checked_add(anchor_turn_id.as_ref().map_or(0, String::len))
+                        .ok_or_else(|| {
+                            invalid_input("Transaction IR literal byte count overflow")
+                        })?;
                     literal_bytes = literal_bytes
                         .checked_add(conversation_id.len())
                         .ok_or_else(|| {
@@ -3724,6 +3759,25 @@ impl TransactionIr {
                             invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
+                TransactionIrStep::WorkerJobClaimHorizon { task_kinds, slot } => {
+                    validate_worker_job_slot(&mut initialized_slots, *slot)?;
+                    let unique: std::collections::BTreeSet<_> = task_kinds.iter().collect();
+                    if task_kinds.is_empty()
+                        || task_kinds.len() > MAX_WORKER_JOB_CLAIM_KINDS
+                        || unique.len() != task_kinds.len()
+                        || task_kinds
+                            .iter()
+                            .any(|kind| !valid_worker_job_text(kind, 128, false))
+                    {
+                        return Err(invalid_input("invalid worker job claim horizon step"));
+                    }
+                    literal_bytes = task_kinds
+                        .iter()
+                        .try_fold(literal_bytes, |bytes, kind| bytes.checked_add(kind.len()))
+                        .ok_or_else(|| {
+                            invalid_input("Transaction IR literal byte count overflow")
+                        })?;
+                }
                 TransactionIrStep::WorkerJobDefer {
                     task_id,
                     worker_id,
@@ -4110,6 +4164,7 @@ impl TransactionIr {
                     conversation_id,
                     turn_id,
                     slot,
+                    ..
                 }
                 | TransactionIrStep::TurnImageGet {
                     conversation_id,
@@ -5320,19 +5375,25 @@ impl TransactionIr {
                 .checked_add(identity_bytes)
                 .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
         }
-        let result_slot = match self.result {
-            TransactionIrResult::Literal(_) => None,
-            TransactionIrResult::SlotOrLiteral { slot, .. } => Some(slot),
+        let result_slots: &[usize] = match &self.result {
+            TransactionIrResult::Literal(_) => &[],
+            TransactionIrResult::SlotOrLiteral { slot, .. } => std::slice::from_ref(slot),
+            TransactionIrResult::SlotArray { slots } => slots,
         };
-        if result_slot.is_some_and(|slot| {
+        if result_slots.iter().any(|slot| {
             !initialized_slots
-                .get(slot as usize)
+                .get(*slot)
                 .copied()
                 .unwrap_or(false)
         }) {
             return Err(invalid_input(
                 "Transaction IR result references an unread slot",
             ));
+        }
+        if result_slots.len() > 1
+            && result_slots.iter().collect::<std::collections::BTreeSet<_>>().len() != result_slots.len()
+        {
+            return Err(invalid_input("Transaction IR result array repeats a slot"));
         }
         match (self.operation_kind.mutates_state(), &self.command_effects) {
             (false, None) => {
@@ -5429,6 +5490,7 @@ impl TransactionIr {
                             | TransactionIrStep::CredentialRevoke { .. }
                             | TransactionIrStep::BillingLedgerAppend { .. }
                             | TransactionIrStep::BillingPaymentRecord { .. }
+                            | TransactionIrStep::BillingPaymentBind { .. }
                             | TransactionIrStep::BillingPaymentSettle { .. }
                             | TransactionIrStep::BillingRedeemCodeApply { .. }
                             | TransactionIrStep::BillingRedeemCodesMint { .. }
@@ -5646,6 +5708,28 @@ fn result_bytes(result: &TransactionIrResult, slots: &mut IrSlots) -> io::Result
                 }
             })
         }
+        TransactionIrResult::SlotArray { slots: selected } => {
+            let mut values = Vec::with_capacity(selected.len());
+            for slot in selected {
+                let value = slots.bytes.get_mut(*slot).and_then(Option::take)
+                    .ok_or_else(|| invalid_input("Transaction IR result slot is unavailable"))?;
+                slots.json_proven[*slot] = false;
+                slots.receipt_cacheable_proven[*slot] = false;
+                values.push(value);
+            }
+            let length = values.iter().map(|value| value.as_ref().map_or(4, Vec::len) + 1).sum::<usize>() + 1;
+            let mut bytes = Vec::with_capacity(length);
+            bytes.push(b'[');
+            for (index, value) in values.into_iter().enumerate() {
+                if index > 0 {
+                    bytes.push(b',');
+                }
+                bytes.extend_from_slice(value.as_deref().unwrap_or(b"null"));
+            }
+            bytes.push(b']');
+            crate::request_profile::work(crate::request_profile::Work::IrResultCopiedBytes, bytes.len() as u64);
+            Ok(IrResponse::unverified(bytes))
+        }
     }
 }
 
@@ -5843,6 +5927,7 @@ fn prepare_transaction_ir_mode(
                 | TransactionIrStep::WorkerJobEnqueue { .. }
                 | TransactionIrStep::WorkerJobGet { .. }
                 | TransactionIrStep::WorkerJobClaimNext { .. }
+                | TransactionIrStep::WorkerJobClaimHorizon { .. }
                 | TransactionIrStep::WorkerJobDefer { .. }
                 | TransactionIrStep::WorkerJobHeartbeat { .. }
                 | TransactionIrStep::WorkerJobClaimState { .. }
@@ -5881,6 +5966,7 @@ fn prepare_transaction_ir_mode(
                 | TransactionIrStep::BillingPaymentFind { .. }
                 | TransactionIrStep::BillingPaymentList { .. }
                 | TransactionIrStep::BillingPaymentRecord { .. }
+                | TransactionIrStep::BillingPaymentBind { .. }
                 | TransactionIrStep::BillingPaymentSettle { .. }
                 | TransactionIrStep::BillingRedeemCodeApply { .. }
                 | TransactionIrStep::BillingRedeemCodesList { .. }
@@ -5934,6 +6020,12 @@ fn prepare_transaction_ir_mode(
         database.exempt_content_free_diagnostic_from_logical_outbox(&mut transaction)?;
     }
     let mut slots = IrSlots::new();
+    // Several Turn event records share one all-or-nothing outcome: a stale
+    // attempt rejects every entry, so a mixed result may never commit.
+    let batched_turn_events = ir.steps.iter()
+        .filter(|step| matches!(step, TransactionIrStep::TurnEventRecord { .. }))
+        .nth(1).is_some();
+    let mut turn_event_applied = None;
     let _steps_timer = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_IR_STEPS);
     let steps = match execution {
         IrStepExecution::Sequential => ir.steps.as_slice(),
@@ -6067,6 +6159,20 @@ fn prepare_transaction_ir_mode(
                     provider_id,
                     payload_json,
                     *created_at,
+                    *physical_updated_at_ms,
+                )?));
+            }
+            TransactionIrStep::BillingPaymentBind {
+                payment_id,
+                payload_json,
+                physical_updated_at_ms,
+                slot,
+            } => {
+                slots[*slot as usize] = Some(Some(crate::billing::payment_bind(
+                    database,
+                    &mut transaction,
+                    payment_id,
+                    payload_json,
                     *physical_updated_at_ms,
                 )?));
             }
@@ -6569,15 +6675,17 @@ fn prepare_transaction_ir_mode(
                 include_messages,
                 message_window,
                 before_sequence,
+                anchor_turn_id,
                 slot,
             } => {
-                slots[*slot as usize] = Some(crate::conversation_header::get(
+                slots[*slot as usize] = Some(crate::conversation_header::get_anchored(
                     database,
                     &mut transaction,
                     conversation_id,
                     *include_messages,
                     *message_window,
                     *before_sequence,
+                    anchor_turn_id.as_deref(),
                     &mut deadline_elapsed,
                 )?);
             }
@@ -6930,6 +7038,13 @@ fn prepare_transaction_ir_mode(
                     task_kinds,
                 )?);
             }
+            TransactionIrStep::WorkerJobClaimHorizon { task_kinds, slot } => {
+                slots[*slot as usize] = Some(Some(crate::worker_job::claim_horizon(
+                    database,
+                    &mut transaction,
+                    task_kinds,
+                )?));
+            }
             TransactionIrStep::WorkerJobDefer {
                 task_id,
                 worker_id,
@@ -7180,13 +7295,15 @@ fn prepare_transaction_ir_mode(
             TransactionIrStep::TurnGet {
                 conversation_id,
                 turn_id,
+                include_projection,
                 slot,
             } => {
-                slots[*slot as usize] = Some(crate::turn::get(
+                slots[*slot as usize] = Some(crate::turn::get_with_projection(
                     database,
                     &mut transaction,
                     conversation_id,
                     turn_id,
+                    *include_projection,
                 )?);
             }
             TransactionIrStep::TurnImageGet {
@@ -7319,11 +7436,26 @@ fn prepare_transaction_ir_mode(
                 )?));
             }
             TransactionIrStep::TurnEventRecord { request, slot } => {
-                slots[*slot as usize] = Some(Some(crate::turn::event_record(
-                    database,
-                    &mut transaction,
-                    request,
-                )?));
+                let response = crate::turn::event_record(database, &mut transaction, request)?;
+                if batched_turn_events {
+                    let applied = serde_json::from_slice::<serde_json::Value>(&response)
+                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData,
+                            "Turn event record response is malformed"))?
+                        .get("applied") == Some(&serde_json::Value::Bool(true));
+                    if *turn_event_applied.get_or_insert(applied) != applied {
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock,
+                            "Turn event batch entries diverged inside one transaction"));
+                    }
+                    // Composed records must not turn into a commit that drains
+                    // every conversation's overlay or synchronizes each loose
+                    // block under the authority; the producer splits instead.
+                    if applied && !database.commits_as_one_ordinary_delta(&transaction)? {
+                        return Err(crate::resource_exhaustion::domain_bound(
+                            "Turn event batch exceeds one ordinary commit; record fewer entries per batch",
+                        ));
+                    }
+                }
+                slots[*slot as usize] = Some(Some(response));
             }
             TransactionIrStep::TurnAttemptClaim {
                 attempt_id,
@@ -7389,6 +7521,7 @@ fn prepare_transaction_ir_mode(
                 )?);
             }
             TransactionIrStep::TurnEventsPrune { request, slot } => {
+                let _retention = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_RETENTION_PRUNE);
                 slots[*slot as usize] = Some(Some(crate::turn::events_prune(
                     database,
                     &mut transaction,
@@ -7564,6 +7697,7 @@ fn prepare_transaction_ir_mode(
                 )?);
             }
             TransactionIrStep::TurnSyncPrune { request, slot } => {
+                let _retention = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_RETENTION_PRUNE);
                 slots[*slot as usize] = Some(Some(crate::turn::sync_prune(
                     database,
                     &mut transaction,
@@ -8462,6 +8596,7 @@ fn prepare_transaction_ir_mode(
                 types,
                 type_prefixes,
                 payload_types,
+                inspector_projection,
                 slot,
             } => {
                 slots[*slot as usize] = Some(Some(crate::indexed_stream::list(
@@ -8474,6 +8609,7 @@ fn prepare_transaction_ir_mode(
                         types: types.clone(),
                         type_prefixes: type_prefixes.clone(),
                         payload_types: payload_types.clone(),
+                        inspector_projection: *inspector_projection,
                     },
                 )?));
             }
@@ -8510,6 +8646,7 @@ fn prepare_transaction_ir_mode(
                         crate::indexed_stream::RetentionClass::Structural
                     }
                 };
+                let _retention = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_RETENTION_PRUNE);
                 slots[*slot as usize] = Some(Some(crate::indexed_stream::prune(
                     database,
                     &mut transaction,
@@ -9351,6 +9488,7 @@ mod tests {
                 types: Vec::new(),
                 type_prefixes: Vec::new(),
                 payload_types: None,
+                inspector_projection: false,
                 slot: 0,
             }],
             TransactionIrResult::SlotOrLiteral {

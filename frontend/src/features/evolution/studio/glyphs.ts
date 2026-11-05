@@ -1,0 +1,50 @@
+/** Game HUD glyphs: one 24×24 stroke icon set shared by the quest banner,
+ * stage track, meters, hotbar, windows and dialogue. Markup only; decorative
+ * (aria-hidden) — every control carries its own accessible name.
+ * Entry: glyph.
+ */
+const PATHS:Record<string,string> = {
+  book:'M12 6.5C9.5 4.5 6 4.3 3 5.6V19c3-1.3 6.5-1.1 9 .9 2.5-2 6-2.2 9-.9V5.6c-3-1.3-6.5-1.1-9 .9ZM12 6.5V20',
+  board:'M4 4h16v12H4zM8 8h8M8 11.5h5M9 16l-2 4M15 16l2 4',
+  monitor:'M3 4.5h18v11.5H3zM9 20h6M12 16v4',
+  check:'M5 12.5l4.2 4.2L19 7',
+  scroll:'M7 3.5h10a2 2 0 0 1 2 2v11H9v2.5a2 2 0 1 1-4 0V5.5a2 2 0 0 1 2-2ZM9 8h6M9 11.5h6',
+  chat:'M4 5h16v11H9l-5 4zM8 9.5h8M8 12.5h5',
+  plus:'M12 5v14M5 12h14',
+  menu:'M4 7h16M4 12h16M4 17h16',
+  map:'M3 6.5l6-2.5 6 2.5 6-2.5v13.5l-6 2.5-6-2.5-6 2.5zM9 4v13.5M15 6.5V20',
+  coin:'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17ZM9.5 9.5c0-1.2 1.1-2 2.5-2s2.5.8 2.5 2c0 2.6-5 1.6-5 4.5 0 1.2 1.1 2 2.5 2s2.5-.8 2.5-2M12 6v1.5M12 16.5V18',
+  wrench:'M14.5 4a4.5 4.5 0 0 0-4.2 6.1L4 16.4 7.6 20l6.3-6.3A4.5 4.5 0 0 0 20 9.5l-2.9 2.9-2.5-.5-.5-2.5L17 6.5A4.5 4.5 0 0 0 14.5 4Z',
+  clock:'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17ZM12 7.5V12l3 2',
+  hourglass:'M6.5 3.5h11M6.5 20.5h11M7.5 3.5c0 5 9 6 9 8.5s-9 3.5-9 8.5M16.5 3.5c0 5-9 6-9 8.5s9 3.5 9 8.5',
+  server:'M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01M12 7h4M12 17h4',
+  question:'M9.2 9a3 3 0 1 1 4.1 2.8c-.8.4-1.3 1.1-1.3 2v.7M12 18h.01',
+  alert:'M12 4l9 16H3zM12 10v4.5M12 17.5h.01',
+  cross:'M6 6l12 12M18 6L6 18',
+  stop:'M7 7h10v10H7z',
+  retry:'M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4.5v4h4',
+  spark:'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM18 16l.8 2.2L21 19l-2.2.8L18 22l-.8-2.2L15 19l2.2-.8z',
+  hammer:'M13.5 6.5l4 4M3.5 20.5l8.8-8.8M10.5 7.5l3-3.5 6.5 6.5-3.5 3z',
+  lens:'M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM15.5 15.5L20 20',
+  flag:'M5 21V4M5 4h11l-2 4 2 4H5',
+  close:'M6 6l12 12M18 6L6 18',
+  arrow:'M7 17L17 7M9 7h8v8',
+  download:'M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14',
+  refresh:'M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4.5v4h-4',
+  people:'M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M16 4.3a3.5 3.5 0 0 1 0 6.4M18 14.4c1.8.8 3 2.6 3 5.6',
+  pause:'M8 5v14M16 5v14',
+  play:'M7 5l12 7-12 7z',
+  home:'M3.5 11L12 4l8.5 7M6 9.5V20h12V9.5',
+  notebook:'M6 3.5h12v17H6zM9 3.5v17M12 8h4M12 11.5h4',
+  flask:'M9.5 3.5h5M10.5 3.5v6L5 18.5a1.5 1.5 0 0 0 1.3 2h11.4a1.5 1.5 0 0 0 1.3-2L13.5 9.5v-6M7.5 14.5h9',
+  chart:'M4 20h16M7 16v-5M12 16V7M17 16v-8',
+  gate:'M5 21V8l7-4.5L19 8v13M9 21v-6h6v6',
+  dots:'M6 12h.01M12 12h.01M18 12h.01',
+  door:'M6 20.5V4.5h10v16M16 20.5h3M4 20.5h2M13 12.5h.01',
+  user:'M12 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM5 20.5c0-3.9 3.1-7 7-7s7 3.1 7 7',
+  zoom:'M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM15.5 15.5L20 20M10.5 8v5M8 10.5h5',
+  focus:'M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5',
+};
+export function glyph(name:string):string {
+  return `<svg class="evo-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${PATHS[name]||PATHS.dots}"/></svg>`;
+}

@@ -12,10 +12,12 @@ STREAM_POLICY = {'capacityStopStatus': 204,
  'eventSource': '/api/v4/conversations/{conversationId}/events',
  'gapEvent': 'sync.reset_required',
  'heartbeatIntervalMs': 15000,
+ 'multiplexedEventSource': '/api/v4/conversation-events',
  'ordering': 'conversation-scoped-monotonic',
  'reconnectGraceMs': 37500,
  'replayRetentionMs': 604800000,
  'streamClientIdQuery': 'streamClientId',
+ 'streamClosedEvent': 'stream.closed',
  'streamGenerationQuery': 'streamGeneration'}
 COMMAND_RETRY_POLICY = {'baseDelayMs': 250,
  'httpStatuses': [502, 503, 504],
@@ -104,7 +106,19 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                                                                      'replayed '
                                                                                      'attempt-event '
                                                                                      'streams '
-                                                                                     'carry it.\n',
+                                                                                     'carry it.\n'
+                                                                                     'The '
+                                                                                     'diagnosticPayload=none '
+                                                                                     'stream '
+                                                                                     'representation '
+                                                                                     'omits this\n'
+                                                                                     'optional '
+                                                                                     'body; it '
+                                                                                     'never '
+                                                                                     'changes '
+                                                                                     'durable '
+                                                                                     'evidence or '
+                                                                                     'projection.\n',
                                                                       'properties': {'type': {'maxLength': 128,
                                                                                               'type': 'string'}},
                                                                       'required': ['type'],
@@ -281,6 +295,24 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                      'attempt.event',
                                      'conversation.activity'],
                             'type': 'string'},
+ 'ConversationEventSubscription': {'additionalProperties': False,
+                                   'properties': {'after': {'type': 'string'},
+                                                  'conversationId': {'maxLength': 256,
+                                                                     'minLength': 1,
+                                                                     'type': 'string'},
+                                                  'cursorSource': {'enum': ['snapshot'],
+                                                                   'type': 'string'},
+                                                  'streamGeneration': {'maximum': 2147483647,
+                                                                       'minimum': 1,
+                                                                       'type': 'integer'},
+                                                  'windowBytes': {'maximum': 16777216,
+                                                                  'minimum': 65536,
+                                                                  'type': 'integer'}},
+                                   'required': ['conversationId', 'streamGeneration'],
+                                   'type': 'object'},
+ 'ConversationEventSubscriptions': {'items': {'$ref': '#/components/schemas/ConversationEventSubscription'},
+                                    'minItems': 1,
+                                    'type': 'array'},
  'ConversationInvalidation': {'additionalProperties': False,
                               'properties': {'channel': {'const': 'notify'},
                                              'contract': {'const': 'tofu.conversation-sync.invalidation/v1'},
@@ -357,9 +389,27 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                            'turnId': {'type': 'string'}},
                             'required': ['turnId', 'ordinal', 'actor', 'roundNumber'],
                             'type': 'object'},
+ 'ConversationStreamClosed': {'additionalProperties': False,
+                              'description': 'One multiplexed stream stopped. status is the HTTP '
+                                             'status its own connection would have answered (204 '
+                                             'superseded or ended, 400 invalid cursor, 404, '
+                                             'storage 503, 500); code is the stop reason.',
+                              'properties': {'code': {'maxLength': 128,
+                                                      'minLength': 1,
+                                                      'type': 'string'},
+                                             'contract': {'const': 'tofu.conversation-sync.stream-closed/v1'},
+                                             'conversationId': {'type': 'string'},
+                                             'status': {'maximum': 599,
+                                                        'minimum': 200,
+                                                        'type': 'integer'},
+                                             'type': {'const': 'stream.closed'}},
+                              'required': ['contract', 'type', 'conversationId', 'status', 'code'],
+                              'type': 'object'},
  'ConversationSyncEvent': {'oneOf': [{'$ref': '#/components/schemas/ConversationChange'},
                                      {'$ref': '#/components/schemas/SyncHeartbeat'},
                                      {'$ref': '#/components/schemas/SyncResetRequired'}]},
+ 'ConversationSyncMultiplexedEvent': {'oneOf': [{'$ref': '#/components/schemas/ConversationSyncEvent'},
+                                                {'$ref': '#/components/schemas/ConversationStreamClosed'}]},
  'ConversationSyncSnapshot': {'additionalProperties': False,
                               'properties': {'activeAttemptPhase': {'$ref': '#/components/schemas/ActiveAttemptPhase'},
                                              'attempts': {'items': {'$ref': '#/components/schemas/AttemptRecord'},
@@ -396,7 +446,14 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                                                                     'values '
                                                                                     'removed from '
                                                                                     'repeated tool '
-                                                                                    'round fields. '
+                                                                                    'round fields, '
+                                                                                    'including '
+                                                                                    'active Turns '
+                                                                                    'whose exact '
+                                                                                    'fields are '
+                                                                                    'restored '
+                                                                                    'before '
+                                                                                    'replay. '
                                                                                     'Omitted '
                                                                                     'unless '
                                                                                     'segmentPayload=refs '
@@ -557,7 +614,8 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                               'reason': {'enum': ['ready',
                                                                   'not_applicable',
                                                                   'operation_unconfirmed',
-                                                                  'configuration_unavailable'],
+                                                                  'configuration_unavailable',
+                                                                  'budget_insufficient'],
                                                          'type': 'string'},
                                               'sourceProjectionRevision': {'minimum': 0,
                                                                            'type': 'integer'},
@@ -1066,7 +1124,8 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                       'reason': {'enum': ['cursor_expired',
                                                           'cursor_invalid',
                                                           'server_restarted',
-                                                          'protocol_mismatch'],
+                                                          'protocol_mismatch',
+                                                          'replay_exceeds_window'],
                                                  'type': 'string'},
                                       'type': {'const': 'sync.reset_required'}},
                        'required': ['contract', 'type', 'conversationId', 'cursor', 'reason'],
@@ -1254,6 +1313,7 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                       'endedAt': {'maximum': 9007199254740991,
                                                   'minimum': 0,
                                                   'type': 'integer'},
+                                      'envelopeKind': {'maxLength': 160, 'type': 'string'},
                                       'failureStage': {'maxLength': 80, 'type': 'string'},
                                       'fromModel': {'maxLength': 160, 'type': 'string'},
                                       'id': {'maxLength': 160, 'minLength': 1, 'type': 'string'},
@@ -1368,6 +1428,13 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                       'originatorConv': {'type': 'string'},
                                       'originatorTitle': {'type': 'string'},
                                       'route': {'type': 'string'}},
+                       'type': 'object'},
+ 'TurnChannelOrigin': {'additionalProperties': False,
+                       'properties': {'channel': {'type': 'string'},
+                                      'eventIds': {'items': {'type': 'string'}, 'type': 'array'},
+                                      'thread': {'type': 'string'},
+                                      'title': {'type': 'string'}},
+                       'required': ['channel', 'thread'],
                        'type': 'object'},
  'TurnClientPerceptionObservation': {'additionalProperties': False,
                                      'properties': {'attemptId': {'maxLength': 128,
@@ -1559,6 +1626,13 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                          'undoAvailable': {'type': 'boolean'}},
                           'required': ['blockId', 'count', 'files'],
                           'type': 'object'},
+ 'TurnForwardedFrom': {'additionalProperties': False,
+                       'properties': {'conversationId': {'type': 'string'},
+                                      'instructionId': {'type': 'string'},
+                                      'steerId': {'type': 'string'},
+                                      'turnId': {'type': 'string'}},
+                       'required': ['conversationId', 'turnId'],
+                       'type': 'object'},
  'TurnImageAttachment': {'additionalProperties': True,
                          'properties': {'attachmentId': {'type': 'string'},
                                         'caption': {'type': 'string'},
@@ -1669,6 +1743,7 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                          'type': 'object'},
  'TurnMessageInjection': {'additionalProperties': True,
                           'properties': {'agentIds': {'items': {'type': 'string'}, 'type': 'array'},
+                                         'author': {'$ref': '#/components/schemas/TurnSteerAuthor'},
                                          'blockId': {'type': 'string'},
                                          'count': {'minimum': 0, 'type': 'integer'},
                                          'deliveryState': {'description': 'A human steer pending '
@@ -1730,6 +1805,8 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                'blockId': {'type': 'string'},
                                'boardTaskId': {'type': 'string'},
                                'brain': {'$ref': '#/components/schemas/TurnBrainDispatch'},
+                               'channel': {'$ref': '#/components/schemas/TurnChannelOrigin'},
+                               'forwardedFrom': {'$ref': '#/components/schemas/TurnForwardedFrom'},
                                'initiator': {'enum': ['human',
                                                       'autopilot',
                                                       'proactive',
@@ -1737,7 +1814,8 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                                       'brain',
                                                       'peer',
                                                       'operator',
-                                                      'swarm'],
+                                                      'swarm',
+                                                      'channel'],
                                              'type': 'string'},
                                'peerHuman': {'type': 'boolean'},
                                'scheduledTaskId': {'type': 'string'},
@@ -2070,6 +2148,16 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                'the attempt; every other value is terminal.',
                 'enum': ['pending', 'running', 'completed', 'interrupted', 'truncated', 'failed'],
                 'type': 'string'},
+ 'TurnSteerAuthor': {'additionalProperties': False,
+                     'properties': {'actor': {'$ref': '#/components/schemas/TurnActor'},
+                                    'origin': {'$ref': '#/components/schemas/TurnOrigin'},
+                                    'text': {'description': 'Complete authored text '
+                                                            '(originalContent before any input '
+                                                            'translation).',
+                                             'minLength': 1,
+                                             'type': 'string'}},
+                     'required': ['actor', 'text'],
+                     'type': 'object'},
  'TurnSystemNoteSegment': {'additionalProperties': True,
                            'properties': {'action': {'default': 'prompt',
                                                      'enum': ['prompt',
@@ -2125,7 +2213,11 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                         'deliverable': {'type': 'boolean'},
                                         'llmRound': {'oneOf': [{'minimum': 0, 'type': 'integer'},
                                                                {'type': 'null'}]},
-                                        'signature': {'type': 'string'},
+                                        'signature': {'description': 'Opaque provider signature of '
+                                                                     'this reasoning. Never '
+                                                                     'rendered; refs views of '
+                                                                     'completed Turns omit it.',
+                                                      'type': 'string'},
                                         'taskId': {'type': 'string'},
                                         'terminal': {'type': 'boolean'},
                                         'text': {'type': 'string'},
@@ -2241,21 +2333,45 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                         'count'],
                            'type': 'object'},
  'TurnTimingSummary': {'additionalProperties': False,
-                       'properties': {'approvalWaitMs': {'maximum': 9007199254740991,
+                       'properties': {'admissionWaitMs': {'maximum': 9007199254740991,
+                                                          'minimum': 0,
+                                                          'type': 'integer'},
+                                      'approvalWaitMs': {'maximum': 9007199254740991,
                                                          'minimum': 0,
                                                          'type': 'integer'},
                                       'compactionMs': {'maximum': 9007199254740991,
                                                        'minimum': 0,
                                                        'type': 'integer'},
+                                      'finalizeMs': {'maximum': 9007199254740991,
+                                                     'minimum': 0,
+                                                     'type': 'integer'},
                                       'flowStepMs': {'maximum': 9007199254740991,
                                                      'minimum': 0,
                                                      'type': 'integer'},
                                       'llmMs': {'maximum': 9007199254740991,
                                                 'minimum': 0,
                                                 'type': 'integer'},
+                                      'orchestrationMs': {'maximum': 9007199254740991,
+                                                          'minimum': 0,
+                                                          'type': 'integer'},
                                       'overBudget': {'items': {'$ref': '#/components/schemas/TurnTimingOverBudgetSpan'},
                                                      'maxItems': 256,
                                                      'type': 'array'},
+                                      'retryWaitMs': {'maximum': 9007199254740991,
+                                                      'minimum': 0,
+                                                      'type': 'integer'},
+                                      'roundPrepMs': {'maximum': 9007199254740991,
+                                                      'minimum': 0,
+                                                      'type': 'integer'},
+                                      'roundSettleMs': {'maximum': 9007199254740991,
+                                                        'minimum': 0,
+                                                        'type': 'integer'},
+                                      'spawnWaitMs': {'maximum': 9007199254740991,
+                                                      'minimum': 0,
+                                                      'type': 'integer'},
+                                      'startupMs': {'maximum': 9007199254740991,
+                                                    'minimum': 0,
+                                                    'type': 'integer'},
                                       'toolMs': {'maximum': 9007199254740991,
                                                  'minimum': 0,
                                                  'type': 'integer'},
@@ -2381,12 +2497,19 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                                             'description': 'Snapshot-only '
                                                                            'references for '
                                                                            'repeated, immutable '
-                                                                           'browser fields. The '
-                                                                           'generated browser '
-                                                                           'client resolves every '
-                                                                           'entry from '
+                                                                           'request-local browser '
+                                                                           'fields, including '
+                                                                           'pending and running '
+                                                                           'Turns. The generated '
+                                                                           'browser client '
+                                                                           'restores every entry '
+                                                                           'from '
                                                                            'ConversationSyncSnapshot.sharedToolDocuments '
-                                                                           'before TurnStore.'},
+                                                                           'before TurnStore or '
+                                                                           'replay patch '
+                                                                           'application; live base '
+                                                                           'fields are never '
+                                                                           'deferred.'},
                                   '_snapshotToolResult': {'$ref': '#/components/schemas/SnapshotToolResultReference'},
                                   'agentId': {'description': 'Legacy swarm display identity. Only '
                                                              'unstamped historical rows infer an '
@@ -2470,7 +2593,12 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                                             'replay.',
                                              'type': 'string'},
                                   'thinking': {'type': 'string'},
-                                  'thinkingSignature': {'type': 'string'},
+                                  'thinkingSignature': {'description': 'Opaque provider replay '
+                                                                       'evidence. Model requests '
+                                                                       'read it from storage; refs '
+                                                                       'views of completed Turns '
+                                                                       'omit it.',
+                                                        'type': 'string'},
                                   'toolArgs': {},
                                   'toolCallId': {'type': 'string'},
                                   'toolContent': {},
@@ -2553,6 +2681,10 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                                             'minimum': 1,
                                                             'type': 'integer'},
                                         'maxTokens': {'default': 100000,
+                                                      'description': 'Finite renewal sized for '
+                                                                     'saved input and output; a '
+                                                                     'smaller explicit source cap '
+                                                                     'is never increased.',
                                                       'maximum': 9007199254740991,
                                                       'minimum': 1,
                                                       'type': 'integer'},
@@ -2597,6 +2729,70 @@ OPENAPI_PATHS = {'/api/v4/attempts/{attemptId}/abort': {'post': {'operationId': 
                                                                                       'result.'}},
                                                  'x-tofu-client': 'abortAttempt',
                                                  'x-tofu-contract': 'tofu.conversation-sync.command.abort-attempt/v1'}},
+ '/api/v4/conversation-events': {'get': {'description': 'The ordered replay of several '
+                                                        'conversations on one Server-Sent Events '
+                                                        'response. An HTTP/1.x browser holds one '
+                                                        'connection per long-lived stream and at '
+                                                        'most six per origin, so one stream per '
+                                                        'conversation starves every other request '
+                                                        'once six conversations are live. Each '
+                                                        'listed stream keeps the exact semantics '
+                                                        'of its own '
+                                                        '/api/v4/conversations/{conversationId}/events '
+                                                        'connection: cursor, catch-up budget, '
+                                                        'heartbeats and supersession by '
+                                                        'streamGeneration. Only the framing '
+                                                        "differs: every frame's data is the "
+                                                        "stream's decimal index in streams, a line "
+                                                        'feed, then the event document, and its id '
+                                                        "remains that stream's cursor. A stream "
+                                                        'that cannot open, is superseded or ends '
+                                                        'sends stream.closed with the status its '
+                                                        'own connection would have answered and '
+                                                        'never resumes on this response; the other '
+                                                        'streams continue. The response ends when '
+                                                        'no stream remains open.',
+                                         'operationId': 'conversationSyncMultiplexedEvents',
+                                         'parameters': [{'in': 'query',
+                                                         'name': 'streamClientId',
+                                                         'required': True,
+                                                         'schema': {'pattern': '^[A-Za-z0-9][A-Za-z0-9._~-]{0,63}$',
+                                                                    'type': 'string'}},
+                                                        {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/ConversationEventSubscriptions'}}},
+                                                         'description': 'One subscription per '
+                                                                        'conversation, each '
+                                                                        'conversation at most '
+                                                                        'once. after is the newest '
+                                                                        'cursor the client '
+                                                                        'received on that stream; '
+                                                                        'a stream that has '
+                                                                        'received no frame yet '
+                                                                        'repeats its bootstrap '
+                                                                        'cursor and cursorSource, '
+                                                                        'exactly as a native '
+                                                                        'EventSource reconnect '
+                                                                        'without Last-Event-ID '
+                                                                        'would.',
+                                                         'in': 'query',
+                                                         'name': 'streams',
+                                                         'required': True},
+                                                        {'description': 'Same selector as the '
+                                                                        'single-conversation '
+                                                                        'stream.',
+                                                         'in': 'query',
+                                                         'name': 'diagnosticPayload',
+                                                         'required': False,
+                                                         'schema': {'default': 'full',
+                                                                    'enum': ['full', 'none'],
+                                                                    'type': 'string'}}],
+                                         'responses': {'200': {'content': {'text/event-stream': {'schema': {'$ref': '#/components/schemas/ConversationSyncMultiplexedEvent'}}},
+                                                               'description': 'Multiplexed ordered '
+                                                                              'replayable '
+                                                                              'Server-Sent '
+                                                                              'Events.'}},
+                                         'x-tofu-client': 'multiplexedEventsUrl',
+                                         'x-tofu-client-fixed-query': {'diagnosticPayload': 'none'},
+                                         'x-tofu-contract': 'tofu.conversation-sync.multiplexed-events/v1'}},
  '/api/v4/conversations/{conversationId}/events': {'get': {'operationId': 'conversationSyncEvents',
                                                            'parameters': [{'$ref': '#/components/parameters/ConversationId'},
                                                                           {'in': 'query',
@@ -2613,7 +2809,135 @@ OPENAPI_PATHS = {'/api/v4/attempts/{attemptId}/abort': {'post': {'operationId': 
                                                                            'required': False,
                                                                            'schema': {'maximum': 2147483647,
                                                                                       'minimum': 1,
-                                                                                      'type': 'integer'}}],
+                                                                                      'type': 'integer'}},
+                                                                          {'description': 'The '
+                                                                                          'browser '
+                                                                                          'requests '
+                                                                                          'none: '
+                                                                                          'omit '
+                                                                                          'only '
+                                                                                          'AttemptEvent.payload.event '
+                                                                                          'diagnostic '
+                                                                                          'bodies. '
+                                                                                          'Ordered '
+                                                                                          'identities, '
+                                                                                          'cursors, '
+                                                                                          'patches, '
+                                                                                          'phases, '
+                                                                                          'interactions '
+                                                                                          'and '
+                                                                                          'settlements '
+                                                                                          'are '
+                                                                                          'unchanged. '
+                                                                                          'Complete '
+                                                                                          'diagnostics '
+                                                                                          'remain '
+                                                                                          'durable '
+                                                                                          'and are '
+                                                                                          'read '
+                                                                                          'through '
+                                                                                          'Request '
+                                                                                          'Inspector '
+                                                                                          'endpoints.',
+                                                                           'in': 'query',
+                                                                           'name': 'diagnosticPayload',
+                                                                           'required': False,
+                                                                           'schema': {'default': 'full',
+                                                                                      'enum': ['full',
+                                                                                               'none'],
+                                                                                      'type': 'string'}},
+                                                                          {'description': 'Catch-up '
+                                                                                          'budget, '
+                                                                                          'equal '
+                                                                                          'to the '
+                                                                                          "caller's "
+                                                                                          'snapshot '
+                                                                                          'windowBytes. '
+                                                                                          'When '
+                                                                                          'the '
+                                                                                          'encoded '
+                                                                                          'changes '
+                                                                                          'committed '
+                                                                                          'before '
+                                                                                          'this '
+                                                                                          'connection '
+                                                                                          'opened '
+                                                                                          'exceed '
+                                                                                          'it, the '
+                                                                                          'stream '
+                                                                                          'sends '
+                                                                                          'sync.reset_required '
+                                                                                          'with '
+                                                                                          'reason '
+                                                                                          'replay_exceeds_window '
+                                                                                          'instead '
+                                                                                          'of '
+                                                                                          'replaying '
+                                                                                          'them, '
+                                                                                          'and the '
+                                                                                          'caller '
+                                                                                          're-anchors '
+                                                                                          'with '
+                                                                                          'one '
+                                                                                          'snapshot. '
+                                                                                          'Changes '
+                                                                                          'committed '
+                                                                                          'later '
+                                                                                          'always '
+                                                                                          'stream. '
+                                                                                          'Omission '
+                                                                                          'replays '
+                                                                                          'every '
+                                                                                          'retained '
+                                                                                          'change.',
+                                                                           'in': 'query',
+                                                                           'name': 'windowBytes',
+                                                                           'required': False,
+                                                                           'schema': {'maximum': 16777216,
+                                                                                      'minimum': 65536,
+                                                                                      'type': 'integer'}},
+                                                                          {'description': 'snapshot '
+                                                                                          'declares '
+                                                                                          'that '
+                                                                                          'after '
+                                                                                          'was '
+                                                                                          'minted '
+                                                                                          'by the '
+                                                                                          'snapshot '
+                                                                                          'this '
+                                                                                          'stream '
+                                                                                          'directly '
+                                                                                          'follows. '
+                                                                                          'Its '
+                                                                                          'first '
+                                                                                          'connection '
+                                                                                          'replays '
+                                                                                          'that '
+                                                                                          'round '
+                                                                                          'trip '
+                                                                                          'without '
+                                                                                          'the '
+                                                                                          'catch-up '
+                                                                                          'budget, '
+                                                                                          'because '
+                                                                                          'another '
+                                                                                          'snapshot '
+                                                                                          'would '
+                                                                                          'only '
+                                                                                          'restart '
+                                                                                          'it. A '
+                                                                                          'native '
+                                                                                          'reconnect '
+                                                                                          'resumes '
+                                                                                          'from '
+                                                                                          'Last-Event-ID '
+                                                                                          'and is '
+                                                                                          'budgeted.',
+                                                                           'in': 'query',
+                                                                           'name': 'cursorSource',
+                                                                           'required': False,
+                                                                           'schema': {'enum': ['snapshot'],
+                                                                                      'type': 'string'}}],
                                                            'responses': {'200': {'content': {'text/event-stream': {'schema': {'$ref': '#/components/schemas/ConversationSyncEvent'}}},
                                                                                  'description': 'Ordered '
                                                                                                 'replayable '
@@ -2629,6 +2953,7 @@ OPENAPI_PATHS = {'/api/v4/attempts/{attemptId}/abort': {'post': {'operationId': 
                                                                                                 'stop '
                                                                                                 'reconnecting.'}},
                                                            'x-tofu-client': 'eventsUrl',
+                                                           'x-tofu-client-fixed-query': {'diagnosticPayload': 'none'},
                                                            'x-tofu-contract': 'tofu.conversation-sync.events/v1'}},
  '/api/v4/conversations/{conversationId}/queue/{queueId}': {'delete': {'operationId': 'conversationQueueCancel',
                                                                        'parameters': [{'$ref': '#/components/parameters/ConversationId'},
@@ -2716,14 +3041,26 @@ OPENAPI_PATHS = {'/api/v4/attempts/{attemptId}/abort': {'post': {'operationId': 
                                                                                         'omits '
                                                                                         'server-only '
                                                                                         'provider '
-                                                                                        'replay '
-                                                                                        'and '
+                                                                                        'replay, '
+                                                                                        'thinking '
+                                                                                        'signatures, '
+                                                                                        'unrendered '
                                                                                         'request '
                                                                                         'diagnostics '
+                                                                                        'and '
+                                                                                        'task-trace '
+                                                                                        'detail '
                                                                                         'for the '
                                                                                         'generated '
                                                                                         'browser '
-                                                                                        'client.',
+                                                                                        'client; a '
+                                                                                        'whole-projection '
+                                                                                        'edit '
+                                                                                        'restores '
+                                                                                        'them from '
+                                                                                        'the '
+                                                                                        'stored '
+                                                                                        'revision.',
                                                                          'in': 'query',
                                                                          'name': 'segmentPayload',
                                                                          'required': False,
@@ -2905,7 +3242,40 @@ OPENAPI_PATHS = {'/api/v4/attempts/{attemptId}/abort': {'post': {'operationId': 
                                                                                   'schema': {'maxLength': 128,
                                                                                              'minLength': 1,
                                                                                              'type': 'string'}},
-                                                                                 {'in': 'query',
+                                                                                 {'description': 'The '
+                                                                                                 "caller's "
+                                                                                                 'applied '
+                                                                                                 'replay '
+                                                                                                 'head. '
+                                                                                                 'The '
+                                                                                                 'page '
+                                                                                                 'answers '
+                                                                                                 'at '
+                                                                                                 'the '
+                                                                                                 'newest '
+                                                                                                 'head '
+                                                                                                 'not '
+                                                                                                 'older '
+                                                                                                 'than '
+                                                                                                 'it '
+                                                                                                 '(the '
+                                                                                                 'response '
+                                                                                                 'syncSeq); '
+                                                                                                 'a '
+                                                                                                 'head '
+                                                                                                 'behind '
+                                                                                                 'it, '
+                                                                                                 'or '
+                                                                                                 'one '
+                                                                                                 'that '
+                                                                                                 'keeps '
+                                                                                                 'moving '
+                                                                                                 'through '
+                                                                                                 'bounded '
+                                                                                                 're-reads, '
+                                                                                                 'is '
+                                                                                                 'history_page_stale.',
+                                                                                  'in': 'query',
                                                                                   'name': 'syncSeq',
                                                                                   'required': True,
                                                                                   'schema': {'maximum': 9223372036854775807,
@@ -2940,9 +3310,11 @@ OPENAPI_PATHS = {'/api/v4/attempts/{attemptId}/abort': {'post': {'operationId': 
                                                                                                  'cursor '
                                                                                                  'at '
                                                                                                  'the '
-                                                                                                 'requested '
                                                                                                  'replay '
-                                                                                                 'head.',
+                                                                                                 'head '
+                                                                                                 'the '
+                                                                                                 'page '
+                                                                                                 'answers.',
                                                                                   'in': 'query',
                                                                                   'name': 'windowBytes',
                                                                                   'required': False,

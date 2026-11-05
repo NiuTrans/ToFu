@@ -1,5 +1,5 @@
 """Versioned semantic operation-domain registry."""
 
-REGISTRY_VERSION = 50
+REGISTRY_VERSION = 54
 
 __all__ = ['REGISTRY_VERSION']

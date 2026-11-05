@@ -19,6 +19,7 @@ import pytest
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
 from quart import Quart, Response, g, request
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.visual
@@ -27,6 +28,7 @@ pytest_plugins = ('tests._artifact_sidecar',)
 
 @pytest.fixture(scope='module')
 def delivery_server(artifact_storage, tmp_path_factory):
+    require_node_modules('vite')
     from lib import response_assets
     from lib.artifacts import response_files
     from lib.api_v4 import attach_v4_envelope, copy_blueprint_to_v4
@@ -95,7 +97,8 @@ const renderMarkdown = (text) => markdown.render(text);
         # Consume its real production lexical import, not independently supplied
         # helper bindings that could mask a missing shipping-runtime dependency.
         code += (ROOT/'frontend/src/runtime/sections/artifacts.js').read_text().replace(
-            "'../rich-response/artifact-delivery'", json.dumps(str(ROOT/'frontend/src/rich-response/artifact-delivery.ts')))
+            "'../rich-response/artifact-delivery'", json.dumps(str(ROOT/'frontend/src/rich-response/artifact-delivery.ts'))).replace(
+            "'../rich-response/artifact-review'", json.dumps(str(ROOT/'frontend/src/rich-response/artifact-review.ts')))
         code += '\nconst ids = ' + json.dumps([doc_id, file_id, md_id] + [row['id'] for row in legacy] + [checked_in_receipt['id']]) + ';\n'
         code += '''
 const controls = document.querySelector('#controls');

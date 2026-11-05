@@ -13,6 +13,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 import serverctl
+from serverctl_pkg import native_engine
 from tests._jsdom import require_shipped_graph
 
 # managed_start validates the built Vite artifact at boot; lanes without
@@ -39,8 +40,8 @@ def test_lifecycle_post_waits_for_manager_shutdown_and_preflight(monkeypatch):
     for action in ('restart', 'stop', 'start'):
         assert serverctl._post(action)['ok']
 
-    assert calls == [('/restart', 1660.0), ('/stop', 1660.0),
-                     ('/start', 5.0)]
+    assert calls == [(path, serverctl.LIFECYCLE_REQUEST_SECONDS)
+                     for path in ('/restart', '/stop', '/start')]
 
 
 def test_startup_progress_streams_worker_boot_stage_and_failure(tmp_path):
@@ -179,12 +180,13 @@ def test_forwarded_server_env_is_narrow_and_uses_project_dotenv(
     for key in serverctl.SERVER_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv('PORT', '16000')
-    monkeypatch.setenv('TOFU_PROCESS_RSS_RECYCLE_MB', '6144')
+    monkeypatch.setenv('TOFU_STORAGE_RPC_CAPACITY', '6')
     monkeypatch.setenv('TOFU_AGENT_QUEUE_CAPACITY', '128')
+    monkeypatch.setenv('TOFU_RESOURCE_PROFILE', 'throughput')
     monkeypatch.setenv('DATABASE_URL', 'secret')
     assert serverctl._forwarded_server_env() == {
         'PORT': '16000', 'BIND_HOST': '0.0.0.0',
-        'TOFU_PROCESS_RSS_RECYCLE_MB': '6144',
+        'TOFU_STORAGE_RPC_CAPACITY': '6',
         'TOFU_AGENT_WORKERS': '12',
         'TOFU_AGENT_QUEUE_CAPACITY': '128'}
 
@@ -496,7 +498,6 @@ def test_doctor_reports_manager_and_live_worker_budget_drift():
             'desired': 'running',
             'health': True,
             'ready': True,
-            'workerRssGuardEnabled': True,
         },
         guard_loops=[],
         legacy_cron=[],
@@ -541,9 +542,9 @@ def test_stale_source_frontend_is_rebuilt_once_before_lifecycle_action(
         serverctl, '_source_frontend_build_command',
         lambda: ['/env/bin/node', '/project/scripts/build_frontend.mjs'])
     monkeypatch.setattr(
-        serverctl.subprocess, 'run',
+        native_engine, '_run',
         lambda command, **kwargs: builds.append((command, kwargs))
-        or SimpleNamespace(returncode=0))
+        or '')
 
     assert serverctl._repair_source_frontend_artifact('test startup') == ''
     assert len(builds) == 1
@@ -576,7 +577,7 @@ def test_frontend_repair_canary_interpreter_survives_missing_python_path(
     observed = {}
 
     def build(_command, **kwargs):
-        environment = kwargs.get('env', dict(os.environ))
+        environment = kwargs['environment']
         observed.update(environment)
         interpreter = environment.get('TOFU_PYTHON') or environment.get('PYTHON') or 'python3'
         result = real_run(
@@ -585,7 +586,7 @@ def test_frontend_repair_canary_interpreter_survives_missing_python_path(
         assert result.stdout.strip() == 'canary interpreter available'
         return result
 
-    monkeypatch.setattr(serverctl.subprocess, 'run', build)
+    monkeypatch.setattr(native_engine, '_run', build)
     assert serverctl.prepare_source_frontend_artifact('manager recovery') == ''
     assert observed['PATH'] == str(tmp_path)
     assert dict(os.environ) == original_environment
@@ -735,17 +736,16 @@ def test_frontend_repair_capture_output_surfaces_the_build_log(
 
     def fake_run(_command, **kwargs):
         observed['kwargs'] = kwargs
-        return SimpleNamespace(
-            returncode=1, stdout='compiling...\nerror TS2304: boom\n')
+        raise native_engine.EngineCommandFailedError('frontend artifact rebuild failed (exit 1): error TS2304: boom')
 
-    monkeypatch.setattr(serverctl.subprocess, 'run', fake_run)
+    monkeypatch.setattr(native_engine, '_run', fake_run)
 
     error = serverctl.prepare_source_frontend_artifact(
         'browser self-repair', capture_output=True)
 
     assert 'exit 1' in error
     assert 'error TS2304: boom' in error
-    assert observed['kwargs']['stdout'] is serverctl.subprocess.PIPE
+    assert observed['kwargs']['progress'] is None
 
 
 def test_frontend_repair_without_capture_keeps_the_cli_contract(
@@ -765,15 +765,14 @@ def test_frontend_repair_without_capture_keeps_the_cli_contract(
 
     def fake_run(_command, **kwargs):
         observed['kwargs'] = kwargs
-        return SimpleNamespace(returncode=1)
+        raise native_engine.EngineCommandFailedError('frontend artifact rebuild failed (exit 1)')
 
-    monkeypatch.setattr(serverctl.subprocess, 'run', fake_run)
+    monkeypatch.setattr(native_engine, '_run', fake_run)
 
     error = serverctl.prepare_source_frontend_artifact('cli startup')
 
     assert 'npm run build:frontend' in error
-    assert 'stdout' not in observed['kwargs'], (
-        'the CLI must keep streaming the build log to its own terminal')
+    assert observed['kwargs']['progress'], 'the CLI keeps streaming build progress'
 
 
 def _patch_request_repair_state(monkeypatch):
@@ -1080,6 +1079,7 @@ def test_status_exit_code_is_monitoring_safe(monkeypatch, capsys):
     assert serverctl.cmd_status(args) == 1
     assert 'Server  : degraded' in capsys.readouterr().out
 
+    # A pre-upgrade manager may still report its retired RSS ceiling.
     monkeypatch.setattr(
         serverctl, '_remote_status',
         lambda probe=False: {'observed': 'running', 'restartCount': 2,
@@ -1097,7 +1097,7 @@ def test_status_exit_code_is_monitoring_safe(monkeypatch, capsys):
     assert 'recent=1/5 in 120s' in output
     assert 'failures=1; planned=3' in output
     assert 'Last RTO: 2.500s' in output
-    assert 'RSS guard: 2.00 GiB / 8.00 GiB hard ceiling' in output
+    assert 'RSS' not in output
 
 
 def test_sqlite_snapshot_status_reports_fresh_external_snapshot(
@@ -1410,9 +1410,11 @@ def test_doctor_classifies_runtime_failures_separately_from_hardening_gaps():
         'fresh': True,
         'destinationConfigured': False,
     }
+    # A pre-upgrade manager reports its RSS guard as disabled; that is no
+    # longer a hardening gap to repair.
     running = serverctl._doctor_findings(
         {'running': True, 'observed': 'running', 'desired': 'running',
-         'health': True, 'ready': True, 'workerRssGuardEnabled': True},
+         'health': True, 'ready': True, 'workerRssGuardEnabled': False},
         guard_loops=[], legacy_cron=[], manager_cron=['installed'],
         memory=memory, snapshot=snapshot)
     assert [(item['code'], item['severity']) for item in running] == [
@@ -1420,7 +1422,7 @@ def test_doctor_classifies_runtime_failures_separately_from_hardening_gaps():
 
     degraded = serverctl._doctor_findings(
         {'observed': 'degraded', 'desired': 'running', 'health': False,
-         'lastError': 'HTTP health failed', 'workerRssGuardEnabled': True},
+         'lastError': 'HTTP health failed'},
         guard_loops=[], legacy_cron=[], manager_cron=['installed'],
         memory=memory, snapshot={**snapshot, 'destinationConfigured': True})
     assert degraded[0]['code'] == 'worker_degraded'
@@ -1429,8 +1431,7 @@ def test_doctor_classifies_runtime_failures_separately_from_hardening_gaps():
 
     stuck = serverctl._doctor_findings(
         {'observed': 'starting', 'desired': 'running', 'health': False,
-         'processStartedAt': 100.0, 'lastError': 'HTTP health failed',
-         'workerRssGuardEnabled': True},
+         'processStartedAt': 100.0, 'lastError': 'HTTP health failed'},
         guard_loops=[], legacy_cron=[], manager_cron=['installed'],
         memory=memory, snapshot={**snapshot, 'destinationConfigured': True},
         now=500.0)
@@ -1440,8 +1441,7 @@ def test_doctor_classifies_runtime_failures_separately_from_hardening_gaps():
 
     drift = serverctl._doctor_findings(
         {'observed': 'starting', 'desired': 'running', 'health': False,
-         'processStartedAt': 100.0, 'lastError': 'HTTP health failed',
-         'workerRssGuardEnabled': True},
+         'processStartedAt': 100.0, 'lastError': 'HTTP health failed'},
         guard_loops=[], legacy_cron=[], manager_cron=['installed'],
         memory=memory, snapshot={**snapshot, 'destinationConfigured': True},
         port_drift={
@@ -1459,7 +1459,7 @@ def test_doctor_classifies_runtime_failures_separately_from_hardening_gaps():
 def test_doctor_json_warning_is_healthy_but_not_ready(monkeypatch, capsys):
     status = {
         'observed': 'starting', 'desired': 'running', 'health': False,
-        'lastError': 'booting storage', 'workerRssGuardEnabled': True,
+        'lastError': 'booting storage',
         'managerPid': 77,
     }
     monkeypatch.setattr(serverctl, '_remote_status', lambda probe=False: status)
@@ -1514,6 +1514,49 @@ def test_doctor_json_warning_is_healthy_but_not_ready(monkeypatch, capsys):
         '77 1 1 now S python /unrelated-looking/supervisor.py']
     assert report['findings'][0]['code'] == 'worker_starting'
     assert report['findings'][0]['severity'] == 'warning'
+
+
+def test_doctor_text_renders_unlimited_budget_without_rss_policy(monkeypatch, capsys):
+    unlimited = serverctl.UNLIMITED
+    report = {
+        'managerStatus': {'observed': 'running', 'workerRssGuardEnabled': True,
+                          'workerRssRecycleBytes': 8 << 30},
+        'lock': {'running': True, 'pid': 42}, 'port': 15000, 'listenerPids': [42],
+        'portDrift': None, 'legacyGuardDisabled': True, 'legacyGuardLoops': [],
+        'legacyGuardCron': [], 'managerRecoveryCron': ['installed'],
+        'memory': {'usageBytes': 1 << 30, 'limitBytes': 4 << 30, 'usagePct': 25.0,
+                   'swapLimitBytes': 0, 'oomKills': 0, 'workerRssBytes': 1 << 30},
+        'resourceBudget': {
+            'probe': {'effective_cpu_count': 4, 'effective_memory_available_mb': 2048,
+                      'effective_memory_capacity_mb': 4096, 'disk_free_mb': 1024,
+                      'data_path': '/srv/tofu/data'},
+            'defaults': {'TOFU_MAX_INFLIGHT_TASKS': unlimited,
+                         'TOFU_SYNC_WORKERS': unlimited,
+                         'TOFU_AGENT_WORKERS': unlimited,
+                         'TOFU_STORAGE_RPC_CAPACITY': unlimited,
+                         'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB': 64,
+                         'TOFU_LOG_TOTAL_BUDGET_MB': 512,
+                         'TOFU_STORAGE_MIN_FREE_BYTES': 256 << 20},
+            'overrides': {'TOFU_AGENT_WORKERS': str(unlimited)},
+        },
+        'managerGeneration': {'current': True, 'loadedFingerprint': 'a' * 12,
+                              'expectedFingerprint': 'a' * 12},
+        'workerResourceBudget': {'policyVersion': 'v', 'values': {
+            'TOFU_MAX_INFLIGHT_TASKS': str(unlimited), 'TOFU_AGENT_WORKERS': '4'}},
+        'snapshot': {'latestPath': None, 'required': False},
+        'findings': [], 'errors': [], 'warnings': [], 'healthy': True,
+    }
+    monkeypatch.setattr(serverctl, 'build_doctor_report', lambda: report)
+    args = serverctl.build_parser().parse_args(['doctor'])
+    assert serverctl.cmd_doctor(args) == 0
+    output = capsys.readouterr().out
+    assert ('Budget  : tasks=unlimited; sync/agent=unlimited/unlimited; '
+            'storage RPC=unlimited / 64 MiB frames; logs=512 MiB; '
+            'storage reserve=256 MiB') in output
+    assert 'Override: TOFU_AGENT_WORKERS=unlimited' in output
+    assert 'TOFU_AGENT_WORKERS=4; TOFU_MAX_INFLIGHT_TASKS=unlimited' in output
+    assert str(unlimited) not in output
+    assert 'RSS cap' not in output and 'RSS soft/hard' not in output
 
 
 def test_status_json_names_command_success_and_runtime_readiness(monkeypatch, capsys):
@@ -1628,6 +1671,43 @@ def test_wait_ready_returns_immediately_for_an_old_stuck_worker(monkeypatch):
 
     assert serverctl._wait_ready(180) is stuck
     assert serverctl._startup_stuck(stuck) is True
+
+
+def test_live_boot_recovery_does_not_become_stuck_from_process_age(monkeypatch):
+    booting = {
+        'running': True, 'observed': 'degraded', 'liveness': True,
+        'ready': False, 'readinessState': 'starting',
+        'processStartedAt': 100.0,
+    }
+    ready = {**booting, 'observed': 'running', 'ready': True,
+             'readinessState': 'ready'}
+    states = iter([booting, ready])
+    monkeypatch.setattr(serverctl, '_remote_status', lambda **_: next(states))
+    monkeypatch.setattr(serverctl.time, 'time', lambda: 900.0)
+    monkeypatch.setattr(serverctl.time, 'sleep', lambda _: None)
+    assert serverctl._wait_ready(5) is ready
+
+
+@pytest.mark.parametrize('action', ['start', 'restart'])
+def test_restart_wait_expiry_reports_running_recovery_without_claiming_failure(
+        tmp_path, monkeypatch, capsys, action):
+    monkeypatch.setattr(serverctl, 'PROJECT', str(tmp_path))
+    monkeypatch.setattr(serverctl, '_remote_status', lambda: {'running': False})
+    monkeypatch.setattr(serverctl, 'read_lock_status', lambda _: {'running': False})
+    monkeypatch.setattr(serverctl, '_forwarded_server_env', lambda: {})
+    monkeypatch.setattr(serverctl, '_repair_source_frontend_artifact', lambda _: '')
+    monkeypatch.setattr(serverctl, '_post', lambda *a, **k: {'ok': True})
+    monkeypatch.setattr(serverctl, '_wait_ready', lambda *a, **k: {
+        'running': True, 'observed': 'degraded', 'liveness': True,
+        'ready': False, 'readinessState': 'starting', 'pid': 42,
+    })
+    args = serverctl.build_parser().parse_args([action, '--wait', '0'])
+    command = serverctl.cmd_start if action == 'start' else serverctl.cmd_restart
+    assert command(args) == 1  # readiness has not been proved
+    output = capsys.readouterr()
+    assert 'still starting' in output.err
+    assert 'failed' not in output.err.lower()
+    assert 'serverctl.py start' in output.err
 
 
 def test_wait_ready_returns_immediately_for_storage_maintenance(monkeypatch):

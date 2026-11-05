@@ -2531,7 +2531,8 @@ def _incremental_reclaim_all(
     reclaimed = 0
     while remaining > 0:
         requested = min(max(1, int(batch_pages)), remaining)
-        connection.execute(f'PRAGMA incremental_vacuum({requested})')
+        # Each statement step frees one page; drain it so a batch is a batch.
+        connection.execute(f'PRAGMA incremental_vacuum({requested})').fetchall()
         connection.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         current = int(
             connection.execute('PRAGMA freelist_count').fetchone()[0])

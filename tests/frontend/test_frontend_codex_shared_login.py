@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
@@ -11,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture(scope='module')
 def reuse_bundle(tmp_path_factory):
+    require_node_modules('vite')
     built = tmp_path_factory.mktemp('codex-reuse') / 'reuse.cjs'
     compiled = subprocess.run([
         str(ROOT / 'scripts/vite_test_bundle.mjs'),

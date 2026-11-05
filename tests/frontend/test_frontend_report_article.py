@@ -11,7 +11,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture(scope='module')
 def article_bundle():
-    entry = "import * as owner from './report-article'; (window as any).articleOwner=owner;"
+    entry = ("import * as article from './report-article'; "
+             "import * as events from './report-events'; "
+             "(window as any).articleOwner={...article,...events};")
     with compiled_typescript(ROOT / 'frontend/src/features/paper/report-reader.ts', contents=entry) as bundle:
         yield bundle
 
@@ -128,7 +130,7 @@ def test_retained_final_paint_releases_interactions_on_skeleton_abort_and_fallba
 const source=fs.readFileSync(process.argv[1]+'/frontend/src/runtime/sections/paper/report.js','utf8');
 const runtime={_captureReadingAnchor:()=>null,_loadReadingPosition:()=>null,_restoreReadingAnchor:()=>{},_persistReadingPosition:()=>{}};
 const renderer=new Function('owner','runtimeScope',`
- const {enhanceReportArticle,buildReportTableOfContents,mountReportArticle,releaseReportArticle}=owner;
+ const {enhanceReportArticle,buildReportTableOfContents,mountReportArticle,releaseReportArticle,syncReportFinishTag,createReportEventProjection,reportSegmentsForRender}=owner;
  const t=key=>key,escapeHtml=text=>String(text||''),prefersReducedMotion=()=>true;
  let renderMarkdown=text=>text;
  ${source}

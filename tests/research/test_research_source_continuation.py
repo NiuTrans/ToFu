@@ -86,7 +86,8 @@ def test_expired_source_restores_exact_original_or_refuses_drift(storage, monkey
             return _execute_one('read_tool_artifact', {'artifact_ref':reference, 'cursor':cursor, 'limit':100},
                                 user_id=1, repository=repository, model='test', token_budget=8000)
         old = read(cursor)
-        if str(cursor).startswith('trq1.'):
+        from lib.tool_results.tool_result_query_contract import SIGNED_CURSOR_PREFIXES
+        if str(cursor).startswith(SIGNED_CURSOR_PREFIXES):
             assert old['status'] == 'error'  # expired signed authorization remains expired
         else:
             assert old['status'] == 'ok'  # an owned numeric range is still an allowed read

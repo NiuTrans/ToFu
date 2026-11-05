@@ -4,6 +4,7 @@ import sys
 import pytest
 from lib.identity import PrincipalContext
 from lib.agent_verdict import classify_verdict
+from tests.orchestration.test_native_flow_engine import load_native_library
 from tests.orchestration.test_native_flow_engine import native_library as native_library
 
 pytestmark=pytest.mark.unit
@@ -136,17 +137,13 @@ def test_large_feedback_retry_emits_one_override(native_library,monkeypatch):
 
 
 def test_unicode_mismatch_refuses_library_before_effects(native_library,monkeypatch):
-    import hashlib
     import os
     import unicodedata
-    from pathlib import Path
-    from lib.orchestration.native_flow import NativeFlowLibrary
     from lib.orchestration.graph import FlowExecutionError
     if not hasattr(native_library._library,'tofu_flow_classify_verdict'):
         pytest.skip('native verdict capability absent')
-    path=Path(os.environ['TOFU_NATIVE_FLOW_TEST_LIBRARY'])
     before=len(os.listdir('/proc/self/fd'))
     monkeypatch.setattr(unicodedata,'unidata_version','99.0.0')
     with pytest.raises(FlowExecutionError,match='Unicode version differs'):
-        NativeFlowLibrary(path=path,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),maximum_bytes=64<<20)
+        load_native_library()
     assert len(os.listdir('/proc/self/fd'))==before

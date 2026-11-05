@@ -16,9 +16,13 @@ export function openEvolution(): void {
   showWorkspace('evolution');
   const root=document.getElementById('evolutionPageContainer');
   if(!root)throw new Error('Evolution page container is missing');
+  const openConversation=(id:string)=>{goToWorkspace('chat');legacy.loadConversation?.(id);};
+  const ensureWatchdog=legacy.ensureRouterWatchdogConversation as (()=>Promise<string>)|undefined;
   const page=mountEvolutionWorkspace(root,{api:evolutionApi,path:workspacePath(),navigate:goToWorkspace,
     draftOwner:()=>readLiveRuntimeBinding('_currentUserId'),draftScope:location.pathname,
     openTask:id=>legacy.openRequestInspectorForTask?.(id),
+    openConversation,
+    openWatchdog:ensureWatchdog?async()=>openConversation(await ensureWatchdog()):undefined,
     recoverLoadFailure:error=>recoverFeatureLoad('openEvolution',error)});
   mountWorkspacePage(page.dispose,page.updateRoute);
 }

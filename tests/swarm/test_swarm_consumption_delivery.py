@@ -117,3 +117,58 @@ def test_failed_staging_leaves_live_result_unread():
     with pytest.raises(RuntimeError, match='receipt unavailable'):
         master.await_agents(ids=['ready'], timeout_seconds=0, delivery_ack=reject)
     assert 'ready' not in master._delivered_result_ids
+
+
+@pytest.mark.parametrize('failure_at', ['session', 'inbox'])
+def test_restoration_failure_retains_only_unrestored_receipts(monkeypatch, failure_at):
+    task = carrier()
+    task['_swarm_inject_pending'].append({'agent_id': 'second', 'value': 'second evidence'})
+    session = Mock(user_id=7, task_id='wave')
+    monkeypatch.setattr('lib.swarm.integration.get_active_session', lambda _: session)
+    delivered = []
+    def enqueue(key, value, **kwargs):
+        if failure_at == 'inbox' and kwargs['agent_id'] == 'second' and not delivered.count('second'):
+            raise OSError('inbox unavailable')
+        delivered.append(kwargs['agent_id'])
+        return True
+    monkeypatch.setattr(agent_inbox, 'enqueue', enqueue)
+    if failure_at == 'session':
+        session.restore_unconsumed_results.side_effect = OSError('session unavailable')
+    with pytest.raises(OSError):
+        restore_unconsumed_results(task)
+    expected = ['branch', 'second'] if failure_at == 'session' else ['second']
+    assert [item['agent_id'] for item in task['_swarm_inject_pending']] == expected
+    session.restore_unconsumed_results.side_effect = None
+    monkeypatch.setattr(agent_inbox, 'enqueue', lambda key, value, **kwargs: delivered.append(kwargs['agent_id']) or True)
+    restore_unconsumed_results(task)
+    restore_unconsumed_results(task)
+    assert delivered == ['branch', 'second']
+    assert '_swarm_inject_pending' not in task
+
+
+def test_foreign_session_cannot_receive_restored_results(monkeypatch):
+    task = carrier()
+    monkeypatch.setattr('lib.swarm.integration.get_active_session', lambda _: Mock(user_id=8))
+    enqueue = Mock()
+    monkeypatch.setattr(agent_inbox, 'enqueue', enqueue)
+    with pytest.raises(ValueError, match='another owner'):
+        restore_unconsumed_results(task)
+    assert task['_swarm_inject_pending']
+    enqueue.assert_not_called()
+
+
+def test_durable_ack_binds_current_session_and_refuses_ambiguous_response(monkeypatch):
+    from lib.swarm import persistence
+    task = carrier()
+    session = Mock(user_id=7, task_id='current-wave')
+    monkeypatch.setattr('lib.swarm.integration.get_active_session', lambda _: session)
+    command = Mock(side_effect=[{'changed': 1}, {'acknowledged': False, 'changed': 0},
+                                {'acknowledged': True, 'changed': 1}])
+    monkeypatch.setattr(persistence, '_command', command)
+    assert acknowledge_presented_results(task) is False
+    assert acknowledge_presented_results(task) is False
+    session.mark_results_delivered.assert_not_called()
+    assert acknowledge_presented_results(task) is True
+    command.assert_called_with('swarm.agents.acknowledge_results', {
+        'swarm_key': task['id'], 'task_id': 'current-wave', 'agent_ids': ['branch']})
+    session.mark_results_delivered.assert_called_once_with(['branch'])

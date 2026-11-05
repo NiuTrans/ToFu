@@ -130,6 +130,8 @@ def test_independent_design_preview(browser):
     import time
     import urllib.request
     from playwright.sync_api import expect
+    from tests._jsdom import require_node_modules
+    require_node_modules('vite')
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
@@ -197,9 +199,11 @@ def test_pending_policy_activation_has_clear_continuation_without_rejection(page
     page.goto(live_server+'/#/evolution/'+target)
     _dismiss_onboarding_modals(page)
     if surface=='studio':
-        page.locator('wa-button[data-studio-action=menu]').click()
-        page.locator('[data-studio-action=proposals]').click()
-        panel=page.locator('.evo-proposals')
+        # The HUD menu button counts pending gate proposals; the menu window lists them.
+        menu=page.locator('.evo-hud-button[data-hud=menu]')
+        expect(menu.locator('.evo-hud-badge')).to_have_text('1',timeout=20000)
+        menu.click()
+        panel=page.locator('.evo-menu-gate .evo-proposals')
         continuation=panel.locator('[data-studio-action=proposal-enable]')
         reject='[data-studio-action=proposal-reject]'
     else:

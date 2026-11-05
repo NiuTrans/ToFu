@@ -12,16 +12,12 @@ def test_conversation_observers_survive_saturated_generation_stream_capacity(mon
     """64 independent observers stay live; disconnect retires every owner."""
     from quart import Quart, g
     from lib.api_keys import local_admin_context
-    from lib.agent_core.sse_limit import limiter
     from lib.conversation_sync.broker import ConversationWakeBroker
     from routes import conversation_sync_v3 as routes
 
-    calls = []
-    def saturated(principal):
-        calls.append(principal)
-        return None
-
     class Service:
+        heartbeat_interval_ms = 15_000
+
         @staticmethod
         def sequence_from_cursor(*_args):
             return 0
@@ -40,7 +36,6 @@ def test_conversation_observers_survive_saturated_generation_stream_capacity(mon
     monkeypatch.setattr(routes, 'broker', broker)
     monkeypatch.setattr(routes, '_service', Service())
     monkeypatch.setattr(routes, 'sse_response', lambda body, **_kwargs: body)
-    monkeypatch.setattr(limiter, 'try_acquire', saturated)
     app = Quart(__name__)
 
     async def exercise():
@@ -59,7 +54,6 @@ def test_conversation_observers_survive_saturated_generation_stream_capacity(mon
                     streams.append(stream)
                     assert 'event: turn.upsert' in await anext(stream)
             assert broker.snapshot()['active'] == 64
-            assert calls == []
         finally:
             for stream in streams:
                 await stream.aclose()

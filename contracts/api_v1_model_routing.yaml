@@ -220,6 +220,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ProbeCellsSnapshot'
+  /api/v1/providers/{provider_id}/listed-models/import:
+    post:
+      operationId: importListedProviderModels
+      summary: Add every model the provider's authenticated /models lists
+      responses:
+        '200':
+          description: >-
+            Listing size, models added (present ones are skipped), and the
+            authority revision after the add-only import
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListedModelsImportResponse'
   /api/v1/model-routing/credentials/{credential_id}/secret:
     put:
       operationId: putCredentialSecret
@@ -372,12 +385,16 @@ components:
             $ref: './model_routing_v2.schema.json#/$defs/credentialMetadata'
         offerings:
           type: array
-          maxItems: 512
+          maxItems: 8192
+          description: >-
+            Same bound as the authority's reasoning_controls projection, not a
+            listing size: a provider holds its whole /models listing once the
+            owner loads it.
           items:
             $ref: './model_routing_v2.schema.json#/$defs/offering'
         deployments:
           type: array
-          maxItems: 1024
+          maxItems: 8192
           items:
             $ref: './model_routing_v2.schema.json#/$defs/deployment'
     ProviderListResponse:
@@ -475,12 +492,16 @@ components:
             $ref: './model_routing_v2.schema.json#/$defs/credentialMetadata'
         offerings:
           type: array
-          maxItems: 512
+          maxItems: 8192
+          description: >-
+            Same bound as the authority's reasoning_controls projection, not a
+            listing size: a provider holds its whole /models listing once the
+            owner loads it.
           items:
             $ref: './model_routing_v2.schema.json#/$defs/offering'
         deployments:
           type: array
-          maxItems: 1024
+          maxItems: 8192
           items:
             $ref: './model_routing_v2.schema.json#/$defs/deployment'
         creators:
@@ -622,12 +643,16 @@ components:
             $ref: './model_routing_v2.schema.json#/$defs/credentialMetadata'
         offerings:
           type: array
-          maxItems: 512
+          maxItems: 8192
+          description: >-
+            Same bound as the authority's reasoning_controls projection, not a
+            listing size: a provider holds its whole /models listing once the
+            owner loads it.
           items:
             $ref: './model_routing_v2.schema.json#/$defs/offering'
         deployments:
           type: array
-          maxItems: 1024
+          maxItems: 8192
           items:
             $ref: './model_routing_v2.schema.json#/$defs/deployment'
         creators:
@@ -683,8 +708,31 @@ components:
         credential_id:
           type: string
         model_count:
+          description: Models in provider_bundle.
           type: integer
           minimum: 0
+        listed_model_count:
+          description: >-
+            Distinct models the endpoint lists. Above model_count, the bundle
+            holds the retained part and the rest loads on request.
+          type: integer
+          minimum: 0
+    ListedModelsImportResponse:
+      type: object
+      additionalProperties: false
+      required: [provider_id, listed_model_count, added_model_count, revision]
+      properties:
+        provider_id:
+          type: string
+          minLength: 1
+        listed_model_count:
+          type: integer
+          minimum: 0
+        added_model_count:
+          type: integer
+          minimum: 0
+        revision:
+          $ref: '#/components/schemas/Revision'
     ProbeCellsStartRequest:
       type: object
       additionalProperties: false
@@ -694,7 +742,7 @@ components:
           description: Temporary request names on saved owner-scoped offerings and connections; never persisted or enabled by detection.
           type: array
           minItems: 1
-          maxItems: 1024
+          maxItems: 8192
           items:
             $ref: '#/components/schemas/ProbeCellTarget'
         credential_ids:
@@ -723,7 +771,7 @@ components:
                 type: integer
             model_ids:
               type: array
-              maxItems: 1024
+              maxItems: 8192
               items:
                 type: string
     ProbeCellTarget:

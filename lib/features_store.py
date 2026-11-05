@@ -187,7 +187,7 @@ def _apply_feature_updates_locked(data: dict, *, owner_user_id: int):
                     _lib.PPTX_TRANSLATE_ENABLED)
     # Hot-reload CACHE_EXTENDED_TTL — takes effect on next LLM request
     if 'cache_extended_ttl' in changed:
-        _lib.CACHE_EXTENDED_TTL = existing.get('cache_extended_ttl', True)
+        _lib.CACHE_EXTENDED_TTL = existing.get('cache_extended_ttl', False)
         logger.info('[Features] Hot-reloaded CACHE_EXTENDED_TTL → %s', _lib.CACHE_EXTENDED_TTL)
     # Hot-reload DEBUG_MODE — takes effect on next page load (client-side flag)
     if 'debug_mode' in changed:

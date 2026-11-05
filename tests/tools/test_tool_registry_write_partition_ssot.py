@@ -17,7 +17,8 @@ Two invariants, both with a measured production consequence:
 
    and an attended task defaults ``auto_apply=False``. So a state-changing tool
    absent from the partition (a) never prompts the user for approval and
-   (b) runs in the PARALLEL dispatch pool instead of the serial write phase.
+   (b) is treated as a bounded read: pool ceiling, Stop placeholder instead
+   of its own effect receipt, and no project-cache invalidation.
    Before this guard, ``browser_execute_js`` (arbitrary JS in the user's
    browser), ``schedule_create``/``timer_create`` (persistent background jobs),
    ``store_artifact`` and ``project_charter_commit`` all had that shape.
@@ -73,7 +74,7 @@ def _memory_names():
 
 
 #: Tools that MUTATE state outside the model's context and therefore must be
-#: approval-eligible + serially dispatched. Each entry names the mutation so a
+#: approval-eligible + dispatched as effects. Each entry names the mutation so a
 #: future reader can judge the classification rather than trusting the list.
 STATE_CHANGING_EXPECTATIONS = {
     # browser — drives the user's real browser session (v2 surface,

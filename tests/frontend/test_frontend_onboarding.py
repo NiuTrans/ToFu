@@ -38,7 +38,6 @@ oauth handoff delegation turns pin 5 red.
 
 from __future__ import annotations
 
-import functools
 import json
 import re
 import shutil
@@ -49,6 +48,7 @@ from pathlib import Path
 import pytest
 
 from tests._runtime_sections import runtime_section_names, runtime_section_path
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -62,19 +62,8 @@ INDEX_HTML = ROOT / "index.html"
 
 def _node() -> str:
     exe = shutil.which("node")
-    if not exe:
-        pytest.skip("node not available")
+    require_node_modules('jsdom')
     return exe
-
-
-@functools.lru_cache(maxsize=1)
-def _has_jsdom() -> bool:
-    try:
-        subprocess.run([_node(), "-e", "require('jsdom')"], cwd=ROOT,
-                       capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
 
 
 HARNESS = textwrap.dedent("""
@@ -242,7 +231,6 @@ def _run(neuter=None) -> dict:
 #  Behavioural
 # ══════════════════════════════════════════════════════════════════
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_first_call_renders_the_chooser_with_the_e2e_contract():
     out = _run()
     assert out["tookOver"] is True
@@ -255,7 +243,6 @@ def test_first_call_renders_the_chooser_with_the_e2e_contract():
     assert out["noDuplicate"], "a second entry duplicated the modal"
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_dismissal_flag_suppresses_and_force_bypasses():
     out = _run()
     assert out["skipClosed"] and out["skipMarked"], (
@@ -267,7 +254,6 @@ def test_dismissal_flag_suppresses_and_force_bypasses():
         "explicit setup intent")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_api_path_probes_creates_v2_access_and_finishes():
     out = _run()
     assert out["apiStepRendered"]
@@ -284,7 +270,6 @@ def test_api_path_probes_creates_v2_access_and_finishes():
         "invisible until a manual reload")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_api_path_failure_persists_nothing():
     out = _run()
     assert out["failureShown"], "a failed probe surfaced no error"
@@ -292,7 +277,6 @@ def test_api_path_failure_persists_nothing():
         "a FAILED probe still created ProviderAccess state")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_oauth_path_hands_off_to_the_existing_surface():
     out = _run()
     assert out["oauthStepRendered"]
@@ -345,7 +329,6 @@ def test_R3_wizard_is_bundled_and_not_raw_in_the_shell():
 #  NEUTER
 # ══════════════════════════════════════════════════════════════════
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_provider_access_create_removed():
     """Cut the persist call → the done step must collapse AND pin 3 goes red."""
     out = _run(lambda s: s.replace(
@@ -355,7 +338,6 @@ def test_NEUTER_provider_access_create_removed():
     assert out["chooserCards"], "unrelated pins must stay green"
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_oauth_handoff_delegation_removed():
     """Cut the tab switch + login kick → the handoff must go dead."""
     out = _run(lambda s: s.replace(

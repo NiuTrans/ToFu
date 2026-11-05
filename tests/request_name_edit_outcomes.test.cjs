@@ -32,7 +32,8 @@ test('disabled template face is refused before staging headers or authorization'
   const source = fs.readFileSync('frontend/src/runtime/sections/settings/provider_render.js','utf8');
   const connection = {connection_id:'disabled',provider_access_id:'a',base_url:'https://fixture.example/v1',enabled:false};
   const draft = {connections:[connection]}; const context = {access:{provider_access_id:'a'}, credentials:[{row:{authorization:{connection_ids:[],models:[]}}}]};
-  const scope = {_stgModelRouting:draft,t:key=>key}; vm.createContext(scope); vm.runInContext(source,scope);
+  const scope = {...owner('provider-connection-staging'), _stgModelRouting:draft,t:key=>key};
+  vm.createContext(scope); vm.runInContext(source,scope);
   const before = JSON.stringify({draft,context});
   assert.throws(() => scope._ensureV2FaceConnection(context,{base_url:connection.base_url,face:'required',extra_headers:{'x-selector':'required'}}), /requestNameConnectionDisabled/);
   assert.equal(JSON.stringify({draft,context}),before);

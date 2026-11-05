@@ -64,6 +64,42 @@ every block adds unbounded output proportional to recovery; treating unfinished
 stages as zero hides the location of failure. The single existing open owner
 provides the needed interval without any new execution path.
 
+## Replay buffer ownership
+
+Problem: recovery retained every scanned WAL frame while cloning each admitted
+frame into the committed transaction list. The temporary overlap added one
+entire backlog of requested allocations and copying before open could return.
+
+Decision: after the record's existing payload/reference validation succeeds,
+transfer its encoded buffer into the committed transaction. Keep sequence,
+hash and file-local offset metadata in the scan result for the unchanged
+durable-witness and tail-truncation checks. The preliminary complete WAL scan,
+per-open source validation, cancellation boundaries and checkpoint bytes do not
+change. No format, cache, worker, quota or weaker acknowledgement is introduced.
+
+Alternatives rejected: skipping validation or trusting a previous open changes
+integrity guarantees; a backlog cap refuses accepted work; a second cache keeps
+the duplicate ownership. This change removes one redundant copy, not all
+backlog-dependent memory: committed encoded bytes, decoded state and staged
+carried content retain their existing lifetimes.
+
+`engine_recovery_memory_tests.rs` uses the existing `allocator-diagnostics`
+feature in a fresh child process. It recovers 256 exact 128 KiB transactions,
+verifies every payload and its logged envelope, and rejects an extra full
+backlog of peak requested bytes. Seeding and concurrent suite workers cannot
+contaminate that child's counters; no allocator counter is reset. The bounded
+parent owns kill/reap. These are requested Rust allocation bytes, not RSS or
+an application latency promise. Ordinary generation, corruption, missing-source,
+unconfirmed-tail and cancellation tests retain the recovery safety boundary.
+
+The 33,568,000-byte encoded fixture measured 100,779,716 peak requested bytes
+before transfer and 67,211,716 afterwards: exactly one encoded backlog removed
+(33.31% of that peak). Retained requested bytes after open stayed 67,185,092;
+all 256 transactions and logged envelopes matched. The default-feature prefix
+test also checks both missing-reference outcomes after valid records: an
+unconfirmed suffix alone is truncated and the prefix survives checkpoint/reopen;
+a durable bad reference refuses open with CONTROL and WAL evidence unchanged.
+
 ## Shared VFS range reads
 
 **Problem:** Unix `RealFile::read_exact_at` uses a seek followed by an exact read.
@@ -88,6 +124,48 @@ Verify `recovery_profile` and `tests/startup_integrity.rs` in both default and
 flag and preserve exact recovery; the latter checks exact sequential accounting,
 actual replay counts, and incomplete failed-open reports without changing the
 CONTROL/WAL evidence. Full native fault/recovery suites cover both builds.
+
+## Repeated carried content
+
+Problem: the per-open carried-payload lookup checked history before consulting
+its existing verified bit. Historical hits also returned without setting that
+bit. Repeated references therefore reopened routing pages and source files,
+even after their exact content had already been verified during the same
+exclusive recovery. A cold-cache deterministic regression records 512 reads
+for 128 repeated references to one published historical payload.
+
+Decision: consult the existing content-addressed proof first, and record
+successful history and conservative-fallback verification in that same map.
+Each supplied payload is still hashed; a fresh lookup must verify its source
+again. Missing or damaged copies retain WAL repair, other I/O errors propagate,
+and identifiers outside the bounded map retain conservative resolution. No
+cross-open cache, new storage format, background worker or retention is added.
+The preliminary ID selection uses the existing strict non-copying envelope
+decoder; actual replay continues validating all carried bytes and references.
+
+Alternatives: a second persistent proof introduces generation/integrity
+ownership; skipping first-use source verification weakens deduplication and
+corruption handling; suppressing I/O errors changes recovery semantics. Reusing
+the already-owned proof removes repeated work without those changes.
+
+`repeated_carried_history_recovery_verifies_each_content_once` checks actual
+VFS reads, per-pass proof lifetime, nonrepairable errors and crash readback.
+`repeated_carried_recovery_paired_measurement` is an explicit ignored test:
+set `TOFUDB_RESTART_BENCH_PARENT` to the measured volume and run it with
+`--release --lib -- --ignored --nocapture`. Its eight ABBA legs use the same
+default-feature binary and disposable authority, compare the conservative
+reader with per-open reuse, and verify bytes, sequence and segment count after
+each arm. This is a repeated-content mechanism experiment, not a complete
+production startup or filesystem cold-cache measurement.
+
+On the original DolphinFS/FUSE volume, the eight-leg default release run
+measured reference `[108200, 105751, 105680, 121137]` microseconds versus
+reuse `[1653, 1688, 1696, 1668]` for 128 references (medians 106,975.5 and
+1,678 microseconds). All exact byte, sequence and segment-count checks passed.
+The deterministic regression changes repeated source reads from 512 to zero
+after first verification; a fresh pass still reaches an injected PermissionDenied.
+These measurements do not attribute the previously observed 111.267-second
+production authority open or establish its remaining duration.
 
 ## Fixed-image comparison boundary
 

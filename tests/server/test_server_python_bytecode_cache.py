@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import stat
 import sys
+import time
 
 import pytest
 
@@ -49,10 +51,31 @@ def _environment(cache_root: Path, **overrides: str) -> dict[str, str]:
     environment = {
         'TOFU_SERVER_PYTHON_CACHE': 'auto',
         'TOFU_SERVER_PYTHON_CACHE_DIR': str(cache_root),
-        'TOFU_SERVER_PYTHON_CACHE_MAX_MIB': '8',
     }
     environment.update(overrides)
     return environment
+
+
+def _namespace(cache_root: Path, name: str, *, age_seconds: float = 0.0,
+               identity: tuple[str, ...] | None = None, size: int = 0) -> Path:
+    namespace = cache_root / name
+    (namespace / 'pycache').mkdir(parents=True, mode=0o700)
+    namespace.chmod(0o700)
+    (namespace / '.active.lock').touch(mode=0o600)
+    marker = namespace / '.last-used'
+    marker.touch(mode=0o600)
+    if age_seconds:
+        stamp = time.time() - age_seconds
+        os.utime(marker, (stamp, stamp))
+    if identity is not None:
+        cache.record_namespace_identity(namespace, identity)
+    if size:
+        with (namespace / 'pycache' / 'large.pyc').open('wb') as handle:
+            handle.truncate(size)
+    return namespace
+
+
+_WEEK = 7 * 24 * 3600
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX inherited-flock contract')
@@ -126,26 +149,6 @@ def test_existing_python_policy_and_auto_local_source_are_unchanged(
     assert not cache_root.exists()
 
 
-@pytest.mark.parametrize(
-    ('configured', 'expected_mib'),
-    [('1', 8), ('not-an-integer', 64), ('99999', 512)],
-)
-def test_size_override_always_has_a_finite_hard_bound(
-    tmp_path, configured, expected_mib,
-):
-    project, _cache_parent, cache_root = _paths(tmp_path)
-    activation = cache.prepare_server_python_cache(
-        str(project), sys.executable,
-        _environment(
-            cache_root,
-            TOFU_SERVER_PYTHON_CACHE='off',
-            TOFU_SERVER_PYTHON_CACHE_MAX_MIB=configured,
-        ),
-    )
-
-    assert activation.max_bytes == expected_mib * 1024 * 1024
-
-
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX inherited-flock contract')
 def test_force_mode_can_accelerate_local_source_but_cache_must_stay_local(
     tmp_path,
@@ -174,17 +177,65 @@ def test_force_mode_can_accelerate_local_source_but_cache_must_stay_local(
     assert rejected.reason == 'cache-not-local'
 
 
+# Measured 2026-10-25: the 64 MiB quota met a 1.6 GiB namespace at every
+# launch and deleted it, so each boot recompiled the whole server from the
+# network volume. Size never removes bytecode that can still be used.
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX inherited-flock contract')
-def test_launch_prunes_over_budget_inactive_namespace(tmp_path):
+def test_launch_keeps_its_own_namespace_whatever_its_size(tmp_path):
     project, cache_parent, cache_root = _paths(tmp_path)
     cache_root.mkdir(mode=0o700)
-    old_namespace = cache_root / f"ns-{'a' * 16}-{'b' * 16}"
-    old_prefix = old_namespace / 'pycache'
-    old_prefix.mkdir(parents=True, mode=0o700)
-    (old_namespace / '.active.lock').touch(mode=0o600)
-    (old_namespace / '.last-used').touch(mode=0o600)
-    with (old_prefix / 'large.pyc').open('wb') as handle:
-        handle.truncate(7 * 1024 * 1024)
+    name = cache._namespace_name(str(project), sys.executable)
+    own = _namespace(cache_root, name, size=96 * 1024 * 1024)
+
+    activation = cache.prepare_server_python_cache(
+        str(project), sys.executable, _environment(cache_root),
+        mountinfo_text=_mountinfo(project, cache_parent),
+    )
+
+    assert activation.managed is True and activation.namespace == name
+    assert (own / 'pycache' / 'large.pyc').stat().st_size == 96 * 1024 * 1024
+    activation.close_parent_lock()
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX inherited-flock contract')
+def test_launch_reclaims_only_namespaces_nothing_can_use(tmp_path):
+    project, cache_parent, cache_root = _paths(tmp_path)
+    cache_root.mkdir(mode=0o700)
+    removed_project = tmp_path / 'removed-project'
+    expired = _namespace(cache_root, f"ns-{'1' * 16}-{'a' * 16}", age_seconds=_WEEK + 60)
+    orphaned = _namespace(cache_root, f"ns-{'2' * 16}-{'a' * 16}",
+                          identity=(str(removed_project), sys.executable))
+    unreachable = _namespace(cache_root, f"ns-{'3' * 16}-{'a' * 16}",
+                             identity=(str(tmp_path / 'offline' / 'volume' / 'project'),))
+    recent = _namespace(cache_root, f"ns-{'4' * 16}-{'a' * 16}",
+                        identity=(str(project), sys.executable), size=32 * 1024 * 1024)
+    leased = _namespace(cache_root, f"ns-{'5' * 16}-{'a' * 16}", age_seconds=_WEEK + 60)
+    lease = cache._open_lock(leased / '.active.lock', exclusive=False)
+    assert lease is not None
+    try:
+        activation = cache.prepare_server_python_cache(
+            str(project), sys.executable, _environment(cache_root),
+            mountinfo_text=_mountinfo(project, cache_parent),
+        )
+        assert activation.managed is True
+        activation.close_parent_lock()
+    finally:
+        cache._close_lock(lease)
+
+    assert not expired.exists(), 'unused for a week'
+    assert not orphaned.exists(), 'its project was provably removed'
+    assert unreachable.exists(), 'an unreachable volume proves no removal'
+    assert recent.exists(), 'recent and intact, whatever its size'
+    assert leased.exists(), 'in use by a live worker'
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX inherited-flock contract')
+def test_disk_pressure_reclaims_unused_namespaces_oldest_first(tmp_path, monkeypatch):
+    project, cache_parent, cache_root = _paths(tmp_path)
+    cache_root.mkdir(mode=0o700)
+    older = _namespace(cache_root, f"ns-{'6' * 16}-{'a' * 16}", age_seconds=3600)
+    newer = _namespace(cache_root, f"ns-{'7' * 16}-{'a' * 16}", age_seconds=60)
+    monkeypatch.setattr(cache, 'volume_has_room', lambda _path: not older.exists())
 
     activation = cache.prepare_server_python_cache(
         str(project), sys.executable, _environment(cache_root),
@@ -192,32 +243,142 @@ def test_launch_prunes_over_budget_inactive_namespace(tmp_path):
     )
 
     assert activation.managed is True
-    assert not old_namespace.exists()
+    assert not older.exists() and newer.exists()
     activation.close_parent_lock()
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX inherited-flock contract')
-def test_launch_never_prunes_active_namespace_to_claim_budget(tmp_path):
+def test_a_full_disk_skips_the_cache_without_touching_one_in_use(tmp_path, monkeypatch):
     project, cache_parent, cache_root = _paths(tmp_path)
     cache_root.mkdir(mode=0o700)
-    old_namespace = cache_root / f"ns-{'a' * 16}-{'b' * 16}"
-    old_prefix = old_namespace / 'pycache'
-    old_prefix.mkdir(parents=True, mode=0o700)
-    with (old_prefix / 'large.pyc').open('wb') as handle:
-        handle.truncate(7 * 1024 * 1024)
-    active_lock = cache._open_lock(
-        old_namespace / '.active.lock', exclusive=False)
-    assert active_lock is not None
+    leased = _namespace(cache_root, f"ns-{'8' * 16}-{'a' * 16}")
+    lease = cache._open_lock(leased / '.active.lock', exclusive=False)
+    monkeypatch.setattr(cache, 'volume_has_room', lambda _path: False)
+    environment = _environment(cache_root)
+    try:
+        activation = cache.prepare_server_python_cache(
+            str(project), sys.executable, environment,
+            mountinfo_text=_mountinfo(project, cache_parent),
+        )
+    finally:
+        cache._close_lock(lease)
 
-    activation = cache.prepare_server_python_cache(
-        str(project), sys.executable, _environment(cache_root),
-        mountinfo_text=_mountinfo(project, cache_parent),
-    )
+    assert (activation.managed, activation.reason) == (False, 'insufficient-cache-space')
+    assert leased.exists()
+    assert 'PYTHONPYCACHEPREFIX' not in environment
 
-    assert activation.managed is False
-    assert activation.reason == 'cache-budget-unavailable'
-    assert old_namespace.exists()
-    cache._close_lock(active_lock)
+
+def _mirror(prefix: Path, source: Path) -> Path:
+    mirror = prefix / str(source.resolve()).lstrip(os.sep)
+    mirror.mkdir(parents=True, exist_ok=True)
+    (mirror / 'module.cpython-312.pyc').write_bytes(b'bytecode')
+    return mirror
+
+
+def test_sweep_removes_only_bytecode_of_removed_source_directories(tmp_path, monkeypatch):
+    sources = tmp_path / 'sources'
+    live = sources / 'live' / 'package'
+    gone = sources / 'removed-worktree' / 'package'
+    replaced = sources / 'replaced'
+    offline = sources / 'offline-volume' / 'project'
+    erroring = sources / 'erroring'
+    for directory in (live, gone, replaced, offline, erroring):
+        directory.mkdir(parents=True)
+    prefix = tmp_path / 'namespace' / 'pycache'
+    mirrors = {name: _mirror(prefix, path) for name, path in (
+        ('live', live), ('gone', gone), ('replaced', replaced), ('offline', offline),
+        ('erroring', erroring))}
+    gone_root = (prefix / str(sources.resolve()).lstrip(os.sep) / 'removed-worktree')
+    import shutil
+    shutil.rmtree(sources / 'removed-worktree')
+    replaced.rmdir()
+    replaced.write_text('now a file')
+    # An unmounted volume leaves its mount point behind, empty.
+    shutil.rmtree(sources / 'offline-volume' / 'project')
+    real_stat = os.stat
+    erroring_path = str(erroring.resolve())
+
+    def flaky_stat(path, *args, **kwargs):
+        if os.fspath(path) == erroring_path:
+            raise OSError(5, 'Input/output error')
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(cache.os, 'stat', flaky_stat)
+    result = cache.sweep_dead_bytecode(prefix)
+
+    assert not gone_root.exists(), 'a removed worktree takes its whole subtree'
+    assert not mirrors['replaced'].exists(), 'a directory replaced by a file'
+    assert (mirrors['live'] / 'module.cpython-312.pyc').exists()
+    assert mirrors['offline'].exists(), 'an empty mount point proves nothing'
+    assert mirrors['erroring'].exists(), 'an I/O error proves nothing'
+    assert result['subtreesRemoved'] == 2
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX detached-sweeper contract')
+def test_sweep_requests_are_rate_limited_detached_and_single(tmp_path, monkeypatch):
+    cache_root = tmp_path / 'cache'
+    cache_root.mkdir(mode=0o700)
+    name = f"ns-{'9' * 16}-{'a' * 16}"
+    namespace = _namespace(cache_root, name)
+    launched = []
+    monkeypatch.setattr(cache.subprocess, 'Popen',
+                        lambda argv, **options: launched.append((argv, options)))
+
+    assert cache.request_bytecode_sweep(cache_root, name, python='/source/python')
+    assert not cache.request_bytecode_sweep(cache_root, name), 'swept recently'
+    argv, options = launched[0]
+    assert argv[:4] == ['/source/python', '-s', '-m', 'serverctl_pkg.python_bytecode_cache']
+    assert argv[4:] == ['sweep', '--root', str(cache_root), '--namespace', name]
+    assert options['start_new_session'] is True
+    assert not any(key.startswith('PYTHON') and key != 'PYTHONDONTWRITEBYTECODE'
+                   for key in options['env'])
+
+    stale = time.time() - cache.SWEEP_INTERVAL_SECONDS - 60
+    os.utime(namespace / cache.SWEEP_MARKER_NAME, (stale, stale))
+    held = cache._open_lock(namespace / cache.SWEEP_LOCK_NAME, exclusive=True)
+    try:
+        assert not cache.request_bytecode_sweep(cache_root, name), 'a sweep is running'
+    finally:
+        cache._close_lock(held)
+    assert not cache.request_bytecode_sweep(cache_root, 'ns-not-a-namespace')
+    assert len(launched) == 1
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX detached-sweeper contract')
+def test_sweeper_entry_point_records_its_outcome(tmp_path):
+    cache_root = tmp_path / 'cache'
+    cache_root.mkdir(mode=0o700)
+    name = f"ns-{'c' * 16}-{'a' * 16}"
+    namespace = _namespace(cache_root, name)
+    removed = tmp_path / 'removed'
+    removed.mkdir()
+    mirror = _mirror(namespace / 'pycache', removed)
+    removed.rmdir()
+
+    assert cache.main(['sweep', '--root', str(cache_root), '--namespace', name]) == 0
+
+    assert not mirror.exists()
+    outcome = json.loads((namespace / cache.SWEEP_MARKER_NAME).read_text())
+    assert outcome['subtreesRemoved'] == 1 and outcome['directoriesChecked'] >= 1
+
+
+def test_manager_requests_sweeps_only_for_a_managed_cache(tmp_path, monkeypatch):
+    project = tmp_path / 'project'
+    (project / 'data').mkdir(parents=True)
+    (project / 'logs').mkdir()
+    requests = []
+    monkeypatch.setattr(cache, 'request_bytecode_sweep',
+                        lambda root, namespace, **kwargs: requests.append(
+                            (root, namespace, kwargs)) or True)
+    manager = sm.LifecycleManager(str(project))
+
+    manager._state['workerBytecodeCache'] = {'managed': False}
+    manager._request_bytecode_sweep()
+    manager._state['workerBytecodeCache'] = {
+        'managed': True, 'cacheRoot': '/cache', 'namespace': 'ns-x'}
+    manager._request_bytecode_sweep()
+
+    assert requests == [('/cache', 'ns-x', {'python': manager.python})]
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX pass_fds contract')
@@ -240,7 +401,6 @@ def test_manager_applies_prefix_and_owns_namespace_lease(
         managed=True,
         reason='remote-source-local-cache',
         mode='auto',
-        max_bytes=64 * 1024 * 1024,
         namespace=f"ns-{'a' * 16}-{'b' * 16}",
         pycache_prefix='/local/prefix',
         lock_fd=lock_fd,
@@ -271,7 +431,7 @@ def test_manager_applies_prefix_and_owns_namespace_lease(
     assert 'pass_fds' not in child_options
     assert manager.status()['workerBytecodeCache']['selected'] is True
     assert os.fstat(lock_fd)
-    manager._release_worker_bytecode_cache_lease()
+    manager._release_worker_leases()
     with pytest.raises(OSError):
         os.fstat(lock_fd)
 

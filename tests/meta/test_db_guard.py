@@ -328,7 +328,9 @@ def test_guard_isolates_authority_in_subprocess_under_ambient_pg():
     assert authority['role'] == 'all'
     assert authority['override'] == '1'
     root = Path(authority['root']).resolve()
-    assert root.name.startswith('tofu-test-storage-pid-')
+    # Owned pytest roots carry the xdist worker id when one is set.
+    assert root.name.startswith('tofu-test-storage-'), root.name
+    assert conftest._PYTEST_ROOT_PATTERN.fullmatch(root.name), root.name
     assert root != Path(_REPO_ROOT).resolve()
     # Read-only child probes may share the parent's disposable worker root.
 

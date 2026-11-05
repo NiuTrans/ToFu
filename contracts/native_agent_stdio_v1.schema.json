@@ -112,7 +112,7 @@
         "model_call_id": {
           "type": "string",
           "minLength": 1,
-          "description": "Original model occurrence identity; grants no approval. Required for qualified parallel callbacks."
+          "description": "Original model occurrence identity; grants no approval. Required for qualified parallel and concurrent callbacks."
         },
         "model_round": {
           "type": "integer",
@@ -430,7 +430,11 @@
             "minLength": 1
           },
           "uniqueItems": true,
-          "description": "Trusted read-tool scheduling qualification. Names must belong to the admitted read catalog. Omission preserves ordered dispatch; callbacks and replies retain request ownership and joined teardown."
+          "description": "Trusted read-tool scheduling qualification. Names must belong to the admitted read catalog. Omission preserves ordered dispatch unless concurrent_tool_dispatch is selected; callbacks and replies retain request ownership and joined teardown."
+        },
+        "concurrent_tool_dispatch": {
+          "type": "boolean",
+          "description": "Every admitted call of a round, writes included, starts at once on its own joined worker; only the host's round_ack tool_order keeps call order. Requires round_control and tool_sibling_control and excludes parallel_tool_names."
         }
       },
       "additionalProperties": false
@@ -604,6 +608,18 @@
         },
         "accepted": {
           "type": "boolean"
+        },
+        "tool_order": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "description": "Concurrent dispatch only, on returned evidence: maps a settled model call ID to the earlier call IDs of the same response that must finish before it enters (same resolved write target, ordered state). Unlisted calls start at once; a predecessor that is never dispatched is not awaited."
         }
       },
       "additionalProperties": false
@@ -2125,7 +2141,7 @@
     "maximum_key_bytes": 128,
     "protocol": "responses",
     "profile": "codex",
-    "source": "lib.llm.responses_outbound.responses_cache_affinity_key"
+    "source": "lib.llm.cache_affinity.cache_affinity_key"
   },
   "actor_account_checkpoint": "Explicit checkpoint_actor_account requires shared model-control checkpoints. actor_task_id equals the executor and differs from root_task_id; tokens/tool counters are this participant observation from the one shared account. Root checkpoint and handoff reject actor scope. Application restore requires separate accepted aggregate recovery authority."
 }

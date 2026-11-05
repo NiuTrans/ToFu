@@ -53,7 +53,7 @@ def _manifest(role: str, *, thinking: str = "high") -> dict:
             "binarySha256" if baseline else "commitSha256": (
                 _sha("codex") if baseline else _sha("tofu")),
         },
-        provider_face="meituan-chat",
+        provider_face="yourprovider-chat",
         provider_slot_id="kimi-slot-fixture",
         thinking=thinking,
         experiment_arm="codex_0_149_1" if baseline else "control",
@@ -593,6 +593,9 @@ def test_pair_report_is_immutable_and_pilot_can_never_make_release_claim(
     )
 
     assert report["fullFrozenMatrix"] is False
+    assert report["contractVersion"] == "tofu-long-agent-release-report/v2"
+    assert report["acceptancePolicy"] == "tofu-long-agent-quality-first/v1"
+    assert report["releaseDecision"]["acceptancePolicy"] == report["acceptancePolicy"]
     assert report["taskCount"] == 1
     assert report["releaseDecision"]["releaseEligible"] is False
     assert report["releaseDecision"]["gates"] == {"fullFrozenMatrix": False}

@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
-
-from tests._esm_feature_harness import compile_feature_owner
-
 
 pytestmark = pytest.mark.unit
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -36,6 +32,7 @@ global.pushUnsubscribe = (channel, taskId, handler) => {
   }
 };
 eval(fs.readFileSync(process.argv[1], 'utf8'));
+const { paperIngestEvent, paperAttachPush, paperDetachPush, taskReplayIngestPage } = global.TofuTestBundle;
 
 const out = [];
 const check = (name, value) => out.push((value ? 'PASS ' : 'FAIL ') + name);
@@ -112,12 +109,12 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not shutil.which('node') or not os.path.isfile(ESBUILD),
-                    reason='node + vite test bundler dev-deps not installed')
 def test_native_push_transport_contract(tmp_path):
     assert not os.path.exists(CLASSIC_SOURCE)
     built = tmp_path / 'push-transport.js'
-    compiled = compile_feature_owner(ESBUILD, SOURCE, built, tmp_path)
+    compiled = subprocess.run(
+        [ESBUILD, SOURCE, '--bundle', '--format=iife', '--platform=browser',
+         f'--outfile={built}'], capture_output=True, text=True, timeout=60)
     assert compiled.returncode == 0, compiled.stderr
     proc = subprocess.run(
         ['node', '-e', _HARNESS, str(built)],

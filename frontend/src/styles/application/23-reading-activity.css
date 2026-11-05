@@ -125,6 +125,10 @@
   overflow-wrap: anywhere;
 }
 
+.conversation-surface .activity-event-group__causes {
+  font-weight: var(--weight-semibold);
+}
+
 .conversation-surface .activity-event-group__models {
   max-width: 40ch;
   overflow: hidden;
@@ -181,48 +185,87 @@
   font-size: var(--conversation-font-size-caption);
 }
 
-/* Compaction is a durable context boundary, so it earns one quiet exception
- * to the log-line treatment. The converging token rail carries the before /
- * after accounting; accent chrome distinguishes it from failures. */
+/* A compaction is one more activity row, not a callout: same full-width
+ * geometry, inset and quiet ink as its neighbours. The header carries the
+ * summarizer name, duration and an always-visible snapshot action; the token
+ * flow and one plain-language cause sit on the accounting line. Raw reasons
+ * and routing ids live only in the fold. */
 
 .conversation-surface .activity-event--compaction {
-  margin: var(--space-1) 0;
-  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
-  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--turn-rule));
-  border-radius: 11px;
-  background:
-    linear-gradient(105deg,
-      color-mix(in srgb, var(--accent) 8%, var(--bg-primary)) 0%,
-      color-mix(in srgb, var(--accent) 2%, var(--bg-primary)) 74%);
-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 62%, transparent);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .conversation-surface .activity-event--compaction .activity-event__marker {
-  top: var(--space-2);
-  background: var(--bg-primary);
-  color: color-mix(in srgb, var(--accent) 84%, var(--text-secondary));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 38%, var(--turn-spine));
+  background: transparent;
+  color: var(--text-tertiary);
+  box-shadow: none;
 }
 
 .conversation-surface .activity-event--compaction .activity-event__summary {
-  color: var(--text-primary, var(--text));
+  flex: 0 1 auto;
+  color: var(--text-secondary);
   font-size: var(--conversation-font-size-meta);
   font-weight: var(--weight-semibold);
-  letter-spacing: .003em;
+}
+
+.conversation-surface .activity-event__compaction-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  box-sizing: border-box;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  list-style: none;
+}
+
+.conversation-surface .activity-event__compaction-summary::-webkit-details-marker {
+  display: none;
+}
+
+.conversation-surface .activity-event__compaction-summary::marker {
+  content: '';
+}
+
+.conversation-surface .activity-event__compaction-summary:hover {
+  background: var(--bg-hover, var(--bg-secondary));
+}
+
+.conversation-surface .activity-event__compaction-summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .conversation-surface .activity-event--compaction .activity-event__body {
   flex: 1;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1) var(--space-3);
+  display: block;
 }
 
 .conversation-surface .activity-event--compaction .activity-event__line {
-  flex: 1 0 100%;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: baseline;
+}
+
+.conversation-surface .activity-event__compaction-model {
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+  line-height: var(--conversation-activity-line-height);
+  overflow-wrap: anywhere;
+}
+
+.conversation-surface .activity-event__compaction-accounting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  margin-block-start: var(--space-1);
 }
 
 .conversation-surface .activity-event--compaction .compaction-token-flow {
@@ -247,6 +290,13 @@
   letter-spacing: normal;
 }
 
+.conversation-surface .activity-event__compaction-trigger {
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+  line-height: var(--conversation-activity-line-height);
+  overflow-wrap: anywhere;
+}
+
 .conversation-surface .activity-event--compaction .activity-event__facts {
   margin: 0;
   font-family: var(--font-ui);
@@ -256,59 +306,44 @@
   flex-basis: 100%;
 }
 
-.conversation-surface .activity-event__compaction-details {
+.conversation-surface .activity-event__compaction-content {
   min-width: 0;
-  margin-left: auto;
+  padding: 0 var(--conversation-process-inset) var(--space-2)
+    calc(var(--conversation-process-inset) + var(--space-4) + var(--space-2));
   color: var(--text-tertiary);
   font-size: var(--conversation-font-size-caption);
   overflow-wrap: anywhere;
 }
 
-.conversation-surface .activity-event__compaction-details[open] {
-  flex-basis: 100%;
-  margin-left: 0;
+.conversation-surface .activity-event__compaction-content > * + * {
+  margin-block-start: var(--space-1);
 }
 
-.conversation-surface .activity-event__compaction-details > summary {
-  cursor: pointer;
-}
-
-.conversation-surface .activity-event__compaction-details > summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: var(--space-1);
-}
-
+/* A quiet text action in the chip column, not a second badge. */
 .conversation-surface .activity-event__compaction-open {
-  min-height: 22px;
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--turn-rule));
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
-  color: color-mix(in srgb, var(--accent) 76%, var(--text-secondary));
+  min-height: 20px;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
   cursor: pointer;
-  font: 600 var(--conversation-font-size-caption)/1.2 var(--font-ui);
+  font: 500 var(--conversation-font-size-caption)/1.2 var(--font-ui);
   white-space: nowrap;
 }
 
 .conversation-surface .activity-event__compaction-open:hover {
-  border-color: color-mix(in srgb, var(--accent) 52%, var(--turn-rule));
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--accent);
 }
 
 .conversation-surface .activity-event__compaction-open:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 72%, white);
-  outline-offset: 2px;
-}
-
-.conversation-surface .activity-event--compaction.activity-event--failed {
-  border-color: color-mix(in srgb, var(--warning-text) 28%, var(--turn-rule));
-  background: color-mix(in srgb, var(--warning-text) 5%, var(--bg-primary));
-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--warning-text) 62%, transparent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 @media (max-width: 600px) {
   .conversation-surface .activity-event--compaction .activity-event__line {
-    align-items: flex-start;
     flex-wrap: wrap;
   }
   .conversation-surface .activity-event--compaction .activity-event__chips {
@@ -392,4 +427,49 @@
 
 .conversation-surface .conversation-file-changes[open] .fc-chevron {
   transform: rotate(180deg);
+}
+
+/* One issue grammar for failures and warnings: a tinted callout with a
+ * severity rule, wherever the chronology anchors it. In a grouped reply that
+ * is inside the tool panel, directly below the call it followed (or above a
+ * call it blocked). Retry storms and the terminal failure receipt share it;
+ * compaction keeps its own context-boundary receipt. The wash and rule hang
+ * into the leading gutter, so the row's text keeps its column and width. */
+.conversation-surface .conversation-block--activity-event
+  > .activity-event:is(.activity-event--error, .activity-event--failed, .activity-event--warning):not(.activity-event--compaction),
+.conversation-surface .activity-event-group:is(.activity-event-group--error, .activity-event-group--warning) {
+  --issue-ink: var(--warning-text);
+  --issue-wash: var(--warning-bg);
+  --issue-rule: var(--warning-border);
+  margin-inline-start: calc(var(--space-2) * -1);
+  padding-inline-start: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--issue-wash);
+  box-shadow: inset calc(var(--control-edge-inset) * 2) 0 0 var(--issue-rule);
+}
+
+.conversation-surface .conversation-block--activity-event
+  > .activity-event:is(.activity-event--error, .activity-event--failed):not(.activity-event--compaction),
+.conversation-surface .activity-event-group.activity-event-group--error {
+  --issue-ink: var(--error-text);
+  --issue-wash: var(--error-bg);
+  --issue-rule: var(--error-border);
+}
+
+.conversation-surface .conversation-block--activity-event
+  > .activity-event:is(.activity-event--error, .activity-event--failed, .activity-event--warning):not(.activity-event--compaction)
+  :is(.activity-event__marker, .activity-event__summary),
+.conversation-surface .activity-event-group:is(.activity-event-group--error, .activity-event-group--warning)
+  > summary :is(.activity-event-group__marker, .activity-event-group__label) {
+  background: transparent;
+  color: var(--issue-ink);
+}
+
+/* Breathing room is the block's padding, never a callout margin: a margin
+ * would collapse through the block and break the tool panel's left rule. */
+.conversation-surface .conversation-block--activity-event:has(
+  > .activity-event:is(.activity-event--error, .activity-event--failed, .activity-event--warning):not(.activity-event--compaction),
+  > .activity-event-group:is(.activity-event-group--error, .activity-event-group--warning)
+) {
+  padding-block: var(--space-1);
 }

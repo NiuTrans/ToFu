@@ -153,6 +153,49 @@ def test_detector_names_namespace_switch_not_server_side():
         f'the verdict must name the key/namespace switch: {r}')
 
 
+def test_namespace_switch_warns_only_when_it_costs_a_miss(caplog):
+    """Failover rotation flips the key on purpose; half of the 2026-10-23
+    switches still read the other key's warm prefix. Only a costly switch is a
+    WARNING (the BREAK verdict); the routing change itself is INFO."""
+    import logging
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+    from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
+
+    _cache_states.clear()
+    msgs, fp, st, wb = _identical_body()
+    route = {name: routing_fingerprint(
+        key_hash=name, anthropic_beta='prompt-caching-2024',
+        endpoint='https://gw/claude/messages') for name in ('keyA', 'keyB')}
+
+    def usage(read, write, key):
+        return {'cache_read_tokens': read, 'cache_creation_input_tokens': write,
+                '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
+                '_wire_routing': route[key]}
+
+    def warnings():
+        return [r.getMessage() for r in caplog.records
+                if r.levelno >= logging.WARNING]
+
+    detect_cache_break('ns-warm', msgs, None, 'claude-opus-4',
+                       usage=usage(90000, 50000, 'keyA'), user_id=1)
+    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.cache_tracking'):
+        warm = detect_cache_break('ns-warm', msgs, None, 'claude-opus-4',
+                                  usage=usage(138000, 2000, 'keyB'), user_id=1)
+    assert warm is None
+    assert warnings() == []
+    assert 'cache namespace switch' in caplog.text
+
+    caplog.clear()
+    detect_cache_break('ns-cold', msgs, None, 'claude-opus-4',
+                       usage=usage(90000, 50000, 'keyA'), user_id=1)
+    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.cache_tracking'):
+        cold = detect_cache_break('ns-cold', msgs, None, 'claude-opus-4',
+                                  usage=usage(0, 140000, 'keyB'), user_id=1)
+    assert cold is not None and 'cache_namespace_switch' in cold
+    assert any('NAMESPACE SWITCH BREAK' in m for m in warnings()), warnings()
+
+
 def test_detector_names_beta_ttl_flip_as_namespace_switch():
     """★ MANDATED. Body byte-identical, ONLY the anthropic-beta header flips
     from carrying extended-cache-ttl to not — the one client variable that can

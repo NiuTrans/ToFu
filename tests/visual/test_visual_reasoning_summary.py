@@ -1,4 +1,4 @@
-"""Reasoning receipts are visible without inventing expandable thinking text.
+"""Reply headers omit reasoning notices while real thinking and evidence survive.
 
 Runs real common projection/renderer owners on an ephemeral local HTTP origin;
 all Turns are synthetic and no model, credentials or durable data are touched.
@@ -48,9 +48,9 @@ def _mount(page, graph, language, theme):
           type:'text',blockId:'text:terminal',text:'Recorded answer '+id,terminal:true,deliverable:true}],
           ...extra}
       });
-      const reported = {usage:{completion_tokens_details:{reasoning_tokens:2843}},usageComplete:true,
+      const reported = {usage:{completion_tokens_details:{reasoning_tokens:2002}},usageComplete:true,
         lastRoundUsage:{round:1,reasoningResolution:{requested:'preset',requestedValue:'high',effective:'preset',
-          actualMode:'exact',actualValue:'low'}}};
+          actualMode:'exact',actualValue:'max'}}};
       const encryptedOnly = record('opaque',1,'completed',reported);
       const lowerBound = record('partial',2,'completed',{...reported,usageComplete:false});
       const readable = record('readable',3,'completed',{...reported,thinking:'A readable summary.',segments:[
@@ -62,7 +62,10 @@ def _mount(page, graph, language, theme):
       const active = record('active',6,'running',reported);
       const failed = record('failed',7,'failed',reported);
       const off = record('off',8,'completed',{lastRoundUsage:{round:1,reasoningResolution:{actualMode:'off',actualValue:''}}});
-      const turns=[encryptedOnly,lowerBound,readable,absent,unsafe,active,failed,off];
+      const pending = record('pending',9,'pending',reported);
+      const interrupted = record('interrupted',10,'interrupted',reported);
+      const truncated = record('truncated',11,'truncated',reported);
+      const turns=[encryptedOnly,lowerBound,readable,absent,unsafe,active,failed,off,pending,interrupted,truncated];
       window.reasoningState={...createTurnState('reasoning-fixture'),
         turnsById:Object.fromEntries(turns.map(turn=>[turn.turnId,turn])),laneOrder:{main:turns.map(turn=>turn.turnId)}};
       const ports={localizedText:translate,renderSafeMarkdownHtml:text=>{
@@ -72,76 +75,62 @@ def _mount(page, graph, language, theme):
       window.reasoningRender=()=>reasoningSurface.render(selectConversationViewModel(reasoningState));
       reasoningRender();
     }''')
-    return translations
 
 
 @pytest.mark.parametrize('theme', ['light', 'dark', 'tofu'])
 @pytest.mark.parametrize('width', [1180, 390])
 @pytest.mark.parametrize('language', ['zh', 'en'])
-def test_missing_summary_is_honest_visible_and_narrow_safe(
+def test_missing_summary_stays_out_of_headers_and_preserves_readable_thinking(
         frontend_visual_page, reasoning_browser_graph, tmp_path, theme, width, language):
     page = frontend_visual_page
     page.set_viewport_size({'width': width, 'height': 1000})
-    text = _mount(page, reasoning_browser_graph, language, theme)
+    _mount(page, reasoning_browser_graph, language, theme)
     turn = lambda id: page.locator(f'[data-turn-id="{id}"]').first
-    info = turn('opaque').locator('.conversation-reasoning-status')
-    assert info.is_visible()
-    assert info.get_attribute('data-reasoning-summary') == 'unavailable'
-    assert text['chat.reasoning.summaryUnavailable'] in info.inner_text()
-    assert text['chat.reasoning.effort.low'] in info.locator('.conversation-reasoning-effort').inner_text()
-    assert '2,843' in info.locator('.conversation-reasoning-tokens').inner_text()
-    assert info.locator('details,button,a,img').count() == 0
+    assert page.locator('.conversation-reasoning-status, [data-reasoning-summary]').count() == 0
     assert turn('opaque').locator('.thinking-block').count() == 0
-    assert turn('partial').locator('.conversation-reasoning-tokens').inner_text() == (
-        text['chat.reasoning.reportedTokensLowerBound'].replace('{tokens}', '2,843'))
-    assert turn('readable').locator('.conversation-reasoning-status').count() == 0
-    assert turn('unknown').locator('.conversation-reasoning-status').count() == 0
-    assert turn('unsafe').locator('.conversation-reasoning-effort').count() == 0
+    assert turn('partial').locator('.thinking-block').count() == 0
+    assert turn('opaque').locator('[data-block-id="text:terminal"]').inner_text().endswith('Recorded answer opaque')
+    assert '2,002' not in turn('opaque').locator('[data-conversation-part="turn-header"]').inner_text()
     assert page.evaluate('window.reasoningPwned') is None
-    assert turn('active').locator('.conversation-reasoning-status').get_attribute('data-reasoning-summary') == 'not-received-yet'
-    assert turn('failed').locator('.conversation-reasoning-status').get_attribute('data-reasoning-summary') == 'not-received'
-    assert text['chat.reasoning.summaryUnavailable'] not in turn('failed').inner_text()
-    assert turn('off').locator('.conversation-reasoning-summary').count() == 0
-    # Reasoning text still uses the existing keyboard-accessible historical folds.
-    process = turn('readable').locator('.conversation-history-process > summary')
-    process.focus()
-    process.press('Enter')
+    # Readable reasoning retains the existing keyboard-accessible folds.
     thinking = turn('readable').locator('.thinking-header')
     thinking.focus()
     thinking.press('Enter')
     assert turn('readable').locator('.thinking-text').is_visible()
     assert turn('readable').locator('.thinking-text').inner_text() == 'A readable summary.'
-    # A late authoritative receipt repaints metadata without replacing the answer.
     page.evaluate('''() => {
       window.reasoningAnswerNode=document.querySelector('[data-turn-id="opaque"] [data-block-id="text:terminal"]');
+      window.reasoningHeaderNode=document.querySelector('[data-turn-id="opaque"] [data-conversation-part="turn-header"]').firstChild;
       const turn=reasoningState.turnsById.opaque;
       reasoningState={...reasoningState,turnsById:{...reasoningState.turnsById,opaque:{...turn,projectionRevision:11,
         projection:{...turn.projection,usage:{completion_tokens_details:{reasoning_tokens:7374}},lastRoundUsage:{
           round:2,reasoningResolution:{actualMode:'exact',actualValue:'high'}}}}}};
       reasoningRender();
     }''')
-    assert '7,374' in info.locator('.conversation-reasoning-tokens').inner_text()
-    assert text['chat.reasoning.effort.high'] in info.locator('.conversation-reasoning-effort').inner_text()
+    assert page.locator('.conversation-reasoning-status, [data-reasoning-summary]').count() == 0
     assert page.evaluate('reasoningAnswerNode === document.querySelector(\'[data-turn-id="opaque"] [data-block-id="text:terminal"]\')')
-    geometry = info.evaluate('''node=>{
+    assert page.evaluate('reasoningHeaderNode === document.querySelector(\'[data-turn-id="opaque"] [data-conversation-part="turn-header"]\').firstChild')
+    assert page.evaluate('reasoningState.turnsById.opaque.projection.usage.completion_tokens_details.reasoning_tokens') == 7374
+    geometry = turn('opaque').evaluate('''node=>{
       const box=node.getBoundingClientRect();return {left:box.left,right:box.right,width:innerWidth,
-        scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth,
-        textSize:parseFloat(getComputedStyle(node).fontSize)};
+        scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth};
     }''')
     assert geometry['left'] >= 0 and geometry['right'] <= geometry['width'] + 1
     assert geometry['scroll'] <= geometry['client'] + 1
-    assert geometry['textSize'] >= 11
-    page.screenshot(path=str(tmp_path / f'reasoning-status-{language}-{theme}-{width}.png'))
+    page.screenshot(path=str(tmp_path / f'no-reasoning-status-{language}-{theme}-{width}.png'))
     page.evaluate('reasoningSurface.dispose()')
 
 
-def test_reasoning_receipts_reconstruct_on_reload_without_browser_state(
+def test_reload_keeps_header_quiet_without_losing_provider_evidence(
         frontend_visual_page, reasoning_browser_graph):
     page = frontend_visual_page
     _mount(page, reasoning_browser_graph, 'zh', 'light')
-    before = page.locator('[data-turn-id="opaque"] .conversation-reasoning-status').inner_text()
+    before = page.locator('[data-turn-id="opaque"] [data-block-id="text:terminal"]').inner_text()
     page.reload(wait_until='load')
     _mount(page, reasoning_browser_graph, 'zh', 'light')
-    assert page.locator('[data-turn-id="opaque"] .conversation-reasoning-status').inner_text() == before
+    assert page.locator('.conversation-reasoning-status, [data-reasoning-summary]').count() == 0
+    assert page.locator('[data-turn-id="opaque"] [data-block-id="text:terminal"]').inner_text() == before
     assert page.locator('[data-turn-id="opaque"] .thinking-block').count() == 0
+    assert page.evaluate('reasoningState.turnsById.opaque.projection.usage.completion_tokens_details.reasoning_tokens') == 2002
+    assert page.evaluate('reasoningState.turnsById.opaque.projection.lastRoundUsage.reasoningResolution.actualValue') == 'max'
     page.evaluate('reasoningSurface.dispose()')

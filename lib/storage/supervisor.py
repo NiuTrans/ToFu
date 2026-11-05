@@ -16,6 +16,7 @@ import time
 from typing import Callable
 
 from lib.storage.client import StorageClient
+from lib.storage.errors import StorageError, StorageStartRefused
 from lib.storage.connection_file import (
     read_connection_file,
     resolve_connection_file,
@@ -61,7 +62,8 @@ _MAX_RPC_DEADLINE_S = 120.0
 _MAX_ENGINE_STDERR_LINE_CHARS = 16 * 1024
 _ENGINE_LINE_TRUNCATED_MARKER = '…[truncated]'
 # Engine JSON line contract (packages/tofu-db/src/engine_log.rs):
-# {"source":"tofu-db","level":...,"target":...,"message":...}.
+# {"source":"tofu-db","timestamp":...,"level":...,"target":...,"message":...};
+# timestamp is the engine's RFC 3339 UTC emit instant.
 _ENGINE_JSON_SOURCE = 'tofu-db'
 # Integrity-fence evidence is mirrored at any engine level; ordinary
 # diagnostics only cross into the app pipeline at error/critical.
@@ -123,14 +125,17 @@ def _mirror_engine_stderr_line(line: str, *, pid: int) -> None:
         level = str(parsed.get('level') or '').lower()
         target = str(parsed.get('target') or '')[:128]
         message = str(parsed.get('message') or '')
+        # The mirror's own record time is when this drainer got the line.
+        emitted_at = str(parsed.get('timestamp') or '-')[:64]
         log_level = _ENGINE_LEVEL_TO_LOG.get(level, 20)
         if log_level >= 40 or target == _ENGINE_ALWAYS_MIRROR_TARGET:
             engine_logger.log(
-                log_level, 'tofu-db engine pid=%d [%s] %s',
-                pid, target, message)
+                log_level, 'tofu-db engine pid=%d at=%s [%s] %s',
+                pid, emitted_at, target, message)
         else:
             engine_logger.debug(
-                'tofu-db engine pid=%d [%s] %s', pid, target, message)
+                'tofu-db engine pid=%d at=%s [%s] %s',
+                pid, emitted_at, target, message)
         return
     if text.startswith(_ENGINE_DEBUG_LINE_PREFIXES):
         engine_logger.debug('storage child pid=%d stderr: %s', pid, text)
@@ -208,6 +213,21 @@ def rpc_deadline_seconds() -> float:
 _DEFAULT_LIVENESS_INTERVAL_S = 1.0
 _DEFAULT_LIVENESS_PROBE_DEADLINE_S = 1.5
 _DEFAULT_LIVENESS_FAILURE_THRESHOLD = 3
+# How long a live engine must fail every probe before either monitor recycles
+# (managed) or detaches (attachment) it. A starved engine on a busy host stops
+# answering for tens of seconds and then recovers on its own (2026-10-26
+# 23:42: 25 failed probes within 61 s, then healthy again); a
+# 3-probe verdict killed such engines or, for an attachment, fenced the whole
+# application at 06:58:12 on 2026-10-27. Process exit is detected at once and
+# never waits for this budget. A genuinely wedged daemon (2026-09-21) is
+# still recycled within about two minutes instead of 27.
+_DEFAULT_LIVENESS_UNRESPONSIVE_S = 120.0
+# How often the managed-child monitor re-checks the deployed engine artifact
+# against its pin. The check reads a bounded head+tail sample; the full-file
+# re-verification runs only when that sample changed.
+_ARTIFACT_DRIFT_CHECK_INTERVAL_PROBES = 60
+# Bytes read from each end of the artifact for the drift sample.
+_ARTIFACT_SAMPLE_BYTES = 64 * 1024
 # Host-overload gate defaults: cgroup memory at/above 92% of its limit (the
 # same watermark the cgroup guard relieves at) or a 1-minute load average at
 # or above 2x the effective CPU count marks the host as overloaded.
@@ -289,6 +309,75 @@ def _liveness_probe_config(env) -> tuple[float, float, int]:
         'TOFU_STORAGE_LIVENESS_FAILURE_THRESHOLD',
         _DEFAULT_LIVENESS_FAILURE_THRESHOLD, 1, 10))
     return interval, deadline, threshold
+
+
+def _liveness_unresponsive_budget(env) -> float:
+    """Seconds a live engine may fail every probe before it is given up.
+
+    ``TOFU_STORAGE_LIVENESS_UNRESPONSIVE_SECONDS`` (default 120, bounded to
+    10..3600): see ``_DEFAULT_LIVENESS_UNRESPONSIVE_S``. Both the failure
+    threshold and this budget must be exceeded; host-overload suppression
+    extends it further.
+    """
+    raw = env.get('TOFU_STORAGE_LIVENESS_UNRESPONSIVE_SECONDS', '').strip()
+    if not raw:
+        return _DEFAULT_LIVENESS_UNRESPONSIVE_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            '[Storage] invalid TOFU_STORAGE_LIVENESS_UNRESPONSIVE_SECONDS=%r; '
+            'using %s', raw, _DEFAULT_LIVENESS_UNRESPONSIVE_S)
+        return _DEFAULT_LIVENESS_UNRESPONSIVE_S
+    if not 10.0 <= value <= 3600.0:
+        logger.warning(
+            '[Storage] TOFU_STORAGE_LIVENESS_UNRESPONSIVE_SECONDS=%r outside '
+            '[10, 3600]; clamping', raw)
+    return max(10.0, min(3600.0, value))
+
+
+class _LivenessStreak:
+    """Consecutive probe-failure accounting shared by both liveness monitors.
+
+    A failure while the host is overloaded is attributed to starvation: it
+    clears the unresponsive streak and counts as suppressed instead. A served
+    probe clears both counters. ``expired`` holds only after at least
+    ``threshold`` consecutive failures spanning ``budget`` seconds on a host
+    that was not overloaded.
+    """
+
+    def __init__(self, threshold: int, budget_seconds: float) -> None:
+        self.threshold = threshold
+        self.budget_seconds = budget_seconds
+        self.failures = 0
+        self.suppressed = 0
+        self.since: float | None = None
+
+    def served(self) -> tuple[int, int]:
+        """Record a served probe; return the (failures, suppressed) it ended."""
+        ended = (self.failures, self.suppressed)
+        self.failures = 0
+        self.suppressed = 0
+        self.since = None
+        return ended
+
+    def failed(self, now: float, *, overloaded: bool) -> None:
+        if overloaded:
+            self.suppressed += 1
+            self.failures = 0
+            self.since = None
+            return
+        self.suppressed = 0
+        self.failures += 1
+        if self.since is None:
+            self.since = now
+
+    def unresponsive_for(self, now: float) -> float:
+        return 0.0 if self.since is None else now - self.since
+
+    def expired(self, now: float) -> bool:
+        return (self.failures >= self.threshold
+                and self.unresponsive_for(now) >= self.budget_seconds)
 
 
 def _liveness_overload_config(env) -> tuple[float, float]:
@@ -391,31 +480,69 @@ def _read_cgroup_int(paths: tuple[str, ...]) -> int | None:
     return None
 
 
+# (usage, limit, memory.stat, inactive-file key) per cgroup version; v1 uses
+# the hierarchical total like the kubelet working-set computation.
+_CGROUP_MEMORY_FILES = (
+    ('/sys/fs/cgroup/memory.current', '/sys/fs/cgroup/memory.max',
+     '/sys/fs/cgroup/memory.stat', 'inactive_file'),
+    ('/sys/fs/cgroup/memory/memory.usage_in_bytes',
+     '/sys/fs/cgroup/memory/memory.limit_in_bytes',
+     '/sys/fs/cgroup/memory/memory.stat', 'total_inactive_file'),
+)
+
+
+def _read_cgroup_stat(path: str, key: str) -> int:
+    """One ``memory.stat`` counter in bytes; 0 when absent or unreadable."""
+    try:
+        text = Path(path).read_text(encoding='ascii')
+    except (OSError, ValueError):
+        return 0
+    for line in text.splitlines():
+        name, _, value = line.partition(' ')
+        if name == key:
+            return int(value) if value.strip().isdigit() else 0
+    return 0
+
+
+def _cgroup_working_set_ratio() -> float | None:
+    """This cgroup's memory working set over its limit, or None if unobservable.
+
+    Working set is usage minus inactive file cache, the kubelet definition.
+    cgroup v1 ``memory.usage_in_bytes`` and v2 ``memory.current`` both count
+    page cache, which the kernel fills up to the limit on any busy host: at
+    the 2026-10-27 06:58 outage "99.6%" was mostly reclaimable cache (an hour
+    later: 213 GiB used of 220 GiB, 164 GiB cache, 139 GiB inactive, 45 GiB
+    RSS), so raw usage marked the host overloaded permanently.
+    """
+    for usage_path, limit_path, stat_path, inactive_key in _CGROUP_MEMORY_FILES:
+        usage = _read_cgroup_int((usage_path,))
+        limit = _read_cgroup_int((limit_path,))
+        if usage is None or limit is None or limit >= (1 << 62):
+            continue
+        return max(0, usage - _read_cgroup_stat(stat_path, inactive_key)) / limit
+    return None
+
+
 def _host_overload_detail(
         mem_ratio_limit: float, load_factor_limit: float) -> str | None:
     """Return why the host is overloaded right now, or ``None`` when it is not.
 
-    Two independent signals, either sufficient: cgroup memory usage at or
-    above ``mem_ratio_limit`` of the limit, or the 1-minute load average at
-    or above ``load_factor_limit`` times the effective CPU count. Every
-    observation failure falls back to ``None`` (host presumed healthy) so
-    non-Linux hosts and restricted sandboxes keep the original fail-fast
-    recycle behavior. Kernel-ABI paths mirror lib/cgroup_guard.py and
-    lib/server/server_mlock.py; kept independent so this monitor carries no import
-    dependency on later-loaded modules.
+    Two independent signals, either sufficient: the cgroup memory working
+    set (``_cgroup_working_set_ratio``) at or above ``mem_ratio_limit`` of
+    the limit, or the 1-minute load average at or above
+    ``load_factor_limit`` times the effective CPU count. The verdict only
+    withholds liveness recycles; it never limits work. Every observation
+    failure falls back to ``None`` (host presumed healthy) so non-Linux
+    hosts and restricted sandboxes keep the original recycle behavior.
+    Kernel-ABI paths mirror lib/cgroup_guard.py and
+    lib/server/server_mlock.py; kept independent so this monitor carries no
+    import dependency on later-loaded modules.
     """
     try:
-        usage = _read_cgroup_int((
-            '/sys/fs/cgroup/memory.current',                    # v2
-            '/sys/fs/cgroup/memory/memory.usage_in_bytes'))     # v1
-        limit = _read_cgroup_int((
-            '/sys/fs/cgroup/memory.max',                        # v2
-            '/sys/fs/cgroup/memory/memory.limit_in_bytes'))     # v1
-        if usage is not None and limit is not None and limit < (1 << 62):
-            ratio = usage / limit
-            if ratio >= mem_ratio_limit:
-                return (f'cgroup memory {ratio * 100:.1f}% >= '
-                        f'{mem_ratio_limit * 100:.0f}% of limit')
+        ratio = _cgroup_working_set_ratio()
+        if ratio is not None and ratio >= mem_ratio_limit:
+            return (f'cgroup memory working set {ratio * 100:.1f}% >= '
+                    f'{mem_ratio_limit * 100:.0f}% of limit')
         load1 = os.getloadavg()[0]
         try:
             cpus = len(os.sched_getaffinity(0))
@@ -436,6 +563,38 @@ def _exit_signal_note(return_code: int | None) -> str:
     if return_code is None or return_code >= 0:
         return ''
     return f' signal={-return_code}'
+
+
+def _native_crash_hint(return_code: int | None) -> str:
+    """Post-mortem pointer for a signal-terminated storage engine.
+
+    A native crash (SIGSEGV/SIGABRT/…) leaves no Rust panic and no stack in
+    the app log: the engine's stderr is mirrored, but a fault prints nothing.
+    The only durable evidence is the exit signal plus whatever the host's
+    core collector kept, so the crash line names the inspection command
+    instead of leaving the operator with a bare signal number.
+    """
+    if return_code is None or return_code >= 0:
+        return ''
+    try:
+        core_pattern = ''
+        with open('/proc/sys/kernel/core_pattern', encoding='ascii') as handle:
+            core_pattern = handle.read(256).strip()
+    except OSError:
+        core_pattern = ''
+    collector = core_pattern.split('|', 1)[0] if core_pattern.startswith('|') else ''
+    return (
+        ' — the engine died from a native signal, not a clean exit; no panic '
+        'text is expected. Its stderr (if any) is mirrored as '
+        '"storage child pid=<pid> stderr:" in logs/app.log.'
+        + (f' The host core collector ({collector}) may have kept a core; '
+           'inspect it with `python3 scripts/inspect_native_crash.py --core '
+           '<path> --executable <engine>`.'
+           if collector else
+           ' If the host keeps cores, inspect one with `python3 '
+           'scripts/inspect_native_crash.py --core <path> --executable '
+           '<engine>`.')
+    )
 
 
 def _tofudb_env_pin() -> str | None:
@@ -631,29 +790,8 @@ def _bundled_tofudb_candidates() -> list[Path]:
     return candidates
 
 
-def _verify_tofudb_binary(path: str) -> str:
-    """Check the selected engine against its declared content pin, if any.
-
-    Pin authority, highest first:
-
-      1. ``TOFUDB_EXPECTED_SHA256`` — an explicit operator/test override;
-      2. ``<binary>.sha256`` — the sidecar deployed atomically with the
-         artifact by ``scripts/deploy_tofudb_engine.py``, so the pin travels
-         with the binary through upgrades;
-      3. neither declared — development resolution with no drift check.
-
-    This detects accidental artifact drift, not an adversarial filesystem
-    replacement after this check. No cached digest can outlive the selected
-    file; every actual launch resolves and checks its candidate again.
-    """
-    expected = _tofudb_env_pin()
-    pin_source = 'TOFUDB_EXPECTED_SHA256'
-    if expected is None:
-        expected = _tofudb_sidecar_pin(path)
-        pin_source = path + TOFUDB_PIN_SIDECAR_SUFFIX
-    if expected is None:
-        _advise_tofudb_engine_staleness(path)
-        return path
+def _tofudb_binary_digest(path: str) -> str:
+    """Hash one stable executable within the existing verification budget."""
     try:
         with open(path, 'rb') as binary:
             before = os.fstat(binary.fileno())
@@ -673,15 +811,82 @@ def _verify_tofudb_binary(path: str) -> str:
             raise RuntimeError('Pinned tofu-db binary changed during verification')
     except OSError as exc:
         raise RuntimeError('Unable to verify pinned tofu-db binary') from exc
-    actual = digest.hexdigest()
-    if actual != expected:
-        remedy = (f'restore the verified artifact, or re-pin the deployed one with '
+    return digest.hexdigest()
+
+
+def _verify_tofudb_binary(path: str, *, admitted_sha256: str | None = None,
+                          actual_sha256: str | None = None) -> str:
+    """Check the selected engine against its declared content pin, if any.
+
+    Pin authority, highest first:
+
+      1. ``TOFUDB_EXPECTED_SHA256`` — an explicit operator/test override;
+      2. ``<binary>.sha256`` — the sidecar deployed atomically with the
+         artifact by ``scripts/deploy_tofudb_engine.py``, so the pin travels
+         with the binary through upgrades;
+      3. neither declared — development resolution with no drift check.
+
+    This detects accidental artifact drift, not an adversarial filesystem
+    replacement after this check. No cached digest can outlive the selected
+    file; every actual launch checks its candidate again. Admission supplies
+    the digest of the bytes it staged (``actual_sha256``) so the pin judges
+    exactly those bytes. Identical bytes retain their original source
+    admission even if the checkout has since changed.
+    """
+    expected = _tofudb_env_pin()
+    pin_source = 'TOFUDB_EXPECTED_SHA256'
+    if expected is None:
+        expected = _tofudb_sidecar_pin(path)
+        pin_source = path + TOFUDB_PIN_SIDECAR_SUFFIX
+    if expected is None and admitted_sha256 is None:
+        _advise_tofudb_engine_staleness(path)
+        return path
+    actual = actual_sha256 or _tofudb_binary_digest(path)
+    if expected is not None and actual != expected:
+        remedy = (f'restore the verified artifact with `python3 '
+                  f'scripts/deploy_tofudb_engine.py --binary <verified-artifact> '
+                  f'--dest {path}`, or re-pin the deployed one with '
                   f'`python3 scripts/deploy_tofudb_engine.py --binary {path} --dest {path}`')
         raise RuntimeError(f'tofu-db SHA-256 mismatch for {path}: expected {expected} '
                            f'(pin: {pin_source}), got {actual}; {remedy}'
                            f'{_tofudb_provenance_note(path)}')
-    _advise_tofudb_engine_staleness(path)
+    if admitted_sha256 is not None:
+        if actual != admitted_sha256:
+            raise RuntimeError(
+                'tofu-db artifact changed since application admission; '
+                'restart the application to admit the replacement engine')
+    else:
+        _advise_tofudb_engine_staleness(path)
     return path
+
+
+def _artifact_sample_digest(path: str) -> tuple[int, str] | None:
+    """Bounded fingerprint of an engine artifact, or ``None`` when it is gone.
+
+    Reading the whole engine on every check is wasteful on a network volume,
+    and a stat-only fingerprint races the filesystem's timestamp granularity
+    (a replacement inside the same tick is invisible). The size plus a
+    head+tail sample is deterministic, cheap, and differs between builds —
+    the ELF header alone carries the build identity. The full-file pin
+    verification still runs whenever this fingerprint changes, so the sample
+    is a detector, never the authority.
+    """
+    try:
+        size = os.path.getsize(path)
+        with open(path, 'rb') as handle:
+            head = handle.read(_ARTIFACT_SAMPLE_BYTES)
+            if size > _ARTIFACT_SAMPLE_BYTES * 2:
+                handle.seek(-_ARTIFACT_SAMPLE_BYTES, os.SEEK_END)
+                tail = handle.read(_ARTIFACT_SAMPLE_BYTES)
+            else:
+                tail = b''
+    except OSError:
+        return None
+    digest = hashlib.sha256()
+    digest.update(str(size).encode('ascii'))
+    digest.update(head)
+    digest.update(tail)
+    return size, digest.hexdigest()
 
 
 def _resolve_tofudb_binary() -> str:
@@ -737,19 +942,16 @@ def _resolve_tofudb_embedded_engine() -> tuple[str, str]:
     cargo build as the daemon executable, so the daemon's resolution order
     (``TOFUDB_BIN`` override, bundled, checkout build, PATH) and its content
     pin stay authoritative; the library is the selected binary's sibling. A
-    missing sibling fails closed with the build remedy — never a silent
+    missing sibling uses the shared engine preparation refusal — never a silent
     fallback to another engine snapshot.
     """
     binary = _resolve_tofudb_binary()
     library = Path(binary).parent / 'libtofu_db.so'
-    if library.is_file():
-        if (_tofudb_checkout_root() / 'packages/tofu-db/build.rs').is_file():
-            from serverctl_pkg.native_engine import verify_library
-            verify_library(Path(binary))
-        return binary, str(library.resolve())
-    raise RuntimeError(
-        'embedded transport requires libtofu_db.so next to the selected '
-        'tofu-db binary; build with `cargo build --release` (cdylib target)')
+    if (not library.is_file()
+            or (_tofudb_checkout_root() / 'packages/tofu-db/build.rs').is_file()):
+        from serverctl_pkg.native_engine import verify_library
+        verify_library(Path(binary))
+    return binary, str(library.resolve())
 
 
 class _StartupDeadline:
@@ -879,10 +1081,18 @@ class StorageSupervisor:
         self._starting = False
         self._ready_backend: str | None = None
         self._native_fastpath: dict | None = None
+        # Automatic native fastpath bookkeeping for the current daemon launch.
+        self._native_fastpath_declined: dict | None = None
+        self._native_fastpath_data_dir: Path | None = None
+        self._launch_startup_timeout: float | None = None
+        self._native_fastpath_maintenance_at = 0.0
+        self._native_fastpath_maintenance: threading.Thread | None = None
         self._endpoint_port: int | None = None
         self._last_exit_code: int | None = None
         self._monitor: threading.Thread | None = None
         self._external_attached = False
+        self._external_pid: int | None = None
+        self._external_process_start: int | None = None
         self._external_monitor_stop = threading.Event()
         self._embedded_runtime: object | None = None
         self._embedded_lease: object | None = None
@@ -890,6 +1100,8 @@ class StorageSupervisor:
         (self._liveness_interval_seconds,
          self._liveness_probe_deadline_seconds,
          self._liveness_failure_threshold) = _liveness_probe_config(os.environ)
+        self._liveness_unresponsive_seconds = _liveness_unresponsive_budget(
+            os.environ)
         (self._liveness_overload_mem_ratio,
          self._liveness_overload_load_factor) = _liveness_overload_config(
              os.environ)
@@ -909,12 +1121,88 @@ class StorageSupervisor:
         self._lock = threading.RLock()
         # Actual launch selection, never recomputed from mutable settings.
         self._search_projection_directory = ''
+        # Fingerprint of the engine artifact the last launch verified against
+        # its `<binary>.sha256` sidecar. A hand copy of another build into the
+        # certified directory desynchronizes artifact and pin; the drift watch
+        # below notices that long before the next crash needs the pin.
+        self._verified_artifact_path = ''
+        self._verified_artifact_sample: tuple[int, str] | None = None
+        self._admitted_native_artifact: tuple[str, str] | None = None
+        # The private copy every launch runs (lib/storage/admitted_engine.py);
+        # None for attachments, which never launch an engine.
+        self._admitted_engine = None
+
+    @property
+    def owns_engine_process(self) -> bool:
+        """False for an attachment to an engine another process launched."""
+        return self._connection_file is None
+
+    def _resolve_native_daemon_binary(self) -> str:
+        """Admit the engine once and return its configured path.
+
+        Source freshness and the content pin belong to admission. A
+        supervisor that may launch keeps a private copy of exactly the
+        admitted bytes (``lib/storage/admitted_engine.py``) and every launch
+        runs that copy, so neither source edits, a changed resolver override
+        nor a staged deployment replacing this path can change or strand the
+        engine beneath a running application (2026-10-27: 5 h 23 min fenced
+        after a live preparation replaced the path). A full application
+        restart admits an upgrade through the original source and content
+        checks.
+        """
+        with self._lock:
+            admitted = self._admitted_native_artifact
+        if admitted is not None:
+            return admitted[0]
+        path = _resolve_tofudb_binary()
+        engine = None
+        if self.owns_engine_process:
+            from lib.storage.admitted_engine import AdmittedEngine
+
+            # The pin must describe the staged bytes, not a later reread.
+            engine = AdmittedEngine.admit(
+                path,
+                lambda digest: _verify_tofudb_binary(
+                    path, admitted_sha256=digest, actual_sha256=digest),
+                max_bytes=MAX_PINNED_TOFUDB_BINARY_BYTES)
+            digest = engine.sha256
+        else:
+            digest = _tofudb_binary_digest(path)
+            _verify_tofudb_binary(path, admitted_sha256=digest, actual_sha256=digest)
+        with self._lock:
+            # Concurrent launch attempts share the first admitted identity.
+            if self._admitted_native_artifact is None:
+                self._admitted_native_artifact = (path, digest)
+                self._admitted_engine, engine = engine, None
+            path = self._admitted_native_artifact[0]
+        if engine is not None:
+            engine.close()
+        return path
+
+    def _native_launch_artifact(self) -> str:
+        """The executable holding exactly the admitted engine bytes."""
+        from lib.storage.admitted_engine import AdmittedEngineLost
+
+        self._resolve_native_daemon_binary()
+        with self._lock:
+            engine = self._admitted_engine
+        if engine is None:
+            raise RuntimeError('an attached storage supervisor never launches an engine')
+        try:
+            return engine.launch_path()
+        except (AdmittedEngineLost, OSError) as exc:
+            raise StorageStartRefused(
+                'engine_admission_lost', str(exc)[:400],
+                'restart the server to admit the deployed storage engine') from exc
 
     @property
     def client(self) -> StorageClient:
         with self._lock:
             if self._client is None or not self.ready:
-                raise RuntimeError('storage sidecar is not ready')
+                raise StorageError(
+                    'database_unavailable', 'Storage authority is not ready',
+                    retryable=True, retry_after_ms=100,
+                    request_not_dispatched=True)
             return self._client
 
     @property
@@ -925,6 +1213,48 @@ class StorageSupervisor:
             return self._client is not None
         process = self._process
         return bool(process is not None and process.poll() is None and self._client)
+
+    def check_verified_artifact(self) -> dict[str, object]:
+        """Check the deployed engine against its pin when it changed on disk.
+
+        The launch path verifies the artifact against its ``<binary>.sha256``
+        sidecar every time it spawns. A hand copy of another build into the
+        certified directory desynchronizes artifact and pin: the next crash
+        then finds an engine the supervisor refuses to launch, the restart
+        storm latches ``degraded``, and the authority stays down until an
+        operator re-pins the artifact (2026-10-22: a 9.5 h fenced outage
+        whose first visible symptom was the restart failing, not the drift).
+
+        The check reads a bounded head+tail sample of the artifact; the
+        expensive full-file re-hash runs only when that sample changed, and it
+        reuses the launch-time verification so no second trust surface is
+        introduced. A sanctioned deploy re-pins the new bytes, so a
+        re-verification that passes is expected and only refreshes the
+        recorded fingerprint.
+        """
+        with self._lock:
+            path = self._verified_artifact_path
+            sample = self._verified_artifact_sample
+        if not path or sample is None:
+            return {'checked': False, 'consistent': True, 'detail': ''}
+        current = _artifact_sample_digest(path)
+        if current is None:
+            return {'checked': True, 'consistent': False,
+                    'detail': (f'the deployed engine artifact is missing: {path} '
+                               '— restore it with '
+                               'python3 scripts/deploy_tofudb_engine.py')}
+        if current == sample:
+            return {'checked': True, 'consistent': True, 'detail': ''}
+        try:
+            _verify_tofudb_binary(path)
+        except Exception as exc:
+            # The mismatch message names the pin source and the exact remedy;
+            # keep it whole enough for the operator to act on it.
+            logger.debug('deployed engine artifact verification failed: %s', exc)
+            return {'checked': True, 'consistent': False, 'detail': str(exc)[:600]}
+        with self._lock:
+            self._verified_artifact_sample = current
+        return {'checked': True, 'consistent': True, 'detail': ''}
 
     def status(self) -> dict[str, object]:
         """Return an in-memory snapshot; never performs an RPC or disk read."""
@@ -963,14 +1293,14 @@ class StorageSupervisor:
                 'ready': ready,
                 'state': state,
                 'backend': self._ready_backend or configured_backend,
-                'pid': process.pid if child_alive else None,
+                'pid': process.pid if child_alive else (self._external_pid if ready else None),
                 'port': self._endpoint_port if ready else None,
                 'last_exit_code': self._last_exit_code,
             }
             if snapshot['backend'] == 'tofudb':
                 snapshot['search_projection_directory'] = (
                     self._search_projection_directory if alive else '')
-                snapshot['native_fastpath'] = self._native_fastpath if ready and child_alive else None
+                snapshot['native_fastpath'] = self._native_fastpath if ready else None
             if self._embedded_runtime is not None:
                 snapshot['transport'] = 'embedded'
             return snapshot
@@ -984,15 +1314,25 @@ class StorageSupervisor:
             return self._start_embedded(native_scope)
         expected_protocol = PROTOCOL_VERSION
         launch_command = [sys.executable, '-m', 'lib.storage_authority_sql']
+        verified_artifact = ''
+        native_plan = None
         if native_scope is not None:
             from tofu_db.wire import PROTOCOL_VERSION as V2_PROTOCOL_VERSION
 
             expected_protocol = V2_PROTOCOL_VERSION
+            # Admission verifies the artifact against its pin sidecar once;
+            # the configured identity is recorded so the drift watch can
+            # detect an out-of-band replacement later. The child runs the
+            # admitted private copy, whatever happened to that path since.
+            verified_artifact = self._resolve_native_daemon_binary()
+            launch_artifact = self._native_launch_artifact()
             launch_command = [
                 sys.executable, '-m', 'lib.storage_authority_sql.native_launch',
-                _resolve_tofudb_binary(), str(native_scope[0]),
+                launch_artifact, str(native_scope[0]),
                 str(native_scope[1] or 0),
             ]
+            # A planned fastpath exit runs the engine that is about to serve.
+            native_plan = self._plan_native_fastpath(launch_artifact)
         with self._lock:
             if self.ready:
                 return self._client  # type: ignore[return-value]
@@ -1024,13 +1364,18 @@ class StorageSupervisor:
             if self._project_root is not None:
                 env['TOFU_STORAGE_PROJECT_ROOT'] = str(self._project_root)
                 env['TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE'] = '1'
+            if native_plan is not None:
+                env.update(native_plan.environment())
+            self._launch_startup_timeout = (
+                native_plan.startup_timeout
+                if native_plan is not None and native_plan.selected else None)
             creationflags = 0
             if os.name == 'nt':  # pragma: no cover - exercised on Windows CI
                 creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
             try:
                 projection_directory = ''
                 if native_scope is not None:
-                    from lib.storage_authority_sql.projection_paths import resolve_search_projection_paths
+                    from lib.storage_authority_sql.projection_paths import prepare_search_projection_paths
 
                     if self._project_root is not None:
                         data_dir = self._project_root / 'data'
@@ -1038,7 +1383,7 @@ class StorageSupervisor:
                         from lib.runtime.runtime_paths import data_root
 
                         data_dir = Path(data_root())
-                    projection_directory = str(resolve_search_projection_paths(
+                    projection_directory = str(prepare_search_projection_paths(
                         data_dir, environ=env).directory)
                     launch_command.append(projection_directory)
                 process = subprocess.Popen(
@@ -1146,6 +1491,12 @@ class StorageSupervisor:
             self._ready_backend = ready['backend']
             self._endpoint_port = ready['port']
             self._native_fastpath = ready.get('nativeFastpath')
+            declined = ready.get('nativeFastpathDeclined')
+            self._native_fastpath_declined = declined if isinstance(declined, dict) else None
+            if verified_artifact:
+                self._verified_artifact_path = verified_artifact
+                self._verified_artifact_sample = _artifact_sample_digest(
+                    verified_artifact)
             self._monitor = threading.Thread(
                 target=self._monitor_process,
                 args=(process,),
@@ -1156,6 +1507,8 @@ class StorageSupervisor:
             logger.info(
                 'Storage sidecar ready pid=%d backend=%s endpoint=127.0.0.1:%d',
                 process.pid, self._ready_backend, self._endpoint_port)
+            if native_plan is not None:
+                self._record_native_fastpath_launch(native_plan)
             return client
 
     def _read_startup_envelope(
@@ -1223,10 +1576,17 @@ class StorageSupervisor:
         messages: 'queue.Queue[str]',
     ) -> object:
         started_at = time.monotonic()
+        hard_timeout = self._startup_timeout
+        stall_timeout = self._startup_stall_timeout
+        if self._launch_startup_timeout:
+            # An automatically selected fastpath seed, restore or resume owns
+            # the bounded seed budget, exactly like an explicit selection.
+            hard_timeout = max(hard_timeout, self._launch_startup_timeout)
+            stall_timeout = max(stall_timeout, self._launch_startup_timeout)
         deadline = _StartupDeadline(
             started_at=started_at,
-            stall_timeout=self._startup_stall_timeout,
-            hard_timeout=self._startup_timeout,
+            stall_timeout=stall_timeout,
+            hard_timeout=hard_timeout,
         )
         last_log_at = 0.0
         last_logged_phase = ''
@@ -1341,12 +1701,15 @@ class StorageSupervisor:
             from lib.runtime.runtime_paths import data_root
 
             data_dir = Path(data_root()).resolve()
+        if os.path.lexists(data_dir / 'tofudb-authority' / 'FASTPATH'):
+            # A relocated authority replicates its shadow from the daemon.
+            return 'daemon'
         from lib.storage.volume_class import NETWORK, volume_class
 
         classification = volume_class(data_dir)
         resolved = 'daemon' if classification == NETWORK else 'embedded'
         if resolved == 'embedded':
-            binary = Path(_resolve_tofudb_binary())
+            binary = Path(self._resolve_native_daemon_binary())
             if not (binary.parent / 'libtofu_db.so').is_file():
                 resolved = 'daemon'
         logger.info(
@@ -1391,7 +1754,7 @@ class StorageSupervisor:
         if not authority.is_dir():
             _bootstrap_fresh_authority(binary, authority)
         from lib.storage_authority_sql.projection_paths import (
-            resolve_search_projection_paths,
+            prepare_search_projection_paths,
         )
 
         with self._lock:
@@ -1422,7 +1785,7 @@ class StorageSupervisor:
             })
             from tofu_db.embedded import EmbeddedRuntime
 
-            projection = resolve_search_projection_paths(data_dir)
+            projection = prepare_search_projection_paths(data_dir)
             runtime = EmbeddedRuntime(
                 Path(library),
                 authority,
@@ -1629,6 +1992,168 @@ class StorageSupervisor:
             self._fence_embedded(client, wedged=False)
             return
 
+    def _plan_native_fastpath(self, binary: str):
+        """Planned exit, then automatic selection, for one native daemon launch.
+
+        ``binary`` is the admitted launch copy, never the configured path a
+        staged deployment may have replaced since admission.
+
+        Never prevents service: a planning failure launches the classic
+        authority (the engine still fails closed on a fenced one); only a
+        journaled exit swap that cannot complete raises.
+        """
+        with self._lock:
+            if self.ready or self._starting:
+                return None
+        from lib.storage_authority_sql import native_fastpath_auto
+
+        data_dir = self._native_data_directory()
+        self._native_fastpath_data_dir = data_dir
+        native_fastpath_auto.complete_planned_exit(
+            data_dir, binary, os.environ,
+            timeout=native_fastpath_auto.seed_startup_timeout(os.environ))
+        try:
+            from lib.storage_authority_sql.projection_paths import (
+                resolve_search_projection_paths,
+            )
+
+            projection = str(resolve_search_projection_paths(data_dir).directory)
+            return native_fastpath_auto.plan_launch(
+                data_dir, os.environ, transport='daemon',
+                projection_directory=projection)
+        except Exception:
+            logger.warning('Automatic native fastpath planning failed; launching the '
+                           'classic authority', exc_info=True)
+            return None
+
+    def _record_native_fastpath_launch(self, plan) -> None:
+        """Persist the launch outcome off the supervisor lock."""
+        data_dir = self._native_fastpath_data_dir
+        if data_dir is None:
+            return
+        witness, declined = self._native_fastpath, self._native_fastpath_declined
+        # The first census or capacity pass waits out boot I/O.
+        self._native_fastpath_maintenance_at = time.monotonic() + 60.0
+
+        def record() -> None:
+            from lib.storage_authority_sql import native_fastpath_auto
+
+            try:
+                native_fastpath_auto.record_launch(data_dir, plan, witness, declined)
+            except Exception:
+                logger.warning('Recording the native fastpath launch failed', exc_info=True)
+
+        threading.Thread(target=record, name='native-fastpath-record', daemon=True).start()
+
+    def _schedule_native_fastpath_maintenance(self, process: subprocess.Popen[str]) -> None:
+        """Single-flight background census and capacity governance."""
+        data_dir = self._native_fastpath_data_dir
+        if data_dir is None or process is not self._process:
+            return
+        now = time.monotonic()
+        running = self._native_fastpath_maintenance
+        if now < self._native_fastpath_maintenance_at or (
+                running is not None and running.is_alive()):
+            return
+        from lib.storage_authority_sql import native_fastpath_auto
+
+        self._native_fastpath_maintenance_at = (
+            now + native_fastpath_auto.MAINTENANCE_INTERVAL_SECONDS)
+        witness = self._native_fastpath
+        projection = self._search_projection_directory
+
+        def maintain() -> None:
+            try:
+                native_fastpath_auto.run_maintenance(data_dir, os.environ, witness,
+                                                     projection_directory=projection)
+            except Exception:
+                logger.warning('Native fastpath maintenance failed', exc_info=True)
+
+        thread = threading.Thread(target=maintain, name='native-fastpath-maintenance',
+                                  daemon=True)
+        self._native_fastpath_maintenance = thread
+        thread.start()
+
+    def _native_data_directory(self) -> Path:
+        if self._project_root is not None:
+            return (self._project_root / 'data').resolve()
+        from lib.runtime.runtime_paths import data_root
+        return Path(data_root()).resolve()
+
+    def native_connection_document(self, *, service_id: str) -> dict:
+        """Export one ready native generation to its private lifecycle owner."""
+        from lib.storage.connection_file import NATIVE_CONNECTION_FILE_FORMAT
+        from server_manager import proc_start_ticks
+        with self._lock:
+            process = self._process
+            artifact = self._admitted_native_artifact
+            if (not self.ready or self._ready_backend != 'tofudb'
+                    or process is None or artifact is None):
+                raise RuntimeError('native service has no ready daemon generation')
+            owner, tenant = _tofudb_scope_ids()
+            return {
+                'format': NATIVE_CONNECTION_FILE_FORMAT, 'protocol': 2,
+                'backend': 'tofudb', 'host': '127.0.0.1',
+                'port': self._endpoint_port, 'token': self._token,
+                'ownerId': owner, 'tenantId': tenant,
+                'pid': process.pid, 'processStartTime': proc_start_ticks(process.pid),
+                'projectPath': str((self._project_root or Path(
+                    os.environ.get('TOFU_PROJECT_PATH') or Path(__file__).resolve().parents[2])).resolve()),
+                'binarySha256': artifact[1], 'serviceId': service_id,
+                'dataDirectory': str(self._native_data_directory()),
+                'searchProjectionDirectory': self._search_projection_directory,
+                'nativeFastpath': self._native_fastpath,
+            }
+
+    def _external_client(self, connection: dict):
+        """Negotiate the declared transport without changing storage authority."""
+        from lib.storage.connection_file import NATIVE_CONNECTION_FILE_FORMAT
+        def refuse(reason, message):
+            # Deterministic for this published document: the runtime keeps it
+            # out of the crash breaker and rechecks it slowly.
+            raise StorageStartRefused(
+                reason, message,
+                'restart the server so the native storage service is admitted again')
+        if connection['backend'] != 'tofudb':
+            return StorageClient(connection['host'], connection['port'], connection['token'],
+                                 timeout=rpc_deadline_seconds())
+        if connection['format'] != NATIVE_CONNECTION_FILE_FORMAT:
+            refuse('connection_format', 'native external storage requires a v2 connection document')
+        from server_manager import pid_is_alive, proc_start_ticks
+        from lib.storage.v2_client import StorageV2Client
+        owner, tenant = _tofudb_scope_ids()
+        project = (self._project_root or Path(
+            os.environ.get('TOFU_PROJECT_PATH') or Path(__file__).resolve().parents[2])).resolve()
+        if (connection['ownerId'], connection['tenantId']) != (owner, tenant):
+            refuse('connection_scope', 'native storage connection scope mismatch')
+        if Path(connection['projectPath']).resolve() != project:
+            refuse('connection_project', 'native storage connection project mismatch')
+        if Path(connection['dataDirectory']).resolve() != self._native_data_directory():
+            refuse('connection_data_directory',
+                   'native storage connection data directory mismatch')
+        with self._lock:
+            admitted = self._admitted_native_artifact
+        if admitted is None:
+            try:
+                self._resolve_native_daemon_binary()
+            except (RuntimeError, OSError) as exc:
+                refuse('engine_admission', str(exc)[:600])
+            with self._lock:
+                admitted = self._admitted_native_artifact
+        # Reattachment launches no executable. A prepared deployment can
+        # replace the disk path while the admitted native process still runs;
+        # validate that process's published identity against our original
+        # admission instead. Actual child launches still reverify disk bytes.
+        if connection['binarySha256'] != admitted[1]:
+            refuse('engine_identity',
+                   'native storage service engine upgrade requires a drained replacement')
+        if (not pid_is_alive(connection['pid'])
+                or proc_start_ticks(connection['pid']) != connection['processStartTime']):
+            raise RuntimeError('native storage connection belongs to an exited process')
+        return StorageV2Client(connection['host'], connection['port'],
+            connection['token'].encode('ascii'), owner_id=owner, tenant_id=tenant,
+            timeout=rpc_deadline_seconds())
+
     def _attach_external_sidecar(self) -> StorageClient:
         """Attach to a co-located container through its private handoff file."""
         assert self._connection_file is not None
@@ -1647,26 +2172,39 @@ class StorageSupervisor:
 
         deadline = time.monotonic() + self._startup_timeout
         last_error: Exception | None = None
+        attached = False
         while time.monotonic() < deadline:
+            client = None
             try:
+                if self._external_monitor_stop.is_set():
+                    raise RuntimeError('external storage attachment was cancelled')
                 connection = read_connection_file(self._connection_file)
                 expected_backend = self._configured_backend()
                 if connection['backend'] != expected_backend:
                     raise RuntimeError(
                         'storage connection file selected an unexpected backend')
-                client = StorageClient(
-                    connection['host'], connection['port'], connection['token'],
-                    timeout=rpc_deadline_seconds())
+                client = self._external_client(connection)
                 health = client.health(deadline=2.0)
                 if (not health.get('ready')
                         or health.get('backend') != expected_backend):
                     raise RuntimeError(
                         'external storage sidecar failed its health handshake')
+                if hasattr(client, 'set_readiness_budget'):
+                    client.set_readiness_budget(health.get('resourceBudget'))
+                attached = True
                 break
             except Exception as exc:
+                self._close_client_quietly(client)
+                if getattr(exc, 'retryable', None) is False:
+                    with self._lock:
+                        self._starting = False
+                        self._client = None
+                        self._external_attached = False
+                    raise
                 last_error = exc
-                time.sleep(0.05)
-        else:
+                if self._external_monitor_stop.wait(0.05):
+                    break
+        if not attached:
             with self._lock:
                 self._starting = False
                 self._client = None
@@ -1675,10 +2213,18 @@ class StorageSupervisor:
                 'external storage sidecar startup timed out') from last_error
 
         with self._lock:
+            if self._intentional_stop or self._external_monitor_stop.is_set():
+                self._close_client_quietly(client)
+                self._starting = False
+                raise RuntimeError('external storage attachment was cancelled')
             self._client = client
             self._token = connection['token']
             self._starting = False
             self._external_attached = True
+            self._external_pid = connection.get('pid')
+            self._external_process_start = connection.get('processStartTime')
+            self._search_projection_directory = connection.get('searchProjectionDirectory', '')
+            self._native_fastpath = connection.get('nativeFastpath')
             self._ready_backend = connection['backend']
             self._endpoint_port = connection['port']
             self._monitor = threading.Thread(
@@ -1693,15 +2239,42 @@ class StorageSupervisor:
             connection['backend'], connection['host'], connection['port'])
         return client
 
-    def _monitor_external_sidecar(self, client: StorageClient) -> None:
-        """Fence the application after a co-container health handshake fails.
+    def _external_engine_exited(self) -> bool:
+        """Whether the attached engine's published process is provably gone.
 
-        Uses the same consecutive-failure threshold as the managed-daemon
-        monitor (``_liveness_probe_config``): one transiently slow probe
-        must never detach a healthy co-container; a sustained run of
-        failures keeps the established detach/reattach recovery action.
+        Only native attachments publish a PID and start identity; a SQL
+        co-container may live in another PID namespace and is judged by its
+        probes alone.
         """
-        failures = 0
+        with self._lock:
+            pid, started = self._external_pid, self._external_process_start
+        if not pid or started is None:
+            return False
+        from server_manager import pid_is_alive, proc_start_ticks
+        return not pid_is_alive(pid) or proc_start_ticks(pid) != started
+
+    def _monitor_external_sidecar(self, client: StorageClient) -> None:
+        """Detach from an attached engine only once it is really gone.
+
+        Another process (the resident native host or a co-container) owns
+        the engine and its recycling. A published process that exited
+        detaches at once. A live engine that stops answering is starved or
+        wedged: the attachment survives ``_liveness_unresponsive_seconds`` of
+        continuous failure, and longer while the host is overloaded (the
+        managed monitor's starvation attribution), and simply resumes when
+        the engine answers again. Detaching a starved engine after three
+        probes fenced the application for 5 h 23 min on 2026-10-27. Only a
+        published PID/start identity tells starvation from exit, so an
+        attachment without one (a SQL co-container) keeps the plain
+        consecutive-failure verdict.
+        """
+        with self._lock:
+            proves_liveness = (bool(self._external_pid)
+                               and self._external_process_start is not None)
+        streak = _LivenessStreak(
+            self._liveness_failure_threshold,
+            self._liveness_unresponsive_seconds if proves_liveness else 0.0)
+        last_report = 0.0
         while not self._external_monitor_stop.wait(
                 self._liveness_interval_seconds):
             try:
@@ -1711,37 +2284,67 @@ class StorageSupervisor:
             except Exception as exc:
                 logger.debug('storage health monitor probe failed: %s', exc)
                 ready = False
+            now = time.monotonic()
             if ready:
-                if failures:
+                failures, suppressed = streak.served()
+                if failures or suppressed:
                     logger.info(
                         'External Storage Sidecar liveness recovered after '
-                        '%d failed probe(s)', failures)
-                failures = 0
+                        '%d failed probe(s)', failures + suppressed)
                 continue
-            failures += 1
-            if failures < self._liveness_failure_threshold:
+            if self._external_engine_exited():
+                logger.critical(
+                    'External Storage Sidecar pid=%s exited; detaching',
+                    self._external_pid)
+                self._detach_external_sidecar(client)
+                return
+            overload = self._host_overload_sticky() if proves_liveness else None
+            streak.failed(now, overloaded=overload is not None)
+            if streak.expired(now):
+                logger.critical(
+                    'External Storage Sidecar failed %d consecutive liveness '
+                    'probes; detaching (pid=%s unresponsive for %.0fs)',
+                    streak.failures, self._external_pid,
+                    streak.unresponsive_for(now))
+                self._detach_external_sidecar(client)
+                return
+            if overload is not None:
+                if streak.suppressed == 1 or now - last_report >= 30.0:
+                    last_report = now
+                    logger.warning(
+                        'External Storage Sidecar liveness probe failed '
+                        '(suppressed=%d) but the host is overloaded (%s); '
+                        'keeping the attachment', streak.suppressed, overload)
+            elif streak.failures < streak.threshold:
+                last_report = now
                 logger.warning(
                     'External Storage Sidecar liveness probe failed (%d/%d)',
-                    failures, self._liveness_failure_threshold)
-                continue
-            logger.critical(
-                'External Storage Sidecar failed %d consecutive liveness '
-                'probes; detaching', failures)
-            with self._lock:
-                if client is not self._client or self._intentional_stop:
-                    return
-                self._last_exit_code = -1
-                self._client = None
-                self._external_attached = False
-                self._ready_backend = None
-                self._endpoint_port = None
-            logger.critical('External Storage Sidecar became unavailable')
-            for callback in tuple(self._crash_callbacks):
-                try:
-                    callback(-1)
-                except Exception:
-                    logger.exception('Storage crash callback failed')
-            return
+                    streak.failures, streak.threshold)
+            elif now - last_report >= 30.0:
+                last_report = now
+                logger.warning(
+                    'External Storage Sidecar pid=%s unresponsive for %.0fs '
+                    '(%d failed probes); keeping the attachment for up to %.0fs',
+                    self._external_pid, streak.unresponsive_for(now),
+                    streak.failures, streak.budget_seconds)
+
+    def _detach_external_sidecar(self, client: StorageClient) -> None:
+        """Fence readiness and hand recovery to the crash callbacks."""
+        with self._lock:
+            if client is not self._client or self._intentional_stop:
+                return
+            self._last_exit_code = -1
+            self._client = None
+            self._external_attached = False
+            self._ready_backend = None
+            self._endpoint_port = None
+        self._close_client_quietly(client)
+        logger.critical('External Storage Sidecar became unavailable')
+        for callback in tuple(self._crash_callbacks):
+            try:
+                callback(-1)
+            except Exception:
+                logger.exception('Storage crash callback failed')
 
     def _abort_failed_start(self, process: subprocess.Popen[str]) -> None:
         self._close_owner_channel(process)
@@ -1930,6 +2533,79 @@ class StorageSupervisor:
         self._overload_sticky_detail = None
         self._overload_sticky_until = 0.0
         return None
+    def _managed_child_needs_recycle(
+            self, process: subprocess.Popen[str], client: StorageClient,
+            streak: _LivenessStreak, last_report: list[float]) -> bool:
+        """Probe the managed child once; True when it must be recycled now."""
+        now = time.monotonic()
+        if self._probe_managed_child_liveness(client):
+            failures, suppressed = streak.served()
+            if failures or suppressed:
+                logger.info(
+                    'Storage sidecar liveness recovered after %d failed '
+                    'probe(s)', failures + suppressed)
+            # A served probe proves the child is healthy: clear the
+            # overload-forced recycle rate limit.
+            self._overload_recycle_backoff = 0.0
+            self._overload_recycle_not_before = 0.0
+            return False
+        overload = self._host_overload_sticky()
+        if overload is not None:
+            if streak.failures:
+                logger.info(
+                    'Storage sidecar liveness failure streak reset under host '
+                    'overload (%s)', overload)
+            streak.failed(now, overloaded=True)
+            if (streak.suppressed >= self._liveness_overload_max_suppress
+                    and now >= self._overload_recycle_not_before):
+                # The child stayed unresponsive through a whole suppression
+                # window. A shared cgroup pinned near its limit never clears,
+                # so withholding forever would be a permanent outage; force
+                # exactly one bounded recycle and escalate the floor so a
+                # starved child is not cold-started into a storm. The probe
+                # runs on a dedicated session (v2_client._health_call), so
+                # this verdict is not reachable from a merely busy pool — a
+                # failed probe here means the daemon itself is not answering.
+                logger.critical(
+                    'Storage sidecar pid=%d stayed unresponsive through %d '
+                    'probes while the host is overloaded (%s); forcing a '
+                    'bounded recycle so a wedged authority cannot be withheld '
+                    'indefinitely', process.pid, streak.suppressed, overload)
+                self._escalate_overload_recycle_backoff()
+                return True
+            if streak.suppressed == 1 or now - last_report[0] >= 30.0:
+                logger.warning(
+                    'Storage sidecar liveness probe failed (suppressed=%d) but '
+                    'the host is overloaded (%s); withholding recycle of '
+                    'starved pid=%d', streak.suppressed, overload, process.pid)
+                last_report[0] = now
+            return False
+        if streak.suppressed:
+            logger.warning(
+                'Host overload cleared after %d suppressed liveness failure(s); '
+                'normal recycle accounting resumed', streak.suppressed)
+        streak.failed(now, overloaded=False)
+        if streak.expired(now):
+            logger.critical(
+                'Storage sidecar pid=%d failed %d consecutive liveness probes; '
+                'terminating so the exit path can fence and restart storage '
+                '(unresponsive for %.0fs)', process.pid, streak.failures,
+                streak.unresponsive_for(now))
+            return True
+        if streak.failures < streak.threshold:
+            last_report[0] = now
+            logger.warning(
+                'Storage sidecar liveness probe failed (%d/%d) pid=%d',
+                streak.failures, streak.threshold, process.pid)
+        elif now - last_report[0] >= 30.0:
+            last_report[0] = now
+            logger.warning(
+                'Storage sidecar pid=%d unresponsive for %.0fs (%d failed '
+                'probes); recycling only after %.0fs', process.pid,
+                streak.unresponsive_for(now), streak.failures,
+                streak.budget_seconds)
+        return False
+
     def _monitor_process(self, process: subprocess.Popen[str]) -> None:
         """Watch one managed child for exit AND for live-but-unresponsive service.
 
@@ -1951,106 +2627,47 @@ class StorageSupervisor:
         bounded: after ``_liveness_overload_max_suppress`` consecutive
         failures the monitor forces exactly one recycle, rate-limited by an
         escalating cooldown, so a shared host whose overload never clears
-        still cannot withhold a wedged authority forever.
+        still cannot withhold a wedged authority forever. On a healthy host a
+        live child is recycled only after ``_liveness_unresponsive_seconds``
+        of continuous failure (``_LivenessStreak``), never after three probes.
         """
-        failures = 0
-        suppressed = 0
-        last_suppressed_log = 0.0
+        streak = _LivenessStreak(
+            self._liveness_failure_threshold, self._liveness_unresponsive_seconds)
+        last_report = [0.0]
+        artifact_checks = 0
         while True:
             return_code = process.poll()
             if return_code is not None:
                 break
+            # Watch the deployed engine artifact against its pin while the
+            # authority runs. The check is one stat; the re-hash happens only
+            # when the artifact actually changed on disk.
+            artifact_checks += 1
+            if artifact_checks >= _ARTIFACT_DRIFT_CHECK_INTERVAL_PROBES:
+                artifact_checks = 0
+                drift = self.check_verified_artifact()
+                if not drift['consistent']:
+                    logger.critical(
+                        'Storage sidecar pid=%d: the deployed engine artifact '
+                        'no longer matches its pin: %s — restarts keep the '
+                        'admitted engine, but the next application restart '
+                        'will refuse the deployed one; re-deploy with '
+                        'python3 scripts/deploy_tofudb_engine.py',
+                        process.pid, drift['detail'])
             client = None
             with self._lock:
                 if process is self._process and not self._intentional_stop:
                     client = self._client
-            if client is not None:
-                if self._probe_managed_child_liveness(client):
-                    if failures:
-                        logger.info(
-                            'Storage sidecar liveness recovered after %d '
-                            'failed probe(s)', failures)
-                    failures = 0
-                    # A served probe proves the child is healthy: clear the
-                    # overload-forced recycle rate limit.
-                    self._overload_recycle_backoff = 0.0
-                    self._overload_recycle_not_before = 0.0
-                else:
-                    overload = self._host_overload_sticky()
-                    if overload is not None:
-                        suppressed += 1
-                        if failures:
-                            logger.info(
-                                'Storage sidecar liveness failure streak '
-                                'reset under host overload (%s)', overload)
-                        failures = 0
-                        now = time.monotonic()
-                        if (suppressed >= self._liveness_overload_max_suppress
-                                and now >= self._overload_recycle_not_before):
-                            # The child stayed unresponsive through a whole
-                            # suppression window. A shared cgroup pinned near
-                            # its limit never clears, so withholding forever
-                            # would be a permanent outage; force exactly one
-                            # bounded recycle and escalate the floor so a
-                            # starved child is not cold-started into a storm.
-                            # The probe runs on a dedicated session
-                            # (v2_client._health_call), so this verdict is no
-                            # longer reachable from a merely busy pool — a
-                            # failed probe here means the daemon itself is
-                            # not answering.
-                            logger.critical(
-                                'Storage sidecar pid=%d stayed unresponsive '
-                                'through %d probes while the host is '
-                                'overloaded (%s); forcing a bounded recycle '
-                                'so a wedged authority cannot be withheld '
-                                'indefinitely', process.pid, suppressed,
-                                overload)
-                            self._escalate_overload_recycle_backoff()
-                            recycled_code = (
-                                self._terminate_unresponsive_child(
-                                    process))
-                            return_code = (
-                                recycled_code
-                                if recycled_code is not None else -1)
-                            break
-                        if (suppressed == 1
-                                or now - last_suppressed_log >= 30.0):
-                            logger.warning(
-                                'Storage sidecar liveness probe failed '
-                                '(suppressed=%d) but the host is overloaded '
-                                '(%s); withholding recycle of starved '
-                                'pid=%d', suppressed, overload, process.pid)
-                            last_suppressed_log = now
-                    else:
-                        if suppressed:
-                            logger.warning(
-                                'Host overload cleared after %d suppressed '
-                                'liveness failure(s); normal recycle '
-                                'accounting resumed', suppressed)
-                            suppressed = 0
-                        failures += 1
-                        if failures < self._liveness_failure_threshold:
-                            logger.warning(
-                                'Storage sidecar liveness probe failed (%d/%d) '
-                                'pid=%d',
-                                failures, self._liveness_failure_threshold,
-                                process.pid)
-                        else:
-                            logger.critical(
-                                'Storage sidecar pid=%d failed %d consecutive '
-                                'liveness probes; terminating so the exit path '
-                                'can fence and restart storage',
-                                process.pid, failures)
-                            recycled_code = self._terminate_unresponsive_child(
-                                process)
-                            # An unreapable child is still fenced through the
-                            # ordinary exit path with a synthetic code so crash
-                            # callbacks schedule the restart loop; the loop
-                            # keeps retrying in case the kernel ever reaps it.
-                            return_code = (
-                                recycled_code
-                                if recycled_code is not None else -1)
-                            break
+            if client is not None and self._managed_child_needs_recycle(
+                    process, client, streak, last_report):
+                recycled_code = self._terminate_unresponsive_child(process)
+                # An unreapable child is still fenced through the ordinary
+                # exit path with a synthetic code so crash callbacks schedule
+                # the restart loop; the loop keeps retrying in case the
+                # kernel ever reaps it.
+                return_code = recycled_code if recycled_code is not None else -1
+                break
+            self._schedule_native_fastpath_maintenance(process)
             time.sleep(self._liveness_interval_seconds)
         self._close_owner_channel(process)
         with self._lock:
@@ -2061,19 +2678,21 @@ class StorageSupervisor:
                 None if self._process_started_at is None
                 else time.monotonic() - self._process_started_at)
             self._last_exit_code = return_code
-            self._client = None
+            client, self._client = self._client, None
             self._process = None
             self._process_started_at = None
             self._token = ''
             self._starting = False
             self._ready_backend = None
             self._endpoint_port = None
+        self._close_client_quietly(client)
         self._join_stderr_drainer()
         uptime_note = f' uptime={uptime_seconds:.1f}s' if uptime_seconds is not None else ''
         if crashed:
             logger.critical(
-                'Storage sidecar exited unexpectedly exit_code=%d%s%s',
-                return_code, _exit_signal_note(return_code), uptime_note)
+                'Storage sidecar exited unexpectedly exit_code=%d%s%s%s',
+                return_code, _exit_signal_note(return_code), uptime_note,
+                _native_crash_hint(return_code))
             for callback in tuple(self._crash_callbacks):
                 try:
                     callback(return_code)

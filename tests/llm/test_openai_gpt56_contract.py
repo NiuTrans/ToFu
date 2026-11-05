@@ -34,7 +34,7 @@ def test_authoritative_contract_drives_models_slots_and_pricing():
     from lib.pricing import lookup_pricing
 
     expected = {
-        'gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna',
+        'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna',
         'gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'}
     assert GPT56_MODEL_IDS == expected
     assert GPT56_ALIAS_TARGET == 'gpt-5.6-sol'
@@ -149,7 +149,7 @@ def test_lean_prompt_is_default_for_gpt56_and_materially_smaller():
     assert 'System-added <system-reminder>' in lean
 
 
-def test_ptc_and_multi_agent_auto_modes_are_task_gated(monkeypatch):
+def test_multi_agent_auto_is_task_gated_while_ptc_auto_is_resident(monkeypatch):
     from lib.tasks_pkg.tool_orchestration_policy import (
         resolve_tool_orchestration,
     )
@@ -184,7 +184,8 @@ def test_ptc_and_multi_agent_auto_modes_are_task_gated(monkeypatch):
         requested_programmatic='auto', requested_multi_agent='auto',
         messages=[{'role': 'user', 'content': '打开一个文件'}],
         tools=[_tool('read_files')], round_num=1)
-    assert small['programmaticCalling'] == 'off'
+    assert small['programmaticCalling'] == 'auto'
+    assert small['programmaticReason'] == 'resident_eligible_read_tools'
     assert small['multiAgent'] == 'disabled'
 
     later = resolve_tool_orchestration(

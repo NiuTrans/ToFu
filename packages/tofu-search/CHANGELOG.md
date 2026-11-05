@@ -1,5 +1,146 @@
 # Changelog
 
+## Unreleased
+
+- Optional `AuthSourceProvider.bind()` captures the caller's source view before
+  worker dispatch. Existing static and duck-typed providers remain compatible.
+  Browser, native site and source registrations are captured together and
+  restored on every exit. Legacy XHS pacing belongs to that captured transport;
+  replay reuse also requires a current enabled source with unchanged cookies,
+  proxy, query and requested result count. Source/provider changes retire old
+  state, and late work cannot overwrite the replacement. Browser content is
+  always read through its provider. Returned row mutations cannot alter cache
+  entries. Retired state is reclaimed with its scope, without new tuning knobs.
+
+- Native Xiaohongshu search now enters the bound site's authority on every
+  invocation. A previous owner's cached result or legacy account cooldown no
+  longer bypasses current authorization or suppresses another browser's work.
+  Native results and empty outcomes never update compatibility cache/backoff.
+  Explicit cookie-replay-first ordering, unavailable fallback and terminal
+  native refusals retain their existing meaning.
+
+- An engine whose most recent request failed now runs as a probe that the
+  engine wave does not wait for once the other engines have answered. A
+  cooled-down breaker is half-open, and one failed probe re-opens it. An
+  unreachable engine no longer holds every wave for its full request timeout
+  (11-13 s observed): after a restart only the first search waits for it.
+  Previously the cooled-down breaker reset to closed and the next three
+  searches each waited again. Abandoned probes are reported as `circuit_open`
+  coverage. `_EngineCircuit.last_call_failed` replaces `is_half_open`.
+- Evidence coverage no longer counts the separate characters of a CJK bigram
+  (`lexical.subject_terms`). `tokenize` emits them for a two-character run,
+  but a longer run in a page yields bigrams only, so they could never match
+  there: a relevant Chinese listing scored 3/9 instead of 3/7, was classified
+  `weak_match` and was therefore not fetched. Ranking and excerpts keep the
+  unchanged `tokenize` model.
+- Race-to-N waits for `max_results` pages that would be delivered as
+  established evidence (`quality.is_established_evidence`) instead of twice
+  that many pages of any relevance. Fast off-topic pages no longer end the
+  fetch wait before the relevant pages arrive.
+- The SSRF guard (`block_private_addresses`) now refuses every address that is
+  not globally routable, including the RFC 6598 shared space
+  `100.64.0.0/10`. Alibaba Cloud's instance-metadata service
+  (`100.100.100.200`) previously passed the guard because `is_private` does
+  not cover that range. Hostname-anchored `allow_private_hosts` is unchanged.
+- Queries longer than 400 characters (surrounding whitespace excluded) are
+  refused before any engine runs. The empty result carries
+  `_search_diag.reason == 'query_too_long'`, and the formatter states the length
+  and the limit and asks for keywords. Previously every engine rejected such a
+  query (HTTP 414/400) and the repeated failures opened their circuit breakers
+  for every caller.
+- Ordinary HTTP responses and decompression recovery share one body/closure
+  owner. Malformed or oversized response headers, interrupted reads and
+  simultaneous read/close failures always attempt closure and retain the first
+  control signal. Error receipts no longer retain the consumer's partial buffers.
+- URL fallback admission and HTTP body reads now share monotonic elapsed
+  budgets with retries and redirects. System clock corrections cannot consume
+  or extend a request allowance; the existing epoch `deadline_ts` argument is
+  converted once at the HTTP boundary. Page scopes reset after every exit and
+  do not enable scoped HTTP retry behavior for direct shared-session calls.
+  A reader or identity path that exhausts the allowance cannot start another
+  cookie replay or anonymous request; diagnostics retain the deadline cause.
+- Malformed engine evidence no longer reserves a URL against later valid
+  sources or partially changes an already accepted source's corroboration.
+  One call-local candidate index replaces the redundant seen-URL set.
+- Engine selection, candidate accumulation, optional ranking and final
+  diagnostics have explicit internal owners; public search entry points and
+  result metadata remain unchanged.
+- Search pipeline deadlines and elapsed diagnostics use a monotonic clock.
+  System clock corrections no longer prematurely skip ranking or extend its
+  remaining request allowance. Existing timeout values and partial-result
+  semantics are unchanged.
+- Keyed search-gateway sources. With `gateway_url`, `gateway_api_key` and
+  `gateway_sources` set (or `TOFU_SEARCH_GATEWAY_URL` / `_API_KEY` /
+  `_SOURCES`), each source is queried with its own request as an `API:<id>`
+  engine, so a slow source never holds the others and rank fusion keeps
+  per-source evidence. Rows carry a normalized `published_date`; freshness
+  drops rows whose known date is outside the window. Bing click-tracking links
+  that a gateway re-hosts on its own domain are unwrapped to the source URL. Rate-limited sources cool
+  down for 60 s and report `engine_unavailable`. The new `free_engines` policy
+  (`fallback` by default, `parallel`, `off`) decides whether the free engines
+  run only when the gateway found nothing query-relevant. Opt-in
+  `gateway_full_content` uses provider-crawled page bodies instead of our own
+  fetch and counts them toward Race-to-N. Explicit `engines=[...]` selections
+  are unchanged, and nothing changes without gateway configuration.
+- Importing the facade on one thread while another thread first imports a
+  module directly (`tofu_search.search.vertical`, a vertical handler,
+  `tofu_search.verify`, `tofu_search.search.orchestrator`, an engine or
+  `tofu_search.fetch.content_filter`) no longer fails with "cannot import name
+  ... from partially initialized module" or an import deadlock error. Package
+  modules bind siblings as leaf modules and import names only from concrete
+  modules, so the module-level import graph is acyclic, including CPython's
+  implicit wait for the facade. Importing `tofu_search.search.engines` now loads
+  every engine, and `tofu_search.fetch` also loads `content_filter`.
+- The content filter no longer spends an LLM call on a budget that cannot fit
+  one verdict: below 1.5 s (typically the remainder of a nearly spent search
+  deadline) it serves the raw page with one INFO line, and cached verdicts still
+  apply. An elapsed budget (builtin `TimeoutError` from `llm_function`, or
+  `requests.ReadTimeout`) serves the raw page at WARNING without a traceback;
+  every other filter failure keeps its ERROR record.
+- The optional local reranker no longer derives a call gate, a memory refusal
+  or an RSS kill from host CPU count or memory headroom. Default calls start
+  concurrently and leave memory exhaustion to the operating system, which
+  surfaces as an ordinary worker failure and lexical fallback. Explicit
+  `max_parallel` and `max_rss_mb` keep their caller-owned gate and guard;
+  default threads still use a quarter of the observed CPUs.
+
+## 0.12.25
+
+- Preserve fetched cross-language evidence for mixed-script queries, including
+  Chinese, Cyrillic or Arabic questions containing a Latin product name. A
+  shared script no longer hides the remaining language mismatch. Lexical
+  uncertainty stays explicit; snippets and same-script misses keep their guards.
+
+## 0.12.24
+
+- Bind the optional local scoring worker to its launching parent before reading
+  input or loading model libraries. Abrupt parent termination also stops the
+  worker and its native threads; stale or unavailable parent binding fails closed.
+- Reuse the existing parent-lifetime primitive through generated standalone code.
+  Normal cancellation still joins the complete process group before returning.
+
+## 0.12.23
+
+- Add an optional local Qwen relevance scorer through `LocalReranker`, per-call
+  `SearchConfig` and MCP startup flags. Default search needs no model, key or
+  paid service; explicit installation and a pinned local snapshot are required.
+- Verify model file sizes and hashes before loading. Derive CPU/memory budgets
+  from shared resource observations; isolate each scoring call in a disposable
+  process with bounded output, deadline, Stop and joined group retirement.
+- Preserve source text, evidence classes, upstream-vote admission and diversity.
+  Recover optional scoring failures through lexical ranking; propagate Stop and
+  unresolved cleanup. Repeated MCP cancellation retains its accepted worker.
+
+## 0.12.22
+
+- Include lazy local text-PDF reading with pypdf when optional native readers
+  are absent or cannot load. Keep native Markdown/table extraction available
+  through the PDF extra; no key, remote service, OCR or model call is required.
+- Preserve numeric source lines and short documents. Apply exact positive
+  text budgets with explicit truncation; stop raw readers at the filled budget.
+- Cache PDF previews by URL and effective PDF budget, including extensionless
+  downloads, and retain truncation diagnostics on cache hits.
+
 ## 0.12.21
 
 - Reuse the configured anonymous HTTP route for browser reads, including

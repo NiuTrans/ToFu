@@ -2,8 +2,10 @@
 
 - `_render_worker.py` is a standalone standard-library entry point; import the
   PDF library lazily, never import application configuration or `lib` there.
-- `_render.py` owns child launch, cancellation, joined cleanup and JPEG spools.
-  The frame constants and render kernel live once in `_render_worker.py`.
+- `_render.py` owns the render command, frame adoption and JPEG spools; child
+  launch, cancellation and joined cleanup are the shared
+  `lib/runtime/owned_helper_process.py` launcher. The frame constants and
+  render kernel live once in `_render_worker.py`.
 - VLM uses isolated rendering; the in-process facade retains the MuPDF safety
   lock for callers already running inside a PDF process.
 - Pillow loads inside resize/stitch work; text-only discovery stays codec-free.

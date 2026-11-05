@@ -1,5 +1,5 @@
 """Tests for the HEAD-moved auto-restart watcher (``lib/auto_restart.py``)
-and the ``_perform_server_reexec`` extraction in ``routes/api_v1/update.py``.
+and the ``perform_server_reexec`` extraction in ``lib/server/server_reexec.py``.
 
 The watcher is the automated half of the "effective" contract: a commit
 only counts once the RUNNING process serves it. It must fire ONLY when
@@ -8,6 +8,8 @@ shutdown not requested, zero in-flight tasks — and must DEFER (not drop)
 a restart that arrives while busy. All seams are injected; no real execv.
 """
 from __future__ import annotations
+
+import lib.server.server_reexec as reexec
 
 import threading
 
@@ -188,6 +190,17 @@ def test_not_a_repo(state):
 
 
 @pytest.mark.unit
+def test_default_repo_probe_uses_self_update_checkout_predicate(state, monkeypatch):
+    # The production watcher passes no seams; the default probe must resolve.
+    import lib.self_update._git as git_helpers
+    from lib.auto_restart import poll_once
+    monkeypatch.setattr(git_helpers, 'git_available', lambda: False)
+    seams = _seams()
+    del seams['is_repo']
+    assert poll_once(state, **seams) == 'no-repo'
+
+
+@pytest.mark.unit
 def test_unreadable_head_is_transient(state):
     from lib.auto_restart import poll_once
     assert poll_once(state, **_seams(head_sha=lambda: None)) == 'no-head'
@@ -218,14 +231,14 @@ def test_interval_floor_and_default(monkeypatch):
 @pytest.mark.unit
 def test_deferred_reexec_delegates_to_shared_primitive(monkeypatch):
     """Wire-parity pin for the update.py extraction: _deferred_reexec must
-    delegate to _perform_server_reexec('update'). The shared primitive gained
+    delegate to perform_server_reexec('update'). The shared primitive gained
     a frontend_prevalidated kwarg (the synchronous request path pre-builds
     the frontend); the deferred path forwards it."""
     from routes.api_v1 import update as upd
     calls = []
     monkeypatch.delenv('TOFU_MANAGED_BY', raising=False)
     monkeypatch.setattr(
-        upd, '_perform_server_reexec',
+        reexec, 'perform_server_reexec',
         lambda reason, *, frontend_prevalidated=False, requested_at=None:
             calls.append((reason, frontend_prevalidated, requested_at))
             or True)
@@ -245,7 +258,7 @@ def test_managed_reexec_refreshes_supervisor_then_replaces_worker(monkeypatch):
     calls = []
     monkeypatch.setenv('TOFU_MANAGED_BY', 'supervisor')
     monkeypatch.setenv('TOFU_PROJECT_PATH', '/project')
-    monkeypatch.setattr(upd, '_prepare_server_reexec_frontend', lambda: '')
+    monkeypatch.setattr(reexec, 'prepare_server_reexec_frontend', lambda: '')
     monkeypatch.setattr(
         'serverctl_pkg.application_restart.run_application_restart_control',
         lambda project, **kwargs: calls.append((project, kwargs)) or {
@@ -254,7 +267,7 @@ def test_managed_reexec_refreshes_supervisor_then_replaces_worker(monkeypatch):
         },
     )
 
-    assert upd._perform_server_reexec('update') is True
+    assert reexec.perform_server_reexec('update') is True
     assert calls == [('/project', {
         'stage': 'delegate',
         'reason': 'update',
@@ -267,7 +280,7 @@ def test_managed_reexec_threads_requested_at_to_supervisor(monkeypatch):
     calls = []
     monkeypatch.setenv('TOFU_MANAGED_BY', 'supervisor')
     monkeypatch.setenv('TOFU_PROJECT_PATH', '/project')
-    monkeypatch.setattr(upd, '_prepare_server_reexec_frontend', lambda: '')
+    monkeypatch.setattr(reexec, 'prepare_server_reexec_frontend', lambda: '')
     monkeypatch.setattr(
         'serverctl_pkg.application_restart.run_application_restart_control',
         lambda project, **kwargs: calls.append((project, kwargs)) or {
@@ -277,7 +290,7 @@ def test_managed_reexec_threads_requested_at_to_supervisor(monkeypatch):
     )
 
     epoch = 1789972800.0
-    assert upd._perform_server_reexec(
+    assert reexec.perform_server_reexec(
         'update', frontend_prevalidated=True, requested_at=epoch) is True
     assert calls == [('/project', {
         'stage': 'delegate',

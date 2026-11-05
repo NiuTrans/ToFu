@@ -26,39 +26,14 @@ from lib.compat._common import (
     require_deliverable_terminal,
     short_id,
 )
+from lib.compat.openai_projection import (
+    openai_completion_chunk, openai_finish_reason, project_completion_usage,
+)
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 from lib.turn_verdict import terminal_finish_reason
 
 logger = get_logger(__name__)
-
-
-def _openai_finish_reason(raw_finish: str, *, aborted: bool = False) -> str:
-    """Map one validated Tofu reason to OpenAI's closed finish enum."""
-    if aborted:
-        return 'length'
-    mapping = {
-        'stop': 'stop',
-        'done': 'stop',
-        'completed': 'stop',
-        'end_turn': 'stop',
-        'length': 'length',
-        'max_tokens': 'length',
-        'context_length': 'length',
-        'budget_exceeded': 'length',
-        'incomplete': 'length',
-        'max_turns': 'length',
-        'aborted': 'length',
-        'interrupted': 'length',
-        'tool_calls': 'tool_calls',
-        'tool_use': 'tool_calls',
-        'function_call': 'function_call',
-        'content_filter': 'content_filter',
-    }
-    try:
-        return mapping[raw_finish]
-    except KeyError as exc:
-        raise ValueError(
-            f'unsupported verified finish reason: {raw_finish!r}') from exc
 
 
 # ── Request translation ────────────────────────────────────────────
@@ -74,7 +49,11 @@ def translate_openai_request(body: dict) -> tuple[list[dict], dict, dict]:
     """
     messages = body.get('messages') or []
     if not isinstance(messages, list):
-        raise ValueError('messages must be an array')
+        raise BadRequest('messages must be an array', field='messages')
+    try:
+        timeout_s = float(body.get('timeout_s') or 600)
+    except (TypeError, ValueError):
+        raise BadRequest('timeout_s must be a number', field='timeout_s') from None
 
     cfg: dict = {}
     apply_common_cfg(cfg, body)
@@ -102,7 +81,7 @@ def translate_openai_request(body: dict) -> tuple[list[dict], dict, dict]:
     options = {
         'id': body.get('id') or '',
         'stream': bool(body.get('stream')),
-        'timeout_s': float(body.get('timeout_s') or 600),
+        'timeout_s': timeout_s,
     }
     return list(messages), cfg, options
 
@@ -113,18 +92,18 @@ def validate_client_tools(body: dict) -> tuple[list, object]:
     """Validate client declarations without resolving any server tool handler."""
     tools = body.get('tools')
     if not isinstance(tools, list):
-        raise ValueError('tools must be an array')
+        raise BadRequest('tools must be an array', field='tools')
     names = set()
     for tool in tools:
         function = tool.get('function') if isinstance(tool, dict) else None
         if not isinstance(function, dict) or tool.get('type') != 'function':
-            raise ValueError('client tools must be function declarations')
+            raise BadRequest('client tools must be function declarations', field='tools')
         name = function.get('name')
         if not isinstance(name, str) or not name or name in names:
-            raise ValueError('client tool names must be nonempty and unique')
+            raise BadRequest('client tool names must be nonempty and unique', field='tools')
         parameters = function.get('parameters')
         if parameters is not None and not isinstance(parameters, dict):
-            raise ValueError('client tool parameters must be a schema object')
+            raise BadRequest('client tool parameters must be a schema object', field='tools')
         names.add(name)
     choice = body.get('tool_choice')
     if choice is not None and choice not in ('auto', 'none', 'required'):
@@ -132,22 +111,12 @@ def validate_client_tools(body: dict) -> tuple[list, object]:
         if (not isinstance(function, dict) or choice.get('type') != 'function'
                 or not isinstance(function.get('name'), str)
                 or function.get('name') not in names):
-            raise ValueError('tool_choice must name a declared client tool')
+            raise BadRequest('tool_choice must name a declared client tool', field='tool_choice')
     if not tools and choice not in (None, 'auto', 'none'):
-        raise ValueError('tool_choice requires declared client tools')
+        raise BadRequest('tool_choice requires declared client tools', field='tool_choice')
     if body.get('n', 1) != 1:
-        raise ValueError('only n=1 is supported')
+        raise BadRequest('only n=1 is supported', field='n')
     return tools, choice
-
-
-def project_completion_usage(usage: dict) -> dict:
-    """Preserve provider counters without exporting private dispatch metadata."""
-    prompt = int(usage.get('prompt_tokens') or usage.get('input_tokens') or 0)
-    completion = int(usage.get('completion_tokens') or usage.get('output_tokens') or 0)
-    public_usage = {key: value for key, value in usage.items() if not key.startswith('_')}
-    public_usage.update(prompt_tokens=prompt, completion_tokens=completion,
-                        total_tokens=int(usage.get('total_tokens') or prompt + completion))
-    return public_usage
 
 
 def build_direct_openai_response(result, *, model, completion_id, created):
@@ -161,7 +130,7 @@ def build_direct_openai_response(result, *, model, completion_id, created):
     return {
         'id': completion_id, 'object': 'chat.completion', 'created': created,
         'model': model, 'choices': [{'index': 0, 'message': message,
-                                   'finish_reason': _openai_finish_reason(result.provider_finish_reason)}],
+                                   'finish_reason': openai_finish_reason(result.provider_finish_reason)}],
         'usage': project_completion_usage(result.usage or {}),
     }
 
@@ -184,7 +153,7 @@ def build_openai_response(task: dict, model: str,
                             requested_id: str = '') -> dict:
     """Turn a finished task into an OpenAI ``chat.completion`` body."""
     require_deliverable_terminal(task)
-    finish = _openai_finish_reason(
+    finish = openai_finish_reason(
         terminal_finish_reason(task), aborted=bool(task.get('aborted')))
     usage = task.get('usage') or {}
     return {
@@ -209,6 +178,60 @@ def build_openai_response(task: dict, model: str,
 
 # ── Streaming ──────────────────────────────────────────────────────
 
+def _terminal_frames(task, model, completion_id, *, emitted_role, terminal_event=None):
+    """Project one verified terminal observation, including late connections."""
+    event = terminal_event or {}
+    try:
+        require_deliverable_terminal(task, terminal_event)
+    except CompatTerminalFailure as exc:
+        yield 'data: ' + json.dumps({
+            'error': {
+                'message': str(exc),
+                'type': 'server_error',
+                'code': exc.verdict.cause,
+            },
+        }, ensure_ascii=False) + '\n\n'
+        yield 'data: [DONE]\n\n'
+        return
+    # Project the final deliverable; intermediate narration stays out of the wire.
+    from lib.tasks_pkg.segments import deliverable_text
+    answer = deliverable_text(task)
+    if answer:
+        ans_chunk = openai_completion_chunk(
+            completion_id, model,
+            created=int(time.time()))
+        if not emitted_role:
+            ans_chunk['choices'][0]['delta']['role'] = 'assistant'
+            emitted_role = True
+        ans_chunk['choices'][0]['delta']['content'] = answer
+        yield f'data: {json.dumps(ans_chunk, ensure_ascii=False)}\n\n'
+    # A tool-use terminal must carry the same call batch as the sync response.
+    _rounds = task.get('toolRounds') or []
+    _last = _rounds[-1] if (_rounds and isinstance(_rounds[-1], dict)) else None
+    _tcs = _last.get('tool_calls') if _last else None
+    if _tcs:
+        tc_chunk = openai_completion_chunk(
+            completion_id, model,
+            created=int(time.time()))
+        if not emitted_role:
+            tc_chunk['choices'][0]['delta']['role'] = 'assistant'
+            emitted_role = True
+        tc_chunk['choices'][0]['delta']['tool_calls'] = [
+            {'index': i, **tc} for i, tc in enumerate(_tcs)]
+        yield f'data: {json.dumps(tc_chunk, ensure_ascii=False)}\n\n'
+    raw_finish = (str(event.get('finishReason') or '') if 'finishReason' in event
+                  else terminal_finish_reason(task))
+    final = openai_completion_chunk(
+        completion_id, model,
+        created=int(time.time()),
+        finish_reason=openai_finish_reason(raw_finish, aborted=bool(task.get('aborted'))))
+    if event.get('usage') or task.get('usage'):
+        final['usage'] = event.get('usage') or task.get('usage')
+    yield f'data: {json.dumps(final, ensure_ascii=False)}\n\n'
+    yield 'data: [DONE]\n\n'
+    return
+
+
 async def stream_openai_chunks(task, model: str, requested_id: str = '',
                                *, include_tofu_native: bool = False
                                ) -> AsyncGenerator[str, None]:
@@ -230,144 +253,56 @@ async def stream_openai_chunks(task, model: str, requested_id: str = '',
     from lib.task_replay.task_replay import task_memory_replay_page
 
     try:
-      while True:
-        page = task_memory_replay_page(task, cursor)
-        new_events = page.events
-        cursor = page.next_cursor
+        while True:
+            page = task_memory_replay_page(task, cursor)
+            new_events = page.events
+            cursor = page.next_cursor
 
-        for ev in new_events:
-            etype = ev.get('type', '')
-            if etype == 'delta':
-                # Narrator-leak root fix (, step 3):
-                #   a content delta is UNCLASSIFIABLE mid-stream (narration vs
-                #   answer is only known at round close), and a wire client
-                #   cannot retract bytes already sent. So we do NOT forward raw
-                #   content deltas into the answer channel — the narration-free
-                #   deliverable is emitted from the segment model at `done`.
-                #   Thinking deltas DO stream live (reasoning_content), giving a
-                #   real-time experience without polluting the answer. This
-                #   retires the compat surface's dependence on DELTA_RESET.
-                if not ev.get('thinking'):
-                    continue
-                chunk = {
-                    'id': completion_id, 'object': 'chat.completion.chunk',
-                    'created': int(time.time()), 'model': model,
-                    'choices': [{'index': 0, 'delta': {}, 'finish_reason': None}],
-                }
-                if not emitted_role:
-                    chunk['choices'][0]['delta']['role'] = 'assistant'
-                    emitted_role = True
-                chunk['choices'][0]['delta']['reasoning_content'] = ev['thinking']
-                yield f'data: {json.dumps(chunk, ensure_ascii=False)}\n\n'
-            elif etype == 'done':
-                try:
-                    require_deliverable_terminal(task, ev)
-                except CompatTerminalFailure as exc:
-                    yield 'data: ' + json.dumps({
-                        'error': {
-                            'message': str(exc),
-                            'type': 'server_error',
-                            'code': exc.verdict.cause,
-                        },
-                    }, ensure_ascii=False) + '\n\n'
-                    yield 'data: [DONE]\n\n'
+            for ev in new_events:
+                etype = ev.get('type', '')
+                if etype == 'delta':
+                    # Narrator-leak root fix (, step 3):
+                    #   a content delta is UNCLASSIFIABLE mid-stream (narration vs
+                    #   answer is only known at round close), and a wire client
+                    #   cannot retract bytes already sent. So we do NOT forward raw
+                    #   content deltas into the answer channel — the narration-free
+                    #   deliverable is emitted from the segment model at `done`.
+                    #   Thinking deltas DO stream live (reasoning_content), giving a
+                    #   real-time experience without polluting the answer. This
+                    #   retires the compat surface's dependence on DELTA_RESET.
+                    if not ev.get('thinking'):
+                        continue
+                    chunk = openai_completion_chunk(
+                        completion_id, model,
+                        created=int(time.time()))
+                    if not emitted_role:
+                        chunk['choices'][0]['delta']['role'] = 'assistant'
+                        emitted_role = True
+                    chunk['choices'][0]['delta']['reasoning_content'] = ev['thinking']
+                    yield f'data: {json.dumps(chunk, ensure_ascii=False)}\n\n'
+                elif etype == 'done':
+                    for frame in _terminal_frames(
+                        task, model, completion_id, emitted_role=emitted_role, terminal_event=ev):
+                        yield frame
                     return
-                # Emit the narration-free deliverable as content NOW, from the
-                #   segment model (falls back to task['content']). One clean
-                #   answer chunk — no inter-round scaffolding prose ever leaked.
-                from lib.tasks_pkg.segments import deliverable_text
-                answer = deliverable_text(task)
-                if answer:
-                    ans_chunk = {
+                elif include_tofu_native:
+                    chunk = {
                         'id': completion_id, 'object': 'chat.completion.chunk',
                         'created': int(time.time()), 'model': model,
                         'choices': [{'index': 0, 'delta': {}, 'finish_reason': None}],
+                        'tofu': ev,
                     }
-                    if not emitted_role:
-                        ans_chunk['choices'][0]['delta']['role'] = 'assistant'
-                        emitted_role = True
-                    ans_chunk['choices'][0]['delta']['content'] = answer
-                    yield f'data: {json.dumps(ans_chunk, ensure_ascii=False)}\n\n'
-                # Tool-calls parity with the sync path (_assistant_message):
-                #   the model may have finished on a tool call. The sync
-                #   completion emits message.tool_calls, but the stream `done`
-                #   branch previously emitted only content+finish_reason — so a
-                #   streaming caller that requested tools saw
-                #   finish_reason='tool_calls' with NO tool_calls payload. Emit
-                #   them as a delta here (the OpenAI streaming tool-call shape).
-                _rounds = task.get('toolRounds') or []
-                _last = _rounds[-1] if (_rounds and isinstance(_rounds[-1], dict)) else None
-                _tcs = _last.get('tool_calls') if _last else None
-                if _tcs:
-                    tc_chunk = {
-                        'id': completion_id, 'object': 'chat.completion.chunk',
-                        'created': int(time.time()), 'model': model,
-                        'choices': [{'index': 0, 'delta': {}, 'finish_reason': None}],
-                    }
-                    if not emitted_role:
-                        tc_chunk['choices'][0]['delta']['role'] = 'assistant'
-                        emitted_role = True
-                    tc_chunk['choices'][0]['delta']['tool_calls'] = [
-                        {'index': i, **tc} for i, tc in enumerate(_tcs)]
-                    yield f'data: {json.dumps(tc_chunk, ensure_ascii=False)}\n\n'
-                final = {
-                    'id': completion_id, 'object': 'chat.completion.chunk',
-                    'created': int(time.time()), 'model': model,
-                    'choices': [{'index': 0, 'delta': {},
-                                  'finish_reason': _openai_finish_reason(
-                                      str(ev.get('finishReason') or '')
-                                      if 'finishReason' in ev
-                                      else terminal_finish_reason(task),
-                                      aborted=bool(task.get('aborted')))}],
-                }
-                if ev.get('usage') or task.get('usage'):
-                    final['usage'] = ev.get('usage') or task.get('usage')
-                yield f'data: {json.dumps(final, ensure_ascii=False)}\n\n'
-                yield 'data: [DONE]\n\n'
-                return
-            elif include_tofu_native:
-                chunk = {
-                    'id': completion_id, 'object': 'chat.completion.chunk',
-                    'created': int(time.time()), 'model': model,
-                    'choices': [{'index': 0, 'delta': {}, 'finish_reason': None}],
-                    'tofu': ev,
-                }
-                yield f'data: {json.dumps(chunk, ensure_ascii=False)}\n\n'
+                    yield f'data: {json.dumps(chunk, ensure_ascii=False)}\n\n'
 
-        if task.get('status') in ('done', 'error', 'aborted') and not new_events:
-            # Terminal but the `done` event wasn't in the stream (e.g. a late
-            # connect after completion) — still emit the deliverable so the
-            # client gets the answer, then close.
-            try:
-                require_deliverable_terminal(task)
-            except CompatTerminalFailure as exc:
-                yield 'data: ' + json.dumps({
-                    'error': {
-                        'message': str(exc),
-                        'type': 'server_error',
-                        'code': exc.verdict.cause,
-                    },
-                }, ensure_ascii=False) + '\n\n'
-                yield 'data: [DONE]\n\n'
+            if task.get('status') in ('done', 'error', 'aborted') and not new_events:
+                for frame in _terminal_frames(
+                    task, model, completion_id, emitted_role=emitted_role):
+                    yield frame
                 return
-            from lib.tasks_pkg.segments import deliverable_text
-            answer = deliverable_text(task)
-            if answer:
-                ans_chunk = {
-                    'id': completion_id, 'object': 'chat.completion.chunk',
-                    'created': int(time.time()), 'model': model,
-                    'choices': [{'index': 0, 'delta': {
-                        **({'role': 'assistant'} if not emitted_role else {}),
-                        'content': answer}, 'finish_reason': None}],
-                }
-                emitted_role = True
-                yield f'data: {json.dumps(ans_chunk, ensure_ascii=False)}\n\n'
-            yield 'data: [DONE]\n\n'
-            return
 
-        woke = await wait_for_event(task_id, timeout=15.0)
-        if not woke:
-            yield ': heartbeat\n\n'
+            woke = await wait_for_event(task_id, timeout=15.0)
+            if not woke:
+                yield ': heartbeat\n\n'
     except (GeneratorExit, asyncio.CancelledError):
         logger.info('[compat:openai] stream client disconnected task=%s',
                     task_id[:8])

@@ -8,8 +8,11 @@ importing application or member code.
 
 from __future__ import annotations
 
+import argparse
 import ast
-from functools import cache
+from collections import deque
+from collections.abc import Iterator
+import json
 import re
 import subprocess
 import sys
@@ -28,10 +31,112 @@ def _toml(path: Path) -> dict:
         return tomllib.load(stream)
 
 
+def _sdk_version_constant(path: Path) -> str:
+    """Read a pure SDK identity leaf without importing or running client code."""
+    source = path.read_text(encoding="utf-8")
+    if path.suffix == '.ts':
+        # The leaf permits documentation and one literal export, not arbitrary
+        # TypeScript whose runtime value cannot be established by this guard.
+        source = source.lstrip()
+        while source.startswith('/*'):
+            end = source.find('*/', 2)
+            if end == -1:
+                raise ValueError('unterminated SDK version documentation')
+            source = source[end + 2:].lstrip()
+        match = re.fullmatch(
+            r'export\s+const\s+VERSION\s*=\s*'
+            r'([\'"])([^\'"\n]+)\1\s*;\s*', source)
+        if match:
+            return match.group(2)
+    else:
+        body = ast.parse(source, filename=str(path)).body
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            if isinstance(body[0].value.value, str):
+                body = body[1:]  # Optional module docstring.
+        if len(body) == 1 and isinstance(body[0], ast.Assign):
+            assignment = body[0]
+            if (len(assignment.targets) == 1
+                    and isinstance(assignment.targets[0], ast.Name)
+                    and assignment.targets[0].id == '__version__'
+                    and isinstance(assignment.value, ast.Constant)
+                    and isinstance(assignment.value.value, str)):
+                return assignment.value.value
+    raise ValueError('expected a single literal SDK version constant')
+
+
+def _locked_application_version(path: Path) -> str:
+    packages = [package for package in _toml(path)['package']
+                if package['name'] == 'tofu-agent']
+    if len(packages) != 1 or packages[0].get('source') != {'editable': '.'}:
+        raise ValueError('expected exactly one tofu-agent package from the repository root')
+    return packages[0]['version']
+
+
+def check_release_identity(root: Path, *, tag: str | None = None) -> list[str]:
+    """Validate one source tree's release identity; never prepare or publish it.
+
+    VERSION owns the application and public SDK release. Independent workspace
+    packages keep their own versions. Every metadata/runtime/lock consumer is
+    checked here so local, frozen-export and CI gates enforce the same boundary.
+    """
+    try:
+        expected = (root / 'VERSION').read_text(encoding='utf-8').strip()
+        if not expected or any(character.isspace() for character in expected):
+            raise ValueError('expected one nonempty version')
+    except (OSError, ValueError) as exc:
+        return [f'VERSION: {exc}']
+
+    def read_json(relative: str) -> dict:
+        return json.loads((root / relative).read_text(encoding='utf-8'))
+
+    readers = (
+        ('pyproject.toml:project.version', lambda: _toml(root / 'pyproject.toml')['project']['version']),
+        ('uv.lock:tofu-agent.version', lambda: _locked_application_version(root / 'uv.lock')),
+        ('clients/python/pyproject.toml:project.version',
+         lambda: _toml(root / 'clients/python/pyproject.toml')['project']['version']),
+        ('clients/python/tofu_sdk/_version.py:__version__',
+         lambda: _sdk_version_constant(root / 'clients/python/tofu_sdk/_version.py')),
+        ('clients/typescript/package.json:version', lambda: read_json('clients/typescript/package.json')['version']),
+        ('clients/typescript/package-lock.json:version', lambda: read_json('clients/typescript/package-lock.json')['version']),
+        ("clients/typescript/package-lock.json:packages[''].version",
+         lambda: read_json('clients/typescript/package-lock.json')['packages']['']['version']),
+        ('clients/typescript/src/version.ts:VERSION',
+         lambda: _sdk_version_constant(root / 'clients/typescript/src/version.ts')),
+    )
+    failures = []
+    for label, read in readers:
+        try:
+            actual = read()
+        except (OSError, ValueError, KeyError, TypeError, SyntaxError) as exc:
+            failures.append(f'{label}: cannot read release identity ({exc})')
+            continue
+        if actual != expected:
+            failures.append(f'{label}={actual!r} differs from VERSION={expected!r}')
+    if tag is not None and tag != f'v{expected}':
+        failures.append(f'release tag={tag!r} differs from VERSION tag v{expected}')
+    return failures
+
+
+def _import_statements(tree: ast.AST) -> Iterator[ast.Import | ast.ImportFrom]:
+    """Visit import-bearing syntax in the same breadth-first order as ast.walk.
+
+    Python expressions cannot contain import statements. Skipping their children
+    avoids traversing large call/literal payloads while retaining every statement
+    scope, exception handler, and match case. Parsing still validates all syntax.
+    """
+    pending = deque([tree])
+    while pending:
+        node = pending.popleft()
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            yield node
+        elif not isinstance(node, ast.expr):
+            pending.extend(ast.iter_child_nodes(node))
+
+
 def _python_import_roots(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     roots: set[str] = set()
-    for node in ast.walk(tree):
+    for node in _import_statements(tree):
         if isinstance(node, ast.Import):
             roots.update(alias.name.split(".", 1)[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
@@ -39,7 +144,6 @@ def _python_import_roots(path: Path) -> set[str]:
     return roots
 
 
-@cache
 def _tracked_paths() -> tuple[Path, ...]:
     result = subprocess.run(
         ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=False
@@ -53,31 +157,59 @@ def _tracked_paths() -> tuple[Path, ...]:
     )
 
 
-def _tracked_text_hits(literal: str) -> list[str]:
-    """Search bounded source-like tracked files without inflating Git packs."""
-    suffixes = {
+def _grep_line_records(output: bytes) -> Iterator[tuple[bytes, bytes, bytes]]:
+    """Decode git grep -z -n records; a filename can itself contain newlines."""
+    offset = 0
+    while offset < len(output):
+        name_end = output.index(b"\0", offset)
+        number_end = output.index(b"\0", name_end + 1)
+        line_end = output.find(b"\n", number_end + 1)
+        if line_end < 0:
+            line_end = len(output)
+        yield (output[offset:name_end], output[name_end + 1:number_end],
+               output[number_end + 1:line_end])
+        offset = line_end + 1
+
+
+def _tracked_text_hits(literals: tuple[str, ...]) -> dict[str, list[str]]:
+    """Search tracked source once and retain separate diagnostics per literal.
+
+    ``git grep`` scans the worktree copies of tracked files natively; a Python
+    walk that resolves, stats and reads every tracked path exceeds this
+    guard's budget on a network-mounted checkout.
+    """
+    suffixes = (
         ".cfg", ".ini", ".java", ".js", ".json", ".kt", ".md", ".mjs",
         ".ps1", ".py", ".sh", ".toml", ".ts", ".txt", ".yaml", ".yml",
-    }
-    hits: list[str] = []
-    for relative in _tracked_paths():
-        path = ROOT / relative
-        if path.resolve() == Path(__file__).resolve():
+    )
+    encoded_literals = {literal: literal.encode("utf-8") for literal in literals}
+    hits: dict[str, list[str]] = {literal: [] for literal in encoded_literals}
+    if not hits:
+        return hits
+    patterns = [argument for literal in encoded_literals for argument in ("-e", literal)]
+    result = subprocess.run(
+        ["git", "grep", "-z", "-n", "-I", "-F", "--no-color", *patterns,
+         "--", *(f":(icase)*{suffix}" for suffix in suffixes)],
+        cwd=ROOT, capture_output=True, check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError(result.stderr.decode("utf-8", "replace").strip())
+    own_path = Path(__file__).resolve().relative_to(ROOT.resolve()).as_posix()
+    for raw_name, line_number, line in _grep_line_records(result.stdout):
+        relative = raw_name.decode("utf-8", "surrogateescape")
+        if relative == own_path:
             continue  # The guard necessarily names the paths it rejects.
-        if path.suffix.lower() not in suffixes or not path.is_file():
-            continue
         try:
-            if path.stat().st_size > 512 * 1024:
+            if (ROOT / relative).stat().st_size > 512 * 1024:
                 continue
-            for line_number, line in enumerate(
-                path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1
-            ):
-                if literal in line:
-                    hits.append(f"{relative}:{line_number}:{line.strip()}")
-                    if len(hits) >= 5:
-                        return hits
         except OSError:
             continue
+        text = line.decode("utf-8", "ignore").strip()
+        for literal, encoded in encoded_literals.items():
+            if len(hits[literal]) < 5 and encoded in line:
+                hits[literal].append(f"{relative}:{int(line_number)}:{text}")
+        if all(len(matches) >= 5 for matches in hits.values()):
+            break
     return hits
 
 
@@ -94,7 +226,7 @@ def _script_import_dependencies(root: Path, path: Path) -> set[str]:
     if 'scripts' not in source:
         return dependencies
     # Parse names without importing modules or executing generators.
-    for node in ast.walk(ast.parse(source)):
+    for node in _import_statements(ast.parse(source)):
         if isinstance(node, ast.Import):
             modules = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom) and node.level == 0:
@@ -115,11 +247,28 @@ def _script_import_dependencies(root: Path, path: Path) -> set[str]:
     return dependencies
 
 
-def check_declared_scripts(root: Path, tracked: set[str]) -> list[str]:
+def _tracked_files_mentioning(literal: str, pathspec: str) -> set[str]:
+    result = subprocess.run(
+        ["git", "grep", "-l", "-z", "-F", "-e", literal, "--", pathspec],
+        cwd=ROOT, capture_output=True, check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError(result.stderr.decode("utf-8", "replace").strip())
+    return {
+        raw_name.decode("utf-8", "surrogateescape")
+        for raw_name in result.stdout.split(b"\0")
+        if raw_name
+    }
+
+
+def check_declared_scripts(root: Path, tracked: set[str], *,
+                           script_mentions: set[str] | None = None) -> list[str]:
     """A clean checkout must contain release entrypoints and local script imports.
 
     Read declared build/workflow sources and retained test imports.
     Never execute scripts or follow documentation/generated command examples.
+    ``script_mentions`` may narrow the retained tests that are read to those
+    whose text contains ``scripts``; a test without it imports no script.
     """
     declarations = [root / 'Makefile', root / 'package.json']
     declarations.extend(sorted((root / '.github/workflows').glob('*.yml')))
@@ -128,6 +277,8 @@ def check_declared_scripts(root: Path, tracked: set[str]) -> list[str]:
                if name.startswith('scripts/') and name.endswith('.py')}
     for name in sorted(tracked):
         if name.startswith('tests/') and name.endswith('.py'):
+            if script_mentions is not None and name not in script_mentions:
+                continue
             source = root / name
             if source.is_file():
                 pending.update(_script_import_dependencies(root, source))
@@ -161,7 +312,11 @@ def check_declared_scripts(root: Path, tracked: set[str]) -> list[str]:
 
 
 def check() -> list[str]:
-    failures = check_declared_scripts(ROOT, {p.as_posix() for p in _tracked_paths()})
+    # One index snapshot per check; a later invocation must observe new edits.
+    tracked_paths = _tracked_paths()
+    failures = check_declared_scripts(
+        ROOT, {p.as_posix() for p in tracked_paths},
+        script_mentions=_tracked_files_mentioning("scripts", "tests/*.py"))
     root = _toml(ROOT / "pyproject.toml")
     search = _toml(SEARCH_ROOT / "pyproject.toml")
     trading = _toml(TRADING_ROOT / "pyproject.toml")
@@ -182,11 +337,7 @@ def check() -> list[str]:
             failures.append(f"{owner}: nested .git creates a second source authority")
 
     root_version = root["project"]["version"]
-    version_file = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    if version_file != root_version:
-        failures.append(
-            f"VERSION={version_file!r} differs from tofu-agent {root_version!r}"
-        )
+    failures.extend(check_release_identity(ROOT))
 
     members = set(root.get("tool", {}).get("uv", {}).get("workspace", {}).get("members", []))
     required_members = {"packages/tofu-search", "plugins/tofu-trading"}
@@ -219,8 +370,8 @@ def check() -> list[str]:
             f"tofu-trading host range {trading_host!r} does not admit {root_minor}"
         )
 
-    for retired_path in ("../tofu-search", "../tofu-trade"):
-        hits = _tracked_text_hits(retired_path)
+    retired_paths = ("../tofu-search", "../tofu-trade")
+    for retired_path, hits in _tracked_text_hits(retired_paths).items():
         if hits:
             failures.append(
                 f"retired sibling path {retired_path!r}: " + "; ".join(hits[:5])
@@ -229,7 +380,7 @@ def check() -> list[str]:
     forbidden_search_imports = {"lib", "routes", "tofu", "tofu_agent"}
     search_prefix = Path("packages/tofu-search/tofu_search")
     search_python = (
-        ROOT / relative for relative in _tracked_paths()
+        ROOT / relative for relative in tracked_paths
         if relative.suffix == ".py" and relative.is_relative_to(search_prefix)
     )
     for path in search_python:
@@ -241,7 +392,7 @@ def check() -> list[str]:
 
     core_prefixes = (Path("lib"), Path("routes"), Path("tofu"), Path("tofu_agent"))
     core_python = (
-        ROOT / relative for relative in _tracked_paths()
+        ROOT / relative for relative in tracked_paths
         if relative.suffix == ".py"
         and any(relative.is_relative_to(prefix) for prefix in core_prefixes)
     )
@@ -266,13 +417,23 @@ def check() -> list[str]:
     return failures
 
 
-def main() -> int:
-    failures = check()
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--release-identity', action='store_true',
+                        help='check only release metadata, runtime constants and lockfiles')
+    parser.add_argument('--tag', help='also require this exact release tag (vVERSION)')
+    args = parser.parse_args(argv)
+    if args.tag is not None and not args.release_identity:
+        parser.error('--tag requires --release-identity')
+    failures = check_release_identity(ROOT, tag=args.tag) if args.release_identity else check()
     if failures:
         for failure in failures:
             print(f"ERROR: {failure}")
         return 1
-    print("monorepo contract: OK (tofu-agent, tofu-search, tofu-trading, tofu-overleaf-mcp)")
+    if args.release_identity:
+        print('release identity: OK (application, SDKs, runtime constants and lockfiles)')
+    else:
+        print("monorepo contract: OK (tofu-agent, tofu-search, tofu-trading, tofu-overleaf-mcp)")
     return 0
 
 

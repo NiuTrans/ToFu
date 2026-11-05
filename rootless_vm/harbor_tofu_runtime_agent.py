@@ -7,7 +7,7 @@ Two tool surfaces are supported:
   into the disposable benchmark guest; no host filesystem path or built-in
   Tofu execution authority is exposed.
 * ``production`` — the real production tool face. Production-verbatim
-  registry schemas (read_files/write_file/edit_file/grep_search/find_files/
+  registry schemas (read_files/write_file/edit_file/search_files/find_files/
   repo_map/fetch_url/todo_write/…) are served through the runtime's
   caller-supplied explicit-catalog precedence and dispatched by the REAL
   built-in registry against the host-visible guest rootfs (the same bytes the

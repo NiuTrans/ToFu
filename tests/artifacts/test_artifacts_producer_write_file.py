@@ -1,7 +1,7 @@
 """Tests for Producer A — write_file → chat artifact promotion (Step 2).
 
-The hook lives in ``lib/tasks_pkg/handlers/project.py`` as
-``_maybe_promote_write_to_artifact``.  It is invoked at the end of the
+The hook lives in ``lib/tasks_pkg/handlers/_project_presentation.py`` as
+``maybe_promote_write_to_artifact``.  It is invoked at the end of the
 project tool handler for ``write_file``/``apply_diff``/``insert_content``,
 reads the on-disk file back, and (when the path is renderable) creates a
 chat_artifacts row + emits an artifact SSE event.
@@ -68,13 +68,13 @@ def _last_artifact_event(task):
     return None
 
 
-# ─── _maybe_promote_write_to_artifact ───────────────────────────────
+# ─── maybe_promote_write_to_artifact ───────────────────────────────
 
 def test_skips_md_write(flask_app, tmp_project_root, fake_task):
     """Routine project markdown edits (README.md, etc.) must NOT spawn
     artifact chips.  Inline ```markdown fences still go through the
     scanner (Producer B); this test only covers the write_file path."""
-    from lib.tasks_pkg.handlers.project import _maybe_promote_write_to_artifact
+    from lib.tasks_pkg.handlers._project_presentation import maybe_promote_write_to_artifact
 
     rel = 'report.md'
     body = '# Report\n\nHello world.\n'
@@ -83,7 +83,7 @@ def test_skips_md_write(flask_app, tmp_project_root, fake_task):
 
     meta = {'toolName': 'write_file', 'title': 'write_file'}
     with flask_app.app_context():
-        _maybe_promote_write_to_artifact(
+        maybe_promote_write_to_artifact(
             fake_task, 'write_file', {'path': rel}, tmp_project_root, meta,
         )
 
@@ -92,7 +92,7 @@ def test_skips_md_write(flask_app, tmp_project_root, fake_task):
 
 
 def test_promotes_html_write_full_event(flask_app, tmp_project_root, fake_task):
-    from lib.tasks_pkg.handlers.project import _maybe_promote_write_to_artifact
+    from lib.tasks_pkg.handlers._project_presentation import maybe_promote_write_to_artifact
 
     rel = 'report.html'
     body = '<!doctype html><html><body><h1>Report</h1><p>Hi.</p></body></html>\n'
@@ -101,7 +101,7 @@ def test_promotes_html_write_full_event(flask_app, tmp_project_root, fake_task):
 
     meta = {'toolName': 'write_file', 'title': 'write_file'}
     with flask_app.app_context():
-        _maybe_promote_write_to_artifact(
+        maybe_promote_write_to_artifact(
             fake_task, 'write_file', {'path': rel}, tmp_project_root, meta,
         )
 
@@ -121,7 +121,7 @@ def test_promotes_html_write_full_event(flask_app, tmp_project_root, fake_task):
 
 
 def test_promotes_html_write(flask_app, tmp_project_root, fake_task):
-    from lib.tasks_pkg.handlers.project import _maybe_promote_write_to_artifact
+    from lib.tasks_pkg.handlers._project_presentation import maybe_promote_write_to_artifact
     from lib.artifacts import get_artifact
 
     rel = 'page.html'
@@ -131,7 +131,7 @@ def test_promotes_html_write(flask_app, tmp_project_root, fake_task):
 
     meta = {'toolName': 'write_file', 'title': 'write_file'}
     with flask_app.app_context():
-        _maybe_promote_write_to_artifact(
+        maybe_promote_write_to_artifact(
             fake_task, 'write_file', {'path': rel}, tmp_project_root, meta,
         )
         # Round-trip: the persisted content equals what we wrote.
@@ -144,7 +144,7 @@ def test_promotes_html_write(flask_app, tmp_project_root, fake_task):
 
 
 def test_skips_non_renderable(flask_app, tmp_project_root, fake_task):
-    from lib.tasks_pkg.handlers.project import _maybe_promote_write_to_artifact
+    from lib.tasks_pkg.handlers._project_presentation import maybe_promote_write_to_artifact
 
     rel = 'script.py'
     with open(os.path.join(tmp_project_root, rel), 'w') as f:
@@ -152,7 +152,7 @@ def test_skips_non_renderable(flask_app, tmp_project_root, fake_task):
 
     meta = {'toolName': 'write_file'}
     with flask_app.app_context():
-        _maybe_promote_write_to_artifact(
+        maybe_promote_write_to_artifact(
             fake_task, 'write_file', {'path': rel}, tmp_project_root, meta,
         )
 
@@ -162,12 +162,12 @@ def test_skips_non_renderable(flask_app, tmp_project_root, fake_task):
 
 
 def test_skips_when_file_missing(flask_app, tmp_project_root, fake_task):
-    from lib.tasks_pkg.handlers.project import _maybe_promote_write_to_artifact
+    from lib.tasks_pkg.handlers._project_presentation import maybe_promote_write_to_artifact
 
     meta = {'toolName': 'write_file'}
     with flask_app.app_context():
         # File does not exist on disk — handler degrades gracefully.
-        _maybe_promote_write_to_artifact(
+        maybe_promote_write_to_artifact(
             fake_task, 'write_file', {'path': 'nope.html'}, tmp_project_root, meta,
         )
     assert 'artifactId' not in meta
@@ -176,7 +176,7 @@ def test_skips_when_file_missing(flask_app, tmp_project_root, fake_task):
 
 def test_large_completed_html_is_promoted_without_feature_or_storage_byte_quota(flask_app, tmp_project_root, fake_task):
     import hashlib
-    from lib.tasks_pkg.handlers.project import _maybe_promote_write_to_artifact
+    from lib.tasks_pkg.handlers._project_presentation import maybe_promote_write_to_artifact
     from lib.artifacts import get_artifact
     rel = 'large-complete.html'
     body = '<!doctype html><html><!--' + 'a' * (9 * 1024 * 1024) + '--><p>late evidence</p></html>'
@@ -184,7 +184,7 @@ def test_large_completed_html_is_promoted_without_feature_or_storage_byte_quota(
         output.write(body)
     meta = {'toolName': 'write_file'}
     with flask_app.app_context():
-        _maybe_promote_write_to_artifact(fake_task, 'write_file', {'path': rel}, tmp_project_root, meta)
+        maybe_promote_write_to_artifact(fake_task, 'write_file', {'path': rel}, tmp_project_root, meta)
         saved = get_artifact(meta['artifactId'])
     assert saved['content'] == body
     assert saved['size_bytes'] == len(body.encode())
@@ -193,7 +193,7 @@ def test_large_completed_html_is_promoted_without_feature_or_storage_byte_quota(
 
 
 def test_apply_diff_promotes(flask_app, tmp_project_root, fake_task):
-    from lib.tasks_pkg.handlers.project import _maybe_promote_write_to_artifact
+    from lib.tasks_pkg.handlers._project_presentation import maybe_promote_write_to_artifact
 
     rel = 'edited.html'
     body = '<!doctype html><html><body>Edited</body></html>\n'
@@ -202,7 +202,7 @@ def test_apply_diff_promotes(flask_app, tmp_project_root, fake_task):
 
     meta = {'toolName': 'apply_diff'}
     with flask_app.app_context():
-        _maybe_promote_write_to_artifact(
+        maybe_promote_write_to_artifact(
             fake_task, 'apply_diff', {'path': rel}, tmp_project_root, meta,
         )
 
@@ -212,7 +212,7 @@ def test_apply_diff_promotes(flask_app, tmp_project_root, fake_task):
 
 def test_dedupe_idempotent_repeat_writes(flask_app, tmp_project_root, fake_task):
     """Writing the same content twice should reuse the same artifact id."""
-    from lib.tasks_pkg.handlers.project import _maybe_promote_write_to_artifact
+    from lib.tasks_pkg.handlers._project_presentation import maybe_promote_write_to_artifact
 
     rel = 'idem.html'
     body = '<!doctype html><html><body>Idempotent</body></html>\n'
@@ -221,10 +221,10 @@ def test_dedupe_idempotent_repeat_writes(flask_app, tmp_project_root, fake_task)
 
     meta_a, meta_b = {}, {}
     with flask_app.app_context():
-        _maybe_promote_write_to_artifact(
+        maybe_promote_write_to_artifact(
             fake_task, 'write_file', {'path': rel}, tmp_project_root, meta_a,
         )
-        _maybe_promote_write_to_artifact(
+        maybe_promote_write_to_artifact(
             fake_task, 'write_file', {'path': rel}, tmp_project_root, meta_b,
         )
 
@@ -232,7 +232,7 @@ def test_dedupe_idempotent_repeat_writes(flask_app, tmp_project_root, fake_task)
 
 
 def test_no_conv_id_skips(flask_app, tmp_project_root):
-    from lib.tasks_pkg.handlers.project import _maybe_promote_write_to_artifact
+    from lib.tasks_pkg.handlers._project_presentation import maybe_promote_write_to_artifact
 
     rel = 'no-conv.html'
     with open(os.path.join(tmp_project_root, rel), 'w') as f:
@@ -242,7 +242,7 @@ def test_no_conv_id_skips(flask_app, tmp_project_root):
     task = {'id': 'tid', 'convId': '', 'events': [],
             'events_lock': threading.Lock()}
     with flask_app.app_context():
-        _maybe_promote_write_to_artifact(
+        maybe_promote_write_to_artifact(
             task, 'write_file', {'path': rel}, tmp_project_root, meta,
         )
     assert 'artifactId' not in meta

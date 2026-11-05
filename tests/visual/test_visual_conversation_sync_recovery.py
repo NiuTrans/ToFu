@@ -13,6 +13,17 @@ from tests.support.frontend_visual import frontend_visual_origin, frontend_visua
 pytestmark = pytest.mark.visual
 
 
+def _stream_cursor(route) -> str:
+    """The single subscription's cursor on a multiplexed events request."""
+    from urllib.parse import parse_qs, urlsplit
+    [stream] = json.loads(parse_qs(urlsplit(route.request.url).query)['streams'][0])
+    return stream['after']
+
+
+def _multiplexed_frame(event: dict) -> str:
+    return f"event: {event['type']}\ndata: 0\ndata: {json.dumps(event)}\n\n"
+
+
 @pytest.mark.parametrize('startup', ['pending', 'tools'])
 def test_http_204_recovery_retires_stale_startup_and_reaches_terminal(frontend_visual_page, startup):
     """A real CLOSED EventSource must not pin accepted/preparation UI forever."""
@@ -22,6 +33,7 @@ def test_http_204_recovery_retires_stale_startup_and_reaches_terminal(frontend_v
     page = frontend_visual_page
     for name, source in [
         ('sync', 'frontend/src/core/conversation-sync.ts'),
+        ('streams', 'frontend/src/core/conversation-event-multiplexer.ts'),
         ('state', 'frontend/src/core/turn-state.ts'),
         ('surface', 'frontend/src/conversation/ui/conversation-surface.ts'),
         ('session', 'frontend/src/conversation/application/conversation-session.ts'),
@@ -58,16 +70,14 @@ def test_http_204_recovery_retires_stale_startup_and_reaches_terminal(frontend_v
         route.fulfill(content_type='application/json', body=json.dumps(body))
 
     def serve_events(route):
-        from urllib.parse import parse_qs, urlsplit
-        event_cursors.append(parse_qs(urlsplit(route.request.url).query)['after'][0])
+        event_cursors.append(_stream_cursor(route))
         if len(event_cursors) <= 2:
             route.fulfill(status=204, headers={'X-Tofu-Stream-Admission': 'capacity'})
         else:
             event = {'contract': 'tofu.conversation-sync.event/v1', 'conversationId': 'closed',
                      'type': 'sync.heartbeat', 'cursor': 'cursor-17', 'serverBootId': 'test',
                      'degraded': False}
-            route.fulfill(content_type='text/event-stream',
-                          body=f'event: sync.heartbeat\ndata: {json.dumps(event)}\n\n')
+            route.fulfill(content_type='text/event-stream', body=_multiplexed_frame(event))
 
     page.route('**/closed-fixture/snapshot', serve_snapshot)
     page.route('**/closed-fixture/events?*', serve_events)
@@ -79,12 +89,16 @@ def test_http_204_recovery_retires_stale_startup_and_reaches_terminal(frontend_v
           localizedText: (key, fallback) => locale[key] || fallback}));
       const session = bindConversationSession(store, surface);
       window.closedStore = store;
+      const streams = createConversationEventMultiplexer({streamClientId:'closed-page', api:{
+        multiplexedEventsUrl:(_client, subscriptions) =>
+          '/closed-fixture/events?streams=' + encodeURIComponent(JSON.stringify(subscriptions)),
+      }});
       window.coordinator = new ConversationSyncCoordinator({conversationId:'closed', api:{
         async snapshot(_id, options) {
           return (await fetch('/closed-fixture/snapshot', {signal:options.signal})).json();
         },
-        eventsUrl(_id, cursor) { return '/closed-fixture/events?after=' + encodeURIComponent(cursor); },
-      }, onSnapshot(snapshot) { store.dispatch({type:'snapshot', snapshot}); },
+      }, eventSourceFactory: streams.open,
+      onSnapshot(snapshot) { store.dispatch({type:'snapshot', snapshot}); },
       onTurnDelta() {return true;}, onAttemptEvent() {return true;}});
       window.disposeClosed = () => {coordinator.close(); session.dispose();};
       void coordinator.resume();
@@ -97,7 +111,9 @@ def test_http_204_recovery_retires_stale_startup_and_reaches_terminal(frontend_v
         expect(page.locator('#surface')).not_to_contain_text(locale[key])
         assert page.evaluate('closedStore.getState().turnsById.answer.status') == 'completed'
         assert heads == [1, 9, 17]
-        assert event_cursors == ['cursor-1', 'cursor-9', 'cursor-17']
+        # A finished fixture body is a dropped response; it resumes from 17.
+        assert event_cursors[:3] == ['cursor-1', 'cursor-9', 'cursor-17']
+        assert set(event_cursors[3:]) <= {'cursor-17'}
     finally:
         page.evaluate('disposeClosed()')
 
@@ -106,6 +122,7 @@ def test_failed_reset_snapshot_recovers_rendering_before_reopening_sse(frontend_
     page = frontend_visual_page
     for name, source in [
         ('sync', 'frontend/src/core/conversation-sync.ts'),
+        ('streams', 'frontend/src/core/conversation-event-multiplexer.ts'),
         ('state', 'frontend/src/core/turn-state.ts'),
         ('surface', 'frontend/src/conversation/ui/conversation-surface.ts'),
         ('session', 'frontend/src/conversation/application/conversation-session.ts'),
@@ -142,15 +159,13 @@ def test_failed_reset_snapshot_recovers_rendering_before_reopening_sse(frontend_
         }))
 
     def serve_events(route):
-        from urllib.parse import parse_qs, urlsplit
-        event_cursors.append(parse_qs(urlsplit(route.request.url).query)['after'][0])
+        event_cursors.append(_stream_cursor(route))
         event = {'contract': 'tofu.conversation-sync.event/v1', 'conversationId': 'recovery'}
         if len(event_cursors) == 1:
             event.update(type='sync.reset_required', cursor='reset-head-9', reason='server_restarted')
         else:
             event.update(type='sync.heartbeat', cursor='cursor-9', serverBootId='test', degraded=False)
-        route.fulfill(content_type='text/event-stream',
-                      body=f"event: {event['type']}\ndata: {json.dumps(event)}\n\n")
+        route.fulfill(content_type='text/event-stream', body=_multiplexed_frame(event))
 
     page.route('**/recovery-fixture/snapshot', serve_snapshot)
     page.route('**/recovery-fixture/events?*', serve_events)
@@ -160,6 +175,10 @@ def test_failed_reset_snapshot_recovers_rendering_before_reopening_sse(frontend_
       const surface = createConversationSurface(document.getElementById('surface'));
       const session = bindConversationSession(store, surface);
       window.acceptedHeads = []; window.syncFailures = [];
+      const streams = createConversationEventMultiplexer({streamClientId:'recovery-page', api:{
+        multiplexedEventsUrl:(_client, subscriptions) =>
+          '/recovery-fixture/events?streams=' + encodeURIComponent(JSON.stringify(subscriptions)),
+      }});
       window.coordinator = new ConversationSyncCoordinator({
         conversationId: 'recovery',
         api: {
@@ -168,8 +187,8 @@ def test_failed_reset_snapshot_recovers_rendering_before_reopening_sse(frontend_
             if (!response.ok) throw new Error('temporary storage failure');
             return response.json();
           },
-          eventsUrl(_id, cursor) { return '/recovery-fixture/events?after=' + encodeURIComponent(cursor); },
         },
+        eventSourceFactory: streams.open,
         onSnapshot(snapshot) { store.dispatch({type:'snapshot', snapshot}); acceptedHeads.push(snapshot.syncSeq); },
         onTurnDelta() { return true; }, onAttemptEvent() { return true; },
         onProtocolError(error) { syncFailures.push(error.message); },
@@ -184,7 +203,8 @@ def test_failed_reset_snapshot_recovers_rendering_before_reopening_sse(frontend_
         assert page.evaluate('acceptedHeads') == [1, 9]
         assert page.evaluate('syncFailures') == ['temporary storage failure']
         assert len(snapshot_requests) == 3
-        assert event_cursors == ['cursor-1', 'cursor-9']
+        assert event_cursors[:2] == ['cursor-1', 'cursor-9']
+        assert set(event_cursors[2:]) <= {'cursor-9'}
         expect(page.locator('#surface')).not_to_contain_text('Old answer')
     finally:
         page.evaluate('disposeRecovery()')

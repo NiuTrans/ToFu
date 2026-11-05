@@ -172,6 +172,23 @@ def test_cold_hot_wire_form_byte_identical():
     _ok(f'cold == hot byte-identical (revert={_REVERT or "none"})')
 
 
+def test_snapshot_wire_form_is_independent_of_an_earlier_snapshot(tmp_path):
+    """A snapshot keeps no baseline that an earlier snapshot can change.
+
+    The debug panel's throwaway task has no task or conversation identity.
+    Such compositions once shared one project-path transition baseline, so a
+    snapshot with a project made the next cold build announce a project path
+    change that the hot build never sends.
+    """
+    raw, config = _fixture(), _config()
+    _build_cold(raw, {**config, 'projectEnabled': True,
+                      'projectPath': str(tmp_path)})
+    cold = _build_cold(raw, config)
+    hot = _build_hot(raw, config)
+    assert _canon(cold) == _canon(hot), (
+        'an earlier anonymous snapshot changed this snapshot\'s wire form')
+
+
 def test_carrier_transforms_fire():
     """Byte-identity must rest on REAL transforms, not an empty no-op run."""
     raw, config = _fixture(), _config()
@@ -190,18 +207,18 @@ def test_carrier_transforms_fire():
     # (2) empty user rewritten
     user_texts = [m.get('content') for m in wire if m.get('role') == 'user']
     assert '[empty message]' in user_texts, f'empty-user fix did not fire: {user_texts}'
-    # (3) dynamic context rides a trailing user carrier, never system history.
+    # (3) orchestration guidance occupies a native system carrier.
     sys_txt = _system_text(wire)
-    assert '<parallel_execution>' not in sys_txt
-    assert any(
+    assert '<parallel_execution>' in sys_txt
+    assert not any(
         '<parallel_execution>' in str(message.get('content') or '')
         for message in wire if message.get('role') == 'user'
-    ), 'dynamic context did not land in a user carrier'
-    _ok('carrier transforms fire: order retained + empty-user fix + tail inject')
+    ), 'orchestration guidance must not remain in a user carrier'
+    _ok('carrier transforms fire: order retained + empty-user fix + system inject')
 
 
 def test_provider_symmetry_no_gateway_divergence():
-    """provider_id='' (auto-detect) and explicit non-sankuai agree on the
+    """provider_id='' (auto-detect) and explicit non-example-corp agree on the
     carrier transforms — proving only _sanitize_messages is provider-gated."""
     from lib.tasks_pkg.wire_messages import apply_wire_sanitize
     from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
@@ -221,7 +238,7 @@ def test_wire_preview_uses_gateway_family_and_wire_shape_rules():
         apply_wire_sanitize,
     )
 
-    assert _gateway_sanitize_enabled('sankuai_anthropic') is True
+    assert _gateway_sanitize_enabled('example_corp_anthropic') is True
     source = [
         {'role': 'assistant', 'content': '', 'tool_calls': [{
             'id': '', 'function': {'name': '', 'arguments': {}},

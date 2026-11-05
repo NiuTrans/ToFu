@@ -29,7 +29,6 @@ Run::
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -40,7 +39,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 TR_JS = runtime_section_path('ui/tool_rounds.js')
 
-_HAS_NODE = shutil.which('node') is not None
 
 pytestmark = pytest.mark.unit
 
@@ -79,7 +77,13 @@ def _extract_timeline_fns() -> str:
         os.path.join(ROOT, 'frontend', 'src', 'conversation', 'presentation',
                      'context-note-grouping.ts'),
     ), encoding='utf-8').read()
-    return groups_native + '\n' + context_notes_native + '\n' + chunk
+    note_rows_native = open(native_module_path(
+        '.native/context-note-presentation.js',
+        os.path.join(ROOT, 'frontend', 'src', 'conversation', 'presentation',
+                     'context-note-presentation.ts'),
+    ), encoding='utf-8').read()
+    return (groups_native + '\n' + context_notes_native + '\n' + note_rows_native
+            + '\n' + chunk)
 
 
 _STUBS = r"""
@@ -188,7 +192,6 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason='node not installed')
 def test_adjacent_context_notes_merge_into_one_row():
     out = _run_node(_HARNESS, {'FN_SRC': _extract_timeline_fns()})
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
@@ -196,7 +199,6 @@ def test_adjacent_context_notes_merge_into_one_row():
     assert out.count('PASS') >= 16, f'expected >=16 PASS, got:\n{out}'
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason='node not installed')
 def test_registry_classifier_unknown_keys_actions_and_scope_fail_closed():
     harness = _STUBS + r'''
     eval(process.env.FN_SRC);

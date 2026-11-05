@@ -1,13 +1,14 @@
 /** Subscription-page Codex reuse card. Entry: renderCodexSharedLogin.
  * Owns DOM and single-flight feedback; credential policy stays server-side.
- * State is scoped to the mounted card, reclaimed when its DOM is removed.
+ * Commands settle across close/reopen; feedback belongs to the opening that submitted them.
  */
 import { reuseCodexLogin, type CodexLoginStatus } from '../../api/codex-shared-login';
 import { t, type I18nKey } from '../../i18n';
 import { createButton } from '../../ui';
+import {currentSettingsReadSession} from './panel-read-session';
 
 type State = { status?: CodexLoginStatus; busy: boolean; issue: boolean;
-  refresh: (status: CodexLoginStatus) => void; paint: () => void };
+  refresh: (status: CodexLoginStatus) => void; committed: (status: CodexLoginStatus) => void; paint: () => void };
 const cards = new WeakMap<HTMLElement, State>();
 const issueKeys: Readonly<Record<string, I18nKey>> = {
   codex_access_expired: 'settings.codexSharedExpired',
@@ -21,7 +22,10 @@ const issueKeys: Readonly<Record<string, I18nKey>> = {
   credential_store_unsupported: 'settings.codexSharedStoreUnsupported',
 };
 
-export function renderCodexSharedLogin(status?: CodexLoginStatus, refresh?: (status: CodexLoginStatus) => void): void {
+export function renderCodexSharedLogin(
+  status?: CodexLoginStatus, refresh?: (status: CodexLoginStatus) => void,
+  committed?: (status: CodexLoginStatus) => void,
+): void {
   const host = document.getElementById('oauthCodexCard');
   if (!host) return;
   let state = cards.get(host);
@@ -44,6 +48,7 @@ export function renderCodexSharedLogin(status?: CodexLoginStatus, refresh?: (sta
     benefit.className = 'codex-shared-benefit';
     heading.append(title, benefit);
     const description = document.createElement('p');
+    description.className = 'codex-shared-description';
     const actions = document.createElement('div');
     actions.className = 'codex-shared-actions';
     const feedback = document.createElement('p');
@@ -52,30 +57,35 @@ export function renderCodexSharedLogin(status?: CodexLoginStatus, refresh?: (sta
     feedback.setAttribute('role', 'status');
     const hint = document.createElement('p');
     hint.className = 'codex-shared-hint';
-    const current: State = { busy: false, issue: false, refresh: () => {}, paint: () => {} };
+    const current: State = { busy: false, issue: false, refresh: () => {}, committed: () => {}, paint: () => {} };
     const button = createButton({label: t('settings.codexSharedAction'), variant: 'primary',
       onClick: async () => {
-        if (current.busy || button.disabled) return;
+        const session = currentSettingsReadSession();
+        if (!session?.isCurrent() || current.busy || button.disabled) return;
+        const refresh = current.refresh, committed = current.committed;
+        const isCurrent = () => session.isCurrent() && panel.isConnected;
         current.busy = true;
         current.issue = false;
         current.paint();
         try {
           const result = await reuseCodexLogin();
-          if (!panel.isConnected) return;
+          const success = {...result, authenticated: true, shared_login_reuse_supported: true};
+          if (result.status === 'success') committed(success);
+          if (!isCurrent()) return;
           if (result.status !== 'success') {
             current.issue = true;
             feedback.textContent = t(issueKeys[result.auth_issue ?? ''] ?? 'settings.codexSharedUnavailable', {} as never);
           } else {
-            current.status = { ...result, authenticated: true, shared_login_reuse_supported: true };
-            current.refresh(current.status);
+            current.status = success;
+            refresh(current.status);
           }
         } catch {
-          if (!panel.isConnected) return;
+          if (!isCurrent()) return;
           current.issue = true;
           feedback.textContent = t('settings.codexSharedFailed');
         } finally {
           current.busy = false;
-          if (panel.isConnected) current.paint();
+          if (panel.isConnected && currentSettingsReadSession()?.isCurrent()) current.paint();
         }
       }});
     button.id = 'oauthCodexReuseBtn';
@@ -97,7 +107,7 @@ export function renderCodexSharedLogin(status?: CodexLoginStatus, refresh?: (sta
       button.textContent = current.busy ? t('settings.codexSharedChecking')
         : connected && shared ? t('settings.codexSharedConnected')
         : current.issue ? t('settings.codexSharedRetry') : t('settings.codexSharedAction');
-      panel.dataset.state = current.issue ? 'error' : connected && shared ? 'connected' : 'idle';
+      panel.dataset.state = current.issue ? 'error' : connected ? shared ? 'connected' : 'own' : 'idle';
       panel.setAttribute('aria-busy', String(current.busy));
       if (!current.issue) feedback.textContent = connected
         ? shared ? t(s?.credential_source === 'desktop_codex' ? 'settings.codexSharedRemote' : 'settings.codexSharedLocal')
@@ -114,5 +124,6 @@ export function renderCodexSharedLogin(status?: CodexLoginStatus, refresh?: (sta
     if (status.authenticated) state.issue = false;
   }
   if (refresh) state.refresh = refresh;
+  if (committed) state.committed = committed;
   state.paint();
 }

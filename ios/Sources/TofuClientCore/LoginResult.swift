@@ -9,8 +9,6 @@ public enum LoginResult: Equatable, Sendable {
     case badCredentials
     /// Layer-1 SSO detected — caller must open the WebView interactively.
     case needsInteractiveSso(url: String)
-    /// No stored credential for this alias.
-    case noCredential
     /// Transport / parse failure.
     case error(message: String)
     /// The server's v4 meta endpoint definitively refuses this client build.

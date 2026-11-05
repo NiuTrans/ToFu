@@ -228,3 +228,33 @@ def test_native_role_tier_uses_durable_preference_and_principal_tenant(preferred
     assert route.resolved_model=='routed-model'
     assert seen==[dict(role='worker',provider_id=preferred_provider,
         owner_user_id=71,tenant_id='owned-tenant')]
+
+
+def test_sibling_that_loses_the_visible_output_publishes_nothing_live(monkeypatch):
+    import contextlib
+    import lib.tasks_pkg.child_invocation as child_module
+    from lib.tasks_pkg.manager import append_event
+    parent = _parent()
+    bound = []
+
+    @contextlib.contextmanager
+    def port(child):
+        bound.append(child['id'])
+        yield False
+    parent['_flowLiveOutputPort'] = port
+    events = []
+
+    def execute(task, *, policy):
+        append_event(task, {'type': 'delta', 'content': 'sibling narration'})
+        append_event(task, {'type': 'tool_start', 'roundNum': 1, 'toolCallId': 'sibling',
+                            'toolName': 'read_files', 'query': 'Read'})
+        task.update(content='sibling answer', status='done', finishReason='stop',
+                    streamState='provider_finished')
+    monkeypatch.setattr(child_module, 'execute_invocation', execute)
+    result = OrchestrationInvocationRunner(
+        OrchestrationAgentRunnerConfig(parent_task=parent, model='chosen',
+                                       model_routing_policy='selected'),
+        emit=events.append, abort_check=lambda: False)(_node(), 'context', 1)
+    assert result.status == 'completed' and result.output == 'sibling answer'
+    assert len(bound) == 1
+    assert events == []

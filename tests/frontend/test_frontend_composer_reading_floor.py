@@ -23,6 +23,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -35,18 +36,8 @@ MAIN_JS = Path(runtime_section_path('main.js'))
 
 def _node() -> str:
     exe = shutil.which("node")
-    if not exe:
-        pytest.skip("node not available")
+    require_node_modules('jsdom')
     return exe
-
-
-def _has_jsdom() -> bool:
-    try:
-        subprocess.run([_node(), "-e", "require('jsdom')"], cwd=ROOT,
-                       capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
 
 
 def _slice_fn(src: str, signature: str) -> str:
@@ -117,7 +108,6 @@ def _run(reflow: str) -> dict:
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_composer_floored_to_chat_reading_column():
     out = _run(_reflow_fn())
     # Narrow toolbar (~540px) must be floored UP to the 820px reading column
@@ -128,7 +118,6 @@ def test_composer_floored_to_chat_reading_column():
     )
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NC_old_480_floor_leaves_composer_narrow():
     """Neuter: restore the old `Math.max(480, Math.min(w, maxW))` floor (no
     reading-column floor) → the narrow toolbar stays ~540px, proving the

@@ -19,10 +19,23 @@ legacy import, runtime candidate compilation, health scopes, and route snapshots
 - Every repository CAS uses `registration.prepare_registration_document`; new
   incomplete Models are drafts, never executable candidates. Research belongs
   to `lib/model_catalog/registration_research.py`, not request preparation.
+- Provider dependency removal lives in `managed_provider.py`; HTTP, OAuth and
+  local discovery share that graph rule. Its in-place operation edits only a
+  caller-owned candidate; CAS and post-commit secret cleanup stay with the caller.
 - Preserve all admitted owner entities and grants; entity counts and aggregate bytes
   do not reject authority commits. Reconstructible health/snapshots and cleanup
   retain their declared lifecycle. Default dispatch retains every eligible
   candidate; an explicit caller shortlist remains a positive size hint.
+
+## Compilation owners
+
+`routing.py` is the stable public re-export surface. `selection_resolution.py`
+owns normalized authority indexes and logical/provider selector resolution;
+`candidate_compiler.py` owns eligibility, grants, health and stable ranking;
+`route_snapshot.py` owns bounded diagnostic projections. Request groups reuse
+one compiler for primary/fallback selection and release indexes before secret
+materialization. New requests always read/validate their own owner revision.
+Extend these owners, not the facade; never add a global authority/plaintext cache.
 
 ## Verification
 

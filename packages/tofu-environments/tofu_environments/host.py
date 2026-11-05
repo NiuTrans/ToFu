@@ -61,12 +61,15 @@ def read_compute_catalog(actor, provider, *, cancelled=lambda: False):
         return result
 
 def _capacity_defaults(observation):
-    """Use the host's cached launch memory/volume probe; missing data stays lean."""
-    available = max(1, observation.effective_memory_available_mb or 32) * 1048576
+    """Volume-bounded context and the runner's fixed output maximum.
+
+    Host memory never sizes these (root docs/RESOURCE_CONTROL.md, "Hardware
+    never limits work"); a missing volume observation stays lean.
+    """
     disk = max(1, observation.disk_free_mb or 4) * 1048576
-    return {"output_limit": min(67108864, max(65536, available // 128)),
-            "context_byte_limit": max(1, min(available * 2, disk // 4)),
-            "context_file_limit": max(1, min(1000000, available // 4096, disk // 8192))}
+    return {"output_limit": 67108864,
+            "context_byte_limit": max(1, disk // 4),
+            "context_file_limit": max(1, min(1000000, disk // 8192))}
 
 def _default_service(task, *, jobs=False, lifecycle=None, cancelled=None):
     from lib.storage import get_storage_client

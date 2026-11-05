@@ -9,13 +9,14 @@ Entry points:
 ``ensure_search_runtime`` activates the runtime on first real use;
 ``sync_search_config_if_loaded`` hot-applies settings without causing a cold
 optional import; ``search_library_is_loaded`` supports dependency-free schema
-decisions.  The module deliberately imports ``lib.search.search_bridge`` only inside
-the activation function.
+decisions; ``submit_search_worker`` captures explicit inputs for host fan-out.
+The bridge and optional dependency are imported only inside real-use functions.
 """
 
 from __future__ import annotations
 
 import sys
+from contextvars import Context
 from types import ModuleType
 
 from lib.log import get_logger
@@ -29,7 +30,36 @@ __all__ = [
     'search_library_is_loaded',
     'search_runtime_is_active',
     'sync_search_config_if_loaded',
+    'submit_search_worker',
 ]
+
+
+def submit_search_worker(pool, fn, /, *args, **kwargs):
+    """Submit host search work with only explicitly owned search inputs.
+
+    Capture provider registrations before enqueueing, in a fresh context that
+    excludes HTTP/actor state. The worker owns a new file-handoff lifetime;
+    the creating handler keeps ownership of knowledge/repair settlement.
+    """
+    from lib.search.browser_scope import SearchBrowserBinding, current_browser_identity
+    from lib.site_doctor.ownership import bind_knowledge_scope, current_knowledge_scope
+    from tofu_search.config import bind_call_config, get_config
+    from tofu_search.providers import bound_optional_providers, submit_with_provider_context
+
+    binding = SearchBrowserBinding(*current_browser_identity())
+    knowledge_scope = current_knowledge_scope()
+    config = get_config()
+
+    def run():
+        with binding.activate():
+            return fn(*args, **kwargs)
+
+    def submit():
+        with binding.activate(), bind_knowledge_scope(knowledge_scope), bind_call_config(config):
+            with bound_optional_providers():
+                return submit_with_provider_context(pool, run)
+
+    return Context().run(submit)
 
 
 def prepare_search_dependency_import() -> bool:

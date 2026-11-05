@@ -2,7 +2,8 @@
 
 Creation is empty/create-only. Delegation derives a bounded grant from the current
 accepted human request; dispatch and observation reuse ProjectDispatchService.
-This module never synthesizes human principals or starts a model loop.
+Global Router tools (docs/ROUTER.md) delegate to lib.router.tools after the same
+binding check. This module never synthesizes human principals or starts a model loop.
 """
 from __future__ import annotations
 
@@ -75,7 +76,7 @@ def _create(scope: dict, arguments: dict) -> dict:
                           'Use dispatch_project_assignment only for an already-authorized assignment.')}
 
 
-def execute_coordinator_tool(task: dict, name: str, arguments: dict) -> str:
+def execute_coordinator_tool(task: dict, name: str, arguments: dict, *, runtime_context=None) -> str:
     """Handle explicit create/dispatch/read; all results preserve owner scope."""
     from lib.storage.errors import StorageError
     try:
@@ -84,7 +85,11 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict) -> str:
             result = _create(scope, arguments)
         elif name in {'delegate_project_work', 'await_project_workers'}:
             from .coordinator_workers import delegate, await_workers
-            result = (delegate if name == 'delegate_project_work' else await_workers)(task, scope, arguments)
+            if name == 'delegate_project_work':
+                result = delegate(task, scope, arguments)
+            else:
+                result = await_workers(
+                    task, scope, arguments, runtime_context=runtime_context)
         elif name == 'review_project_work':
             from lib.project_dispatch.repository import ProjectDispatchRepository
             from lib.project_dispatch.service import ProjectDispatchService
@@ -92,12 +97,15 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict) -> str:
         elif name == 'get_project_workers':
             from .coordinator_workers import get_workers
             result = get_workers(task, scope, arguments)
-        elif name in {'finish_project_request', 'cancel_project_work'}:
+        elif name in {'finish_project_request', 'cancel_project_work', 'request_user_decision'}:
             from lib.project_dispatch.repository import ProjectDispatchRepository
             repository = ProjectDispatchRepository(scope['user_id'], scope['project_path'])
             if name == 'finish_project_request':
                 from lib.project_dispatch.continuation import finish_request
                 result = finish_request(repository, task, arguments)
+            elif name == 'request_user_decision':
+                from lib.project_dispatch.continuation import request_decision
+                result = request_decision(repository, task, arguments)
             else:
                 from lib.project_dispatch.service import ProjectDispatchService
                 result = ProjectDispatchService(repository).cancel_for_coordinator(task, scope, arguments)
@@ -107,6 +115,16 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict) -> str:
                 'owner': scope['user_id'], 'projectPath': scope['project_path'],
                 'coordinatorId': scope['conversation_id'], 'bindingRevision': scope['binding_revision'],
             }, arguments)
+        elif name == 'update_task_progress':
+            from lib.conversations.coordinator_progress import CoordinatorTaskProgress
+            published = CoordinatorTaskProgress(scope['user_id'], scope['project_path']).publish({
+                'owner': scope['user_id'], 'projectPath': scope['project_path'],
+                'coordinatorId': scope['conversation_id'], 'bindingRevision': scope['binding_revision'],
+            }, arguments)
+            result = {'revision': published['board']['revision'], 'changed': published['changed'],
+                      'task_count': len(published['board']['tasks']),
+                      'next_step': 'Shown to the human above this chat. Send the complete board again '
+                                   'whenever a task starts, advances, finishes or is dropped.'}
         elif name in {'dispatch_project_assignment', 'get_project_assignment'}:
             from lib.identity import PrincipalContext
             from lib.project_dispatch.repository import ProjectDispatchRepository
@@ -127,13 +145,35 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict) -> str:
                 result = service.dispatch_authorized(binding)
             else:
                 result = service.view_for_coordinator(assignment_id, scope=scope)
+        elif name in _router_only_tools():
+            from lib.router.tools import execute_router_tool
+            result = execute_router_tool(task, scope, name, arguments)
+        elif name in _watchdog_only_tools():
+            from lib.router.watchdog.tools import execute_watchdog_tool
+            result = execute_watchdog_tool(task, scope, name, arguments)
         else:
             raise ValueError('Unknown Coordinator tool')
         return json.dumps(result, ensure_ascii=False)
     except (PermissionError, ValueError, KeyError, StorageError) as error:
+        # A typed refusal states its own effect and recovery; generic errors stay uncertain.
         return json.dumps({'error': str(error),
-                           'execution_started': None if name in {'dispatch_project_assignment', 'delegate_project_work', 'review_project_work'} else False,
-                           'recovery': ('Read get_project_assignment before retrying an uncertain dispatch.'
+                           'execution_started': getattr(error, 'execution_started',
+                               None if name in {'dispatch_project_assignment', 'delegate_project_work', 'review_project_work',
+                                                'route_to_project'} else False),
+                           'recovery': getattr(error, 'recovery', None) or (
+                                        'Read get_project_assignment before retrying an uncertain dispatch.'
                                         if name == 'dispatch_project_assignment' else
                                         'Retry delegate_project_work with unchanged arguments and the same idempotency_key; it reuses any accepted worker.'
-                                        if name == 'delegate_project_work' else '')}, ensure_ascii=False)
+                                        if name == 'delegate_project_work' else
+                                        'Retry route_to_project with unchanged arguments; it never forwards twice.'
+                                        if name == 'route_to_project' else '')}, ensure_ascii=False)
+
+
+def _router_only_tools() -> frozenset:
+    from lib.router.policy import ROUTER_ONLY_TOOLS
+    return ROUTER_ONLY_TOOLS
+
+
+def _watchdog_only_tools() -> frozenset:
+    from lib.router.watchdog.policy import WATCHDOG_ONLY_TOOLS
+    return WATCHDOG_ONLY_TOOLS

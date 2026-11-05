@@ -47,7 +47,6 @@ def test_thread_start_failure_releases_registry_slot(monkeypatch):
         def start(self):
             raise RuntimeError('thread creation failed')
 
-    monkeypatch.setenv('TOFU_TIMER_LIVE_CAP', '2')
     monkeypatch.setattr(
         _loop,
         '_get_timer_row',

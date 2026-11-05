@@ -25,8 +25,10 @@ OWNER_GLOBAL_SKILLS_SUBPATH = os.path.join('skills', 'users')
 #: ``export.py --mode`` values carry it. Both are documentation consumed by
 #: ``tests/skills/test_skill_roots_contract.py``; runtime only reads ``subdir``.
 #:
-#: Order is precedence: an earlier project root wins when two roots define the
-#: same skill id (see ``docs/modules/skills.md``).
+#: Order is precedence among project roots: an earlier project root wins when
+#: two project roots define the same skill id. The owner-global store precedes
+#: every project root (owner decision 2026-10-31, see ``skill_scan_dirs`` and
+#: ``docs/modules/skills.md``).
 PROJECT_SKILL_ROOTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     # Runtime project packages: what ``mtskills i`` and the Settings UI write.
     # Gitignored, so the bulk export tree never carries it. The internal-mode
@@ -46,7 +48,7 @@ PROJECT_SKILL_ROOTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     # Internal-only platform guides (CodeLab, MLP, Hope). Git-tracked inside
     # the ``bundles/`` tree, which opensource export excludes wholesale, so
     # these reach internal sites without leaking to the public mirror.
-    (os.path.join('bundles', 'meituan', 'skills'), 'project-internal-dev',
+    (os.path.join('bundles', 'yourprovider', 'skills'), 'project-internal-dev',
      ('personal', 'internal')),
 )
 
@@ -114,15 +116,31 @@ def skill_scan_dirs(
 ) -> list[tuple[str, str]]:
     """Return precedence-ordered ``(directory, scope)`` scan roots.
 
-    The new owner-global directory wins. The old process-global store is only
-    visible to the declared personal owner, preventing legacy data from
-    becoming an accidental multi-user sharing mechanism.
+    Skills are owner-global (owner decision 2026-10-31): the owner-global
+    store comes FIRST, so its package is the single runtime authority for an
+    id in every conversation. A same-id package under an attached project (a
+    stale copy, a repository development guide or a vendored snapshot) is
+    reported as shadowed instead of silently replacing the global package in
+    that one project. Project roots still contribute ids that are not
+    installed globally, in their declared order; ``lib.skills.promote`` moves
+    them to the global store. The old process-global store is only visible to
+    the declared personal owner, preventing legacy data from becoming an
+    accidental multi-user sharing mechanism.
     """
+    out: list[tuple[str, str]] = []
+    if owner_user_id is None:
+        out.append((memory_dirs._server_global_skills_dir(), 'global'))
+    else:
+        owner = require_user_id(owner_user_id, context='skill registry')
+        out.append((owner_global_skills_dir(owner), 'global'))
+        if owner == PERSONAL_USER_ID:
+            legacy = memory_dirs._server_global_skills_dir()
+            if legacy != out[-1][0]:
+                out.append((legacy, 'global'))
     roots: list[str] = []
     for path in [project_path, *(extra_paths or [])]:
         if path and path not in roots:
             roots.append(path)
-    out = []
     for root in roots:
         for subdir, _visibility, _exported in PROJECT_SKILL_ROOTS:
             directory = os.path.join(root, subdir)
@@ -131,16 +149,6 @@ def skill_scan_dirs(
             if os.path.commonpath((os.path.realpath(root),
                                    os.path.realpath(directory))) == os.path.realpath(root):
                 out.append((directory, 'project'))
-    if owner_user_id is None:
-        out.append((memory_dirs._server_global_skills_dir(), 'global'))
-        return out
-
-    owner = require_user_id(owner_user_id, context='skill registry')
-    out.append((owner_global_skills_dir(owner), 'global'))
-    if owner == PERSONAL_USER_ID:
-        legacy = memory_dirs._server_global_skills_dir()
-        if legacy != out[-1][0]:
-            out.append((legacy, 'global'))
     return out
 
 

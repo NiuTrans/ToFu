@@ -17,6 +17,7 @@ import unittest
 class ProviderPinTest(unittest.TestCase):
 
     def setUp(self):
+        self._prev_preflight = os.environ.get('TOFU_EPHEMERAL_PREFLIGHT')
         os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = '0'
         from lib.llm_dispatch.factory import get_dispatcher
         from lib.llm_dispatch.slot import Slot
@@ -26,14 +27,14 @@ class ProviderPinTest(unittest.TestCase):
         self.d = get_dispatcher()
         self.d.initialize()
         # Inject a fake OPERATOR slot for a popular alias model with a great
-        # (low) score — this is the Meituan-keyed slot that the leak routes
+        # (low) score — this is the YourProvider-keyed slot that the leak routes
         # onto. We give it tiny latency + zero inflight so it ALWAYS wins a
         # naive min(score) race.
         self._operator = Slot(
             key_name='operator_key', api_key='sk-operator',
             model='deepseek-v4-pro', capabilities={'text', 'cheap'},
             base_url='https://gateway.internal/v1',
-            provider_id='sankuai', latency_ema=10.0,
+            provider_id='default', latency_ema=10.0,
         )
         with self.d._lock:
             self.d.slots.append(self._operator)
@@ -48,7 +49,10 @@ class ProviderPinTest(unittest.TestCase):
         if self._eph is not None:
             from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
             dispose_ephemeral_slot(self._eph)
-        os.environ.pop('TOFU_EPHEMERAL_PREFLIGHT', None)
+        if self._prev_preflight is None:
+            os.environ.pop('TOFU_EPHEMERAL_PREFLIGHT', None)
+        else:
+            os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = self._prev_preflight
 
     def _mint_ephemeral(self):
         from lib.llm_dispatch.ephemeral import mint_ephemeral_slot
@@ -68,7 +72,7 @@ class ProviderPinTest(unittest.TestCase):
         self.assertIsNotNone(chosen)
         # The faster operator slot should win the naive race — this is
         # exactly the leak the pin closes.
-        self.assertEqual(chosen.provider_id, 'sankuai')
+        self.assertEqual(chosen.provider_id, 'example-corp')
 
     def test_pinned_only_picks_its_own_provider(self):
         from lib.llm_dispatch.provider_pin import provider_pin

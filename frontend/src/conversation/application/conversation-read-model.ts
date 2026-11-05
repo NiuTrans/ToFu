@@ -41,6 +41,36 @@ export function conversationHasActor(
     .some((turn) => turn.actor === actor);
 }
 
+const timelineArchiveIds = new WeakMap<object, ReadonlyArray<string>>();
+
+/**
+ * Compaction archives this conversation's loaded Turns reference: running or
+ * settled `context_compaction` receipts and manual compaction Turns. Unchanged
+ * Turns keep their timeline identity, so each timeline is scanned once.
+ */
+export function conversationCompactionArchiveIds(
+  state: TurnState | null | undefined,
+): ReadonlyArray<string> {
+  if (!state) return [];
+  const ids = new Set<string>();
+  for (const turn of entityRecordValues(state.turnsById)) {
+    if (!turn || turn.conversationId !== state.conversationId) continue;
+    const { activityTimeline, compaction } = turn.projection ?? {};
+    if (compaction?.archiveId) ids.add(compaction.archiveId);
+    if (!activityTimeline) continue;
+    let archived = timelineArchiveIds.get(activityTimeline);
+    if (!archived) {
+      archived = activityTimeline.entries.flatMap((entry) => (
+        entry.reasonCode === 'context_compaction' && entry.archiveId
+          ? [entry.archiveId] : []
+      ));
+      timelineArchiveIds.set(activityTimeline, archived);
+    }
+    for (const id of archived) ids.add(id);
+  }
+  return [...ids];
+}
+
 /** Active attempt ids across every lane, derived only from live Turns. */
 export function activeConversationAttemptIds(
   state: TurnState | null | undefined,

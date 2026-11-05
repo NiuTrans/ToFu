@@ -38,7 +38,7 @@ def source_trace(groups, *, url_field='url'):
             'scope': 'Raw engine observations; not ranked results or fetch authority'}
 
 
-def search_observation(rows, *, url_field='url', snippet_field='snippet'):
+def search_observation(rows, *, url_field='url', snippet_field='snippet', include_related=False):
     """Keep discovery candidates and safe diagnostics within the shared budget.
 
     Search snippets and uncertain follow-ups are not fetched-source evidence.
@@ -46,21 +46,42 @@ def search_observation(rows, *, url_field='url', snippet_field='snippet'):
     """
     followups = getattr(rows, '_unverified_candidates', None) or []
     results, seen, omitted_urls = [], set(), 0
+    visible_parents = []
+
+    def append_candidate(row, status):
+        nonlocal omitted_urls
+        url = row.get(url_field, '')
+        key = url_key(url) if isinstance(url, str) and len(url) <= 4000 else ''
+        if not key:
+            omitted_urls += 1
+            return False
+        if key in seen:
+            return False
+        seen.add(key)
+        results.append({'title': str(row.get('title') or '')[:500], 'url': url,
+                        'snippet': str(row.get(snippet_field) or '')[:SNIPPET_CHARS],
+                        'evidence_status': status})
+        return True
+
     for candidates, status in ((rows, 'search_snippet'), (followups, 'unverified_candidate')):
         for row in candidates:
             if len(results) == RESULTS:
                 break
-            url = row.get(url_field, '')
-            key = url_key(url) if isinstance(url, str) and len(url) <= 4000 else ''
-            if not key:
-                omitted_urls += 1
-                continue
-            if key in seen:
-                continue
-            seen.add(key)
-            results.append({'title': str(row.get('title') or '')[:500], 'url': url,
-                            'snippet': str(row.get(snippet_field) or '')[:SNIPPET_CHARS],
-                            'evidence_status': status})
+            if append_candidate(row, status):
+                visible_parents.append(row)
+    if include_related and len(results) < RESULTS:
+        # Only native pipeline-owned groups carry observed discovery authority.
+        # Keep existing candidates first, then one direct listing per group per
+        # round. Never recurse or promote arbitrary provider/trace metadata.
+        groups = [row.get('similar_snippets') or [] for row in visible_parents]
+        for index in range(max((len(group) for group in groups), default=0)):
+            for group in groups:
+                if len(results) == RESULTS:
+                    break
+                if index < len(group):
+                    append_candidate(group[index], 'unverified_candidate')
+            if len(results) == RESULTS:
+                break
     diagnostic = {'omitted_url_count': omitted_urls}
     native = getattr(rows, '_search_diag', None) or {}
     # Do not expose arbitrary provider messages, which may contain route details.
@@ -88,7 +109,7 @@ def identity(arm):
         module = tofu_search
     names = (('ddgs', 'primp', 'lxml') if arm == 'ddgs' else
              ('tofu-search', 'requests', 'httpx', 'trafilatura', 'lxml',
-              'playwright', 'pymupdf', 'pymupdf4llm'))
+              'playwright', 'pypdf', 'pymupdf', 'pymupdf4llm'))
     versions = {'python': sys.version, 'entry_sha256':
                 hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()}
     if arm == 'tofu':
@@ -149,7 +170,7 @@ def operation(request):
         if request['operation'] == 'search' and arm == 'tofu':
             rows = perform_web_search(request['query'], max_results=RESULTS,
                                       fetch_pages=False, filter_pages=False, config=cfg)
-            observation = search_observation(rows)
+            observation = search_observation(rows, include_related=True)
             if request.get('include_source_trace') is True:
                 observation['source_trace'] = source_trace(
                     getattr(rows, '_engine_breakdown', None) or {'returned': rows})

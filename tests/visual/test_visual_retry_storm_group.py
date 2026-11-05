@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.frontend_visual import frontend_visual_origin, frontend_visual_page as frontend_visual_page  # noqa: F401
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "tests" / "screenshots"
@@ -93,6 +94,7 @@ SCRIPT_BODY = """
 
 @pytest.fixture(scope="module")
 def activity_renderer_bundle(tmp_path_factory):
+    require_node_modules('vite')
     bundle = tmp_path_factory.mktemp("retry-storm") / "activity-renderer.js"
     result = subprocess.run([
         str(ROOT / "scripts/vite_test_bundle.mjs"),

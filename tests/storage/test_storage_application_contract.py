@@ -45,8 +45,10 @@ def application_storage(request, tmp_path, monkeypatch, application_storage_owne
         from scripts.check_tofudb_engine_drift import resolve_deployment_binary
         repository_root = Path(__file__).resolve().parents[2]
         monkeypatch.setenv('TOFUDB_BIN', resolve_deployment_binary(repository_root))
-    # Model/provider preparation reads the same deployment contract as storage.
-    monkeypatch.setenv('TOFU_PERSONAL_STORAGE_BACKEND', backend)
+    # The personal selector names the native or SQL authority. PostgreSQL is
+    # an explicit SQL authority test backend, not a third personal-mode value.
+    monkeypatch.setenv('TOFU_PERSONAL_STORAGE_BACKEND',
+                       'sqlite' if backend == 'postgres' else backend)
     runtime = StorageRuntime(StorageSupervisor(
         project_root=tmp_path, backend=backend, startup_timeout=60),
         auto_restart=False)
@@ -232,6 +234,91 @@ def test_stream_progress_wakes_committed_event_observers(application_storage):
                 and notice.get('event', {}).get('conversationId') == conv_id]
     assert matching, 'a committed stream update must wake readers before the heartbeat'
     assert all(notice['event']['syncSeq'] > 0 for notice in matching)
+
+
+def test_acknowledged_commands_name_their_operation_to_subscribers(application_storage):
+    from lib.storage.commit_events import subscribe_committed_operations
+    from lib.storage.errors import StorageError
+
+    named = []
+    unsubscribe = subscribe_committed_operations(['record.put'], named.append)
+    try:
+        key = f'operation-hint-{uuid.uuid4().hex}'
+        application_storage.command('record.put', {
+            'namespace': 'commit.hints', 'key': key, 'value': {'v': 1}, 'user_id': 1,
+        }, f'put-{key}')
+        assert named == ['record.put']
+        application_storage.query('record.get', {
+            'namespace': 'commit.hints', 'key': key, 'user_id': 1})
+        application_storage.command('record.delete', {
+            'namespace': 'commit.hints', 'key': key, 'user_id': 1}, f'delete-{key}')
+        with pytest.raises(StorageError):
+            application_storage.command('record.put', {'user_id': 1}, f'invalid-{key}')
+        assert named == ['record.put'], 'queries, unlisted and rejected commands stay silent'
+    finally:
+        unsubscribe()
+    application_storage.command('record.put', {
+        'namespace': 'commit.hints', 'key': key, 'value': {'v': 2}, 'user_id': 1,
+    }, f'put-again-{key}')
+    assert named == ['record.put']
+
+
+def test_delivery_action_page_selects_complete_rows_that_need_action(application_storage):
+    from lib import integration_state_repository as state
+
+    project = '/contract/delivery-action'
+    isolated = {'executionMode': 'isolated-task'}
+    delivered = {'state': 'delivered', 'taskOutcome': 'completed',
+                 'publicationMode': 'working_tree'}
+    acknowledged = {**isolated, 'deliveryCheckpoint': {'status': 'disabled'},
+                    'sourceRetirement': 'reclaimed', 'delivery': delivered}
+    cases = [  # task, managed, origin, an ordinary pass acts on it
+        ('no-receipt', True, {}, False),
+        ('working', False, {'delivery': {'state': 'working'}}, True),
+        ('pending', False, {'delivery': {'state': 'pending'}}, True),
+        ('blocked', False, {'delivery': {'state': 'blocked'}}, True),
+        ('preserved', True, {'delivery': {'state': 'preserved'}}, False),
+        ('inputs-changed', False, {'delivery': {
+            'state': 'failed', 'retry': {'condition': 'validation_inputs_changed'}}}, True),
+        ('failed', False, {'delivery': {
+            'state': 'failed', 'retry': {'condition': 'conflict_inputs_changed'}}}, False),
+        ('checkpoint-ack-missing', False, {**isolated, 'delivery': delivered}, True),
+        ('source-ack-missing', True, {**isolated, 'deliveryCheckpoint': None,
+                                      'delivery': {'state': 'delivered'}}, True),
+        ('acknowledged', True, acknowledged, False),
+        ('retained', True, {**acknowledged, 'sourceRetirement': 'retained'}, False),
+        ('explicit-candidate', True, {'delivery': {'state': 'delivered'}}, False),
+    ]
+    for task, managed, origin, _ in cases:
+        for name, row_origin in ((task, origin), (f'cold-{task}', acknowledged)):
+            state.register_workspace(
+                user_id=1, project_root=project, task_id=name, title=name,
+                workspace_path=f'/contract/workspaces/{name}', managed=managed,
+                base_sha='a' * 40, now=1.0, origin=row_origin or None)
+
+    def tasks(page):
+        return [row['task_id'] for row in page['rows']]
+
+    expected = [task for task, _, _, action in cases if action]
+    page = state.delivery_action_page(0, 128)
+    assert tasks(page) == expected
+    assert (page['hasMore'], page['nextAfterId']) == (False, 0)
+    for row in page['rows']:
+        assert row == state.find_workspace(project, row['task_id'], user_id=1), \
+            'a page row is the complete workspace row; no reread is needed'
+    assert tasks(state.delivery_action_page(0, 128, retained=True)) == [
+        task for task, _, _, action in cases if action or task == 'retained']
+    # Keyset continuation skips cold rows between matches; an empty page ends it.
+    first = state.delivery_action_page(0, 2)
+    assert (tasks(first), first['hasMore']) == (expected[:2], True)
+    assert first['nextAfterId'] == first['rows'][-1]['id']
+    rest = state.delivery_action_page(first['nextAfterId'], 128)
+    assert tasks(rest) == expected[2:]
+    assert state.delivery_action_page(rest['rows'][-1]['id'], 1) == {
+        'rows': [], 'hasMore': False, 'nextAfterId': 0}
+    state.set_workspace_meta(user_id=1, project_root=project, task_id='preserved',
+                             patch={'delivery': {'state': 'pending'}}, now=2.0)
+    assert 'preserved' in tasks(state.delivery_action_page(0, 128))
 
 
 def test_startup_cleanup_accepts_application_default(application_storage):
@@ -494,8 +581,12 @@ def test_stable_segment_patch_replays_from_exact_committed_base(application_stor
         assert after['projection']['content'] == text
 
 
-def test_conversation_inspector_api_reads_real_owner_scoped_projection(application_storage, monkeypatch):
-    """Compose the real HTTP handlers with each authority and the diagnostic reader."""
+def _inspector_route_api(conv_id, *, archive_id=None, before=None):
+    """The diagnostic reader over the real HTTP handlers of the selected authority.
+
+    ``before(path)`` may commit real writes ahead of a request. A typed storage
+    conflict becomes the reader's conflict exactly as the v4 problem would.
+    """
     import asyncio
     import json
     from urllib.parse import urlsplit
@@ -504,27 +595,20 @@ def test_conversation_inspector_api_reads_real_owner_scoped_projection(applicati
     from debug import inspect_conversation as inspector
     from lib.api_keys import local_admin_context
     from lib.api_v4 import success_envelope
-    from lib.tasks_pkg.persistence_store import DefaultConversationStore
-    from lib.turn_lifecycle import create_turn_pair
     import routes.conversations as conversations
     import routes.conversations_compaction as compactions
 
-    conv_id = 'inspect-' + uuid.uuid4().hex
-    create_turn_pair(conv_id, command_id=conv_id, input_projection={'content': 'native question'},
-        config={}, user_id=1, conversation_defaults={'allowCreate': True, 'title': 'Inspect me', 'settings': {}})
-    store = DefaultConversationStore()
-    archive_id = store.archive_transcript(conv_id, [{'role': 'user', 'content': 'before compaction'}],
-        user_id=1, summary='durable diagnostic summary', receipt={'status': 'completed'})
-    assert archive_id
-    monkeypatch.setattr(compactions, 'get_conversation_store', lambda: store)
     app = create_base_app(__name__)
 
     class RouteAPI(inspector._DiagnosticAPI):
         def __init__(self):
             super().__init__('http://127.0.0.1:15000', None)
             self.paths = []
+            self.served = []
 
-        def get(self, path, *, missing_ok=False):
+        def get(self, path, *, missing_ok=False, snapshot_read=False):
+            if before is not None:
+                before(path)
             self.requests += 1
             self.paths.append(path)
             async def invoke():
@@ -539,13 +623,35 @@ def test_conversation_inspector_api_reads_real_owner_scoped_projection(applicati
                         response, status = await compactions.get_compaction(conv_id, archive_id)
                     else:
                         response, status = await conversations.get_conv(conv_id)
+                    body = await response.get_json()
+                    if status == 409 and snapshot_read and 'database_conflict' in json.dumps(body):
+                        raise inspector.DiagnosticSnapshotConflict('storage conflict')
                     assert status == 200
-                    wire = success_envelope(await response.get_json(), request_id='test', server_time_ms=1)
+                    self.served.append(path)
+                    wire = success_envelope(body, request_id='test', server_time_ms=1)
                     self.bytes_read += len(json.dumps(wire, ensure_ascii=False).encode('utf-8'))
                     return wire['data']
             return asyncio.run(invoke())
 
-    api = RouteAPI()
+    return RouteAPI()
+
+
+def test_conversation_inspector_api_reads_real_owner_scoped_projection(application_storage, monkeypatch):
+    """Compose the real HTTP handlers with each authority and the diagnostic reader."""
+    from debug import inspect_conversation as inspector
+    from lib.tasks_pkg.persistence_store import DefaultConversationStore
+    from lib.turn_lifecycle import create_turn_pair
+    import routes.conversations_compaction as compactions
+
+    conv_id = 'inspect-' + uuid.uuid4().hex
+    create_turn_pair(conv_id, command_id=conv_id, input_projection={'content': 'native question'},
+        config={}, user_id=1, conversation_defaults={'allowCreate': True, 'title': 'Inspect me', 'settings': {}})
+    store = DefaultConversationStore()
+    archive_id = store.archive_transcript(conv_id, [{'role': 'user', 'content': 'before compaction'}],
+        user_id=1, summary='durable diagnostic summary', receipt={'status': 'completed'})
+    assert archive_id
+    monkeypatch.setattr(compactions, 'get_conversation_store', lambda: store)
+    api = _inspector_route_api(conv_id, archive_id=archive_id)
     document, archives = inspector._load_api_document(api, conv_id, full=True)
     assert api.bytes_read > 0 and api.requests == len(api.paths)
     assert any('kind=chunk' in path for path in api.paths)
@@ -557,6 +663,51 @@ def test_conversation_inspector_api_reads_real_owner_scoped_projection(applicati
     assert archives[0]['id'] == archive_id
     assert archives[0]['summary'] == 'durable diagnostic summary'
     assert archives[0]['receipt']['status'] == 'completed'
+
+
+def test_conversation_inspector_reads_one_revision_while_real_writes_land(application_storage):
+    """Real appends and a settled-Turn edit commit between the reader's requests."""
+    from debug import inspect_conversation as inspector
+    from lib.turn_lifecycle import (
+        append_settled_turn, get_conversation_revision, get_turn, update_turn_projection)
+
+    conv_id = 'inspect-live-' + uuid.uuid4().hex
+    turn_ids = []
+
+    def append(index, content):
+        turn = append_settled_turn(
+            conv_id, command_id=f'{conv_id}-{index}', actor='human' if index % 2 == 0 else 'assistant',
+            projection={'content': content}, user_id=1,
+            conversation_defaults={'allowCreate': True, 'title': 'Live', 'settings': {}})['turn']
+        turn_ids.append(turn['turnId'])
+
+    for index in range(3):
+        append(index, f'turn {index} ' + ('x' * 200_000 if index == 1 else 'settled'))
+    requests = 0
+
+    def write_between_reads(path):
+        nonlocal requests
+        requests += 1
+        if requests in (3, 9, 15):
+            append(len(turn_ids), f'appended at request {requests}')
+        elif requests == 6:
+            current = get_turn(conv_id, turn_ids[0], user_id=1)
+            update_turn_projection(conv_id, turn_ids[0], projection={'content': 'turn 0 edited'},
+                                   expected_projection_revision=current['projectionRevision'], user_id=1)
+
+    api = _inspector_route_api(conv_id, before=write_between_reads)
+    document, _ = inspector._load_api_document(api, conv_id, full=True)
+    assert requests > 15
+    assert document['diagnostic_snapshot'] == 'consistent'
+    assert document['diagnostic_revision'] == get_conversation_revision(conv_id, user_id=1)
+    quiet, _ = inspector._load_api_document(_inspector_route_api(conv_id), conv_id, full=True)
+    assert quiet['diagnostic_revision'] == document['diagnostic_revision']
+    assert [message['content'] for message in document['messages']] == [
+        message['content'] for message in quiet['messages']]
+    assert len(document['messages']) == 6 and document['messages'][0]['content'] == 'turn 0 edited'
+    # The large settled Turn is downloaded once, then only re-verified.
+    large = [path for path in api.served if 'kind=chunk' in path and '&index=1&' in path]
+    assert sum('&offset=0&limit=65536' in path for path in large) == 1
 
 
 def test_flow_recovery_receipts_survive_authority_and_fence_late_publish(application_storage):

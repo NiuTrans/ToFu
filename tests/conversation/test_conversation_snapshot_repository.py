@@ -279,7 +279,10 @@ def test_bounded_scan_lists_metadata_then_hydrates_small_ordered_batches():
     assert all(payload['settings_keys'] == ['model'] for payload in body_payloads)
 
 
-@pytest.mark.parametrize('code', ['database_protocol_error', 'database_unavailable'])
+@pytest.mark.parametrize('code', [
+    'database_protocol_error', 'database_resource_exhausted',
+    'database_unavailable',
+])
 def test_bounded_scan_splits_rejected_transcript_batches(code):
     client = _ScanClient(['c0', 'c1', 'c2', 'c3'], max_full_batch=1)
     original_query = client.query
@@ -287,8 +290,9 @@ def test_bounded_scan_splits_rejected_transcript_batches(code):
         try:
             return original_query(operation, payload)
         except StorageError as exc:
-            raise StorageError(code, "database_resource_exhausted"
-                               if code == "database_unavailable" else exc.message) from exc
+            raise StorageError(code, exc.message
+                               if code == "database_protocol_error"
+                               else "database_resource_exhausted") from exc
     client.query = query
     total, iterator = _repository(client).scan_bounded(
         user_id=7, batch_size=4)
@@ -399,3 +403,217 @@ def test_malformed_authority_projection_fails_loudly(document):
     client = _Client({'conversation.get': document})
     with pytest.raises(RuntimeError, match='malformed'):
         _repository(client).get('c1', user_id=7)
+
+
+# One refusal per backend: the SQL Sidecar cannot encode a response frame
+# above 64 MiB; native TofuDB refuses a response above its byte budget as a
+# non-retryable domain_resource_bound. Older engines sent that refusal as
+# retryable load shedding, which the client maps to database_unavailable.
+_RESPONSE_REFUSALS = {
+    'sql': lambda: StorageError(
+        'database_protocol_error', 'Storage frame exceeds the size limit'),
+    'native': lambda: StorageError(
+        'database_resource_exhausted', 'database_resource_exhausted'),
+    'native_legacy': lambda: StorageError(
+        'database_unavailable', 'database_resource_exhausted', True),
+}
+
+
+def _timed_message(sequence, timestamp, *, size=1):
+    return {
+        'role': 'user' if sequence % 2 == 0 else 'assistant',
+        'content': f'message {sequence}',
+        'timestamp': timestamp,
+        'size': size,
+    }
+
+
+class _ResponseBudgetClient:
+    """Both backends' message-window contract under a response byte budget.
+
+    ``size`` stands in for a message's encoded bytes. Whole hydration and
+    windows are refused alike once a response would exceed ``budget``.
+    """
+
+    def __init__(self, transcripts, *, budget, refusal):
+        self.transcripts = transcripts
+        self.budget = budget
+        self.refusal = _RESPONSE_REFUSALS[refusal]
+        self.windows = []
+
+    def _document(self, conversation_id, messages):
+        document = _document(conversation_id, messages=messages)
+        document['metadata']['settings'] = {'model': 'm', 'other': 'x'}
+        document['metadata']['msg_count'] = len(
+            self.transcripts[conversation_id])
+        return document
+
+    def _admit(self, messages):
+        if sum(message['size'] for message in messages) > self.budget:
+            raise self.refusal()
+
+    def query(self, operation, payload):
+        if operation == 'conversation.list':
+            ids = payload.get('ids')
+            if ids is None:
+                return [self._document(conversation_id, [])
+                        for conversation_id in self.transcripts]
+            documents = [
+                self._document(conversation_id,
+                               self.transcripts[conversation_id])
+                for conversation_id in ids
+            ]
+            self._admit([message for document in documents
+                         for message in document['messages']])
+            return documents
+        assert operation == 'conversation.get'
+        assert payload['derive_messages'] is True
+        messages = self.transcripts[payload['conv_id']]
+        window = payload['message_window']
+        before = payload.get('before_sequence')
+        end = len(messages) if before is None else max(
+            0, min(before, len(messages)))
+        start = max(0, end - window)
+        try:
+            self._admit(messages[start:end])
+        except StorageError:
+            self.windows.append((window, before, False))
+            raise
+        self.windows.append((window, before, True))
+        document = self._document(payload['conv_id'], messages[start:end])
+        document['message_page'] = {
+            'total_count': len(messages), 'start': start, 'end': end,
+        }
+        return document
+
+
+@pytest.mark.parametrize('refusal', sorted(_RESPONSE_REFUSALS))
+def test_bounded_scan_pages_oversized_transcript_back_to_time_bound(refusal):
+    oversized = [_timed_message(index, 100 + index) for index in range(10)]
+    oversized[1]['timestamp'] = 0
+    oversized[7]['timestamp'] = 0
+    oversized[8]['size'] = oversized[9]['size'] = 4
+    client = _ResponseBudgetClient({
+        'small-a': [_timed_message(0, 100)],
+        'oversized': oversized,
+        'small-b': [_timed_message(0, 100)],
+    }, budget=8, refusal=refusal)
+
+    _, iterator = _repository(client).scan_bounded(
+        user_id=7, settings_keys=['model'], oversized_messages_since_ms=103)
+    snapshots = list(iterator)
+
+    assert [row['id'] for row in snapshots] == [
+        'small-a', 'oversized', 'small-b']
+    # Message 2 is the newest one timestamped before the bound; message 1
+    # carries no timestamp but was appended before it, so it predates the
+    # bound too. Message 7 has no timestamp and follows the bound: kept.
+    assert snapshots[1].messages == oversized[3:]
+    assert snapshots[1]['msg_count'] == 10
+    assert snapshots[1]['settings'] == {'model': 'm'}
+    # A one-message tail window reports the authoritative total. Windows
+    # start at half of it and halve on the same refusal; each accepted
+    # window moves the cursor to its start.
+    assert client.windows == [
+        (1, None, True), (5, 10, False), (2, 10, True), (2, 8, True),
+        (2, 6, True), (2, 4, True),
+    ]
+
+
+def test_windowed_transcript_reaches_first_message_when_none_precedes_bound():
+    messages = [_timed_message(index, 100 + index, size=3) for index in range(5)]
+    client = _ResponseBudgetClient(
+        {'oversized': messages}, budget=8, refusal='native')
+
+    _, iterator = _repository(client).scan_bounded(
+        user_id=7, oversized_messages_since_ms=50)
+
+    assert [row.messages for row in iterator] == [messages]
+    assert client.windows == [
+        (1, None, True), (2, 5, True), (2, 3, True), (2, 1, True),
+    ]
+
+
+@pytest.mark.parametrize('listed_count', [None, 0, 3, 1000])
+def test_windowed_read_sizes_windows_from_the_authoritative_total(
+        listed_count):
+    """A listing count can be missing or stale (older native lanes keep no
+    maintained count), so it never sizes the windows: the total comes from
+    the one-message tail window, and no refused window rereads the whole
+    transcript."""
+    class StaleListingClient(_ResponseBudgetClient):
+        def query(self, operation, payload):
+            result = super().query(operation, payload)
+            if operation == 'conversation.list' and payload.get('ids') is None:
+                for document in result:
+                    if listed_count is None:
+                        del document['metadata']['msg_count']
+                    else:
+                        document['metadata']['msg_count'] = listed_count
+            return result
+
+    messages = [_timed_message(index, 100 + index) for index in range(16)]
+    client = StaleListingClient(
+        {'oversized': messages}, budget=6, refusal='native')
+
+    _, iterator = _repository(client).scan_bounded(
+        user_id=7, oversized_messages_since_ms=50)
+    snapshots = list(iterator)
+
+    assert [row.messages for row in snapshots] == [messages]
+    assert snapshots[0]['msg_count'] == 16
+    assert client.windows == [
+        (1, None, True), (8, 16, False), (4, 16, True), (4, 12, True),
+        (4, 8, True), (4, 4, True),
+    ]
+
+
+@pytest.mark.parametrize('refusal', sorted(_RESPONSE_REFUSALS))
+def test_bounded_scan_without_time_bound_still_fails_oversized_transcript(
+        refusal):
+    client = _ResponseBudgetClient({
+        'oversized': [_timed_message(index, 100, size=5) for index in range(4)],
+    }, budget=8, refusal=refusal)
+
+    _, iterator = _repository(client).scan_bounded(user_id=7)
+
+    with pytest.raises(StorageError) as caught:
+        list(iterator)
+    assert caught.value.code == _RESPONSE_REFUSALS[refusal]().code
+    assert client.windows == []
+
+
+@pytest.mark.parametrize('refusal', sorted(_RESPONSE_REFUSALS))
+def test_windowed_transcript_fails_loudly_when_one_message_exceeds_response(
+        refusal):
+    messages = [_timed_message(index, 100 + index) for index in range(4)]
+    messages[3]['size'] = 9
+    client = _ResponseBudgetClient(
+        {'oversized': messages}, budget=8, refusal=refusal)
+
+    _, iterator = _repository(client).scan_bounded(
+        user_id=7, oversized_messages_since_ms=100)
+
+    with pytest.raises(StorageError) as caught:
+        list(iterator)
+    assert caught.value.code == _RESPONSE_REFUSALS[refusal]().code
+    assert client.windows == [(1, None, False)]
+
+
+def test_windowed_transcript_refuses_history_truncated_below_its_cursor():
+    class TruncatingClient(_ResponseBudgetClient):
+        def query(self, operation, payload):
+            result = super().query(operation, payload)
+            if operation == 'conversation.get':
+                del self.transcripts['oversized'][1:]
+            return result
+
+    client = TruncatingClient({
+        'oversized': [_timed_message(index, 100, size=5) for index in range(4)],
+    }, budget=8, refusal='native')
+
+    _, iterator = _repository(client).scan_bounded(
+        user_id=7, oversized_messages_since_ms=50)
+
+    with pytest.raises(RuntimeError, match='changed during a windowed read'):
+        list(iterator)

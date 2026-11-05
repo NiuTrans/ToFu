@@ -65,6 +65,9 @@ stays dependency-free when used standalone.
   includes search-engine consensus, primary-source preference, entity coverage,
   and a two-result-per-domain diversity pass. Query-focused body passages bring
   late-document evidence into ranking; Unicode matching is shared with excerpts.
+- **Optional local semantic ranking**: explicitly select a pinned Qwen snapshot
+  for offline CPU scoring, with per-call process retirement and cancellation.
+  Default search remains model-free. See [local setup](#optional-local-reranking).
 - **Token-bounded MCP context**: full pages are used for ranking, while
   `web_search` returns query-focused excerpts under one shared 18k-character
   budget by default. Complementary passages compete with repeated text while
@@ -77,7 +80,8 @@ stays dependency-free when used standalone.
   content are excluded; links, code, tables and open shadow/slot text survive.
   Empty application main regions trigger recovery instead of treating menus
   as complete source. The browser dependency and executable remain optional.
-- **PDF extraction**: optional pymupdf / pymupdf4llm integration.
+- **PDF extraction**: local text extraction included through pypdf; optional
+  pymupdf / pymupdf4llm integration adds native Markdown/table extraction.
 - **Streamed HTML reads**: recognized React/Fizz completion segments already
   received in the response are restored before extraction and anchor selection.
   This uses no page JavaScript or browser; client-only content still needs
@@ -136,6 +140,81 @@ for r in results:
         print(f"  {r['full_content'][:200]}...")
 ```
 
+### Optional local reranking
+
+The qualified optional backend uses Linux CPU BF16 with Qwen3-Reranker-0.6B.
+It has no search or inference API charge. You explicitly install its runtime
+and download roughly 1.2 GB of model files; scoring also needs CPU and memory.
+Default installation does neither. The current quality scope and limitations
+are in [relevance admission](docs/relevance-quality.md#ranking-and-excerpts).
+
+Install the CPU build first in a dedicated Python 3.10+ environment, following
+the [PyTorch installation guide](https://pytorch.org/get-started/locally/):
+
+```bash
+python -m pip install 'torch==2.14.1' --index-url https://download.pytorch.org/whl/cpu
+python -m pip install 'tofu-search[local-rerank,mcp]>=0.12.25'
+```
+
+Use Hugging Face's [snapshot download](https://huggingface.co/docs/huggingface_hub/guides/download)
+once, selecting the exact revision and files from the admitted package manifest:
+
+```python
+from huggingface_hub import snapshot_download
+from tofu_search.generated_local_models import local_model_artifacts
+
+artifact = next(row for row in local_model_artifacts()["artifacts"]
+                if row["artifact_id"] == "qwen3-reranker-0.6b-bf16")
+source = artifact["source"]
+model_dir = snapshot_download(
+    repo_id=source["repository"], revision=source["revision"],
+    allow_patterns=[entry["name"] for entry in source["files"]],
+    local_dir="./qwen3-reranker-0.6b",
+)
+```
+
+Then pass an explicitly owned scorer to the ordinary search API:
+
+```python
+from tofu_search import LocalReranker, SearchConfig, perform_web_search
+
+with LocalReranker("./qwen3-reranker-0.6b") as ranker:
+    config = SearchConfig(local_reranker=ranker, local_rerank_timeout=30)
+    results = perform_web_search("How does SQLite WAL recovery work?", config=config)
+```
+
+Reuse the same scorer across related concurrent searches and close it after
+those calls. It holds configuration and any explicit reservations, with no
+resident model.
+Each call verifies file sizes/SHA-256 before importing the model runtime, loads
+only local safetensors with remote code disabled, and retires its whole process
+group. Loading is included in the scoring timeout and search deadline. Missing
+files/dependencies and ordinary scoring failure, including a worker the
+operating system stops, fall back to lexical ranking; cancellation and
+unresolved cleanup propagate. A failed `close()` keeps
+its unsettled processes/reservations for another close attempt.
+
+Host CPU and memory never gate, refuse or stop a call: concurrent calls start
+their own workers and memory exhaustion is left to the operating system.
+Default threads use a quarter of the observed CPUs. Explicit `threads`,
+`max_parallel` and `max_rss_mb` are available; RSS is sampled, so an explicit
+allowance is an observation guard rather than a kernel-enforced reservation.
+Separate scorer instances have separate budgets. `local_rerank_cancel_event`
+accepts a caller-owned `threading.Event`; `rerank=False` disables both rankers.
+Source text and evidence classes are preserved; a neural score does not verify
+a claim. Final ranking changes; the existing prefetch selection stays lexical.
+
+MCP uses the same owner and propagates request cancellation:
+
+```bash
+tofu-search-mcp --local-reranker-model-dir ./qwen3-reranker-0.6b
+```
+
+`--local-reranker-python /path/to/model-env/bin/python` selects a separate model
+interpreter when the MCP environment does not include those optional libraries.
+The library exposes the same option as `LocalReranker(..., python_executable=...)`.
+Neither path downloads files during a search or changes the host's Model store.
+
 ### With OpenAI content filtering
 
 ```python
@@ -158,6 +237,8 @@ from tofu_search import search, configure
 def my_llm(messages, **kwargs):
     # Your LLM call — receives OpenAI-format messages.
     # kwargs may include: stop, temperature, timeout
+    # Raise the builtin TimeoutError when the `timeout` budget elapses; the
+    # filter then serves the raw page at WARNING instead of logging an ERROR.
     return "response text"
 
 configure(llm_function=my_llm)
@@ -301,8 +382,8 @@ text/challenge guards still apply; an HTTP 200 alone does not prove useful conte
 
 ## Host integration (provider seams)
 
-The standalone library never imports a host application. To unlock the two
-host-only capabilities, register a provider — dependency points inward (host →
+The standalone library never imports a host application. To unlock optional
+host capabilities, register a provider — dependency points inward (host →
 library), exactly like a plugin.
 
 Eligible connected browser fallbacks call the bound provider directly; no local
@@ -338,6 +419,20 @@ register_auth_source_provider(MyAuth())      # cookies for login-walled domains
 When no provider is registered, the browser fallback and authenticated fetch
 paths are inert no-ops — the anonymous HTTP + Playwright pipeline runs as normal.
 
+Browser, site and auth-source providers are captured once before worker dispatch.
+In 0.12.26, auth-source providers can override `bind()` to capture an explicit
+source owner, just as browser/site providers do. Static providers return `self`;
+existing duck-typed source providers without this hook still work. Binding is
+not an access grant: each source lookup must return current enabled/credential
+state, and each browser/native operation must enforce its current authority.
+
+Legacy XHS pacing follows the captured provider view. Only cookie replay caches
+content, after a fresh source lookup and with unchanged cookies, proxy, query
+and requested result count. Registering a replacement or changing credentials
+retires prior state; late work cannot overwrite the replacement. Browser reads
+always enter their provider. Per-account policy across distinct bound views
+belongs to the host provider.
+
 ## Configuration
 
 ```python
@@ -354,6 +449,13 @@ configure(
     searxng_url="http://searxng:8080",
     searxng_engines="",            # Empty: respect the instance configuration
     mcp_content_budget_chars=18000,
+
+    # Optional keyed search gateway: one engine ("API:<id>") per source
+    gateway_url="",                # Empty: no gateway sources
+    gateway_api_key="",            # Bearer key; excluded from repr
+    gateway_sources=[],            # e.g. ["alpha-search", "beta-search"]
+    gateway_full_content=False,    # True: use provider-crawled page bodies
+    free_engines="fallback",       # With gateway sources: fallback | parallel | off
 
     # LLM settings (for content filter)
     llm_api_key="sk-...",
@@ -387,6 +489,11 @@ racing switch reads `TOFU_SEARCH_PROXY_RACE`.
 For a stable, broader free backend, set `TOFU_SEARCH_SEARXNG_URL`; optionally
 pin its comma-separated engine list with `TOFU_SEARCH_SEARXNG_ENGINES`. See the
 [open-source backend review](docs/search-backends.md) for deployment tradeoffs.
+A keyed search gateway reads `TOFU_SEARCH_GATEWAY_URL`,
+`TOFU_SEARCH_GATEWAY_API_KEY`, `TOFU_SEARCH_GATEWAY_SOURCES`,
+`TOFU_SEARCH_GATEWAY_FULL_CONTENT`, `TOFU_SEARCH_GATEWAY_TIMEOUT_SECS` and
+`TOFU_SEARCH_FREE_ENGINES`; its protocol facts and policy are in
+[Keyed search gateway](docs/search-backends.md#keyed-search-gateway-optional-paid-sources).
 
 ## Pipeline
 
@@ -434,7 +541,7 @@ candidate sidecar stays complete. `rerank=False` retains their arrival order.
 pip install tofu-search[playwright]
 python -m playwright install chromium
 
-# PDF extraction
+# Enhanced PDF Markdown/table extraction (basic text is included by default)
 pip install tofu-search[pdf]
 
 # Everything
@@ -490,8 +597,9 @@ not an exact token count; CJK and Latin text tokenize differently.
 `fetch_page` keeps the common fetcher's safe failure category in its unavailable
 reply, including HTTP status, timeout, access challenge and extraction failure.
 It does not expose raw exception details or response headers, and an unknown
-category retains the generic unavailable reply. Browser rendering and PDF
-extraction depend on optional capabilities; neither guarantees source access.
+category retains the generic unavailable reply. Text PDFs are read locally
+without a key or native extra. Browser rendering and enhanced PDF layout remain
+optional; scans need OCR, and access challenges can still prevent a download.
 
 Design constraints an embedder should know (each enforced by a test):
 
@@ -548,6 +656,13 @@ behaviour.
 only when the root logger has none, and otherwise defers to the host's logging
 configuration. Nothing in the package writes to stdout, which keeps it safe to
 embed in a process whose stdout carries a protocol stream.
+
+**First imports may race.** One thread may import `tofu_search` while others
+first import any of its modules directly, such as `tofu_search.search.vertical`,
+`tofu_search.verify` or `tofu_search.fetch.content_filter`. The module-level
+import graph is acyclic, counting CPython's implicit waits for the facade, and
+each subpackage loads the children the facade needs, so no thread receives a
+partially initialized module.
 
 ## Contributing
 

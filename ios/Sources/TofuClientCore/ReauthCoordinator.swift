@@ -36,7 +36,7 @@ public final class ReauthCoordinator {
 
     public static let maxConsecutiveFailures = 3
 
-    private let authType: AuthType
+    private var authType: AuthType
     private let sink: (Action) -> Void
     public private(set) var inFlight = false
     public private(set) var consecutiveFailures = 0
@@ -60,7 +60,7 @@ public final class ReauthCoordinator {
 
     /// Main-frame redirect-to-login or bare 401 on the main frame.
     public func trigger() {
-        guard authType != .interactiveSso, !inFlight else { return }
+        guard authType == .codeServerPassword, !inFlight else { return }
         inFlight = true
         sink(.reauthStarted)
     }
@@ -72,7 +72,7 @@ public final class ReauthCoordinator {
         url: String,
         isMainFrame: Bool,
         hasGesture: Bool,
-        ownHost: String?
+        ownURL: String
     ) -> NavigationVerdict {
         guard let comps = URLComponents(string: url),
               let scheme = comps.scheme?.lowercased()
@@ -81,15 +81,23 @@ public final class ReauthCoordinator {
         if scheme != "http" && scheme != "https" {
             return .openExternally
         }
-        if isMainFrame, looksLikeLogin(url), authType != .interactiveSso {
+        if isMainFrame, authType == .codeServerPassword,
+           let server = ServerUrl.parse(ownURL), server.isLoginURL(url) {
             trigger()
             return .interceptForReauth
         }
         if isMainFrame, hasGesture, authType != .interactiveSso,
-           let own = ownHost, let host = comps.host, host != own {
+           !TrustedWebBridge.allowsURL(URL(string: url), serverURL: ownURL, isMainFrame: true) {
             return .openExternally
         }
         return .allow
+    }
+
+    /// A gateway handoff changes only this screen's mode, never saved policy.
+    public func handoffToBrowser() {
+        authType = .interactiveSso
+        inFlight = false
+        consecutiveFailures = 0
     }
 
     /// The login attempt resolved (success OR failure). Only now is the
@@ -109,6 +117,6 @@ public final class ReauthCoordinator {
 
     /// `…/login`, `…/login?…`, `…/login#…` — code-server's gate bounce.
     public static func looksLikeLogin(_ url: String) -> Bool {
-        url.hasSuffix("/login") || url.contains("/login?") || url.contains("/login#")
+        ServerUrl.parse(url)?.path.split(separator: "/").last == "login"
     }
 }

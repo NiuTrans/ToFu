@@ -63,6 +63,13 @@ def _ttl_seconds() -> int:
         return _DEFAULT_TTL_SECONDS
 
 
+def _index_version(value: Any) -> int | float | None:
+    """AA's ``intelligence_index_version`` (major.minor, e.g. ``5``) or None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
 def _parse_dataset(payload: Any) -> list[dict[str, Any]]:
     rows = payload.get("data") if isinstance(payload, Mapping) else None
     if not isinstance(rows, list):
@@ -96,10 +103,11 @@ def _parse_dataset(payload: Any) -> list[dict[str, Any]]:
             "aa_slug": slug,
             "aa_creator": creator_name,
             "intelligence": number("artificial_analysis_intelligence_index"),
+            # AA retired its Coding, Agentic and Math indices (the API keeps
+            # Coding/Agentic as always-null fields); they remain for cached
+            # legacy rows only.
             "coding": number("artificial_analysis_coding_index"),
             "agentic": number("artificial_analysis_agentic_index"),
-            # Retained for cached/legacy API rows; the current API publishes
-            # the Agentic index in this slot instead.
             "math": number("artificial_analysis_math_index"),
             "_keys": keys,
             "_creator_keys": {
@@ -109,7 +117,13 @@ def _parse_dataset(payload: Any) -> list[dict[str, Any]]:
     return parsed
 
 
-def _fetch_dataset(api_key: str, fetcher: Callable[..., Any] | None = None) -> list[dict[str, Any]]:
+def _fetch_dataset(api_key: str, fetcher: Callable[..., Any] | None = None) -> dict[str, Any]:
+    """Fetch every AA row plus the Intelligence Index version its scores use.
+
+    AA serves scores for its current index version only: after a major bump
+    every model not yet re-benchmarked reports null, so the version is what
+    explains a sudden drop in scored models.
+    """
     if not api_key:
         raise PermissionError("Artificial Analysis API key is not configured")
     if fetcher is None:
@@ -117,6 +131,7 @@ def _fetch_dataset(api_key: str, fetcher: Callable[..., Any] | None = None) -> l
 
         fetcher = http_get
     models: list[dict[str, Any]] = []
+    index_version: int | float | None = None
     page = 1
     while page <= _MAX_DATASET_PAGES and len(models) < _MAX_DATASET_ROWS:
         url = AA_API_URL if page == 1 else f"{AA_API_URL}?page={page}"
@@ -128,12 +143,14 @@ def _fetch_dataset(api_key: str, fetcher: Callable[..., Any] | None = None) -> l
         response.raise_for_status()
         payload = response.json()
         models.extend(_parse_dataset(payload))
+        if index_version is None and isinstance(payload, Mapping):
+            index_version = _index_version(payload.get("intelligence_index_version"))
         pagination = payload.get("pagination") if isinstance(payload, Mapping) else None
         if not isinstance(pagination, Mapping) or pagination.get("has_more") is not True:
             break
         reported_page = pagination.get("page")
         page = reported_page + 1 if isinstance(reported_page, int) else page + 1
-    return models[:_MAX_DATASET_ROWS]
+    return {"models": models[:_MAX_DATASET_ROWS], "index_version": index_version}
 
 
 def _read_disk_cache() -> dict[str, Any] | None:
@@ -159,11 +176,16 @@ def _read_disk_cache() -> dict[str, Any] | None:
             key for key in (normalize_name(row.get("aa_creator")),) if key
         }
         models.append(row)
-    return {"fetched_at": cached.get("fetched_at"), "models": models}
+    return {
+        "fetched_at": cached.get("fetched_at"),
+        "index_version": _index_version(cached.get("index_version")),
+        "models": models,
+    }
 
 
-def _write_disk_cache(models: list[dict[str, Any]], fetched_at: float) -> None:
+def _write_disk_cache(dataset: Mapping[str, Any]) -> None:
     path = _cache_path()
+    models = dataset["models"]
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         temporary_path = f"{path}.tmp"
@@ -175,7 +197,11 @@ def _write_disk_cache(models: list[dict[str, Any]], fetched_at: float) -> None:
             for row in models[:_MAX_DATASET_ROWS]
         ]
         with open(temporary_path, "w", encoding="utf-8") as handle:
-            json.dump({"fetched_at": fetched_at, "models": public_rows}, handle)
+            json.dump({
+                "fetched_at": dataset["fetched_at"],
+                "index_version": dataset.get("index_version"),
+                "models": public_rows,
+            }, handle)
         os.replace(temporary_path, path)
     except OSError as exc:
         logger.debug("[ModelIntelligence] AA cache write failed: %s", exc)
@@ -185,14 +211,14 @@ def _background_refresh(api_key: str, fetcher: Callable[..., Any] | None) -> Non
     global _memo
     try:
         try:
-            models = _fetch_dataset(api_key, fetcher)
+            fetched = _fetch_dataset(api_key, fetcher)
         except Exception as exc:
             logger.warning("[ModelIntelligence] AA background refresh failed: %s", exc)
             return
-        fetched_at = time.time()
+        dataset = {"fetched_at": time.time(), **fetched}
         with _lock:
-            _memo = {"fetched_at": fetched_at, "models": models}
-        _write_disk_cache(models, fetched_at)
+            _memo = dataset
+        _write_disk_cache(dataset)
     finally:
         with _lock:
             _background["running"] = False
@@ -253,16 +279,16 @@ def _dataset(
                 return {"status": "stale", **freshest}
             return {"status": "unavailable", "fetched_at": None, "models": []}
     try:
-        models = _fetch_dataset(api_key, fetcher)
+        fetched = _fetch_dataset(api_key, fetcher)
     except Exception as exc:
         logger.warning("[ModelIntelligence] AA refresh failed: %s", exc)
         if freshest is not None:
             return {"status": "stale", **freshest}
         return {"status": "unavailable", "fetched_at": None, "models": []}
-    result = {"fetched_at": current_time, "models": models}
+    result = {"fetched_at": current_time, **fetched}
     with _lock:
         _memo = result
-    _write_disk_cache(models, current_time)
+    _write_disk_cache(result)
     return {"status": "ok", **result}
 
 
@@ -281,14 +307,21 @@ def _block(
     source_rows = dataset.get("models")
     rows = source_rows if isinstance(source_rows, list) else []
     for model in models:
+        # Match against every listed row, scored or not, so an unscored row
+        # still makes a shared identity ambiguous instead of ceding it.
         matched = match_model(model, rows)
         if matched is None:
             continue
+        metrics = {
+            metric: matched.get(metric)
+            for metric in ("intelligence", "coding", "agentic", "math")
+        }
+        # AA lists far more models than it scores on the current index
+        # version; a listed-but-unscored row is not a score.
+        if all(value is None for value in metrics.values()):
+            continue
         scores[_score_key(model)] = {
-            "intelligence": matched.get("intelligence"),
-            "coding": matched.get("coding"),
-            "agentic": matched.get("agentic"),
-            "math": matched.get("math"),
+            **metrics,
             "aa_name": matched.get("aa_name") or "",
             "aa_slug": matched.get("aa_slug") or "",
         }
@@ -297,6 +330,7 @@ def _block(
         "source": AA_SOURCE_LABEL,
         "source_url": AA_SOURCE_URL,
         "fetched_at": dataset.get("fetched_at"),
+        "index_version": dataset.get("index_version"),
         "key_source": key_source,
         "key_hint": key_hint,
         "scores": scores,

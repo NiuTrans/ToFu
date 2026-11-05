@@ -29,6 +29,16 @@ pub struct BoundedDirectoryEntries {
     pub has_more: bool,
 }
 
+/// One directory entry and the kind its listing reported. `None` means the
+/// listing established neither a regular file nor a directory (`DT_UNKNOWN`,
+/// a symbolic link or another kind); a caller that needs the kind asks
+/// [`Vfs::metadata`], which classifies and refuses exactly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectoryEntry {
+    pub path: PathBuf,
+    pub kind: Option<FileKind>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BoundedDirectoryMatches {
     pub matches: Vec<PathBuf>,
@@ -139,6 +149,13 @@ pub trait Vfs: Send + Sync {
     /// disjoint WAL regions. Stateful/encrypting wrappers default to fallback.
     fn supports_buffered_wal_writes(&self) -> bool { false }
 
+    /// Independent files may be created, written, synced and renamed from
+    /// concurrent threads, each sequence keeping its own order. Wrappers that
+    /// impose one global operation order (deterministic simulation, gated
+    /// race specifications) or keep per-store mutable state default to one
+    /// caller at a time.
+    fn supports_concurrent_file_publication(&self) -> bool { false }
+
     fn filesystem_capacity(&self, _path: &Path) -> io::Result<FilesystemCapacity> {
         Ok(FilesystemCapacity::default())
     }
@@ -151,6 +168,16 @@ pub trait Vfs: Send + Sync {
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     fn metadata(&self, path: &Path) -> io::Result<FileKind>;
     fn read_directory(&self, path: &Path) -> io::Result<Vec<PathBuf>>;
+    /// Every entry of `path`, sorted by path, with the kind the listing
+    /// itself reports. The default reports none, so a caller classifies each
+    /// entry it needs with one [`Vfs::metadata`] call.
+    fn read_directory_entries(&self, path: &Path) -> io::Result<Vec<DirectoryEntry>> {
+        Ok(self
+            .read_directory(path)?
+            .into_iter()
+            .map(|path| DirectoryEntry { path, kind: None })
+            .collect())
+    }
     fn read_directory_bounded(
         &self,
         path: &Path,
@@ -286,6 +313,7 @@ impl VfsFile for RealFile {
 
 impl Vfs for RealVfs {
     fn supports_buffered_wal_writes(&self) -> bool { true }
+    fn supports_concurrent_file_publication(&self) -> bool { true }
     fn filesystem_capacity(&self, path: &Path) -> io::Result<FilesystemCapacity> {
         let mut probe = path;
         loop {
@@ -395,6 +423,29 @@ impl Vfs for RealVfs {
         Ok(entries)
     }
 
+    fn read_directory_entries(&self, path: &Path) -> io::Result<Vec<DirectoryEntry>> {
+        let _profile = crate::request_profile::Probe::new(crate::request_profile::VFS_DIRECTORY);
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            // `d_type` where the filesystem reports it; std falls back to one
+            // `lstat` only for `DT_UNKNOWN`. Links and other kinds, and an
+            // entry that vanished before that fallback, stay unclassified, so
+            // `metadata` answers for them exactly as it always did.
+            let kind = match entry.file_type() {
+                Ok(file_type) if file_type.is_file() => Some(FileKind::File),
+                Ok(file_type) if file_type.is_dir() => Some(FileKind::Directory),
+                _ => None,
+            };
+            entries.push(DirectoryEntry {
+                path: entry.path(),
+                kind,
+            });
+        }
+        entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        Ok(entries)
+    }
+
     fn read_directory_bounded(
         &self,
         path: &Path,
@@ -495,6 +546,8 @@ struct SimulatedState {
     operation_fault: Option<(Operation, usize, FaultAction, bool)>,
     #[cfg(test)]
     capacity: FilesystemCapacity,
+    #[cfg(test)]
+    concurrent_file_publication: bool,
 }
 
 struct SimulatedFile {
@@ -575,6 +628,15 @@ impl DeterministicVfs {
         Ok(())
     }
 
+    /// Lets a specification drive concurrent file publication through the
+    /// simulation; operations still serialize on the state lock, so outcomes
+    /// stay checkable while their interleaving varies between runs.
+    #[cfg(test)]
+    pub(crate) fn allow_concurrent_file_publication(&self) -> io::Result<()> {
+        state(&self.shared)?.concurrent_file_publication = true;
+        Ok(())
+    }
+
     pub fn new(fault: Option<FaultRule>) -> Self {
         let root = PathBuf::from("/");
         Self {
@@ -592,6 +654,8 @@ impl DeterministicVfs {
                 operation_fault: None,
                 #[cfg(test)]
                 capacity: FilesystemCapacity::default(),
+                #[cfg(test)]
+                concurrent_file_publication: false,
             })),
         }
     }
@@ -617,6 +681,8 @@ impl DeterministicVfs {
                 operation_fault: None,
                 #[cfg(test)]
                 capacity: FilesystemCapacity::default(),
+                #[cfg(test)]
+                concurrent_file_publication: false,
             })),
         })
     }
@@ -687,6 +753,12 @@ impl DeterministicVfs {
 
 impl Vfs for DeterministicVfs {
     fn supports_buffered_wal_writes(&self) -> bool { true }
+    fn supports_concurrent_file_publication(&self) -> bool {
+        #[cfg(test)]
+        { state(&self.shared).is_ok_and(|state| state.concurrent_file_publication) }
+        #[cfg(not(test))]
+        { false }
+    }
     fn filesystem_capacity(&self, _path: &Path) -> io::Result<FilesystemCapacity> {
         #[cfg(test)]
         { Ok(state(&self.shared)?.capacity) }
@@ -818,6 +890,36 @@ impl Vfs for DeterministicVfs {
             .cloned()
             .collect();
         entries.sort();
+        Ok(entries)
+    }
+
+    fn read_directory_entries(&self, path: &Path) -> io::Result<Vec<DirectoryEntry>> {
+        let mut state = state(&self.shared)?;
+        before(&mut state, Operation::ReadDirectory)?;
+        if !state.working_directories.contains(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "VFS directory is missing",
+            ));
+        }
+        let files = state
+            .working_files
+            .keys()
+            .filter(|candidate| candidate.parent() == Some(path))
+            .map(|candidate| DirectoryEntry {
+                path: candidate.clone(),
+                kind: Some(FileKind::File),
+            });
+        let directories = state
+            .working_directories
+            .iter()
+            .filter(|candidate| candidate.parent() == Some(path))
+            .map(|candidate| DirectoryEntry {
+                path: candidate.clone(),
+                kind: Some(FileKind::Directory),
+            });
+        let mut entries: Vec<_> = files.chain(directories).collect();
+        entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
         Ok(entries)
     }
 

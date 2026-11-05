@@ -3,12 +3,14 @@ from pathlib import Path
 import subprocess
 
 import pytest
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture()
 def sse_bundle(tmp_path):
+    require_node_modules('vite')
     out = tmp_path / 'sse-reader.js'
     subprocess.run([
         'node', str(ROOT / 'scripts/vite_test_bundle.mjs'),

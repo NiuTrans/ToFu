@@ -189,7 +189,14 @@ def test_base_pm_workbench_height_uses_vh100_guard():
 # (content fits, no inline max-height set) is governed by that CSS 100vh, which
 # the WebView measures as 0 → the popover collapsed to a narrow sliver.
 _PREVIEW_SELECTORS = ('.preview-text-panel', '.preview-text-body',
-                      '.preview-body', '.preview-image', '.cost-popover')
+                      '.preview-body', '.cost-popover')
+# `.preview-image` (c3b24bbd4, 2026-10-30) stopped capping its own height:
+# capping max-height shrank a tall page render below its inline size. The
+# zoom ladder in upload_preview.js now sizes the bitmap in px from
+# window.innerWidth/innerHeight (correct in this WebView, like the cost
+# popover's JS path), and the guarded `.preview-body` scroll container above
+# bounds what is visible. A viewport height on the image must stay guarded.
+_PREVIEW_JS_SIZED_SELECTORS = ('.preview-image',)
 _ANY_VH_RE = re.compile(r'\d+d?vh')
 
 
@@ -211,6 +218,13 @@ def test_preview_modal_base_heights_use_vh100_guard():
             f'max-height:calc(var(--vh100,100vh)*0.85).')
         checked += 1
     assert checked == len(_PREVIEW_SELECTORS)
+    for selector in _PREVIEW_JS_SIZED_SELECTORS:
+        vals = [v for _, v in _HEIGHT_DECL_RE.findall(_base_rule_body(css, selector))
+                if _ANY_VH_RE.search(v)]
+        assert not vals or any('--vh100' in v for v in vals), (
+            f'{selector!r} base rule sets a bare vh height {vals!r} — this '
+            f'collapses to 0 in the Android WebView. The zoom ladder in '
+            f'upload_preview.js owns the preview image size.')
 
 
 def test_NC_neuter_preview_bare_vh_trips_the_guard():

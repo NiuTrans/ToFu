@@ -422,6 +422,73 @@ Repeated `start` after activation returns the snapshot without mutation/dispatch
 `advance_mode` is `continuous` (compatible default) or `checkpoint`. Checkpoint settlement archives review, sources, actuals and receipt, then durably pauses before a successor or automatic diagnostic; completion and attention verdicts keep precedence. `set_pacing` changes future advancement only, never launches/resumes/replays or alters frozen inputs/acceptance. Polling/reloads cannot grant execution.
 **Alternatives rejected.** Browser-only pause loses authority on restart; a second runtime duplicates recovery; resetting the clock grants extra budget. Checkpoints do not guarantee success or learning: archive/recall remain untrusted evidence until independently verified by existing gates. Two scalar header fields and a bounded protocol projection reuse the existing store/reaper/read lifecycle, adding no worker, timer, cache or unbounded history.
 
+### Chat is the primary conversation; the notebook is the detailed record
+
+**Problem.** Requiring a separate intake form duplicates a goal already agreed in
+Chat, while an ordinary message cannot replace durable experiment state, evidence
+or independent review. A second research Chat/runtime would split authority.
+
+**Decision.** `lib/evolution/chat_programs.py` is a thin adapter over the existing
+programme, run and coordination owners. The searchable `get_exploration` tool
+reads owner-scoped catalog pages, current state or experiment receipts;
+`manage_exploration` creates the agreed plan, optionally starts it, controls it,
+appends experiments or sends guidance to the observed current experiment. Both
+use the ordinary tool registry/gateway, approval and response rendering. Schemas
+are derived from `evolution_program_v1`, with documentation annotations removed
+from provider schemas so exact Tool Search disclosure remains within its existing
+output envelope. Runtime validation retains the full action-specific contract.
+No conversation transcript, model loop, task scheduler or progress store is added.
+
+A human can say “按刚才的目标和验收标准启动长期探索，沿用已选技能；在 Chat
+里继续沟通，给我详情入口。” Subsequent turns can inspect, pause or continue the
+same programme. Catalog reads recover existing IDs without creating replacements.
+Tool results link `#/evolution/programs/<id>`; the notebook exposes original
+requirements, selected skills, queued/current experiments, immutable evidence,
+independent reviews, guidance and measured consumption. Its primary intake action
+returns to Chat; the form remains an advanced entry. Programmes created from Chat
+retain one source conversation/Turn pointer and offer “Continue in original Chat”
+through the shell's existing conversation loader. No second renderer is mounted.
+
+Execution admission verifies the owner, attended user principal, live assistant
+Turn/attempt/task and its genuine human parent. The shared
+`turn_initiation.require_human_turn` also serves project dispatch, preserving its
+synthetic-origin exclusions. Headless, child, project-coordinator and synthetic
+carriers cannot inherit human rights. Restricted Chat cannot grant independent
+execution. A finite shared Chat account cannot be copied into a fresh programme
+budget or shift an absolute deadline; those writes refuse until a durable budget
+handoff exists. Ordinary unrestricted human Chat can set an explicit programme
+budget using the existing cumulative accounting. Selected project/model, plugins
+and loaded explicit/bound skills reuse their current owners. Disabled executor
+capabilities and denied tool families remain disabled; the independent reviewer
+keeps its own read-only evidence policy.
+
+Creation/append use existing idempotency owners with conversation-scoped keys.
+Commands carry the observed storage version, so an old resume cannot override a
+later pause; an uncertain acknowledgement requires another read. Guidance binds
+the observed run ID and uses the existing coordination log. Its receipt means
+recorded, pending executor acknowledgement, and applies only to that experiment;
+it does not amend the frozen objective/acceptance. No unsolicited completion
+message is injected into Chat. Chat queries and notebook reads expose confirmed
+state; loading skills or creating a plan proves neither execution nor acceptance.
+Legacy records without an activation timestamp report unknown, not unstarted.
+An accepted programme outlives a Chat turn; stopping Chat alone does not cancel it.
+
+**Alternatives.** A mandatory form repeats conversation work. A dedicated research
+Chat or copied task state adds another authority. Replaying old controls can undo
+newer user decisions. Reusing the installed skill/context/review owners preserves
+the same checks across both entries without a separate skill registry.
+
+Persistence measurement (compact JSON): a representative source pointer with a
+20-character conversation ID and 36-character Turn ID is 107 bytes; two disabled
+capability flags under `executor_restrictions` are 80 bytes. These bounded fields
+live in the existing programme/run headers and frozen launch inputs. No transcript
+is copied and no new retention store or resident worker is introduced. Existing
+coordination and evidence retention remains unchanged. Verification:
+`test_evolution_chat_programs.py`, project human-source contracts, provider/tool
+inventory checks, notebook unit tests, and the real-storage browser journey at
+390/1440 pixels. Browser tests control tool selection and model execution; they
+do not claim a live model always chooses this workflow from natural language.
+
 ## States and recovery
 
 | State | Meaning |
@@ -513,6 +580,31 @@ writes did, and nothing re-drove a lost transition except manual reconcile.
 (execution is an explicit authorization; `needs_attention` stays the honest
 outcome); a per-run watchdog timer (duplicated lifecycle ownership — one
 sweep on the existing reaper cadence covers all runs).
+
+**Unsettled-run work list (2026-10-30).** Problem: every 60-second sweep paged
+the owner's complete run history with full values to find the few runs it may
+drive. Production logged 615 such pages over 2 s in 27 hours, 70% of slow
+`record.list` calls, and no sweep transition in that period. Decision: `_save`,
+the only run writer, puts a marker (`evolution.runs.unsettled.v1`, same owner
+key, `marked_at` = the saved `updated_at`) before writing a run that is
+non-terminal or cancelled with an episode. The sweep lists markers and reads
+only those runs. It removes a marker only after observing its run settled at or
+after `marked_at`, and only at the marker version it listed, so a concurrent
+re-mark survives. An interrupted or unacknowledged save therefore leaves an
+extra marker, never a missing one; an extra marker costs one point read per
+sweep until that run is saved again. The first sweep for an owner pages history
+once, marks sweepable runs and then records completion in
+`evolution.runs.sweep.v1`; a failed page leaves that flag unset. Backfill marks
+are create-only, so a possibly stale listed header never lowers a marker that a
+concurrent save wrote. Alternatives
+rejected: in-process caches miss writers in other processes and restarts;
+key-encoded status needs a run-key migration; deleting markers inside `_save`
+races a reopen and cannot distinguish lost acknowledgements from failures.
+Verification: `test_evolution_run_resilience.py` covers the one-time pass,
+steady-state reads limited to the work list with no writes, save-time marking,
+unlanded saves, concurrent re-marks and create-only backfill.
+`test_evolution_run_sweep_storage.py` repeats the marker lifecycle against the
+actual SQLite and TofuDB authorities (guarded deletes, listed versions).
 
 ### Capability domains: the research cycle is executed, not shadowed
 (2026-09-18)
@@ -956,7 +1048,7 @@ round. Source metadata is untrusted reference data, never executable instruction
 
 ## Studio interaction and measured limits
 
-**Problem:** room navigation obscured the entry to durable experiments; the initial briefing lacked a concrete starting point, and quantitative results were plain text. **Decision:** `#/evolution` opens the studio; its persistent navigation and toolbar expose `#/evolution/programs`. Research and capability evidence remain distinct existing destinations. Example briefs fill only an empty draft and never launch work. Mission headings/actions use separate grid tracks; narrow entry puts the brief before the scene. Rooms, furniture and teammates retain the same runtime. The notebook's observation island uses the shared `rich-response/data-chart.ts` presenter for the current history page (at most 20 receipts), with explicit metric and bar/line controls and a lossless data table. Totals come from the program; page counts never imply full-history coverage. Missing/invalid measurements are omitted and incomplete usage is a labelled lower bound. Cost is not quality. Complete admitted `tofu-ui` data-chart blocks in deliveries and opened receipts render beside the unchanged original and independent review. At most eight charts are projected from a 200,000-character source; other content remains readable as original evidence. This projection adds no transport, timer or authorization. **Alternatives rejected:** fabricated progress/success curves misrepresent evidence; a new chart library or game loop duplicates existing owners; replacing the room art does not fix entry, alignment or the evidence workflow. Specifications: `experiment-charts.test.ts` and `test_evolution_experience_browser.py`.
+**Problem:** room navigation obscured the entry to durable experiments; the initial briefing lacked a concrete starting point, and quantitative results were plain text. **Decision:** `#/evolution` opens the studio; its persistent navigation and toolbar expose `#/evolution/programs`. Research and capability evidence remain distinct existing destinations. Example briefs fill only an empty draft and never launch work. On narrow screens the camera fits the room height and follows the active role; the briefing is a full-screen window. Rooms, furniture and teammates retain the same runtime. The notebook's observation island uses the shared `rich-response/data-chart.ts` presenter for the current history page (at most 20 receipts), with explicit metric and bar/line controls and a lossless data table. Totals come from the program; page counts never imply full-history coverage. Missing/invalid measurements are omitted and incomplete usage is a labelled lower bound. Cost is not quality. Complete admitted `tofu-ui` data-chart blocks in deliveries and opened receipts render beside the unchanged original and independent review. At most eight charts are projected from a 200,000-character source; other content remains readable as original evidence. This projection adds no transport, timer or authorization. **Alternatives rejected:** fabricated progress/success curves misrepresent evidence; a new chart library or game loop duplicates existing owners; replacing the room art does not fix entry, alignment or the evidence workflow. Specifications: `experiment-charts.test.ts` and `test_evolution_experience_browser.py`.
 
 ### Live office projection (2026-09-23)
 
@@ -974,7 +1066,7 @@ claim a saved source before `evolution_material` commits one. Replacing the
 existing sprite and prop atlases with more generated bitmaps would add download
 and decode cost without exposing more backend truth.
 
-`frontend/src/features/evolution/workspace.ts` composes the primary studio, the durable program notebook and existing evidence pages; `studio.ts` owns only its mounted DOM and requests. Problem: opening the notebook also imported the office renderer/vendor controls, and failed research imports left a blank page. Decision: each route loads its own graph through the shared document-lifetime module cache. `route-host.ts` retains the latest pending path, disposes the old page before admission and fences late success/failure. Closing before admission starts no import; closing during a flight permits no later mount or reload. The shell mount handle owns repeat-open identity and preserves unsent forms. There is one mounted page, at most four cached module flights, and no additional timer, observer or transport. CSS failures stay cached. Child routes use the shell's single bounded reload/replay authority, then show a localized failure with an explicit reload control. Rejected: static imports of hidden pages, per-route reload guards and retrying failed CSS imports that could mount unstyled UI. The measured production notebook's incremental graph (excluding already-loaded shell chunks) fell from approximately 136 to 21 KiB gzip; this measures transfer size, not whole-page latency. Browser tests assert emitted page requests/vendor registration and inject a failed studio CSS transaction. The studio uses cream paper, forest ink and sage surfaces around authored office assets; controls, text and state remain DOM. The office has reserved regions for the persistent room directory, mission HUD, scene and furniture tool shelf. The task heading opens details and human questions. No content panel opens by default. A uniformly scaled 4:3 world fits inside the viewport; narrow screens start centered and keep all furniture reachable through the dock. Details, goal creation, Ask Human and navigation use secondary Web Awesome drawers with Escape, focus trapping and focus restoration. Object pins use Web Awesome tooltips; both keyboard labels and touch-accessible dock labels remain available. `ui-components.ts` registers only drawer, tooltip and button through `studio-entry.ts` on the studio route, scopes vendor root tokens to the studio, and uses bundled system icons with no CDN requests. Web Awesome is pinned to 3.13.0 (MIT); forms retain native browser semantics. The library does not replace the Canvas renderer or introduce a game engine. The office uses one fixed light frosted theme, independent of the chat theme. Keyboard focus and narrow layouts are supported. The preview has no state/theme toolbar; empty/error fixtures are selected only by test URL parameters. The studio uses tinted frosted surfaces: a 560px desktop drawer inset 24px from the viewport, a 760px delivery drawer, and 8px outer margins on phones. Headers, objective selection, navigation dock and material cards share the same theme-derived glass tokens. Native select pickers receive progressive `base-select` styling where supported; fallback remains native. Unsupported backdrop filtering and reduced-transparency preferences use opaque surfaces. The core office interaction adds no new font, dependency or animation loop; lazy room backgrounds and one bounded pod pose timer are described above. `office-scene.ts` renders three supervising human sprites with four-direction walk frames; `office-navigation.ts` bounds paths to a 48×36 grid with furniture clearance. Select a person, then click clear floor or use arrow keys to walk. Execution/review move to their respective desks; Ask Human moves the actor to the entrance and clicking it focuses the response form. Manual walking is presentation. Tool-triggered routes mirror live task events but do not claim a result or replace persisted evidence. Motion is never required to understand task state. Books are reconciled by durable material ID per selected goal, including after the run becomes terminal. A newly committed agent material takes the desk-to-shelf trip while execution is active; user-added and preexisting links appear on the shelf directly. A newly observed durable `assignment` journal entry sends the coordinator to the executor's desk once; a refresh never invents another conversation, and walking does not claim that the executor accepted the update. The original atlas is sampled using measured frame bounds, without raster edits.
+`frontend/src/features/evolution/workspace.ts` composes the primary studio, the durable program notebook and existing evidence pages; `studio.ts` owns only its mounted DOM and requests. Problem: opening the notebook also imported the office renderer/vendor controls, and failed research imports left a blank page. Decision: each route loads its own graph through the shared document-lifetime module cache. `route-host.ts` retains the latest pending path, disposes the old page before admission and fences late success/failure. Closing before admission starts no import; closing during a flight permits no later mount or reload. The shell mount handle owns repeat-open identity and preserves unsent forms. There is one mounted page, at most four cached module flights, and no additional timer, observer or transport. CSS failures stay cached. Child routes use the shell's single bounded reload/replay authority, then show a localized failure with an explicit reload control. Rejected: static imports of hidden pages, per-route reload guards and retrying failed CSS imports that could mount unstyled UI. The measured production notebook's incremental graph (excluding already-loaded shell chunks) fell from approximately 136 to 21 KiB gzip; this measures transfer size, not whole-page latency. Browser tests assert emitted page requests/vendor registration and inject a failed studio CSS transaction. The studio is a full-bleed game screen (decision record: [EVOLUTION_GAME_ART.md](EVOLUTION_GAME_ART.md#game-screen)). A canvas world fills the route under theme-invariant walnut/brass HUD chrome; one docked, non-modal parchment window hosts the journal, chat, briefing, menu and actor sheet with heading focus, focus return and Escape. Everything shown is projected by `studio/projection.ts` from confirmed snapshots; visible copy is state, with names and long reasons in tooltips and accessible labels. The world mirrors every furniture/actor target as a focusable button. Residents are never steered by the human: execution/review sit at their desks, a pending question walks the asking role to the front door and opens a choice dialogue, a compute or background wait keeps the executor at its lit desk. The human's own avatar walks by click, WASD/arrows or E-to-use; tool-triggered routes mirror live task events but do not claim a result or replace persisted evidence. Motion is never required to understand task state. Books are reconciled by durable material ID per selected goal, including after the run becomes terminal. A newly committed agent material takes the desk-to-shelf trip while execution is active; user-added and preexisting links appear on the pile directly. A newly observed durable `assignment` journal entry sends the coordinator to the executor's desk once; a refresh never invents another conversation, and walking does not claim that the executor accepted the update. The original atlas is sampled using measured frame bounds, without raster edits.
 
 **Problem.** The first office looked like a status board: the scenery already contained chairs, while the Canvas drew another pair, and most characters only changed clothing color. A desk arrival therefore could not read as a physical action. **Decision.** The shipped chair-free WebP keeps the same 1448×1086 composition; each desk owns one dark rolling chair with its own position and eased slide. The executor and reviewer approach from the side, pull the chair, sit, and roll under the desk. Leaving rolls back, stands, steps aside, and pushes the chair in. A task update interrupts the sequence by restoring the chair to its tucked position before starting the new route. Activating a chair target with pointer or keyboard runs the same presentation-only sequence. `office-character.ts` adds role-shaped silhouettes and equipment on top of the walking atlas in both the main office and agent rooms; visitor gear follows the live role string. **Alternatives considered.** Baking more chairs into scenery prevents motion; six additional full directional atlases would add decode memory and a second animation pipeline. The vector equipment shares the existing gait and incurs no separate texture decode. These animations do not claim a task completed or a source saved; the backend evidence and durable material list remain authority.
 
@@ -1063,7 +1155,7 @@ Ask Human preserves drafts across refresh, presents every batch field, never
 pre-submits suggested choices, and resumes through the existing owner-bound gate.
 Submission retries retain an idempotency key for the same objective/model.
 
-One visible-page read flight polls active work at 3s and idle/history at 15s; model options load once, at most 128. Unmount aborts reads and clears timers; hiding pauses polling. The list transports at most 50 short summaries, excluding large deliverables and learning blobs (budget test: <40 KiB for 50 CJK objectives). The shipped chair-free scenery plus human atlas total 2,545,403 bytes encoded and 26,321,088 bytes decoded (the asset test enforces <=5 MiB / <=27 MiB). The original 2,024,654-byte PNG is retained only as an art comparison and is not loaded by the studio. One canvas caps its backing store at 1440×1080, keeping total raster memory under 19 MiB, independent of device DPR. Walking paints at most 30 FPS; standing actors have no RAF. Idle wandering wakes at 6.5 seconds, with at most one timer and one pending RAF. Hidden/offscreen scenes cancel both; unmount disconnects observers, handlers and zeros the backing store. Pause and prefers-reduced-motion stop animation; manual movement then places the actor at the valid destination instantly. No game-engine dependency is added. These are bounds and browser-observed frame counts, not cross-device CPU claims.
+One visible-page read flight polls active work at 3s and idle/history at 15s; model options load once, at most 128. Unmount aborts reads and clears timers; hiding pauses polling. The list transports at most 50 short summaries, excluding large deliverables and learning blobs (budget test: <40 KiB for 50 CJK objectives). The shipped chair-free scenery plus human atlas total 2,545,403 bytes encoded and 26,321,088 bytes decoded (the asset test enforces <=5 MiB / <=27 MiB). The original 2,024,654-byte PNG is retained only as an art comparison and is not loaded by the studio. One stage canvas matches the viewport at device pixel ratio (raster memory = viewport × DPR² × 4 bytes, e.g. ~20 MiB at 1440×900, DPR 2). The fixed-step loop runs frames only while something moves; otherwise it holds at most one timer for the next emote/screen keyframe of a live role, or nothing at all. Hidden/offscreen stages cancel both; unmount disconnects observers, handlers and zeros the backing store. The menu's animation pause and prefers-reduced-motion settle every beat at once. No game-engine dependency is added. These are bounds and browser-observed frame counts, not cross-device CPU claims.
 
 Art research: [LimeZu Modern Interiors](https://limezu.itch.io/moderninteriors),
 [Belohlavek's CC0 walk sprite](https://lpc.opengameart.org/content/character-sprite-walk-animation),
@@ -1264,3 +1356,61 @@ Program sweep demand — Problem: fixed-count rotation postponed admitted projec
 Complete run reconciliation sweep — Problem: the first 200 owner records could contain only terminal history, starving later unfinished runs; serial advances could also delay independent reconciliation. Decision: page the entire owner key range, submit each eligible identity/status to the shared demand executor and join accepted workers. Page sizes remain bounded and short pages continue until true EOF. Existing grace, live-task observation, owner/CAS fences and cancelled-episode accounting remain. One read/advance or worker-start failure does not suppress siblings; storage-page failures still propagate after joining accepted workers. Transition summaries retain owner-key order and grant no replay or acceptance authority. Alternatives: larger first-page limits still starve later rows; removing terminal history loses durable evidence; detached workers lose teardown; serial advances retain head blocking. Measurement: 64 physical reconciliation workers rendezvoused in 13.0 ms and joined teardown left zero owned workers. A fixture with 573 terminal history rows still found all seven later stale runs, while ignoring fresh and foreign rows; shortened two-row pages also preserved all nine eligible identities. Thread-start failure leaves its run available for another pass, and later-page failure joins accepted work before surfacing the storage error. This measures controlled reconciliation, not model execution. Full discovery remains linear in retained history; an authoritative active-record index remains further work.
 
 Complete review output — Problem: total-length checks rejected schema-valid judgments and prevented immutable archive projection of long evidence fields. Decision: explicit tool delivery, JSON parsing and archive projection impose no aggregate character/byte quota. JSON shape, duplicate/multiple-object guards, independent reviewer binding, immutable archive digest/offsets, original-source inspection and explicit model budgets remain. Long field text is retained in the source archive and represented by verified JSON-pointer references in the compact verdict; projection does not change the judgment. Large malformed JSON uses the existing finite syntax recovery allowance, never executor replay. Alternatives: larger caps retain refusal; truncation changes evidence; trusting unbound original pointers invents authority; reparsing without schema checks accepts invalid verdicts. Tests cover complete tool delivery, multi-megabyte valid JSON/archived evidence, unchanged source identity and no extra rejudge. Measurement: a 6,960,486-byte UTF-8 review with long original evidence fields archived and projected in 0.2344 s under tracing, with 48,080,581 peak traced bytes; input construction is excluded. The verdict retained original judgments and verified source pointers without a model rejudge. This measures controlled archive/parse/projection work, not provider throughput; full parsing remains linear in terminal output size.
+
+### Shared skills and research inputs
+
+Problem: research-to-programme navigation retained a candidate reference but lost
+edited protocol/tool inputs; installed Chat skills were discoverable but not a
+persistent requirement of subsequent stages. Decision: programme/run
+`skill_selection` resolves through the existing owner/project skill registry and
+loader into `skill_bindings` (the loader's SKILL.md content hash). Every executor
+and independent reviewer uses the registered `selected_skills` context provider.
+Missing, disabled, changed or undisclosable required guides refuse execution;
+ordinary `$skill` selection keeps its existing whole-guide-or-defer behavior.
+The programme creator reads the same installed catalog as Settings/Chat, supports
+explicit IDs and retains selections in the existing owner-scoped draft store.
+No new skill catalog, runtime, scheduler, credential or installation grant exists.
+
+Each selected guide adds an independent requirement to the existing review
+rubric: applicable checks need observed evidence; inapplicable checks need a
+reason. Disclosure receipts prove input delivery only, never scientific value or
+compliance. The reviewer can read skill resources using the common read-only
+skill tools and the explicit selected project scope; project execution, install,
+MCP and other writes remain unavailable. Guide identity is rechecked for resource
+reads. Supporting resources are not immutable package snapshots. Original review
+coverage, numerical protocols, and final acceptance remain enforced independently.
+A changed guide requires a reviewed new plan, not silent rebinding of an old one.
+
+Research handoff copies the visible hypothesis, protocol and capability bindings
+into the existing source-specific intake draft. `research_context` references the
+original research workspace schemas; input is frozen in execution options and
+sent to execution and review. Selected enabled MCP bindings are revalidated by
+`lib/research/capabilities.py` at intake and each fresh execution-stage admission.
+Missing tools or schema drift refuse; bindings never authorize publication or
+bypass the shared gateway. Frozen task recovery and tool dispatch retain their
+existing catalog/approval authority. These are user-selected constraints, not
+observations or precommitted numerical validation. The original discovery source
+still uses its independent digest-bound reader. Unstructured prior Chat messages
+are not inferred as requirements; retain those in a selected skill or acceptance.
+
+Alternatives rejected: a research-specific skill registry or agent loop duplicates
+Chat; textual reminders alone do not persist exact requirements; inheriting the
+whole conversation would confuse historical material with current authorization.
+The fixed discovery recipe still owns its built-in novelty gates. Custom selected
+workflows start in a general run/programme (including its discovery stage), not in
+that recipe's separate bounded model calls.
+
+Storage: one small guide reference per selected skill, plus one optional protocol/
+binding input in the existing programme and run headers and frozen stage inputs.
+No new store, resident cache, worker or periodic fetch is added. Browser drafts
+retain their existing 512 KiB envelope and refuse overflow without truncation.
+Measurement (compact UTF-8 JSON): 16 synthetic eight-character guide IDs with
+their 16-character hashes add 1,144 bytes per selection/binding record. A small
+hypothesis/falsifier/two-seed context adds 140 bytes; real protocol input scales
+with its existing schema fields. These inputs persist with each accepted stage
+under the existing programme/run retention; guide bodies remain contextual input,
+not additional programme header copies. No existing durable history is evicted.
+Model input retains the shared whole-guide budget; the selected required group
+must fit in full. Verify skill-selection/composer, execution-capability, programme,
+review-delivery and frontend draft/catalog/handoff suites; browser verification
+uses synthetic tasks, never a real research or provider run.

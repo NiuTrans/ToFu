@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 
 import pytest
 
 from tests._runtime_sections import native_module_path
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
 
 
 def _run(source: str) -> dict:
-    if not shutil.which('node'):
-        pytest.skip('node is required')
+    require_node_modules('vite')
     bundle = native_module_path(
         'api-transport-control-rpc.js', 'frontend/src/api/transport.ts')
     completed = subprocess.run(

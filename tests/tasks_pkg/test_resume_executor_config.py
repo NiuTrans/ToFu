@@ -1,11 +1,10 @@
-"""Lossless-continue executor resume authorities.
+"""Executor resume authorities derived from a settled projection.
 
-2026-08-31 root-cause fix: a turn interrupted after completed tool rounds
-resumed with prose prefill only, so the model went blind to every tool fact
-it had produced (the replayed history the user still saw on screen).  The
-``continue`` branch must ship the retained checkpoint rounds alongside the
-prefill; retention keeps pre-gap display carriers, replay stays the causal
-prefix.
+Every resume replays the retained checkpoint rounds (retention keeps pre-gap
+display carriers, replay stays the causal prefix) and regenerates from the
+last complete message. No operation carries the interrupted prose or
+reasoning as a prefill or display seed: no provider continues a bare trailing
+assistant message, so a seed would show text the regenerated reply repeats.
 """
 
 from __future__ import annotations
@@ -49,7 +48,7 @@ def test_resume_complete_claim_never_clears_existing_unknown_usage():
     task = {'id': 'task-1', 'convId': 'conv-1', 'content': '', 'thinking': '',
             'content_lock': threading.Lock(), '_executionActualsComplete': False}
     apply_resume_state(task=task, cfg={'checkpointUsageComplete': True},
-                       messages=[], model='gpt-4o', tid='task-1')
+                       messages=[], tid='task-1')
     assert task['_executionActualsComplete'] is False
 
 
@@ -88,8 +87,7 @@ def test_continue_replays_completed_rounds_and_display_carriers() -> None:
                        dict(_IN_FLIGHT)],
     })
 
-    assert config['resumePrefill'] == 'partial answer'
-    assert config['contentPrefix'] == 'partial answer'
+    assert not _SEED_KEYS & set(config)
     retained = config['checkpointToolRounds']
     # The result-less in-flight tail is amputated; the display carrier and
     # the completed execution receipt survive.
@@ -100,54 +98,51 @@ def test_continue_without_tool_rounds_omits_checkpoint() -> None:
     config = _resume_executor_config('continue', {'content': 'tail'})
 
     assert 'checkpointToolRounds' not in config
-    assert config['resumePrefill'] == 'tail'
+    assert not _SEED_KEYS & set(config)
     assert config['checkpointImages'] == []
 
 
-def test_continue_seeds_thinking_prefix_only_when_prose_continues() -> None:
-    config = _resume_executor_config('continue', {
+_SEED_KEYS = {'resumePrefill', 'contentPrefix', 'thinkingPrefix'}
+
+
+@pytest.mark.parametrize('operation', ['continue', 'checkpoint_resume', 'answer_guidance'])
+def test_resume_never_carries_the_interrupted_tail(operation) -> None:
+    config = _resume_executor_config(operation, {
         'content': 'partial answer',
         'thinking': 'interrupted reasoning',
-    })
-    assert config['thinkingPrefix'] == 'interrupted reasoning'
+        'toolRounds': [_completed('call-1'), _awaiting_human('call-ask', 'hg-1')],
+    }, {'guidanceId': 'hg-1', 'toolCallId': 'call-ask', 'response': 'go'})
 
-    # Empty prose lane: the write boundary already moved the thinking tail
-    # into rolledBack — a seed would resurrect it inside the live lane.
-    replay_only = _resume_executor_config('continue', {
-        'content': '',
-        'thinking': 'interrupted reasoning',
-    })
-    assert 'thinkingPrefix' not in replay_only
+    assert not _SEED_KEYS & set(config)
 
 
-def test_prepare_and_apply_resume_state_hydrates_thinking_prefix() -> None:
+def test_resumed_wire_ends_at_the_replayed_checkpoint() -> None:
+    """The resumed request is the interrupted request's complete prefix: the
+    replayed rounds end on a tool result, with no trailing assistant turn and
+    no reasoning seed for a regenerated tail to repeat."""
     import threading
 
-    from lib.tasks_pkg.orchestrator._resume_state import (
-        apply_resume_state,
-        prepare_resume_state,
-    )
+    from lib.tasks_pkg.orchestrator._resume_state import apply_resume_state
 
+    config = _resume_executor_config('continue', {
+        'content': '',
+        'thinking': 'interrupted reasoning',
+        'toolRounds': [_completed('call-1'), dict(_IN_FLIGHT)],
+    })
     task = {
         'id': 'task-1', 'convId': 'conv-1',
         'content': '', 'thinking': '',
         'content_lock': threading.Lock(),
     }
-    prepared = prepare_resume_state({
-        'contentPrefix': 'prose',
-        'thinkingPrefix': 'reasoning',
-    })
-    apply_resume_state(
-        task=task, cfg={}, messages=[], model='gpt-4o', tid='task-1',
-        prepared_state=prepared)
-    assert task['content'] == 'prose'
-    assert task['thinking'] == 'reasoning'
+    base = [{'role': 'user', 'content': 'inspect the repo'}]
+    messages = [dict(message) for message in base]
+    apply_resume_state(task=task, cfg=config, messages=messages, tid='task-1')
 
-    blank = prepare_resume_state({'contentPrefix': 'prose'})
-    task['thinking'] = ''
-    apply_resume_state(
-        task=task, cfg={}, messages=[], model='gpt-4o', tid='task-1',
-        prepared_state=blank)
+    assert messages[:len(base)] == base
+    assert [message['role'] for message in messages[len(base):]] == [
+        'assistant', 'tool']
+    assert messages[-1]['tool_call_id'] == 'call-1'
+    assert task['content'] == ''
     assert task['thinking'] == ''
 
 
@@ -168,8 +163,7 @@ def test_checkpoint_resume_passes_retained_projection_verbatim() -> None:
     })
 
     assert config['checkpointToolRounds'] == rounds
-    assert config['contentPrefix'] == 'partial'
-    assert 'resumePrefill' not in config
+    assert not _SEED_KEYS & set(config)
 
 
 def _awaiting_human(call_id: str, guidance_id: str) -> dict:
@@ -185,31 +179,6 @@ def _awaiting_human(call_id: str, guidance_id: str) -> dict:
     }
 
 
-def test_answer_guidance_seeds_thinking_prefix_with_surviving_prose() -> None:
-    config = _resume_executor_config('answer_guidance', {
-        'content': 'partial answer',
-        'thinking': 'interrupted reasoning',
-        'images': [],
-        'toolRounds': [_awaiting_human('call-ask', 'hg-1')],
-    }, {
-        'guidanceId': 'hg-1',
-        'toolCallId': 'call-ask',
-        'response': '仅服务商侧改造',
-    })
-    assert config['thinkingPrefix'] == 'interrupted reasoning'
-
-    blank = _resume_executor_config('answer_guidance', {
-        'content': '',
-        'thinking': 'interrupted reasoning',
-        'toolRounds': [_awaiting_human('call-ask', 'hg-1')],
-    }, {
-        'guidanceId': 'hg-1',
-        'toolCallId': 'call-ask',
-        'response': '继续',
-    })
-    assert 'thinkingPrefix' not in blank
-
-
 def test_answer_guidance_completes_the_interrupted_question_round() -> None:
     config = _resume_executor_config('answer_guidance', {
         'content': 'partial answer',
@@ -222,8 +191,7 @@ def test_answer_guidance_completes_the_interrupted_question_round() -> None:
         'response': '仅服务商侧改造',
     })
 
-    assert config['resumePrefill'] == 'partial answer'
-    assert config['contentPrefix'] == 'partial answer'
+    assert not _SEED_KEYS & set(config)
     rounds = config['checkpointToolRounds']
     assert [item.get('toolCallId') for item in rounds] == [
         None, 'call-1', 'call-ask',

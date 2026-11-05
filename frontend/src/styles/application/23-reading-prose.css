@@ -9,7 +9,7 @@
   font-family: var(--font-ui);
   font-size: var(--conversation-font-size-body);
   font-weight: var(--weight-regular);
-  line-height: var(--leading-body);
+  line-height: var(--conversation-leading-prose);
   overflow-wrap: anywhere;
 }
 
@@ -19,9 +19,9 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: var(--control-h-lg);
-  margin-block: 0 var(--space-4);
-  padding-block-end: var(--space-2);
+  min-height: var(--control-h-sm);
+  margin-block: 0 var(--space-3);
+  padding-block-end: var(--space-1);
   border-block-end: var(--control-edge-inset) solid var(--turn-rule);
   color: var(--text-secondary);
   font-size: var(--conversation-process-font-size);
@@ -37,7 +37,7 @@
 .conversation-surface .conversation-answer-outline > summary {
   display: flex;
   align-items: center;
-  min-height: var(--control-h-lg);
+  min-height: var(--control-h-sm);
   gap: var(--space-2);
   padding-inline: var(--space-2);
   border-radius: var(--radius-sm);
@@ -84,16 +84,9 @@
   line-height: var(--leading-tight);
   letter-spacing: -.025em;
 }
-.conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content > p:first-child {
-  font-size: var(--font-size-2xl);
-}
-.conversation-surface .conversation-history-process .conversation-block--text > .md-content {
-  font-size: var(--conversation-process-font-size);
-  color: var(--text-secondary);
-}
 
 .conversation-surface .conversation-block--text > .md-content :is(p, ul, ol, pre, table, blockquote) {
-  margin-block: var(--space-4);
+  margin-block: var(--space-3);
 }
 
 .conversation-surface .conversation-block--text > .md-content > :first-child {
@@ -105,7 +98,7 @@
 }
 
 .conversation-surface .conversation-block--text > .md-content :is(h1, h2, h3, h4, h5, h6) {
-  margin-block: var(--space-6) var(--space-3);
+  margin-block: var(--space-5) var(--space-2);
   color: var(--text-primary);
   font-family: var(--font-ui);
   font-weight: var(--weight-semibold);
@@ -132,7 +125,7 @@
 }
 
 .conversation-surface .conversation-block--text > .md-content li {
-  margin-block: var(--space-2);
+  margin-block: var(--space-1);
   padding-inline-start: var(--space-1);
 }
 
@@ -161,13 +154,13 @@
 .conversation-surface .conversation-block--text > .md-content pre code {
   font-family: var(--font-mono);
   display: block;
-  padding: var(--space-4);
+  padding: var(--space-3);
   border: 0;
   border-radius: 0;
   background: transparent;
   overflow-x: auto;
   font-size: var(--conversation-font-size-content);
-  line-height: var(--leading-body);
+  line-height: var(--conversation-leading-compact);
   white-space: pre;
   overflow-wrap: normal;
   word-break: normal;
@@ -176,7 +169,7 @@
 .conversation-surface .conversation-block--text > .md-content table {
   max-width: 100%;
   font-size: var(--conversation-font-size-table);
-  line-height: var(--leading-body);
+  line-height: var(--conversation-leading-compact);
   border-color: var(--border);
 }
 

@@ -9,14 +9,15 @@ DESKTOP_TOOL_LIST_FILES = {
         "description": (
             "List files and directories on the user's LOCAL computer. "
             "This operates on the user's actual machine (desktop/laptop), not the server. "
-            "Use this to browse their local file system — Documents, Desktop, Downloads, etc."
+            "Only folders the user shared with Tofu (the device's share roots) can be listed; "
+            "a refusal names the shared folders."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Directory path to list. Use ~ for home directory. Examples: '~/Documents', '~/Desktop'"
+                    "description": "Directory path inside a shared folder (absolute or ~-relative)."
                 }
             },
             "required": ["path"]
@@ -30,7 +31,8 @@ DESKTOP_TOOL_READ_FILE = {
         "name": "desktop_read_file",
         "description": (
             "Read a file from the user's LOCAL computer. "
-            "Returns the full text content. Useful for reading local configs, documents, code, etc."
+            "Returns the full text content. Only files inside folders the user shared with Tofu "
+            "(the device's share roots) can be read; a refusal names the shared folders."
         ),
         "parameters": {
             "type": "object",
@@ -227,7 +229,8 @@ DESKTOP_TOOL_CLIPBOARD = {
         "name": "desktop_clipboard",
         "description": (
             "Read or write the user's system clipboard. "
-            "Useful for: copying results to clipboard, reading what user just copied, etc."
+            "Useful for: copying results to clipboard, reading what user just copied, etc. "
+            "Requires the device's GUI permission."
         ),
         "parameters": {
             "type": "object",

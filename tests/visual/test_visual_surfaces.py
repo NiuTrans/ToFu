@@ -53,7 +53,7 @@ pytestmark = [pytest.mark.visual, pytest.mark.slow]
 # `switchSettingsTab` marks the matching `#settingsTab_<id>` pane `.active`,
 # which is the RESULT we assert.
 _SETTINGS_TABS = (
-    'general', 'api', 'preset', 'mcp', 'skills', 'search', 'speech',
+    'general', 'api', 'preset', 'mcp', 'skills', 'knowledge', 'search', 'speech',
     'translate', 'oauth', 'network', 'devices', 'feishu', 'preferences',
     'advanced',
 )
@@ -112,28 +112,19 @@ def test_settings_tabs_open_without_js_errors(page):
     One test for all tabs on one page load — the sweep must stay seconds, not
     minutes (the whole visual ring is 2m55s and must not regress).
 
-    ⚠️ THE OPEN PHASE IS WHERE THE WORK HAPPENS — assert it, don't drain it.
-    A first version of this test drained the error buffer immediately before
-    each ``switchSettingsTab`` call and only looked at what that call produced.
-    NEUTER proved it blind: injecting a real ``TypeError`` into
-    ``_populateMcpTab`` left the test GREEN. Reason (measured in
-    ``settings/core_panel.js``): ``openSettings()`` invokes EVERY
-    ``_populate*Tab`` in one pass, so all panel bodies render there, and
-    ``switchSettingsTab`` afterwards only flips CSS classes. Draining after the
-    open threw away the only window in which a panel-render crash is visible.
-    So the open phase now gets its own assertion, before any drain.
+    Check errors during both opening and tab activation. Shared configuration
+    loads on opening; independent panels load on their first visit. Clearing
+    the buffer before judging either phase would conceal a renderer failure.
     """
     _wait_ready(page)
     _drain(page)
     _invoke_action(page, 'openSettings')
-    # openSettings() fans out to every _populate*Tab (several are async and
-    # fetch), so give the whole batch time to settle before judging it.
+    # Shared initial configuration has asynchronous projections of its own.
     page.wait_for_timeout(2500)
     open_errs = _hard_errors(page)
     assert not open_errs, (
         'openSettings() raised %d JavaScript error(s) while building the '
-        'settings panes — this is where every _populate*Tab runs, so a crash '
-        'here silently leaves later tabs unrendered:\n  %s'
+        'initial settings panes:\n  %s'
         % (len(open_errs), '\n  '.join(open_errs[:10])))
 
     failures = {}

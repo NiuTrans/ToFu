@@ -249,6 +249,134 @@ exit 1
     assert info['has_audio'] is False
 
 
+
+def test_probe_video_uses_container_duration_when_streams_omit_it(tmp_path):
+    """WebM/Matroska carry duration only at the container (format) level."""
+    media = tmp_path / 'c.webm'
+    media.write_bytes(b'\x00' * 64)
+    ffprobe = _make_exe(str(tmp_path), 'ffprobe', """#!/bin/sh
+cat <<'JSON'
+{"streams":[
+ {"codec_type":"video","codec_name":"vp9","width":640,"height":360,
+  "r_frame_rate":"25/1"},
+ {"codec_type":"audio","codec_name":"opus"}],
+ "format":{"duration":"12.480000"}}
+JSON
+""")
+    info = mv.probe_video(str(media), ffprobe=ffprobe, ffmpeg='/nonexistent')
+    assert info['duration'] == pytest.approx(12.48)
+    assert info['audio_codec'] == 'opus'
+
+
+def test_probe_video_reports_audio_codec_on_ffmpeg_fallback(tmp_path):
+    media = tmp_path / 'd.mp4'
+    media.write_bytes(b'\x00' * 64)
+    ffmpeg = _make_exe(str(tmp_path), 'ffmpeg', """#!/bin/sh
+echo "  Duration: 00:00:02.00, start: 0.000000, bitrate: 100 kb/s" >&2
+echo "    Stream #0:0: Video: h264 (High), yuv420p, 64x64, 10 fps, 10 tbr" >&2
+echo "    Stream #0:1(und): Audio: aac (LC), 44100 Hz, mono, fltp, 69 kb/s" >&2
+exit 1
+""")
+    info = mv.probe_video(str(media), ffprobe='', ffmpeg=ffmpeg)
+    assert info['has_audio'] is True
+    assert info['audio_codec'] == 'aac'
+
+
+_AUDIO_ONLY = {'codec': '', 'width': 0, 'height': 0, 'fps': 0.0, 'has_audio': True}
+
+
+@pytest.mark.parametrize('streams, expected_duration', [
+    ('{"codec_type":"audio","codec_name":"mp3","duration":"3.030000"}', 3.03),
+    # WebM/Matroska audio declares its duration only on the container.
+    ('{"codec_type":"audio","codec_name":"opus"}', 12.48),
+], ids=['stream-duration', 'container-duration'])
+def test_probe_video_reports_audio_only_files_only_when_the_caller_accepts_them(
+        tmp_path, streams, expected_duration):
+    media = tmp_path / 'e.mp3'
+    media.write_bytes(b'\x00' * 64)
+    ffprobe = _make_exe(str(tmp_path), 'ffprobe', f"""#!/bin/sh
+cat <<'JSON'
+{{"streams":[{streams}], "format":{{"duration":"12.480000"}}}}
+JSON
+""")
+    # Callers that need a picture keep today's answer: no video stream.
+    assert mv.probe_video(str(media), ffprobe=ffprobe, ffmpeg='/nonexistent') is None
+
+    info = mv.probe_video(str(media), ffprobe=ffprobe, ffmpeg='/nonexistent',
+                          allow_audio_only=True)
+    audio_codec = 'mp3' if 'mp3' in streams else 'opus'
+    assert info == dict(_AUDIO_ONLY, audio_codec=audio_codec,
+                        duration=pytest.approx(expected_duration))
+
+
+def test_ffprobe_ignores_attached_cover_pictures_like_the_ffmpeg_fallback(tmp_path):
+    """An embedded cover (ID3 APIC, MP4 covr) is not a playable video stream."""
+    media = tmp_path / 'h.mp3'
+    media.write_bytes(b'\x00' * 64)
+    cover = ('{"codec_type":"video","codec_name":"mjpeg","width":300,"height":300,'
+             '"r_frame_rate":"90000/1","duration":"3.030000",'
+             '"disposition":{"attached_pic":1}}')
+    audio = '{"codec_type":"audio","codec_name":"mp3","duration":"3.030000"}'
+    video = ('{"codec_type":"video","codec_name":"h264","width":64,"height":64,'
+             '"r_frame_rate":"10/1","duration":"3.000000",'
+             '"disposition":{"attached_pic":0}}')
+
+    def fake_ffprobe(name, streams):
+        # The disposition must come from the same single probe call.
+        return _make_exe(str(tmp_path), name, f"""#!/bin/sh
+case "$*" in *stream_disposition=attached_pic*) ;; *) exit 1 ;; esac
+cat <<'JSON'
+{{"streams":[{streams}], "format":{{"duration":"3.030000"}}}}
+JSON
+""")
+
+    audio_with_cover = fake_ffprobe('ffprobe-cover', f'{audio},{cover}')
+    assert mv.probe_video(str(media), ffprobe=audio_with_cover, ffmpeg='/nonexistent') is None
+    assert mv.probe_video(str(media), ffprobe=audio_with_cover, ffmpeg='/nonexistent',
+                          allow_audio_only=True) == dict(
+        _AUDIO_ONLY, audio_codec='mp3', duration=pytest.approx(3.03))
+
+    video_with_cover = fake_ffprobe('ffprobe-video', f'{video},{audio},{cover}')
+    info = mv.probe_video(str(media), ffprobe=video_with_cover, ffmpeg='/nonexistent')
+    assert (info['codec'], info['width'], info['fps']) == ('h264', 64, 10.0)
+
+
+def test_probe_video_ffmpeg_fallback_reports_audio_only_files_when_accepted(tmp_path):
+    media = tmp_path / 'f.mp3'
+    media.write_bytes(b'\x00' * 64)
+    # An embedded cover image is an attached picture, not a playable video stream.
+    ffmpeg = _make_exe(str(tmp_path), 'ffmpeg', """#!/bin/sh
+echo "  Duration: 00:00:03.03, start: 0.025057, bitrate: 64 kb/s" >&2
+echo "    Stream #0:0: Audio: mp3 (mp3float), 44100 Hz, mono, fltp, 64 kb/s" >&2
+echo "    Stream #0:1: Video: mjpeg (Baseline), yuvj420p(pc), 300x300, 90k tbr, 90k tbn (attached pic)" >&2
+exit 1
+""")
+    assert mv.probe_video(str(media), ffprobe='', ffmpeg=ffmpeg) is None
+
+    info = mv.probe_video(str(media), ffprobe='', ffmpeg=ffmpeg, allow_audio_only=True)
+    assert info == dict(_AUDIO_ONLY, audio_codec='mp3', duration=pytest.approx(3.03))
+
+
+def test_probe_video_accepting_audio_only_keeps_video_and_non_media_answers(tmp_path):
+    media = tmp_path / 'g.mp4'
+    media.write_bytes(b'\x00' * 64)
+    video = _make_exe(str(tmp_path), 'ffmpeg', """#!/bin/sh
+echo "  Duration: 00:00:02.00, start: 0.000000, bitrate: 100 kb/s" >&2
+echo "    Stream #0:0: Video: h264 (High), yuv420p, 64x64, 10 fps, 10 tbr" >&2
+echo "    Stream #0:1(und): Audio: aac (LC), 44100 Hz, mono, fltp, 69 kb/s" >&2
+exit 1
+""")
+    assert (mv.probe_video(str(media), ffprobe='', ffmpeg=video, allow_audio_only=True)
+            == mv.probe_video(str(media), ffprobe='', ffmpeg=video))
+    empty = tmp_path / 'empty'
+    empty.mkdir()
+    unreadable = _make_exe(str(empty), 'ffmpeg', """#!/bin/sh
+echo "Error opening input: Invalid data found when processing input" >&2
+exit 1
+""")
+    assert mv.probe_video(str(media), ffprobe='', ffmpeg=unreadable,
+                          allow_audio_only=True) is None
+
 def test_verify_spec_checks_every_axis():
     good = {'codec': 'h264', 'width': 1080, 'height': 1440, 'fps': 30.0,
             'duration': 4.0, 'has_audio': False}

@@ -169,6 +169,31 @@ def test_crash_after_index_publication_does_not_replay_the_artifact(tmp_path):
     assert [row['path'] for row in mods._load_from_disk(session)] == ['first', 'second']
 
 
+@pytest.mark.parametrize('index_published', [False, True])
+def test_undo_after_an_interrupted_fold_does_not_resurrect_undone_changes(
+        tmp_path, index_published):
+    session = session_of(tmp_path)
+    for task in ('task-a', 'task-b'):
+        (tmp_path / f'{task}.txt').write_text(f'created by {task}\n')
+        assert mods._record_modification(
+            str(tmp_path), 'write_file', f'{task}.txt', task_id=task) is True
+    fold = Path(session, 'modifications.journal.fold')
+    os.replace(tail_path(session), fold)
+    if index_published:
+        envelope = json.loads(index_path(session).read_text())
+        envelope['modifications'].extend(
+            json.loads(line) for line in fold.read_text().splitlines())
+        envelope['absorbedFold'] = list(mods._fold_identity(session))
+        mods._atomic_json_write(str(index_path(session)), envelope)
+
+    result = mods.undo_task_modifications(str(tmp_path), 'task-b')
+
+    assert result['undone'] == 1 and result['failed'] == 0, result
+    assert not (tmp_path / 'task-b.txt').exists()
+    mods._mods_cache.clear()
+    assert [row['taskId'] for row in mods.get_modifications(str(tmp_path))] == ['task-a']
+
+
 def test_repeated_change_identity_is_idempotent_across_the_log(tmp_path):
     session = session_of(tmp_path)
     identity = 'a' * 32

@@ -105,18 +105,23 @@ def test_recursive_grep_content_parity(ws, command):
     GNU ``grep -r`` emits readdir order; ripgrep's parallel walker emits its
     own order. Both are filesystem-arbitrary — the contract is the match
     SET, line content, and exit code. Binary files inside a walk are
-    silently skipped by rg (GNU ``-I`` semantics); GNU's ``Binary file X
-    matches`` notice lines are dropped from the comparison.
+    silently skipped by rg (GNU ``-I`` semantics); GNU's binary-match
+    notice is dropped from the comparison. GNU grep before 3.5 printed it on
+    stdout as ``Binary file X matches``; 3.5 and later print
+    ``grep: X: binary file matches`` on stderr.
     """
     import re as _re
-    notice = _re.compile(r'^(?:Binary file \S+ matches|binary file .+ matches.*)$')
-    normalize = lambda out: sorted(
-        line for line in out.splitlines() if not notice.match(line))
+    notice = _re.compile(
+        r'^(?:Binary file \S+ matches|grep: .+: binary file matches'
+        r'|binary file .+ matches.*)$')
+    without_notices = lambda out: [
+        line for line in out.splitlines() if not notice.match(line)]
     expected = run_gnu_hardened(command, ws)
     actual = run_rewritten(command, ws)
     assert actual.returncode == expected.returncode
-    assert normalize(actual.stdout) == normalize(expected.stdout)
-    assert actual.stderr == expected.stderr
+    assert sorted(without_notices(actual.stdout)) == sorted(
+        without_notices(expected.stdout))
+    assert without_notices(actual.stderr) == without_notices(expected.stderr)
 
 
 @pytest.mark.parametrize('command', [
@@ -161,6 +166,7 @@ def test_only_proven_common_subset_translates_to_rg(ws):
         ['node_modules'])
     assert fast and fast[0] == 'rg'
     assert '--files-with-matches' in fast and '--glob' in fast
+    assert '--hidden' in fast  # GNU grep -r parity
     assert not _raw_grep_rg_argv(
         'grep', ['-P', 'b.ta', 'a.txt'], ws, ['node_modules'])
     assert not _raw_grep_rg_argv(

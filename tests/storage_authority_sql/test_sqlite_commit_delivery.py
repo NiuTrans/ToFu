@@ -165,6 +165,140 @@ def test_unknown_segment_does_not_fail_or_repeat_later_unexecuted_jobs(backend):
     assert totals(backend) == [{'name': 'one', 'total': 1}, {'name': 'two', 'total': 1}]
 
 
+class CommitProbe:
+    """Keep the real connection; observe the writer just before each COMMIT."""
+
+    def __init__(self, connection, before_commit):
+        self.connection = connection
+        self.before_commit = before_commit
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def commit(self):
+        self.before_commit()
+        return self.connection.commit()
+
+
+def seed_record(backend):
+    def seed(session):
+        session.execute('CREATE TABLE commit_records '
+                        '(key TEXT PRIMARY KEY, version INTEGER NOT NULL, value TEXT NOT NULL)')
+        session.execute("INSERT INTO commit_records VALUES ('k', 1, 'base')")
+    command(backend, 'seed', seed, receipt=False)
+
+
+def put_if_version(value, expected):
+    """The record.put version CAS shape: conflict unless the version matches."""
+    def apply(session):
+        current = session.fetch_one("SELECT version FROM commit_records WHERE key='k'")
+        if current['version'] != expected:
+            raise StorageError('database_conflict', 'Storage record version conflict')
+        session.execute("UPDATE commit_records SET version=?, value=? WHERE key='k'",
+                        (expected + 1, value))
+        return expected + 1
+    return apply
+
+
+def committed_record(backend):
+    return backend.query('test.commit_records', lambda session: session.fetch_one(
+        "SELECT version, value FROM commit_records WHERE key='k'"), time.monotonic()+5)
+
+
+def batch_behind_blocker(backend, *submissions):
+    """Queue submissions behind a held writer so they share one batch."""
+    entered, release = threading.Event(), threading.Event()
+
+    def blocker(_session):
+        entered.set()
+        assert release.wait(5)
+        return 'released'
+
+    executor = ThreadPoolExecutor(max_workers=len(submissions) + 1)
+    first = executor.submit(command, backend, 'blocker', blocker, receipt=False)
+    assert entered.wait(2)
+    futures = []
+    try:
+        for index, submission in enumerate(submissions, start=1):
+            futures.append(executor.submit(submission))
+            until = time.monotonic()+5
+            while backend._writer.queue_depths()['user'] != index:
+                assert time.monotonic() < until
+                time.sleep(.005)
+        jobs = list(backend._writer._queues['user'])
+    finally:
+        release.set()
+    return executor, first, futures, jobs
+
+
+def test_batched_conflict_is_delivered_with_the_commit_it_observed(backend):
+    seed_record(backend)
+    # One segment: the second CAS executes against the first one's uncommitted
+    # write inside the shared transaction.
+    backend._writer._segment_budget_s = 60
+    jobs, answered_before_commit = [], []
+    backend._writer._connection = CommitProbe(backend._writer._connection, lambda: (
+        answered_before_commit.append([job.done.is_set() for job in jobs])))
+
+    def losing_put():
+        try:
+            command(backend, 'second', put_if_version('second', 1), receipt=False)
+        except StorageError as error:
+            return error, committed_record(backend)
+        return None, committed_record(backend)
+
+    executor, blocker, (winner, loser), queued = batch_behind_blocker(
+        backend, lambda: command(backend, 'first', put_if_version('first', 1), receipt=False),
+        losing_put)
+    jobs.extend(queued)
+    with executor:
+        assert blocker.result(5) == 'released'
+        assert winner.result(5) == 2
+        error, observed = loser.result(5)
+    assert error is not None and error.code == 'database_conflict'
+    assert observed == {'version': 2, 'value': 'first'}, (
+        'a conflict was answered before the write that caused it committed')
+    assert answered_before_commit and not any(any(row) for row in answered_before_commit)
+
+
+def test_batched_failure_is_reevaluated_when_its_segment_rolls_back(backend):
+    seed_record(backend)
+    backend._writer._segment_budget_s = 60
+    commits = []
+
+    def disk_full_after_blocker():
+        commits.append(len(commits) + 1)
+        if len(commits) > 1:
+            raise _disk_full()
+
+    backend._writer._connection = CommitProbe(
+        backend._writer._connection, disk_full_after_blocker)
+
+    def put(name):
+        def submit():
+            try:
+                return command(backend, name, put_if_version(name, 1), receipt=False)
+            except StorageError as error:
+                return error
+        return submit
+
+    executor, blocker, (first, second), _jobs = batch_behind_blocker(
+        backend, put('first'), put('second'))
+    with executor:
+        assert blocker.result(5) == 'released'
+        first_error, second_error = first.result(5), second.result(5)
+    assert isinstance(first_error, StorageError) and first_error.code == 'database_unavailable'
+    # The second CAS conflicted only with the first's rolled-back write.
+    assert isinstance(second_error, StorageError) and second_error.code == 'database_unavailable'
+    assert committed_record(backend) == {'version': 1, 'value': 'base'}
+
+
+def _disk_full():
+    error = sqlite3.OperationalError('database or disk is full')
+    error.sqlite_errorcode = sqlite3.SQLITE_FULL
+    return error
+
+
 def test_missing_transaction_state_cannot_authorize_unreceipted_replay(backend):
     class UnknownState(CommitFault):
         @property

@@ -7,6 +7,11 @@ backend selection live in `docs/STORAGE_TOFUDB.md`; selection support alone does
 prove full source-data migration or release readiness. Tie verification
 evidence to the actual build and covered domains.
 
+For storage optimization, start with the SQLite reference and change-review
+map in `docs/STORAGE_PERFORMANCE_CHARTER.md#sqlite-reference-and-change-review`.
+Reuse its comparison, cold-read and fault-test owners; component timings do
+not establish application restart or whole-Agent performance.
+
 `build.rs` embeds the engine source digest reported by `--build-info`; its framing
 matches `serverctl_pkg/native_engine.py`. Deployment metadata is not build evidence.
 `billing.rs` serializes native admission with standalone reserve release on the
@@ -15,6 +20,13 @@ recovery and exact settlement; a zero-value admission is never a fee quote.
 Checkpoint-resume creation rebuilds retained tool blocks after rolling back the
 unfinished prose tail, before publishing the pending attempt. Committed-projection
 integrity stays strict. Verify resume-tail/replay tests and actual v4 queued startup.
+
+`turn/dispatchable_index.rs` owns accepted-attempt catalogue transitions and
+owner-scoped restart repair. A missing target alone never proves deletion;
+repair needs an exact settled Attempt or retained trash-directory witness.
+Verify `turn_dispatchable_index_tests.rs`, including corruption, foreign-owner
+isolation, queue activation and commit-fault replay. Operations and growth
+measurement live in `docs/STORAGE_OPERATIONS.md`.
 
 native_checkpoint_store.rs reserves journal namespaces. Standard builds include
 native-runtime-checkpoints; --no-default-features omits this capability. It exposes NativeCheckpointStore over a supplied
@@ -111,6 +123,11 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
 - Rejected current-WAL payload-prefix caching and its source/recovery boundaries:
   `docs/TOFUDB_PUBLICATION_LATENCY.md#rejected-current-wal-carried-payload-prefix-witnesses`.
 
+- Carried-payload recovery reuses verification only inside the current exclusive
+  open, including historical copies. `engine_tests.rs` covers repeated reads,
+  fresh-pass errors and the paired volume experiment; see
+  `docs/TOFUDB_RECOVERY_ATTRIBUTION.md#repeated-carried-content`.
+
 - Complete-payload staging uses existing fresh-page/WAL owners; generic source
   validation remains separate. Tests: `authority_stream_staging_tests.rs`,
   `engine_write_staging_tests.rs`; policy and costs:
@@ -164,7 +181,11 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   independently at most 2,048 oldest delta positions plus the 2 MiB
   carried-WAL byte bound, including
   a safe prefix within one transaction) per tripped commit, never an unbounded
-  full merge inside a foreground commit. `src/maintenance.rs` survives a
+  full merge inside a foreground commit. Synchronous full drains use bounded
+  bulk batches without changing the online adaptive slice; the owner and
+  regression are `EntityDatabase::merge_overlay_fully` and
+  `full_overlay_drain_batches_without_inflating_foreground_slice`.
+  `src/maintenance.rs` survives a
   poisoned state lock without stranding waiters: a terminal-record
   dropout still wakes every waiter and counts `dropped_terminal_records`
   (lock-free, folded into the metrics snapshot). Round errors carrying
@@ -229,10 +250,21 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
 - `src/request_profile.rs` owns optional request span/work attribution, bounded
   anonymous slow samples and `system.metrics.requestProfile`. `fsync_stats.rs`
   retains process/component totals. Measurement boundaries and observer-cost
-  checks live in `docs/STORAGE_PERFORMANCE_CHARTER.md`.
+  checks live in `docs/STORAGE_PERFORMANCE_CHARTER.md`. The same span tokens
+  feed the always-on per-thread hold recorder; `authority_watch.rs` owns its
+  fixed phase table and the `authority_hold` record (`docs/RESOURCE_CONTROL.md`).
+- `src/resource_exhaustion.rs` owns every `OutOfMemory` refusal. A limit site
+  declares its class with `domain_bound` (non-retryable, literal on the wire),
+  `capacity_quota`, `accounting_overflow`, `reservation_failure`/`_error` or a
+  raw-archive constructor, and semantic checks use `semantic_bound`; no other
+  module constructs or compares the kind, and only this module can build a
+  retryable `ResourceExhausted`. `resource_exhaustion::` tests include the
+  source gate; policy: `docs/STORAGE_OPERATIONS.md`.
 - `src/history_payload.rs` owns immutable history offset indexes and bounded-level
   routing pages; publication belongs to Engine/CONTROL. Point reads verify content
   hashes; backup/GC retain all metadata and pruning relocates old-reader payloads.
+  Retirement uses authenticated SegmentIndex locations to reuse unaffected
+  routing pages; verify `history_payload::tests::pruning_*` and compaction faults.
   Authority prunes only outside the entity root's durable replay boundary;
   the first deferred write publishes that cursor atomically with its delta.
   Protocol and downgrade boundaries live in `docs/STORAGE_TOFUDB.md`.
@@ -240,6 +272,15 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   promotes retired history into payload segments off the authority mutex, and
   publishes CONTROL and prepares payload routes off that mutex, then reconciles
   current logical state. Maintenance releases its guard through publication.
+- `src/maintenance_preparation.rs` prepares restored mounts and tool/event/sync
+  retention through the existing pinned command lane. Each bounded transaction
+  captures fresh state under the writer, prepares outside it and commits with
+  ordinary OCC; contention
+  discards preparation for the next round. Preserve committed progress when a
+  later stage defers. Verify `maintenance_preparation_tests.rs`, maintenance,
+  entity optimistic/range-mount and artifact/Turn prune fault tests.
+  Historical pin reads use the replica's captured sequence and remain read-only;
+  their older-root leases survive live pin removal and replica retirement.
 - `src/engine_rotation_publication.rs` owns reserved predecessor publication
   through captured handles and successor-state reconciliation; `daemon.rs`
   releases authority during publication. Tests and paired slow-I/O measurement
@@ -286,10 +327,81 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   into `BlockStore`'s relink fence; built-but-unpublished segments may only
   be discarded when an error proves no catalog publish happened
   (`WouldBlock`); the offline exclusive collector in `authority_gc.rs`
-  stays unchanged and certified. Mark traversals must keep their
-  every-4,096-visit stop-flag checks, and both background drivers keep
+  stays unchanged and certified. Mark traversals check their stop flag
+  before every read and every mark insert (never less often than every
+  4,096 visits), and both background drivers keep
   their boot grace + crash-safe bounded stop join (a slow phase never
-  stalls startup or shutdown).
+  stalls startup or shutdown). Online marks walk all of their roots through
+  `entity::visit_entity_page_graphs_once`: each page is read and marked
+  once per mark, discovery walks run before the deferred persistent-pin and
+  mount walks, a walk without discovery never satisfies one that needs it,
+  and kept subtree tallies let every root check its pin count. Marks run to
+  completion with no wall-clock budget; epoch pacing (120 s floor, 50% duty)
+  bounds the collector instead. Online marks and backup-prune marks reach
+  value blocks through `backup::visit_semantic_value_references` (manifests
+  only); both marks read through `BlockStore::traversal_reader` (each
+  catalogued segment index streamed once into a per-mark location table,
+  then non-admitting located reads with the exact path as fallback), other
+  whole-store passes through the non-admitting `BlockStore::get_traversal`,
+  and both drivers report their own stats components. Verify the
+  `tests_capture` reachability/cache and `tests_mark_cost` read-cost
+  specifications and the `entity` `reachability_once_*` visitor specifications.
+  Superseded segment files never wait for a mark: the segment lane runs
+  before marking, confirms orphans by two unchanged observations and
+  re-validates each one under its own hold, including both CONTROL slots
+  (`ControlFile::slots_name_only_payload_manifest`). Every catalog
+  publisher, history promotion and consolidation included, parks what it
+  replaces only after both slots name the new catalog. Verify
+  `tests_segment_reclaim` and the full-catalog history compaction tests in
+  `engine_adoption_tests.rs`. Loose compaction streams inside the scan: each
+  segment the format limits close is built off-mutex and published under its
+  own short hold (candidate memory is one segment), its loose copies then go
+  one short hold each, it takes catalog slots only below the pressure floor,
+  and a compaction error ends compaction, never the scan; verify the backlog
+  specifications in `tests` and `tests_fallback_slot`. Every scan probes each
+  live loose block's membership once (`BlockStore::catalogued_payload_segment`),
+  also while compaction is closed: a block the installed catalog holds is a
+  redundant copy that goes after its shard (one shard's IDs in memory), and a
+  copy-removal error ends copy removal, never the scan; verify
+  `tests_redundant_copies`.
+  Only a stop or `WouldBlock` from that lane abandons an epoch; other lane
+  errors are recorded in `segment_lane_failures`/`segment_lane_error`.
+  Every collector hold that waits for the authority (loose victims, copies,
+  orphan segment removals, consolidation and rewrite publishes) goes
+  through `SingleFileHolds::attempt`: a contended or refused hold is
+  retried with the run's backoff, never ends a pass or fails an epoch, and
+  a built segment is discarded only when `WouldBlock` or a stop proves no
+  publish happened. Epoch errors other than a stop are kept in
+  `failed_epochs`/`epoch_error`. Online loose victims are admitted by count
+  only. Verify `tests_reclaim_throughput`.
+  Loose block files vanish only under the authority mutex, one per hold:
+  each garbage victim and each loose copy of a catalogued block (a compacted
+  segment's copies and the redundant copies a scan finds) is validated
+  and unlinked under its own short `try_lock` hold; shard barriers and a
+  pause at least as long as the previous hold run off the mutex (the 50%
+  duty rule, no constant), a contended or refused attempt retries after at
+  least as long as the run has already been retrying (geometric backoff, no
+  constant) and never blocks in `lock()`, and a stop ends the run. Verify
+  `tests_short_holds`.
+  Every loose-victim hold first makes both CONTROL slots name the current
+  physical roots (`ControlFile::slots_name_only_physical_roots`, rule S8),
+  and a copy's hold re-checks that both slots name the installed catalog,
+  that it still names the segment and that its root is not the block
+  (`Engine::remove_redundant_loose_copy`). Deletion never
+  unlinks a block with a staged copy, checked before the relink fence, and
+  a block a hold unlinked never confirms from suspects observed before that
+  unlink (rule S10); the fence is open only from an epoch's capture to its
+  last deletion hold. Verify `tests_rebirth`. Every
+  off-mutex publication that writes loose blocks before its install (WAL
+  rotation, history compaction, pack adoption) must hold an open
+  `BlockStore` publication window for exactly that span, and `put_loose`
+  registers into open windows before the file appears (rule S9). Verify
+  `tests_fallback_slot` and `tests_publication_window`. Loose listings
+  (scan, offline round, `verify`, backup prune) hold one shard at a time
+  with no store-wide total and take entry kinds from
+  `Vfs::read_directory_entries`; a scan sizes only compaction candidates.
+  Verify `tests_listing` and the `block_listing_*`
+  specifications.
 - `src/verify.rs` owns the offline integrity operators: `verify` (full
   read-only walk: CONTROL, selected predecessor/successor WAL chain via
   shared `wal::scan_selected_generation_chain`, history, payload catalog, entity graph, loose
@@ -298,9 +410,32 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   closed). Neither repairs the source; recovery from a salvage target is
   the ordinary `restore` path. Verification phase timings include authority
   close; embedded driver-stop timings use fixed names under opt-in diagnostics.
-- `src/block.rs` binds Bloom negative answers to the installed payload catalog
-  publication. A stale filter falls back to exact routing/index probes; a
-  rebuild cannot disprove membership in a later batch publication.
+- `src/block.rs` trusts Bloom negative answers only for an installed catalog
+  publication whose every segment the filter covers (per-segment coverage
+  records). `verify_payload_segment` covers each segment a publisher adds and
+  the install reads only segments still uncovered, so every publication stays
+  covered; an uncovered one falls back to exact routing/index probes. Rebuilds
+  reset coverage, so a segment whose bits a rebuild dropped is re-read at its
+  install, never hidden. A loose miss (no file, or one unlinked between the
+  stat and the open) re-checks the installed catalog once unless the filter
+  excluded the block under the still-installed publication; `put_loose` and
+  `flush_pending_selection`, which also run off the mutex, take their
+  absent-file path on an open miss. Verify
+  `cold_loose_reads_skip_the_catalog_after_successive_publications`,
+  `packed_filter_rebuild_before_batch_publication_cannot_hide_durable_blocks`
+  and the loose-race specifications beside
+  `a_catalogued_block_reads_through_its_segment_whatever_happens_to_its_loose_copy`.
+- `src/block.rs::flush_pending_selection` publishes a loose batch per hash
+  shard: each absent block is written and synced on its creating handle before
+  its rename, then one directory barrier covers the shard; `ensure_shard`
+  republishes a shard name whose root barrier failed. With
+  `Vfs::supports_concurrent_file_publication` (`RealVfs`) every shard but the
+  first runs on a scoped worker that inherits the caller's stats component and
+  finishes before the caller returns; simulated and wrapper VFSes stay
+  sequential so fault traces reproduce. Verify `block_loose_batch_tests.rs`
+  (error, torn-write and lost-sync campaigns across concurrent workers, real
+  filesystem) and the loose-race specifications; measurements live in
+  `docs/STORAGE_PERFORMANCE_CHARTER.md#loose-batch-publication-per-hash-shard`.
 - `src/transcript_archive.rs` owns the live per-conversation transcript
   archive (`contracts/tofudb_ir_v1.json` `transcriptArchives`): a compact,
   incrementally sealed legacy-message page store so bulk hydration reads a
@@ -323,18 +458,25 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   `online_gc_capture`); the copy+publish lease scope never overlaps the
   prune lease on the same path-locked BACKUP_LOCK; `system.backup` is a
   control operation that only rings a doorbell and waits on its
-  connection thread.
+  connection thread. Copies are presence-first through
+  `BlockStore::retain_held_block`: held leaves are neither re-read nor
+  rewritten, while pages, manifests and history segments are still read.
 - `src/authority_watch.rs` owns the authority-contention watchdog: a
   `tofu-db-auth-watch` probe thread tracks the longest continuous
   `try_lock` contention window and flips `system.health` ready past the
   10 s wedge threshold (the supervisor's liveness path is the recycler).
   Successful foreground lock acquisitions advance the authority-local progress
   counter; the watch clears sampled contention on handoff without taking the
-  semantic layer. Other authorities cannot mask a wedged holder.
+  semantic layer. Other authorities and lock-free published reads cannot mask
+  a wedged holder (`published_reads_never_count_as_authority_handoff`). A reporting
+  `AuthorityHoldTimer::start` hold splits its line into exclusive phases; a new
+  stage either names its phase in `hold_phase_of_stage` or inherits its caller's.
 - `src/authority_gc_online.rs`'s epoch cadence has a doorbell-proof
   floor: no trigger (reclaim doorbell, volume pressure, idle timer) may
   start epochs faster than the minimum interval by start time, and the
-  collector never exceeds a 50% duty cycle.
+  collector never exceeds a 50% duty cycle. An epoch that ends with the
+  payload catalog at 90% of its 4,096-entry ceiling or more keeps the
+  minimum interval instead of doubling its idle backoff.
 - `src/wal_retirement.rs` owns the one retired-generation cleanup slot;
   the existing pack worker deletes it outside the authority mutex.
 - `src/migration_session.rs` owns the exclusive private-pipe operator boundary;
@@ -358,6 +500,12 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
 - `src/turn/snapshot_transfer.rs` owns the exclusive bounded Turn transfer
   buffer; it shares session admission with event/frozen uploads. Turn read
   bounds are distinct from ordinary live write/IR admission.
+- `src/turn/metadata_summary.rs` owns header-bound Turn metadata summaries: every
+  Turn document writer calls `put_document`, and metadata-only `turn.get` trusts
+  a summary only while its digest names the current blob envelope, otherwise
+  the whole-document reader answers. Verify `turn::metadata_read_tests`
+  (byte parity, dangling blob, stale/malformed/oversized fallback, trash/purge,
+  VFS read bytes); design: `docs/STORAGE_TOFUDB.md#header-bound-turn-metadata-summaries`.
 - `src/turn/text_tail.rs` owns revision-fenced live text pages under the existing
   projection head. Contract: `docs/STORAGE_TURN_TEXT.md`; bounds come from the
   native IR generator. Preserve exact replay, owner/CAS fences, snapshot readers
@@ -370,7 +518,9 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
 - `src/turn/event_retirement.rs` owns deletion-time identity pins and bounded
   cleanup cursors on the existing event-maintenance path. Verify generation,
   identity reuse, empty-event progress and cursor/pin crash tests; lifecycle and
-  retained-state costs live in `docs/STORAGE_EVENT_REPLAY.md`.
+  retained-state costs live in `docs/STORAGE_EVENT_REPLAY.md`. Attempt-event
+  retention deletes exact witnessed rows within one rebaseable overlay delta,
+  never a structural range; verify `turn/event_prune_tests.rs`.
 - `src/turn/tombstone_migration.rs` preserves source deletion clocks through
   atomic Turn claims and delta/age indexes; private get/scan validate both.
 - `src/turn/attempt_migration.rs` owns terminal Attempt snapshots and their
@@ -404,7 +554,11 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   replica — never under the foreground authority mutex; only the exact-token
   acknowledge touches the writer. Native limits derive from
   `contracts/conversation_search_v2.json` through `gen_tofudb_ir_contract.py`;
-  the index design record is in `docs/STORAGE_TOFUDB.md`.
+  the index design record is in `docs/STORAGE_TOFUDB.md`. `search_dirty.rs`
+  also owns the volatile per-scope commit sequence: flagged commits ring the
+  existing maintenance condvar, and READY waits for a round whose empty dirty
+  listing observed every counted commit. Verify `maintenance`, `search_dirty`
+  and `turn_search_worker` tests plus the projection relocation integration.
 - `src/turn_search_runtime.rs` owns capacity admission and retryable deferred
   opening off the request mutex on the existing maintenance worker; `search_volume.rs` consumes generated geometry policy. The opened
   codec is crate-private. Source and index reuse `OnlineGcDatabase` ports and
@@ -412,6 +566,11 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
 - `project_brain_recovery.rs` owns header-bound active-work summaries and
   bounded replica backfill; project writes share their existing transaction.
   Verify stale-source, cross-owner, cancellation and atomic cursor/summary faults.
+  `project_brain.rs` recovery pages yield between projects; `server.rs` routes
+  this pure maintenance read through the shared query replica lane. Verify
+  recovery under a held writer, unchanged WAL/outbox, and yielded cursor traversal.
+  Recovery and backfill walk the digest-keyed project documents, never update-index
+  rows; assert per-walk hydration counts with legacy index rows present.
 - `artifact_query.rs` is the shared canonical tool-result read/search owner.
   Policy comes from `contracts/tool_result_query_v1.json`; typed result manifests,
   owner-private signed route cursors and verified raw blob ranges stay in this
@@ -462,10 +621,11 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
     of panicking. The catalog it serves derives from
     `contracts/tofusql_catalog_v1.json` via `scripts/gen_tofusql_catalog.py`.
     No other module may link SQLite.
-- Every allocation, file, queue, worker, and recovery scan needs a hard bound.
-  Normal open must never migrate. Recovery scans at most one active WAL and,
-  only when CONTROL owns it, one sealed predecessor (64 MiB each); see the
-  generation ownership contract below.
+- Normal open never migrates. Recovery scans the active WAL and only its
+  CONTROL-owned sealed predecessor, using `wal_reader.rs` read-ahead and
+  validated frame bounds rather than an aggregate log-size admission cap.
+  `engine_wal_progress_tests.rs` verifies paused maintenance, large-backlog
+  recovery, actual SIGKILL and eventual retirement; see the rotation contract.
 - `src/payload_hints.rs` owns reconstructible positive point-read hints across
   opens. Only the current CONTROL catalog and verified payload bytes establish
   a hit; cache loss/corruption never proves absence or fails authority open.
@@ -474,13 +634,12 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   measurements live in `docs/STORAGE_TOFUDB.md`.
 - `src/payload_routing.rs` owns budgeted verified-prefix routes published with
   the payload catalog; unknown segments stay explicit fallback candidates.
-  `src/block.rs` dedupe probes run behind a bounded candidate window (16):
-  content-hashed IDs make manifest hash-ranges overlap almost entirely, so an
-  unbounded newest-first scan costs O(segments) opens per probe. A filter-
-  proven packed block beyond the window answers `PackedElsewhere` without
-  restaging — staged chunks must stay disjoint from published segments, the
-  invariant the checkpoint pack merge relies on. An unbuilt packed filter
-  means "no catalog yet", never "packed".
+  `src/block.rs` dedupe probes resolve every candidate segment the packed
+  filter admits; there is no candidate window and no `PackedElsewhere`
+  answer. A filter hit that no verified index confirms restages, which is
+  idempotent by content ID, and checkpoint and adoption merges drop
+  duplicates of the segment they merge into. An unbuilt packed filter means
+  "no catalog yet", never "packed".
 - Resource budgets are probe-derived, not operator-tuned: since
   2026-09-23 the daemon and the embedded transport apply four write-path /
   index budgets from the launch probe at authority open
@@ -541,6 +700,11 @@ armed fault fires. Production still generates UUIDs; never skip unexercised cell
 Run `cargo test --manifest-path packages/tofu-db/Cargo.toml`.  Filesystem or
 commit changes must add a deterministic crash/torn-write test before broader
 application integration tests.
+
+Launch shells export `TOFU_DB_*` settings to every child, including `cargo test`.
+Specifications pin each engine knob they depend on: per-database test overrides
+(write overlay, tombstone reclaim) and `DaemonResourceBudget::derive` with
+explicit `ResourceOverrides`; only the launch entry reads the environment.
 
 Platform-specific launch observation (`resource_probe.rs`) is gated with
 `cfg(target_os = ...)`: keep the Linux `/proc`/cgroup path, the macOS

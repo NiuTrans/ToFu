@@ -46,6 +46,35 @@ def test_same_loop_sync_operations_refuse_before_admission():
     asyncio.run(run())
 
 
+def test_owned_cli_configuration_sizes_idle_reuse_only_and_never_counts_pending_calls(monkeypatch, tmp_path):
+    from lib.agent_core.native_image import NativeArchiveImage
+    from runtime_guards import UNLIMITED
+    from tofu_agent.native_runtime import owned_native_agent_configuration
+
+    class Descriptor:
+        def close(self):
+            pass
+
+    async def duplicate(_image, _limit):
+        return Descriptor()
+
+    monkeypatch.setattr(NativeArchiveImage, 'duplicate', duplicate)
+    archive = tmp_path / 'runtime.tar'
+    archive.write_bytes(b'fixture archive')
+    value = profile(); value['model_control']['pricing'] = False
+
+    async def run():
+        async with owned_native_agent_configuration(
+                archive=archive, configuration=value, working_directory=tmp_path,
+                environ={'TOFU_AGENT_WORKERS': '3'}, shutdown_seconds=1) as native:
+            assert native.pending_calls == UNLIMITED
+            assert native.executor.resource_snapshot()['capacity'] == 3
+            assert native.executor.queue_capacity == 0
+            executor = native.executor
+        assert executor._shutdown
+    asyncio.run(run())
+
+
 def test_native_public_result_and_close_wait_for_worker_join(monkeypatch):
     from concurrent.futures import Future
     from lib.agent_core.admission import fire_terminal_callbacks

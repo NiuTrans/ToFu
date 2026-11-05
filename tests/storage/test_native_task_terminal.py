@@ -234,8 +234,11 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
     gateway_mode = outcome in {'native_context','native_context_inbox','native_context_refusal','native_context_deadline','preparation_fault','responses_preparation','responses_gateway','responses_image','gateway_write','gateway_rounds','anthropic_gateway','anthropic_image','chat_image','image_without_admission','image_feedback_overflow','anthropic_schema'}
     multiple_rounds = outcome == 'gateway_rounds'
     second_target=tmp_path/'second-native-tool.txt'
-    tool_name = 'write_file' if gateway_mode else 'lookup'
-    tool_args = {'path':str(write_target),'content':'registered native application write'} if gateway_mode else {}
+    # The source-footer variant opens a page through the real fetch_url
+    # handler; the committed footer must name that page and none of its links.
+    tool_name = 'fetch_url' if source_footer else 'write_file' if gateway_mode else 'lookup'
+    tool_args = ({'url':'https://example.test/retrieved'} if source_footer else
+                 {'path':str(write_target),'content':'registered native application write'} if gateway_mode else {})
     if application_root:tool_args['description']='Native application verification'
     if image_mode:
         import base64
@@ -317,7 +320,7 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
                     elif canonical_approval=='denied':
                         assert evidence=='Tool call denied by owner approval policy'
                     else:
-                        assert 'File created:' in evidence
+                        assert ('Content from https://example.test/retrieved' if source_footer else 'File created:') in evidence
                 else:
                     assert body['messages'][-1]['content'] == (
                         'Tool call denied by owner approval policy' if outcome=='denied_write' else 'tool evidence')
@@ -458,8 +461,15 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
             approval_decisions.append(request.call_id)
             if outcome=='approval_fault':raise OSError('fixture policy failure')
             return 'denied' if outcome=='denied_write' else 'auto_write_mode'
-    write_mode=outcome in {'native_context','native_context_inbox','native_context_refusal','native_context_deadline','preparation_fault','responses_preparation','responses_gateway','approved_write','denied_write','approval_fault','gateway_write','gateway_rounds','anthropic_gateway','anthropic_schema'}
-    if gateway_mode:
+    write_mode=outcome in {'native_context','native_context_inbox','native_context_refusal','native_context_deadline','preparation_fault','responses_preparation','responses_gateway','approved_write','denied_write','approval_fault','gateway_write','gateway_rounds','anthropic_gateway','anthropic_schema'} and not source_footer
+    if source_footer:
+        settings['tools']={'fetch_url':{'name':'fetch_url','contractVersion':'tofu.tool-contract/v2','permission':'read','arguments_schema':{'type':'object','properties':{'url':{'type':'string'}},'required':['url']}}}
+        from lib.tasks_pkg.handlers.search import _core as search_core
+        def retrieved_page(url,user_question='',fetch_reason='',**kwargs):
+            body='Retrieved page body. Related: https://example.test/linked-elsewhere'
+            return {'url':url,'page_content':body,'is_pdf':False,'raw_chars':len(body),'filtered_chars':len(body),'error_msg':None}
+        monkeypatch.setattr(search_core,'_fetch_url_one',retrieved_page)
+    elif gateway_mode:
         settings['tools']={'write_file':{'name':'write_file','contractVersion':'tofu.tool-contract/v2','permission':'write','arguments_schema':{'type':'object','properties':{'path':{'type':'string'},'content':{'type':'string'}},'required':['path','content']}}}
     if image_mode:
         settings['tools']={tool_name:{'name':tool_name,'contractVersion':'tofu.tool-contract/v2','permission':'read','arguments_schema':{'type':'object','properties':{'path':{'type':'string'}},'required':['path']}}}
@@ -647,7 +657,6 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
                     tool_list=definitions,all_search_results_text=[],cfg=task['config'],tid=task_id[:8],
                     thinking_depth='high',temperature=.25,max_tokens=64,response_format=task['config'].get('responseFormat'),
                     project_path=str(tmp_path),project_enabled=True,search_enabled=False)
-                if source_footer:root.all_search_results_text.append('URL: https://example.test/retrieved')
                 resource={key:value for key,value in settings.items() if key not in
                     ({'version','type','owner_user_id','task_id','messages','tools'} | ROUTE_OVERRIDE_FIELDS)}
                 from lib.resource_control.runtime import launch_policy
@@ -869,7 +878,7 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
     elif canonical_approval is not None:
         assert not approval_decisions
         assert len(application_prompts)==(0 if canonical_approval=='auto' else 1)
-        assert write_target.exists()==(canonical_approval!='denied')
+        assert write_target.exists()==(canonical_approval!='denied' and not source_footer)
         assert len(task['toolRounds'])==1
         assert task['toolRounds'][0]['status']==('rejected' if canonical_approval=='denied' else 'done')
         assert len(turn['projection']['toolRounds'])==1
@@ -880,7 +889,7 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
         if image_mode:
             assert not approval_decisions and not write_target.exists()
             assert task['toolRounds'][0].get('toolModelContent')
-        elif canonical_approval!='denied':
+        elif canonical_approval!='denied' and not source_footer:
             assert write_target.read_text()=='registered native application write'
         assert len(task['toolRounds'])==(2 if multiple_rounds else 1)
         assert all(row['status']==('rejected' if canonical_approval=='denied' else 'done') for row in task['toolRounds'])

@@ -1,7 +1,8 @@
-"""Static platform-policy prefix; runtime facts stay in their chronological lane.
+"""Registry-owned system-policy prefix; runtime facts stay in the tail.
 
-Only the registered platform_static producer can use this boundary. Migration
-edits request-local composer envelopes, never user text or durable Turns.
+Only registered system-placement producers can use this boundary. Migration
+edits verified request-local composer envelopes, never user text or durable
+Turns.
 """
 from __future__ import annotations
 
@@ -11,7 +12,9 @@ import re
 from .registry import block_spec
 from ._sections import _canonical_section, _strip_to_body
 
-_STATIC = 'platform_static'
+_MIGRATABLE_POLICY_IDS = (
+    'platform_static', 'parallel_execution', 'delegate_mode',
+)
 # Match outer producer envelopes first: a static-looking quote inside a project
 # or memory envelope is data, not another producer. The stored digest below is
 # additionally required before any content can move into a native policy role.
@@ -42,12 +45,12 @@ def insert_policy(messages: list[dict], carrier: dict) -> None:
     messages.insert(index, carrier)
 
 
-def _verified_spans(message: dict) -> dict:
+def _verified_spans(message: dict, block_id: str) -> dict:
     """Map part index to exact owned spans; no digest means no role promotion."""
     if not message.get('_contextComposer') or not message.get('_isMeta'):
         return {}
     rows = [row for row in message.get('_contextBlocks') or []
-            if isinstance(row, dict) and row.get('id') == _STATIC]
+            if isinstance(row, dict) and row.get('id') == block_id]
     digests = {row.get('hash') for row in rows if row.get('hash')}
     content = message.get('content')
     parts = content if isinstance(content, list) else [content]
@@ -62,10 +65,10 @@ def _verified_spans(message: dict) -> dict:
         # so the on-wire span (standalone or amalgamated envelope) must be
         # reduced to the same form before comparison.
         matches = [match for match in _ENVELOPE.finditer(text)
-                   if match.group(1) == _STATIC
+                   if match.group(1) == block_id
                    and hashlib.sha256(
                        _canonical_section(
-                           _STATIC, _strip_to_body(match.group(0)))
+                           block_id, _strip_to_body(match.group(0)))
                        .encode('utf-8')).hexdigest()[:16]
                    in digests]
         if matches:
@@ -73,15 +76,9 @@ def _verified_spans(message: dict) -> dict:
     return spans
 
 
-def migrate_policy_prefix(messages: list[dict]) -> None:
-    """Move verified static envelopes once, without changing quoted bytes.
-
-    The latest verified policy wins. Missing/mismatched producer evidence fails
-    closed; normal collection may add current policy but cannot promote a quote.
-    Already-dedicated prefix policy is a no-op for cache stability.
-    """
+def _migrate_policy_block(messages: list[dict], block_id: str) -> None:
     owned = {index: spans for index, message in enumerate(messages)
-             if (spans := _verified_spans(message))}
+             if (spans := _verified_spans(message, block_id))}
     if not owned:
         return
     last_index = next(reversed(owned))
@@ -115,11 +112,24 @@ def migrate_policy_prefix(messages: list[dict]) -> None:
             normalized.append({**message,
                 'content': kept if isinstance(content, list) else ''.join(kept),
                 '_contextBlocks': [r for r in message['_contextBlocks']
-                                   if not isinstance(r, dict) or r.get('id') != _STATIC]})
+                                   if not isinstance(r, dict) or r.get('id') != block_id]})
+    spec = block_spec(block_id)
     insert_policy(normalized, policy_carrier([{
-        'id': _STATIC,
+        'id': block_id,
         'hash': hashlib.sha256(
-            _canonical_section(_STATIC, _strip_to_body(rendered))
+            _canonical_section(block_id, _strip_to_body(rendered))
             .encode('utf-8')).hexdigest()[:16],
-        'stability': 'static', 'lifecycle': 'conversation', '_rendered': rendered}]))
+        'stability': spec.stability, 'lifecycle': spec.lifecycle,
+        '_rendered': rendered}]))
     messages[:] = normalized
+
+
+def migrate_policy_prefix(messages: list[dict]) -> None:
+    """Move verified legacy policy envelopes without changing quoted bytes.
+
+    The latest verified policy wins. Missing/mismatched producer evidence fails
+    closed; normal collection may add current policy but cannot promote a quote.
+    Already-dedicated prefix policy is a no-op for cache stability.
+    """
+    for block_id in _MIGRATABLE_POLICY_IDS:
+        _migrate_policy_block(messages, block_id)

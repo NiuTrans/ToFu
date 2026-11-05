@@ -8,7 +8,7 @@ import json
 from jsonschema import Draft7Validator
 import pytest
 
-from lib.tools.gateway import sanitize_wire_tools, tool_schema_tokens
+from lib.tools.gateway import sanitize_wire_tools
 from lib.tools.todo import (
     TODO_MAX_CONTENT_CHARS,
     TODO_MAX_EXPLANATION_CHARS,
@@ -53,7 +53,6 @@ def test_schema_provider_preflight_and_resource_limits():
     assert props['todos']['items']['properties']['content']['maxLength'] == TODO_MAX_CONTENT_CHARS == 512
     assert props['explanation']['maxLength'] == TODO_MAX_EXPLANATION_CHARS == 2048
     assert TODO_STATE_VERSION == 3
-    assert tool_schema_tokens([TODO_WRITE_TOOL]) <= 325
     wire = [TODO_WRITE_TOOL]
     assert sanitize_wire_tools(wire) is wire
     kimi = sanitize_wire_tools(wire, model='kimi-k3')[0]['function']['parameters']

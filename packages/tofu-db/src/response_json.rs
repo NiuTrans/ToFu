@@ -86,8 +86,7 @@ pub(crate) fn normalize_value_with_size(
         // The byte API checks its output bound before parsing that output.
         // Preserve that refusal order even for malformed reserved markers.
         if bytes.len() > maximum_bytes {
-            return Err(serde_json::Error::io(std::io::Error::new(
-                std::io::ErrorKind::OutOfMemory, "JSON exceeds its byte bound")));
+            return Err(serde_json::Error::io(crate::resource_exhaustion::domain_bound("JSON exceeds its byte bound")));
         }
         return serde_json::from_slice(&bytes).map(|value| (value, bytes.len()));
     }
@@ -96,8 +95,8 @@ pub(crate) fn normalize_value_with_size(
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             self.bytes = self.bytes.checked_add(bytes.len())
                 .filter(|size| *size <= self.maximum)
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::OutOfMemory,
-                    "JSON exceeds its byte bound"))?;
+                .ok_or_else(|| crate::resource_exhaustion::domain_bound(
+                    "JSON exceeds its byte bound",))?;
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> { Ok(()) }

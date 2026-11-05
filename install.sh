@@ -550,11 +550,24 @@ _install_run() {
     local seconds="$1"; shift
     local runner_python="${ENV_PYTHON:-${_uvpy:-}}"
     [[ -x "$runner_python" ]] || runner_python="$(command -v python3 || command -v python || :)"
+    # `<interpreter> - ...` reads its program from this call's heredoc. Every
+    # other command gets no stdin: under `curl ... | bash` the inherited stdin
+    # is the rest of this installer, which a child must never consume.
+    local stdin_program=0
+    [[ "${2:-}" == "-" ]] && stdin_program=1
     if [[ -n "$runner_python" && -f "${INSTALL_DIR}/bootstrap_pkg/process.py" ]] \
             && "$runner_python" -c 'import sys; sys.exit(sys.version_info < (3, 8))' >/dev/null 2>&1; then
-        "$runner_python" "${INSTALL_DIR}/bootstrap_pkg/process.py" --timeout "$seconds" --retry-network -- "$@"
+        if [[ "$stdin_program" -eq 1 ]]; then
+            "$runner_python" "${INSTALL_DIR}/bootstrap_pkg/process.py" --timeout "$seconds" --retry-network --stdin-program -- "$@"
+        else
+            "$runner_python" "${INSTALL_DIR}/bootstrap_pkg/process.py" --timeout "$seconds" --retry-network -- "$@" </dev/null
+        fi
     elif command -v timeout >/dev/null 2>&1; then
-        timeout -k 5 "$seconds" "$@" </dev/null
+        if [[ "$stdin_program" -eq 1 ]]; then
+            timeout -k 5 "$seconds" "$@"
+        else
+            timeout -k 5 "$seconds" "$@" </dev/null
+        fi
     else
         _install_run_shell "$seconds" "$@"
     fi
@@ -794,18 +807,21 @@ _ensure_uv() {
         warn "TOFU_UV_LOCAL set but not executable: ${TOFU_UV_LOCAL} — falling back to download"
     fi
     info "uv not found — installing it (astral.sh, bounded)..."
+    # The astral installer otherwise follows XDG_BIN_HOME / XDG_DATA_HOME,
+    # landing uv in a directory this run never searches (and the conda
+    # fallback then hides why). Pin the destination we put on PATH below.
+    local _uv_bin_dir="${UV_INSTALL_DIR:-${HOME}/.local/bin}"
     if command -v curl &>/dev/null; then
         # Capture curl stderr into the install log so proxy/network failures are
         # visible for diagnosis (previously hidden behind /dev/null + `|| true`).
         # A failure still falls back to conda — the return below stays non-zero.
-        if _install_run 120 bash -o pipefail -c 'curl -LsSf --connect-timeout 15 --max-time 90 --retry 2 https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh' >>"$TOFU_INSTALL_LOG" 2>&1; then
+        if UV_INSTALL_DIR="$_uv_bin_dir" _install_run 120 bash -o pipefail -c 'curl -LsSf --connect-timeout 15 --max-time 90 --retry 2 https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh' >>"$TOFU_INSTALL_LOG" 2>&1; then
             :
         else
             warn "uv installer failed (see ${TOFU_INSTALL_LOG}); astral.sh may be unreachable behind a proxy"
         fi
     fi
-    # uv installs to ~/.local/bin or ~/.cargo/bin — put both on PATH for this run.
-    export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+    export PATH="${_uv_bin_dir}:${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
     command -v uv &>/dev/null
 }
 
@@ -954,7 +970,10 @@ from bootstrap_pkg.install_artifacts import prepare_python_wheels
 prepare_python_wheels(sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]))
 PYEOF
     info "Installing Python dependencies with uv (prebuilt wheels)..."
-    _install_run 900 uv pip install --python "$_uvpy" --no-index --find-links "$_wheelhouse" --no-deps --require-hashes -r "${_wheelhouse}/install.lock" 2>&1 || {
+    # --no-config like the resolve step: the checkout's [tool.uv]
+    # constraint-dependencies are unpinned floors, which hash mode rejects;
+    # the lock is already resolved, so installation must not read config.
+    _install_run 900 uv pip install --no-config --python "$_uvpy" --no-index --find-links "$_wheelhouse" --no-deps --require-hashes -r "${_wheelhouse}/install.lock" 2>&1 || {
         warn "uv pip install failed — falling back to conda"; return 1; }
 
     # ── Import smoke-test: THE compatibility gate ──
@@ -976,7 +995,7 @@ PYEOF
         return 1
     fi
 
-    # rg / fd are performance optimizations, NOT hard deps (grep_search degrades
+    # rg / fd are performance optimizations, NOT hard deps (search_files degrades
     # rg → grep → pure-Python). Detect system copies; never build from source.
     if ! command -v rg &>/dev/null; then
         warn "ripgrep (rg) not found — search falls back to grep/Python (slower, still works)."
@@ -1019,15 +1038,21 @@ PYEOF
         # Prove it launches now, while we can still say something useful —
         # otherwise the failure only surfaces much later as a dead browser tool.
         info "Verifying Chromium can actually launch..."
-        if "$_uvpy" - <<'PYEOF' 2>/dev/null
+        if PYTHONPATH="$INSTALL_DIR${PYTHONPATH:+:$PYTHONPATH}" "$_uvpy" - <<'PYEOF' 2>/dev/null
+import chromium_env
+chromium_env.ensure_chromium_env()
 from playwright.sync_api import sync_playwright
 with sync_playwright() as p:
     b = p.chromium.launch(args=['--no-sandbox'])
     pg = b.new_page()
-    pg.set_content('<h1>x</h1>')
-    assert pg.evaluate(
+    pg.set_content('<h1>x中文</h1>')
+    widths = pg.evaluate(
         "(()=>{const c=document.createElement('canvas').getContext('2d');"
-        "c.font='60px sans-serif';return c.measureText('x').width;})()") > 0, 'no fonts'
+        "c.font='60px sans-serif';return [c.measureText('x').width,"
+        "c.measureText('中').width,"
+        "c.measureText(String.fromCodePoint(0x10ffff)).width];})()")
+    assert widths[0] > 0, 'no fonts'
+    assert widths[1] != widths[2], 'missing Chinese glyphs'
     b.close()
 PYEOF
         then
@@ -1309,7 +1334,10 @@ if [[ -z "$CONDA_BIN" ]]; then
         MF_URLS=("${_USER_MIRRORS[@]}" "${MF_URLS[@]}")
     fi
     if [[ "${_SKIP_MINIFORGE_DOWNLOAD:-0}" -ne 1 ]]; then
-    TMP_INSTALLER="$(mktemp "${TMPDIR:-/tmp}/miniforge.XXXXXX")"
+    # Miniforge/Miniconda exit unless $0 ends in `.sh`, so keep the canonical
+    # file name inside a private directory instead of a suffixless mktemp file.
+    _MF_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tofu-miniforge.XXXXXX")"
+    TMP_INSTALLER="${_MF_TMP_DIR}/${MF_FILE}"
     # Don't override the global EXIT trap (which is the install-log reminder);
     # use a RETURN-style cleanup at the end of this branch.
     # Force IPv4 — many corp networks return AAAA records but have no v6
@@ -1331,14 +1359,14 @@ if [[ -z "$CONDA_BIN" ]]; then
             fi
             warn "wget failed for $_MF_URL — trying next mirror"
         else
-            rm -f "$TMP_INSTALLER"
+            rm -rf -- "$_MF_TMP_DIR"
             fail "Need curl or wget to download Miniforge"
         fi
         # Clean up any partial file before retrying the next mirror.
         : > "$TMP_INSTALLER"
     done
     if [[ "$_DOWNLOADED" -ne 1 ]]; then
-        rm -f "$TMP_INSTALLER"
+        rm -rf -- "$_MF_TMP_DIR"
         warn "All Miniforge mirrors failed (tried ${#MF_URLS[@]})."
         warn "Workaround: manually download Miniforge3-${PLATFORM}-${ARCH}.sh on a machine"
         warn "  with network access, copy it to this host, then re-run:"
@@ -1354,7 +1382,7 @@ if [[ -z "$CONDA_BIN" ]]; then
     # belongs to whoever's session this is. Activation is handled by the
     # .tofu_env.json marker (read by server.py / bootstrap.py).
     _install_run 600 bash "$TMP_INSTALLER" -b -p "$SIBLING_CONDA_DIR"
-    rm -f "$TMP_INSTALLER"
+    rm -rf -- "$_MF_TMP_DIR"
 
     CONDA_BIN="${SIBLING_CONDA_DIR}/bin/conda"
     [[ -x "$CONDA_BIN" ]] || fail "Miniforge install did not produce $CONDA_BIN"
@@ -1639,7 +1667,7 @@ CONDA_PKGS=(
     "pip>=23"
     # Quart + Hypercorn (ASGI server) — the core server runtime.
     # cryptography is needed for Hypercorn's auto-TLS (HTTP/2).
-    "quart>=0.19"
+    "quart>=0.20"
     "hypercorn>=0.17"
     "cryptography>=42"
     # cffi — cryptography's C ABI bridge and the one the generated native
@@ -1658,13 +1686,18 @@ CONDA_PKGS=(
     "pyyaml>=6.0"
     "psutil>=5.9"
     "playwright>=1.40"
-    "pillow>=10.0"
+    # Security floor from requirements.txt; a lower conda floor lets the solver
+    # keep or pick a Pillow release with a known critical CVE.
+    "pillow>=13.0.0"
     # numpy + scipy — used by scripts/png_to_svg.py for background removal
     # (flood-fill connected-components) in generate_image(svg=true). Without
     # them the SVG bg-removal step silently degrades to a worse trace.
     "numpy>=1.24"
     "scipy>=1.10"
     "python-pptx>=0.6.21"
+    # defusedxml — hardened XML parsing for the PPTX export package check
+    # (lib/slides/pptx_qa.py). Pure Python; noarch on conda-forge.
+    "defusedxml>=0.7.1"
     # fontTools — CFF→glyf conversion for PPTX font embedding
     # (lib/slides/export_pptx.py). WOFF2 support needs brotli — pip-side
     # below (conda-forge names the binding brotli-python, guard mismatch).
@@ -1692,6 +1725,10 @@ CONDA_PKGS=(
     # Declared in requirements.txt after the desktop_dist clean-venv build
     # proved the gap (boot smoke: ModuleNotFoundError httpx, 2026-08-01).
     "httpx>=0.28"
+    # websockets — Responses WebSocket transport (lib/llm/responses_websocket.py)
+    # and the Feishu long connection. Imported lazily; without it every
+    # Responses round falls back to HTTP SSE.
+    "websockets>=15.0"
     # orjson — fast JSON encoder; imported by routes/chat.py for chat
     # snapshot serialisation. Hard dep: the server won't boot without it.
     "orjson>=3.9"
@@ -1705,12 +1742,12 @@ CONDA_PKGS=(
     "psycopg>=3.2"
     "psycopg-pool>=3.2"
     # markdown — server-side Markdown rendering. Hard dep at import time.
-    "markdown>=3.4"
+    "markdown>=3.5"
     # markdown-it-py — CommonMark renderer for markdown-artifact export
     # (lib/artifacts/pdf_export.py).
     "markdown-it-py>=3.0"
     # tiktoken — exact BPE tokenizer tier for lib/token_counter.
-    "tiktoken>=0.5"
+    "tiktoken>=0.7"
     # Bootstrap PyMuPDF core from conda for old-glibc hosts. The exact trio is
     # harmonized with pip immediately below; this floor is not the final
     # version contract.
@@ -1720,7 +1757,7 @@ CONDA_PKGS=(
     # qrcode — QR PNG encoder for the scan-to-login prompt (lib/qr.py).
     "qrcode>=7.4"
     # uv / uvx — used by lib/mcp/client.py to launch MCP servers
-    "uv>=0.4"
+    "uv>=0.13.4"
 )
 
 # Pip-installed deps.
@@ -1794,15 +1831,18 @@ PIP_ONLY_PKGS=(
     # which would not match the drift guard's name check; the wheel is a
     # self-contained binary with no deps, so --no-deps is safe.
     "brotli>=1.1"
-    # repo_map agent tool (lib/repo_map). All four are absent-or-stale on
+    # zstandard — Codex CLI's zstd request encoding (lib/llm/request_encoding.py).
+    # Pip-side to keep the declared marker: Python 3.14+ uses stdlib
+    # compression.zstd, and a conda match spec cannot express the condition.
+    "zstandard>=0.23; python_version < '3.14'"
+    # repo_map agent tool (lib/repo_map). All three are absent-or-stale on
     # conda-forge, so they install from PyPI. --no-deps is safe because
     # lib/repo_map imports each LAZILY (never at server boot), and each
     # wheel's own runtime deps are already satisfied here:
     #   grep-ast needs tree-sitter + pathspec; tree-sitter-language-pack
-    #   vendors tree-sitter 0.25 and brings it in transitively; networkx
-    #   and pathspec are pure-Python with zero deps.
+    #   vendors tree-sitter 0.25 and brings it in transitively; pathspec is
+    #   pure-Python with zero deps. Ranking itself is dependency-free.
     "grep-ast>=0.9"
-    "networkx>=3.0"
     "pathspec>=0.12"
     "tree-sitter-language-pack>=0.10"
     # paramiko — SSH/SFTP for the codelab-ssh-connect skill's bundled scripts.
@@ -2227,6 +2267,88 @@ else
     done
 fi
 
+# ── YourProvider middle-platform runtime (internal exports only) ──
+# Owner decision 2026-11-01: an internal export must work OUT OF THE BOX —
+# the colleague must not have to install Node, the SSO CLI or the sandbox SDK
+# before the carried skills and MCP servers can run. Demand-driven: this step
+# runs only when a YourProvider capability is actually present (a vendored internal
+# MCP repo, or the owner-global skill store). Opensource installs never see it.
+# Every failure is a WARNING: optional capability state must never abort an
+# otherwise verified installation.
+_MEITUAN_CAPS_PRESENT=0
+for _probe in hope-mcp xuecheng-mcp llm-mcp github-batch-mcp; do
+    [[ -f "${INSTALL_DIR}/vendor/${_probe}/pyproject.toml" ]] && _MEITUAN_CAPS_PRESENT=1
+done
+[[ -d "${INSTALL_DIR}/data/skills/users" ]] && _MEITUAN_CAPS_PRESENT=1
+if [[ "$_MEITUAN_CAPS_PRESENT" -eq 0 ]]; then
+    info "No carried YourProvider capabilities — skipping the internal runtime step"
+else
+    step "Provisioning the YourProvider middle-platform runtime (Node, SSO CLI, sandbox SDK)"
+    _MEITUAN_NODE_OK=0
+    for _cand in "${TOFU_NODE:-}" "${ENV_PREFIX}/bin/node" "${INSTALL_DIR}/.tofu/node-toolchain/bin/node" "$(command -v node 2>/dev/null || true)"; do
+        [[ -n "$_cand" && -x "$_cand" ]] || continue
+        _major="$("$_cand" -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+        if [[ "${_major:-0}" -ge 22 ]] 2>/dev/null; then
+            _MEITUAN_NODE_OK=1
+            _MEITUAN_NODE="$_cand"
+            break
+        fi
+    done
+    if [[ "$_MEITUAN_NODE_OK" -eq 0 ]]; then
+        # DX needs Node >=22 (env-proxy support); the bundled musl toolchain is
+        # Node 20, so an export host that only has that one still needs a newer
+        # runtime. Reuse the conda env the installer already owns.
+        info "Installing nodejs 22 into ${ENV_NAME} (required by carried Node skills/MCP)"
+        if "$CONDA_BIN" install -y -n "$ENV_NAME" -c conda-forge --override-channels "nodejs=22" \
+                >/tmp/tofu-yourprovider-node.log 2>&1; then
+            _MEITUAN_NODE_OK=1
+            _MEITUAN_NODE="${ENV_PREFIX}/bin/node"
+            ok "Node $("$_MEITUAN_NODE" --version) available"
+        else
+            warn "Node >=22 could not be installed (see /tmp/tofu-yourprovider-node.log)."
+            warn "DX / npx-based MCP servers will not run until Node >=22 is on PATH."
+        fi
+    else
+        ok "Node >=22 already available: $("$_MEITUAN_NODE" --version)"
+    fi
+
+    # YourProvider npm CLIs into the env's own node_modules — the shared SSO adapter
+    # discovers @datafe/llm-cli via the `llm` launcher, and @mtfe/mtsso-auth-official
+    # next to it, so both land in the same prefix. No global/home mutation.
+    if [[ "$_MEITUAN_NODE_OK" -eq 1 && -x "${ENV_PREFIX}/bin/npm" ]]; then
+        _NPM_REGISTRY="${TOFU_NPM_REGISTRY:-http://r.npm.internal.example.com}"
+        info "Installing @datafe/llm-cli + @mtfe/mtsso-auth-official + @mtfe/mtskills (${_NPM_REGISTRY})"
+        if "${ENV_PREFIX}/bin/npm" install --prefix "$ENV_PREFIX" --no-audit --no-fund \
+                --registry="$_NPM_REGISTRY" \
+                @datafe/llm-cli @mtfe/mtsso-auth-official @mtfe/mtskills \
+                >/tmp/tofu-yourprovider-npm.log 2>&1; then
+            ok "YourProvider SSO CLI installed (${ENV_PREFIX}/bin/llm)"
+        else
+            warn "YourProvider npm CLIs could not be installed (see /tmp/tofu-yourprovider-npm.log)."
+            warn "Shared SSO ticket exchange needs @datafe/llm-cli and @mtfe/mtsso-auth-official."
+        fi
+    else
+        warn "Skipping YourProvider npm CLIs (no usable npm)."
+    fi
+
+    # Sandbox SDK for the carried sandbox-direct-access skill. It is published
+    # on YourProvider's own index, NOT on the conda/pypi mirrors used earlier.
+    if "$ENV_PYTHON" -c 'import pssdk' 2>/dev/null; then
+        ok "pssdk already available"
+    else
+        # --extra-index-url, NOT --index-url: the SDK only exists on YourProvider's
+        # own index, while its dependencies must still come from the mirror.
+        info "Installing mt-paas-sandbox-python-sdk from https://pypi.internal.example.com/simple/"
+        if _safe_pip_install --extra-index-url https://pypi.internal.example.com/simple/ \
+                mt-paas-sandbox-python-sdk==1.1.4 >/tmp/tofu-yourprovider-pssdk.log 2>&1; then
+            ok "pssdk installed for the sandbox skill"
+        else
+            warn "pssdk could not be installed (see /tmp/tofu-yourprovider-pssdk.log)."
+            warn "Direct sandbox runs need mt-paas-sandbox-python-sdk==1.1.4."
+        fi
+    fi
+fi
+
 # ── Optional: Docling (layout-aware PDF parsing) ──
 # Opt-in via --with-docling. Adds ~2 GB to the env (pulls torch + downloads
 # model weights on first use). Not installed by default because the base
@@ -2402,6 +2524,7 @@ if [[ "$SKIP_PLAYWRIGHT" -eq 0 ]]; then
             fontconfig
             font-ttf-dejavu-sans-mono
             font-ttf-ubuntu
+            font-ttf-noto-cjk
         )
         if ! _install_run 300 "$CONDA_BIN" install -p "$CONDA_ENV_PREFIX" -c conda-forge --override-channels -y "${CHROMIUM_LIBS[@]}"; then
             # One unavailable package must not forfeit the whole set. Measured
@@ -2428,7 +2551,7 @@ if [[ "$SKIP_PLAYWRIGHT" -eq 0 ]]; then
             ok "Chromium shared libs present in the env"
         else
             warn "No directory carrying Chromium GUI libs (libatk/libnss/libgbm) found in the env — browser will not launch"
-            warn "  Fix rootless: conda install -n ${ENV_NAME} -c conda-forge atk-1.0 at-spi2-atk at-spi2-core alsa-lib xorg-libxcomposite xorg-libxdamage xorg-libxfixes xorg-libxrandr libxkbcommon nspr nss mesa-libgbm-cos7-x86_64 fontconfig font-ttf-dejavu-sans-mono font-ttf-ubuntu"
+            warn "  Fix rootless: conda install -n ${ENV_NAME} -c conda-forge atk-1.0 at-spi2-atk at-spi2-core alsa-lib xorg-libxcomposite xorg-libxdamage xorg-libxfixes xorg-libxrandr libxkbcommon nspr nss mesa-libgbm-cos7-x86_64 fontconfig font-ttf-dejavu-sans-mono font-ttf-ubuntu font-ttf-noto-cjk"
             warn "  Fix with root: sudo python -m playwright install-deps chromium"
         fi
 
@@ -2506,10 +2629,14 @@ from playwright.sync_api import sync_playwright
 with sync_playwright() as p:
     b = p.chromium.launch(args=['--no-sandbox'])
     pg = b.new_page()
-    pg.set_content('<h1>x</h1>')
-    assert pg.evaluate(
+    pg.set_content('<h1>x中文</h1>')
+    widths = pg.evaluate(
         "(()=>{const c=document.createElement('canvas').getContext('2d');"
-        "c.font='60px sans-serif';return c.measureText('x').width;})()") > 0, 'no fonts'
+        "c.font='60px sans-serif';return [c.measureText('x').width,"
+        "c.measureText('中').width,"
+        "c.measureText(String.fromCodePoint(0x10ffff)).width];})()")
+    assert widths[0] > 0, 'no fonts'
+    assert widths[1] != widths[2], 'missing Chinese glyphs'
     b.close()
 PYEOF
         then
@@ -3085,10 +3212,45 @@ try:
 except OSError:
     existing = []
 if existing:
-    # Legacy migration never overwrites an owner store, so a carried
-    # registration only appears if that owner has no entry of the same name.
-    print('  owner store already present (%s): carried entries only fill gaps'
+    # The legacy carrier migrates ONLY when no owner store exists at all.
+    print('  owner store already present (%s): the carried legacy file will NOT '
+          'be migrated over it — this install keeps its own registrations'
           % ', '.join(existing))
+
+# Carried YourProvider capabilities need a runtime, not just a launcher. Report
+# what is missing instead of letting it surface at first use.
+def _runtime_report():
+    import subprocess
+    try:
+        import pssdk  # noqa: F401
+        sdk = 'pssdk present'
+    except Exception:
+        sdk = 'pssdk MISSING (sandbox-direct-access cannot run)'
+    node = shutil.which('node') or os.path.join(
+        root, '.tofu', 'node-toolchain', 'bin', 'node')
+    version = ''
+    if os.path.exists(node):
+        try:
+            version = subprocess.run(
+                [node, '-p', 'process.versions.node'], capture_output=True,
+                text=True, timeout=20).stdout.strip()
+        except Exception:
+            version = 'unrunnable'
+    major = int(version.split('.')[0]) if version[:1].isdigit() else 0
+    return sdk, ('Node %s' % (version or 'not found')), major >= 22
+
+if os.path.isdir(os.path.join(root, 'data', 'skills', 'users')):
+    sdk, node_label, node_ok = _runtime_report()
+    print('  sandbox SDK: %s' % sdk)
+    print('  Node runtime: %s%s' % (node_label, '' if node_ok else
+                                    ' — carried Node skills need >=22'))
+    sso = os.path.expanduser('~/.mlp-cli-token.json')
+    if not os.path.exists(sso):
+        sso = os.path.expanduser('~/.llm-cli-token.json')
+    print('  YourProvider SSO session: %s' % (
+        'present' if os.path.exists(sso) else
+        'not signed in yet — the first YourProvider call will ask you to sign in '
+        'once as YOURSELF (llm login); no shared session is carried'))
 raise SystemExit(1 if blocked else 0)
 PYEOF
 if [[ "$_CARRIED_MCP_RC" -eq 0 ]]; then

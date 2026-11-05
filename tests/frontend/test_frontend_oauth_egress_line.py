@@ -103,3 +103,38 @@ process.stdout.write(JSON.stringify(out));
     assert out['repolled'] is True
     assert out['unknown']['text'] == 'settings.egressChecking'
     assert out['unknown']['display'] == ''
+
+
+@pytest.mark.skipif(NODE is None, reason='node is required to execute oauth.js')
+def test_environment_route_is_named_in_the_ui_language():
+    """The server's English 'environment proxy' wire label never reaches the line."""
+    harness = r"""
+const fs = require('fs');
+globalThis.window = globalThis;
+globalThis.addEventListener = function(){};
+delete globalThis.BroadcastChannel;
+globalThis.t = (k, vars) => vars && vars.route ? k + '|' + vars.route : k;
+globalThis.showAlert = function(){};
+const el = { innerHTML: '', textContent: '', style: { display: 'none' }, className: '' };
+globalThis.document = { getElementById: (id) => id === 'oauthCodexEgress' ? el : null };
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+const out = {};
+for (const [name, egress] of Object.entries({
+  env: { state: 'direct', preferred_server_route: 'env',
+         preferred_server_route_label: 'environment proxy',
+         preferred_server_route_mode: 'proxy' },
+  pool: { state: 'direct', preferred_server_route: 'pool:hk',
+          preferred_server_route_label: 'proxy Hong Kong',
+          preferred_server_route_mode: 'proxy' },
+})) {
+  _renderEgressLine('codex', egress);
+  out[name] = el.textContent;
+}
+process.stdout.write(JSON.stringify(out));
+"""
+    proc = subprocess.run([NODE, '-e', harness, str(OAUTH_JS)],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[:800]
+    out = json.loads(proc.stdout)
+    assert out['env'] == 'settings.egressViaProxy|settings.egressEnvProxy'
+    assert out['pool'] == 'settings.egressViaProxy|proxy Hong Kong'

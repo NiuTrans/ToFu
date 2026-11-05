@@ -11,7 +11,7 @@ from lib.storage_authority_sql.json_document import JsonBytes
 from lib.storage_authority_sql.native_checkpoint_rows import HEADERS, SNAPSHOTS, _refuse
 from lib.storage_authority_sql.native_checkpoint_goal_reads import GoalReads
 from lib.storage_authority_sql.generated_checkpoint_storage_contract import SPEC
-from lib.storage_authority_sql.operation_domains.billing import _wallet_settle
+from lib.storage_authority_sql.operations_pkg._billing_wallets import _wallet_settle
 from lib.storage_authority_sql.operations_pkg._runs import _orchestration_event_append
 
 

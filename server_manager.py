@@ -25,7 +25,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import weakref
 
+from collections.abc import Callable, Collection, Iterable
 from tofu_db._loopback import create_connection, urlopen as loopback_urlopen
 from pathlib import Path
 from typing import Any
@@ -36,9 +38,12 @@ from runtime_guards import (
     RESOURCE_BUDGET_POLICY_ENV,
     RESOURCE_BUDGET_POLICY_VERSION,
     _persistent_data_path,
-    deployment_resource_default,
     install_process_resource_defaults,
+    pid_is_alive,
+    proc_stat_fields,
 )
+from tofu_dotenv import read_dotenv_values
+from serverctl_pkg.restart_budget import ARTIFACT_PREPARATION_SECONDS
 
 
 STATE_VERSION = 1
@@ -50,7 +55,6 @@ DEFAULT_WEDGE_STREAK = 120.0
 DEFAULT_MAX_FAILURES = 5
 DEFAULT_FAILURE_WINDOW = 120.0
 DEFAULT_FAILURE_HISTORY_KEEP = 50
-DEFAULT_WORKER_RSS_CGROUP_FRACTION = 0.70
 DEFAULT_SIDECAR_LEASE_RELEASE_WAIT = 10.0
 DEFAULT_ORPHAN_SIDECAR_REAP_WAIT = 15.0
 DEFAULT_STORAGE_LEASE_POLL_INTERVAL = 0.1
@@ -62,7 +66,7 @@ DEFAULT_STORAGE_LEASE_POLL_INTERVAL = 0.1
 # fixed margin so the worker's own deadline always fires first.
 DEFAULT_WORKER_SHUTDOWN_HARD_SECS = 30.0
 WORKER_TERMINATE_TIMEOUT_MARGIN = 5.0
-DEFAULT_FRONTEND_PREFLIGHT_TIMEOUT = 1320.0
+DEFAULT_FRONTEND_PREFLIGHT_TIMEOUT = ARTIFACT_PREPARATION_SECONDS
 DEFAULT_EXIT_INTENT_WINDOW = 120.0
 # Grace for a worker whose heartbeat declares the `booting` phase. Mirrors
 # lib/server_boot/lock.py's `_boot_heartbeat_stale_threshold` so the manager's
@@ -77,28 +81,23 @@ BOOT_HEARTBEAT_GRACE_MIN = 60.0
 BOOT_HEARTBEAT_GRACE_MAX = 900.0
 CLEAN_WORKER_EXIT_REASONS = frozenset(
     {'manual', 'signal', 'restart', 'memory_recycle'})
-MIB = 1024 * 1024
 WORKER_BUDGET_STATUS_KEYS = (
     'TOFU_MAX_INFLIGHT_TASKS',
     'TOFU_AGENT_WORKERS',
-    'TOFU_TASK_RSS_RESERVE_MB',
-    'TOFU_PROCESS_RSS_RELIEF_MB',
-    'TOFU_PROCESS_RSS_RECYCLE_MB',
 )
 CGROUP_OOM_EVENT_PATHS = (
     '/sys/fs/cgroup/memory.events',
     '/sys/fs/cgroup/memory/memory.oom_control',
 )
-CGROUP_MEMORY_LIMIT_PATHS = (
-    '/sys/fs/cgroup/memory.max',
-    '/sys/fs/cgroup/memory/memory.limit_in_bytes',
-)
 SERVER_ENV_KEYS = frozenset({
     'PORT', 'BIND_HOST', 'TOFU_TLS', 'TLS_CERTFILE', 'TLS_KEYFILE',
-    'TOFU_DEPLOYMENT_MODE', 'TOFU_RESOURCE_PROFILE',
+    'TOFU_DEPLOYMENT_MODE',
     'TOFU_DATA_DIR', 'TOFU_DATA_LAYOUT',
     'XDG_DATA_HOME', 'LOCALAPPDATA',
     'TOFU_SERVER_PYTHON_CACHE', 'TOFU_SERVER_PYTHON_CACHE_DIR',
+    # Local placement of the worker runtime replica and of task checkouts is
+    # decided by the manager before spawn and by the worker's workspace control.
+    'TOFU_RUNTIME_REPLICA', 'TOFU_LOCAL_WORKSPACES', 'TOFU_LOCAL_DIR',
     # Agent scheduling is created before request handling starts. Preserve
     # explicit project overrides across manager-owned worker generations.
     'TOFU_AGENT_QUEUE_CAPACITY', 'TOFU_AGENT_STUCK_REPLACEMENTS',
@@ -123,6 +122,21 @@ _PYTEST_CONTEXT_ENV_KEYS = (
     'PYTEST_CURRENT_TEST',
     'TOFU_PYTEST_RUN_ROOT',
 )
+# The interpreter and dynamic loader consume these before any Python runs.
+# A project .env reached them only through the worker's post-start boot
+# loader, which can steer child processes but never the worker interpreter;
+# the exec-time .env overlay keeps that boundary.
+_DOTENV_EXEC_EXCLUDED_KEYS = frozenset({
+    'PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP',
+    'LD_PRELOAD', 'LD_LIBRARY_PATH',
+})
+_DOTENV_EXEC_EXCLUDED_PREFIXES = ('DYLD_',)
+# Unreadable-.env failures already warned in this process, oldest first.
+# Each lifecycle operation re-reads the file several times; one warning per
+# distinct (path, failure) is enough until a successful read clears it.
+_DOTENV_WARNING_MEMORY = 32
+_dotenv_warned_failures: dict[tuple[str, str], None] = {}
+_dotenv_warned_failures_lock = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -153,62 +167,6 @@ def cgroup_oom_kill_count() -> int | None:
                 except ValueError:
                     break
     return None
-
-
-def cgroup_memory_limit_bytes() -> int | None:
-    """Return the effective cgroup memory ceiling when it is finite."""
-    for path in CGROUP_MEMORY_LIMIT_PATHS:
-        try:
-            raw = Path(path).read_text(encoding='utf-8').strip()
-        except OSError:
-            continue
-        if not raw or raw == 'max':
-            continue
-        try:
-            value = int(raw)
-        except ValueError:
-            continue
-        # cgroup v1 uses a huge page-aligned sentinel for "unlimited".
-        if 0 < value < (1 << 60):
-            return value
-    return None
-
-
-def proc_rss_bytes(pid: int) -> int | None:
-    """Read one process's resident set without importing application code."""
-    try:
-        fields = Path(f'/proc/{int(pid)}/statm').read_text(
-            encoding='utf-8').split()
-        return int(fields[1]) * int(os.sysconf('SC_PAGE_SIZE'))
-    except (OSError, ValueError, IndexError, TypeError):
-        return None
-
-
-def worker_rss_recycle_limit_bytes(
-    raw_mb: str | None = None,
-    *,
-    environment: dict[str, str] | None = None,
-) -> int:
-    """Resolve the manager's external worker RSS ceiling; zero disables it."""
-    if raw_mb not in (None, ''):
-        try:
-            configured_mb = float(raw_mb)
-            if configured_mb == 0:
-                return 0
-            if configured_mb > 0:
-                return max(1, int(configured_mb * MIB))
-            raise ValueError('must be non-negative')
-        except (TypeError, ValueError):
-            logger.warning(
-                'invalid TOFU_PROCESS_RSS_RECYCLE_MB=%r; using adaptive default',
-                raw_mb)
-    default = int(deployment_resource_default(
-        'TOFU_PROCESS_RSS_RECYCLE_MB', environment) * MIB)
-    cgroup_limit = cgroup_memory_limit_bytes()
-    if cgroup_limit is not None:
-        default = min(
-            default, int(cgroup_limit * DEFAULT_WORKER_RSS_CGROUP_FRACTION))
-    return max(1, default)
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -295,6 +253,130 @@ def proc_exit_observation(worker: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
+def popen_exit_observation(
+        pid: int, start_ticks: Any, returncode: int) -> dict[str, Any]:
+    """Exit evidence from a reaped ``Popen.returncode`` where /proc is absent.
+
+    The return code carries no core-dump flag or raw wait status, so both are
+    unknown (None) rather than guessed.
+    """
+    signum = -returncode if returncode < 0 else None
+    try:
+        signal_name = signal.Signals(signum).name if signum else ''
+    except ValueError:
+        signal_name = f'SIGNAL_{signum}'
+    return {
+        'pid': pid, 'processStartTime': start_ticks,
+        'source': 'popen_returncode', 'rawStatus': None,
+        'signal': signum, 'signalName': signal_name,
+        'exitCode': returncode if returncode >= 0 else None,
+        'coreDumpFlag': None,
+    }
+
+
+def reap_exited_child(pid: Any, start_ticks: Any) -> int | None:
+    """Reap one identity-verified exited child of this process, never another.
+
+    Waits (WNOHANG) only for a zombie whose parent is this process and whose
+    start ticks match the recorded generation, so every other Popen object in
+    the process keeps its own exit status. Returns the raw wait status, or
+    None for a running, reused, foreign or already-reaped PID.
+    """
+    try:
+        pid, start_ticks = int(pid), int(start_ticks)
+    except (TypeError, ValueError):
+        return None
+    fields = proc_stat_fields(pid) if pid > 0 else None
+    if (fields is None or fields[0] != 'Z'
+            or fields[1] != str(os.getpid())
+            or fields[19] != str(start_ticks)):
+        return None
+    try:
+        reaped, status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return None
+    return status if reaped == pid else None
+
+
+def child_process_identities() -> list[tuple[int, int]]:
+    """(pid, start ticks) of every direct child of this process.
+
+    Linux lists children per creating thread; an exec leaves one thread,
+    which inherits every child of the previous image. Empty without /proc
+    child lists.
+    """
+    identities: list[tuple[int, int]] = []
+    try:
+        threads = os.listdir('/proc/self/task')
+    except OSError:
+        return identities
+    for thread in threads:
+        try:
+            children = Path(
+                f'/proc/self/task/{thread}/children').read_bytes().split()
+        except OSError:
+            continue
+        for child in children:
+            start_ticks = proc_start_ticks(int(child))
+            if start_ticks is not None:
+                identities.append((int(child), start_ticks))
+    return identities
+
+
+def reap_inherited_children(
+    inherited: Iterable[tuple[int, int]],
+    pending_worker_pids: Collection[int] = (),
+) -> list[tuple[int, int]]:
+    """Reap exited children that an earlier image of this process left behind.
+
+    ``os.exec*`` keeps the PID and its children but discards the Popen objects
+    that would have waited for them. *inherited* holds identities captured
+    before this image started any child, so no Popen here owns them. A worker
+    in *pending_worker_pids* is left to its manager, which records the exit
+    evidence and then reaps it. Returns the identities still running or
+    pending; children already reaped or whose PID was reused are dropped.
+    """
+    remaining = []
+    for pid, start_ticks in inherited:
+        fields = proc_stat_fields(pid)
+        if (fields is None or fields[1] != str(os.getpid())
+                or fields[19] != str(start_ticks)):
+            continue
+        if fields[0] == 'Z' and pid not in pending_worker_pids:
+            status = reap_exited_child(pid, start_ticks)
+            if status is not None:
+                logger.info(
+                    'reaped child pid=%s inherited from an earlier '
+                    'Supervisor image (wait status %s)', pid, status)
+                continue
+        remaining.append((pid, start_ticks))
+    return remaining
+
+
+# supervisor.py imports this module before it starts any child and re-execs
+# itself in place on /reload, so children present at import belong to an
+# earlier image whose Popen objects (and their pending waits) the exec dropped.
+_inherited_children = child_process_identities()
+_inherited_children_lock = threading.Lock()
+_lifecycle_managers: weakref.WeakSet[LifecycleManager] = weakref.WeakSet()
+
+
+def reap_children_of_previous_image() -> None:
+    """Reap the exited inherited children of this process, once per tick.
+
+    Every manager's recorded worker stays pending: its manager records the
+    exit evidence first and reaps it afterwards.
+    """
+    with _inherited_children_lock:
+        if not _inherited_children:
+            return
+        pending = {
+            (manager._state.get('worker') or {}).get('pid')
+            for manager in list(_lifecycle_managers)}
+        _inherited_children[:] = reap_inherited_children(
+            _inherited_children, pending)
+
+
 def proc_start_epoch(pid: int) -> float | None:
     ticks = proc_start_ticks(pid)
     if ticks is None:
@@ -377,21 +459,6 @@ def proc_cwd(pid: int) -> str | None:
         return None
 
 
-def pid_is_alive(pid: int) -> bool:
-    try:
-        os.kill(int(pid), 0)
-    except (OSError, ValueError, TypeError):
-        return False
-    try:
-        stat = Path(f'/proc/{int(pid)}/stat').read_text(encoding='utf-8')
-        rest = stat[stat.rfind(')') + 2:].split()
-        if rest and rest[0] == 'Z':
-            return False
-    except OSError:
-        pass
-    return True
-
-
 def pid_is_server(pid: int) -> bool:
     if not pid_is_alive(pid):
         return False
@@ -399,6 +466,104 @@ def pid_is_server(pid: int) -> bool:
     # An unreadable live process is ambiguous: report it as live so start
     # fails closed.  Stop applies stricter identity checks before signalling.
     return cmdline is None or 'server.py' in cmdline
+
+
+# git replaces a changed file by unlink() then create, and a FUSE checkout can
+# stretch that gap. No git operation removes or replaces the checkout root, so
+# its absence needs only one confirming poll.
+SUPERVISOR_SOURCE_MISSING_GRACE_SECONDS = 10.0
+SUPERVISOR_CHECKOUT_MISSING_GRACE_SECONDS = 0.5
+
+
+def _path_state(path: str) -> tuple[str, tuple[int, int] | None]:
+    """('present', (st_dev, st_ino)), ('missing', None) or ('unknown', None)."""
+    try:
+        info = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return 'missing', None
+    except OSError:
+        return 'unknown', None
+    return 'present', (info.st_dev, info.st_ino)
+
+
+class SupervisorOwnership:
+    """Decide when the checkout or declared owner of a Supervisor is gone.
+
+    The checkout owns the Supervisor while its source file exists. ``git
+    merge``/``checkout`` replace a changed file by unlinking it and creating a
+    new one, so one missing observation is not loss: the file must stay
+    missing for ``SUPERVISOR_SOURCE_MISSING_GRACE_SECONDS``, or for
+    ``SUPERVISOR_CHECKOUT_MISSING_GRACE_SECONDS`` once the checkout directory
+    is gone (deleted or moved) or the path names a different directory than
+    at start (moved away and recreated, e.g. by a later state write). Only
+    ENOENT/ENOTDIR count as missing; an unreadable path neither confirms nor
+    clears loss. The optional declared owner process is gone once it exited,
+    an unreaped zombie included, or its PID names a process with other start
+    ticks.
+    """
+
+    def __init__(self, source_file: str, owner_pid: int | None = None, *,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.source_file = os.path.realpath(source_file)
+        self.checkout_dir = os.path.dirname(self.source_file)
+        self.owner_pid = owner_pid
+        self._owner_start_ticks = (
+            proc_start_ticks(owner_pid) if owner_pid else None)
+        self._checkout_identity = _path_state(self.checkout_dir)[1]
+        self._clock = clock
+        self._missing_since: float | None = None
+
+    def lost(self) -> str:
+        """'' while owned; otherwise why ownership is lost for good."""
+        owner = self._owner_lost()
+        if owner:
+            return owner
+        source, _identity = _path_state(self.source_file)
+        if source == 'unknown':
+            return ''
+        now = self._clock()
+        if source == 'present':
+            if self._missing_since is not None:
+                logger.info(
+                    'supervisor ownership sentinel reappeared after %.2fs: %s',
+                    now - self._missing_since, self.source_file)
+                self._missing_since = None
+            return ''
+        checkout, identity = _path_state(self.checkout_dir)
+        if checkout == 'missing':
+            where = 'checkout directory is gone'
+        elif (checkout == 'present' and self._checkout_identity is not None
+                and identity != self._checkout_identity):
+            where = 'checkout directory was replaced'
+        else:
+            where = 'checkout directory still exists'
+        grace = (SUPERVISOR_SOURCE_MISSING_GRACE_SECONDS
+                 if where == 'checkout directory still exists'
+                 else SUPERVISOR_CHECKOUT_MISSING_GRACE_SECONDS)
+        if self._missing_since is None:
+            self._missing_since = now
+            logger.warning(
+                'supervisor ownership sentinel missing: %s (%s); ownership is '
+                'lost only if it stays missing for %.1fs',
+                self.source_file, where, grace)
+            return ''
+        missing_for = now - self._missing_since
+        if missing_for < grace:
+            return ''
+        return (f'supervisor ownership sentinel disappeared: '
+                f'{self.source_file} missing for {missing_for:.1f}s ({where})')
+
+    def _owner_lost(self) -> str:
+        if not self.owner_pid:
+            return ''
+        if not pid_is_alive(self.owner_pid):
+            return f'supervisor owner process disappeared: pid={self.owner_pid}'
+        ticks = proc_start_ticks(self.owner_pid)
+        if (self._owner_start_ticks is not None and ticks is not None
+                and ticks != self._owner_start_ticks):
+            return (f'supervisor owner process disappeared: '
+                    f'pid={self.owner_pid} now names a different process')
+        return ''
 
 
 _OFFLINE_STORAGE_COMMAND_LABELS = (
@@ -918,22 +1083,77 @@ def _rewrite_explicit_server_port(args: list[str], port: int) -> list[str]:
     return rewritten
 
 
-def project_server_env(project_path: str) -> dict[str, str]:
-    """Read lifecycle-relevant values from the project's simple .env file."""
-    result: dict[str, str] = {}
+def _read_project_dotenv(project_path: str) -> dict[str, str]:
+    """Read the project's current ``.env`` with the canonical parser.
+
+    Every lifecycle read of the file goes through here, so the allowlisted
+    view, the worker composition and preparation see identical values.  An
+    unreadable, oversized or non-UTF-8 file reads as empty after a warning
+    (once per distinct failure until the file reads again): the manager must
+    stay up on inherited values instead of failing its construction, restart
+    preparation or spawn.
+    """
+    dotenv = Path(project_path) / '.env'
     try:
-        lines = (Path(project_path) / '.env').read_text(encoding='utf-8').splitlines()
-    except OSError:
-        return result
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith('#') or '=' not in line:
-            continue
-        key, _, value = line.partition('=')
-        key = key.strip()
-        if key in SERVER_ENV_KEYS:
-            result[key] = value.strip().strip('"').strip("'")
-    return result
+        values = read_dotenv_values(dotenv)
+    except OSError as exc:
+        failure = (str(dotenv), str(exc))
+        with _dotenv_warned_failures_lock:
+            first_occurrence = failure not in _dotenv_warned_failures
+            if first_occurrence:
+                _dotenv_warned_failures[failure] = None
+                while len(_dotenv_warned_failures) > _DOTENV_WARNING_MEMORY:
+                    del _dotenv_warned_failures[next(iter(_dotenv_warned_failures))]
+        if first_occurrence:
+            logger.warning(
+                'project .env not applied; inherited Supervisor values remain '
+                'in effect: %s', exc)
+        return {}
+    with _dotenv_warned_failures_lock:
+        for failure in [failure for failure in _dotenv_warned_failures
+                        if failure[0] == str(dotenv)]:
+            del _dotenv_warned_failures[failure]
+    return values
+
+
+def project_server_env(project_path: str) -> dict[str, str]:
+    """Return the lifecycle-allowlisted values of the project's ``.env``."""
+    return {
+        key: value
+        for key, value in _read_project_dotenv(project_path).items()
+        if key in SERVER_ENV_KEYS
+    }
+
+
+def managed_worker_environment(
+    project_path: str,
+    manager_values: dict[str, str],
+    server_env: dict[str, str],
+) -> dict[str, str]:
+    """Compose the launch environment of one Supervisor-managed worker.
+
+    The long-lived Supervisor's ``os.environ`` is a snapshot of whichever
+    shell launched it, and the worker's boot-time ``.env`` load never
+    overrides an inherited name.  Every key the project's *current* ``.env``
+    declares therefore replaces the ambient value here; undeclared keys keep
+    it.  Precedence, lowest first: ambient, current ``.env``, manager-owned
+    values, validated ``serverEnv`` overrides, then probed resource defaults
+    for keys that are still empty.  An unreadable ``.env`` keeps the
+    ambient-only composition after one warning.  Interpreter/loader bootstrap
+    names (``_DOTENV_EXEC_EXCLUDED_*``) are not overlaid; the worker's boot
+    loader still applies them post-start when they are not inherited.
+    """
+    env = os.environ.copy()
+    env.update({
+        key: value
+        for key, value in _read_project_dotenv(project_path).items()
+        if key not in _DOTENV_EXEC_EXCLUDED_KEYS
+        and not key.startswith(_DOTENV_EXEC_EXCLUDED_PREFIXES)
+    })
+    env.update(manager_values)
+    env.update({str(key): str(value) for key, value in server_env.items()})
+    install_process_resource_defaults(env)
+    return env
 
 
 def _path_is_pytest_owned(raw_path: object, project_path: str) -> bool:
@@ -1009,12 +1229,12 @@ def run_frontend_preflight(
     # Nested Node builders/canaries must use the same admitted interpreter;
     # a long-lived manager may legitimately have only /usr/bin:/bin in PATH.
     child_environment['TOFU_PYTHON'] = python_executable
-    from tofu_dotenv import read_dotenv_values
-    project_before = read_dotenv_values(Path(project_path) / '.env')
+    project_before = _read_project_dotenv(project_path)
     logger.info('frontend preflight starting (operation=%s)', operation)
     preflight_started = time.monotonic()
     try:
-        completed = subprocess.run(
+        from serverctl_pkg.native_engine import _run
+        _run(
             [
                 python_executable,
                 str(command_path),
@@ -1022,30 +1242,24 @@ def run_frontend_preflight(
                 '--operation',
                 str(operation or 'manager worker spawn')[:120],
             ],
-            cwd=project_path,
-            env=child_environment,
-            stdin=subprocess.DEVNULL,
+            cwd=Path(project_path),
+            environment=child_environment,
             timeout=DEFAULT_FRONTEND_PREFLIGHT_TIMEOUT,
-            check=False,
+            progress='Preparing worker artifacts',
+            termination_grace=40,
+            failure_subject='Worker artifact preparation',
         )
-    except subprocess.TimeoutExpired:
-        return False, (
-            'frontend preflight exceeded '
-            f'{DEFAULT_FRONTEND_PREFLIGHT_TIMEOUT:.0f}s')
+    except (RuntimeError, KeyboardInterrupt) as exc:
+        logger.error('frontend preflight failed after %.1fs (operation=%s): %s',
+                     time.monotonic() - preflight_started, operation, exc)
+        return False, str(exc) or 'Worker artifact preparation cancelled'
     except OSError as exc:
         return False, f'frontend preflight could not start: {exc}'
     elapsed = time.monotonic() - preflight_started
-    if completed.returncode:
-        logger.error(
-            'frontend preflight failed after %.1fs (operation=%s, exit=%d)',
-            elapsed, operation, completed.returncode)
-        return False, (
-            f'frontend preflight exited {completed.returncode}; '
-            'see the manager log for the validation/build error')
     # A successful native preparation replaces the project's managed pin.
     # Refresh inherited copies only when they still equal the old project
     # value; explicit external overrides retain their fail-closed semantics.
-    project_after = read_dotenv_values(Path(project_path) / '.env')
+    project_after = _read_project_dotenv(project_path)
     for key in ('TOFUDB_BIN', 'TOFUDB_EXPECTED_SHA256'):
         if project_after.get(key):
             # Freeze project-managed artifact selection for this exact launch,
@@ -1059,17 +1273,34 @@ def run_frontend_preflight(
     return True, ''
 
 
+def _source_interpreter(python: str) -> str:
+    """``python``, or its source interpreter when it runs a runtime replica.
+
+    Launchers may pass the serving worker's own interpreter, a replica
+    generation that the manager must neither pin nor spawn without a lease.
+    """
+    try:
+        from serverctl_pkg.runtime_replica import authoritative_interpreter
+    except Exception as exc:  # a broken helper never blocks lifecycle control
+        logger.warning('runtime replica helper unavailable: %s', exc)
+        return python
+    return authoritative_interpreter(python)
+
+
 class LifecycleManager:
     """Own exactly one project's desired/observed server state."""
 
     def __init__(self, project_path: str, python_exe: str | None = None,
                  *, monitor_interval: float | None = None) -> None:
         self.project = os.path.realpath(project_path)
-        self.python = python_exe or os.environ.get('TOFU_SUPERVISOR_PYTHON') or sys.executable
+        self.python = _source_interpreter(
+            python_exe or os.environ.get('TOFU_SUPERVISOR_PYTHON') or sys.executable)
         self.data_dir = Path(self.project) / 'data'
         self.logs_dir = Path(self.project) / 'logs'
         self.state_path = self.data_dir / 'server-manager-state.json'
         self.worker_log = self.logs_dir / 'server-console.log'
+        from serverctl_pkg.native_storage_service import NativeStorageService
+        self._native_storage = NativeStorageService(self.project, self.python)
         self._last_log_maintenance_at = 0.0
         self._last_monitor_error = ''
         self._trace_requested_at: float | None = None
@@ -1078,6 +1309,12 @@ class LifecycleManager:
         self._stop_event = threading.Event()
         self._monitor: threading.Thread | None = None
         self._worker_bytecode_cache_lock_fd: int | None = None
+        self._worker_runtime_lock_fds: list[int] = []
+        self._pending_runtime_build: tuple[str, list[str]] | None = None
+        # Held until the generation is retired: a dropped Popen joins
+        # subprocess._active, where the next Popen (``ss``, a preflight) reaps
+        # the exited worker before its exit status is read.
+        self._worker_process: subprocess.Popen | None = None
         self._state_needs_save = False
         self._project_env = project_server_env(self.project)
         loaded = _read_json(self.state_path)
@@ -1102,18 +1339,12 @@ class LifecycleManager:
         except (ValueError, TypeError):
             max_failures = DEFAULT_MAX_FAILURES
         self.max_failures = max(2, min(100, max_failures))
-        rss_limit_mb = (
-            os.environ.get('TOFU_PROCESS_RSS_RECYCLE_MB')
-            or self._project_env.get('TOFU_PROCESS_RSS_RECYCLE_MB'))
-        profile_environment = dict(os.environ)
-        profile_environment.update(self._project_env)
-        self.worker_rss_recycle_bytes = worker_rss_recycle_limit_bytes(
-            rss_limit_mb, environment=profile_environment)
         self._state = self._load_state()
         if self._state_needs_save:
             self._save()
+        _lifecycle_managers.add(self)
         self._adopt_existing()
-        self._restore_worker_bytecode_cache_lease()
+        self._restore_worker_leases()
 
     def _default_state(self) -> dict[str, Any]:
         default_env = dict(self._project_env)
@@ -1148,10 +1379,9 @@ class LifecycleManager:
             'lastExitCause': '',
             'lastCgroupOomDelta': 0,
             'lastCgroupOomKillCount': None,
-            'workerRssBytes': None,
             'workerBytecodeCache': {},
-            'lastMemoryRecycleAt': 0.0,
-            'lastMemoryRecycleRssBytes': None,
+            'workerRuntime': {},
+            'runtimeSuspect': {},
             'lastRecoveredAt': 0.0,
             'lastRecoverySeconds': None,
             'storageBlocker': {},
@@ -1195,6 +1425,10 @@ class LifecycleManager:
             state['storageBlocker'] = {}
         if not isinstance(state.get('workerBytecodeCache'), dict):
             state['workerBytecodeCache'] = {}
+        if not isinstance(state.get('workerRuntime'), dict):
+            state['workerRuntime'] = {}
+        if not isinstance(state.get('runtimeSuspect'), dict):
+            state['runtimeSuspect'] = {}
         if not isinstance(state.get('pendingRecoverySource'), str):
             state['pendingRecoverySource'] = ''
         if not isinstance(state.get('pendingWorkerExitIntent'), dict):
@@ -1268,6 +1502,35 @@ class LifecycleManager:
 
     def _active_storage_lease(self) -> dict[str, Any]:
         return read_storage_lease_status(self._storage_data_dir())
+
+    def _storage_lease_blocks_worker(self, lease: dict[str, Any]) -> bool:
+        return bool(lease.get('held') and not self._native_storage.owns_lease(lease))
+
+    def _recover_native_storage_service(self) -> None:
+        """Recover a departed manager's host without changing a live app's engine."""
+        from serverctl_pkg.native_storage_service import host_matches, process_matches, write_record
+        record = self._native_storage.record()
+        if not record or host_matches(record):
+            return
+        if record.get('state') == 'failed':
+            raise RuntimeError(record.get('error') or 'native storage failed; explicit restart required')
+        if self._active_storage_lease().get('held'):
+            # The previous host's native child may still be finishing EOF
+            # shutdown. Never launch a second host into its authority lease.
+            return
+        if (record.get('managerPid') == os.getpid()
+                and process_matches(record['managerPid'], record.get('managerStartTime'))):
+            # Engine exits belong to StorageRuntime's crash budget. A host
+            # failure must not create a new runtime/budget on every reconcile.
+            record['state'] = 'failed'
+            record['error'] = 'native storage host exited unexpectedly; explicit restart required'
+            write_record(self._native_storage.state_path, record)
+            raise RuntimeError(record['error'])
+        environment = self._worker_environment(self._state.get('serverEnv') or {}, self.port)
+        plan = self._native_storage.prepare(environment)
+        if not plan or record.get('plan') != plan:
+            raise RuntimeError('native storage configuration changed; drain/restart the worker to replace it')
+        self._native_storage.ensure(plan, environment)
 
     def _clean_exit_marker_for_remembered_worker(self) -> dict[str, Any]:
         """Return a fresh PID-bound clean-exit certificate, or an empty dict.
@@ -1348,6 +1611,7 @@ class LifecycleManager:
         if marker_key and marker_key == self._state.get(
                 'lastConsumedExitMarker'):
             return False
+        retired_worker = dict(self._state.get('worker') or {})
         now = _now()
         self._state['plannedExitCount'] = int(
             self._state.get('plannedExitCount') or 0) + 1
@@ -1358,13 +1622,89 @@ class LifecycleManager:
         self._state['pendingRecoverySource'] = recovery_source
         self._state['pendingWorkerExitIntent'] = {}
         self._state['nextRetryAt'] = 0.0
+        process_exit = self._worker_exit_observation(retired_worker)
+        self._state['lastWorkerProcessExit'] = process_exit
         self._state['worker'] = {}
-        self._release_worker_bytecode_cache_lease()
+        self._release_worker_leases()
         logger.info(
             'worker controlled exit recorded pid=%s reason=%s recovery=%s',
             pid, reason, recovery_source or 'none')
+        self._log_worker_exit(retired_worker, process_exit, logging.INFO)
         self._save()
+        self._reap_retired_worker(retired_worker)
         return True
+
+    def _worker_exit_observation(
+            self, worker: dict[str, Any]) -> dict[str, Any]:
+        """Exit status of a retired generation, read before it is reaped.
+
+        Linux reads the unreaped zombie of a child this manager spawned or
+        inherited across a /reload exec. Without /proc, this image's own
+        Popen supplies the return code.
+        """
+        observation = proc_exit_observation(worker)
+        process = self._worker_process
+        if observation or process is None or process.pid != worker.get('pid'):
+            return observation
+        returncode = process.poll()
+        if returncode is None:
+            return {}
+        self._worker_process = None
+        return popen_exit_observation(
+            process.pid, worker.get('processStartTime'), returncode)
+
+    def _reap_retired_worker(self, worker: dict[str, Any]) -> None:
+        """Reap a retired generation once its exit evidence is saved."""
+        process = self._worker_process
+        if process is not None and process.pid == worker.get('pid'):
+            if process.poll() is not None:
+                self._worker_process = None
+            return
+        reap_exited_child(worker.get('pid'), worker.get('processStartTime'))
+
+    def _forget_worker(self) -> None:
+        """Clear a worker record whose exit no accounting path consumed."""
+        retired = dict(self._state.get('worker') or {})
+        self._state['worker'] = {}
+        self._release_worker_leases()
+        if retired.get('pid'):
+            self._log_worker_exit(
+                retired, self._worker_exit_observation(retired), logging.INFO)
+            self._reap_retired_worker(retired)
+
+    @staticmethod
+    def _log_worker_exit(worker: dict[str, Any], observation: dict[str, Any],
+                         level: int) -> None:
+        if observation:
+            logger.log(level, 'worker process exit observation: %s', observation)
+        else:
+            logger.log(
+                level, 'worker process exit observation unavailable pid=%s: '
+                'not an unreaped child of this Supervisor process',
+                worker.get('pid'))
+
+    def _foreign_owner(self, status: dict[str, Any]) -> str:
+        """Why the worker in question lives where this manager cannot see it.
+
+        Several hosts can share one checkout (a network filesystem). A PID
+        recorded on another host is meaningless here, so its absence is not
+        an exit; judging it would record a false failure and start a second
+        worker beside the live one.
+        """
+        here = _hostname()
+        worker = self._state.get('worker') or {}
+        host = worker.get('host')
+        if worker.get('pid') and host and host != here:
+            return (f'worker pid {worker["pid"]} runs on host {host}; this '
+                    f'Supervisor on {here} cannot observe it, so it neither '
+                    'records its exit nor starts another worker (start '
+                    f'explicitly here only after {host} stopped serving '
+                    'this checkout)')
+        if status.get('sameHost') is False:
+            return (f'instance lock is held by pid {status.get("pid")} on host '
+                    f'{status.get("host")}; this Supervisor on {here} cannot '
+                    'observe it and starts no worker beside it')
+        return ''
 
     def _wait_for_stopped_sidecar_release(
         self,
@@ -1384,6 +1724,8 @@ class LifecycleManager:
         deadline = started + max(0.0, float(timeout))
         while True:
             lease = self._active_storage_lease()
+            if self._native_storage.owns_lease(lease):
+                return lease
             if (not lease.get('held')
                     or lease.get('kind') != 'storage_authority_sql'):
                 waited = time.monotonic() - started
@@ -1418,6 +1760,8 @@ class LifecycleManager:
         holder keeps the fail-closed start behavior for a human operator.
         """
         pid = lease.get('pid')
+        if self._native_storage.owns_lease(lease):
+            return lease
         if (not lease.get('held')
                 or lease.get('kind') != 'storage_authority_sql'
                 or not lease.get('holderVerified')
@@ -1505,7 +1849,7 @@ class LifecycleManager:
         }
         if resume_source:
             self._state['storageBlocker']['resumeSource'] = resume_source
-        self._release_worker_bytecode_cache_lease()
+        self._release_worker_leases()
         self._state['worker'] = {}
         self._set_observed(
             'maintenance' if maintenance else 'conflict',
@@ -1518,39 +1862,136 @@ class LifecycleManager:
         self._state['updatedAt'] = _now()
         _atomic_json(self.state_path, self._state)
 
-    def _release_worker_bytecode_cache_lease(self) -> None:
-        descriptor = self._worker_bytecode_cache_lock_fd
+    def _release_worker_leases(self) -> None:
+        """Drop the bytecode-cache and runtime-replica leases of a gone worker."""
+        descriptors = [self._worker_bytecode_cache_lock_fd, *self._worker_runtime_lock_fds]
         self._worker_bytecode_cache_lock_fd = None
-        if descriptor is None:
-            return
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
+        self._worker_runtime_lock_fds = []
+        for descriptor in descriptors:
+            if descriptor is None:
+                continue
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
-    def _restore_worker_bytecode_cache_lease(self) -> None:
-        """Protect an adopted worker's exact cache without pruning it."""
+    def _restore_worker_leases(self) -> None:
+        """Protect an adopted worker's exact cache and runtime without pruning."""
+        if not self._launcher_is_alive():
+            return
         cache_status = self._state.get('workerBytecodeCache') or {}
-        if not cache_status.get('managed') or not self._launcher_is_alive():
+        if cache_status.get('managed'):
+            descriptor = None
+            try:
+                from serverctl_pkg.python_bytecode_cache import (
+                    reacquire_server_python_cache_lease,
+                )
+                descriptor = reacquire_server_python_cache_lease(
+                    self.project,
+                    self.python,
+                    str(cache_status.get('cacheRoot') or ''),
+                    str(cache_status.get('namespace') or ''),
+                )
+            except Exception as exc:
+                logger.warning('server bytecode cache lease restore skipped: %s', exc)
+            if descriptor is None:
+                logger.warning(
+                    'server bytecode cache lease restore could not validate namespace')
+            else:
+                self._worker_bytecode_cache_lock_fd = descriptor
+        runtime = self._state.get('workerRuntime') or {}
+        generations = runtime.get('generationPaths') if runtime.get('replica') else None
+        for generation in generations if isinstance(generations, list) else []:
+            descriptor = None
+            try:
+                from serverctl_pkg.runtime_replica import lease_generation
+                descriptor = lease_generation(str(generation))
+            except Exception as exc:
+                logger.warning('worker runtime replica lease restore skipped: %s', exc)
+            if descriptor is None:
+                logger.warning(
+                    'worker runtime replica lease restore failed for %s', generation)
+            else:
+                self._worker_runtime_lock_fds.append(descriptor)
+
+    def _request_bytecode_sweep(self) -> None:
+        """Reclaim bytecode of removed source directories, off the launch path.
+
+        Called on every healthy monitor pass; the helper returns at once
+        unless the namespace's last sweep is older than its interval.
+        """
+        cache = self._state.get('workerBytecodeCache') or {}
+        if not cache.get('managed'):
             return
         try:
-            from serverctl_pkg.python_bytecode_cache import (
-                reacquire_server_python_cache_lease,
-            )
-            descriptor = reacquire_server_python_cache_lease(
-                self.project,
-                self.python,
-                str(cache_status.get('cacheRoot') or ''),
-                str(cache_status.get('namespace') or ''),
-            )
+            from serverctl_pkg.python_bytecode_cache import request_bytecode_sweep
+            started = request_bytecode_sweep(
+                str(cache.get('cacheRoot') or ''), str(cache.get('namespace') or ''),
+                python=self.python)
         except Exception as exc:
-            logger.warning('server bytecode cache lease restore skipped: %s', exc)
+            logger.warning('server bytecode sweep request failed: %s', exc)
             return
-        if descriptor is None:
+        if started:
+            logger.info('server bytecode sweep started for %s', cache.get('namespace'))
+
+    def _request_pending_runtime_build(self) -> None:
+        """Copy missing/stale replicas once the worker no longer needs the volume."""
+        pending, self._pending_runtime_build = self._pending_runtime_build, None
+        if pending is None:
+            return
+        root, pythons = pending
+        try:
+            from serverctl_pkg.runtime_replica import request_build
+            started = request_build(pythons, root, launcher=self.python)
+        except Exception as exc:
+            logger.warning('worker runtime replica build request failed: %s', exc)
+            return
+        if started:
+            logger.info('worker runtime replica build started for %s in %s',
+                        ', '.join(pythons), root)
+
+    def _note_unready_runtime(self, reason: str) -> None:
+        """Attribute a pre-readiness worker failure to its runtime, or not.
+
+        A failure on a replica makes that generation suspect: the next spawn
+        runs the source interpreter. A second failure there shows the cause
+        is not the replica and clears the suspicion; readiness there
+        confirms it (``_settle_runtime_suspect``). One unrelated failure
+        therefore never discards a good replica.
+        """
+        if self._state.get('workerReadyLoggedAt'):
+            return
+        runtime = self._state.get('workerRuntime') or {}
+        generations = runtime.get('generationPaths') or []
+        if runtime.get('replica') and generations:
+            self._state['runtimeSuspect'] = {
+                'generationPath': str(generations[0]), 'reason': str(reason)[:500],
+                'since': _now()}
             logger.warning(
-                'server bytecode cache lease restore could not validate namespace')
+                'worker failed before readiness on runtime replica %s; the next '
+                'spawn uses the source interpreter to attribute the failure',
+                generations[0])
+        elif self._state.get('runtimeSuspect'):
+            self._state['runtimeSuspect'] = {}
+            logger.info('worker also failed before readiness on the source interpreter; '
+                        'runtime replica suspicion cleared')
+
+    def _settle_runtime_suspect(self) -> None:
+        """The source interpreter became ready where the replica did not."""
+        suspect = self._state.get('runtimeSuspect') or {}
+        generation = suspect.get('generationPath')
+        if not generation or (self._state.get('workerRuntime') or {}).get('replica'):
             return
-        self._worker_bytecode_cache_lock_fd = descriptor
+        self._state['runtimeSuspect'] = {}
+        try:
+            from serverctl_pkg.runtime_replica import reject_generation
+            reject_generation(str(generation), str(suspect.get('reason') or ''))
+        except Exception as exc:
+            logger.warning('worker runtime replica rejection failed: %s', exc)
+            return
+        logger.warning(
+            'worker runtime replica %s rejected: it failed before readiness and '
+            'the source interpreter did not', generation)
 
     def _set_observed(self, observed: str, error: str = '') -> None:
         if self._state.get('observed') != observed:
@@ -1724,10 +2165,16 @@ class LifecycleManager:
                 )
                 continue
 
+    def _worker_within_boot_grace(self) -> bool:
+        spawned = float((self._state.get('worker') or {}).get('spawnedAt') or 0)
+        return not spawned or _now() - spawned <= DEFAULT_BOOT_GRACE
+
     def _launcher_is_alive(self) -> bool:
         worker = self._state.get('worker') or {}
         pid = worker.get('pid')
-        if not isinstance(pid, int) or not pid_is_server(pid):
+        if (not isinstance(pid, int)
+                or (worker.get('host') or _hostname()) != _hostname()
+                or not pid_is_server(pid)):
             return False
         expected = worker.get('processStartTime')
         actual = proc_start_ticks(pid)
@@ -1867,7 +2314,9 @@ class LifecycleManager:
     def _remembered_worker_status(self) -> dict[str, Any] | None:
         worker = self._state.get('worker') or {}
         pid = worker.get('pid')
-        if not isinstance(pid, int) or not pid_is_alive(pid):
+        if (not isinstance(pid, int)
+                or (worker.get('host') or _hostname()) != _hostname()
+                or not pid_is_alive(pid)):
             return None
         cwd = proc_cwd(pid)
         cmdline = proc_cmdline(pid)
@@ -1900,10 +2349,14 @@ class LifecycleManager:
             if (desired == 'running' and not low.get('running')
                     and not launcher_alive):
                 candidate = self._active_storage_lease()
-                if candidate.get('held'):
+                if self._storage_lease_blocks_worker(candidate):
                     storage_lease = candidate
             identity_error = self._identity_error(low) if low.get('running') else None
-            if conflict or identity_error:
+            foreign_owner = (
+                self._foreign_owner(low)
+                if desired == 'running' and not low.get('running')
+                and not launcher_alive else '')
+            if conflict or identity_error or foreign_owner:
                 observed = 'conflict'
             elif low.get('running'):
                 if self._state.get('desired') == 'stopped':
@@ -1913,7 +2366,8 @@ class LifecycleManager:
             elif desired == 'stopped':
                 observed = 'stopped'
             elif launcher_alive:
-                observed = 'starting'
+                observed = ('starting' if self._worker_within_boot_grace()
+                            else 'degraded')
             elif storage_lease:
                 observed = (
                     'maintenance'
@@ -1940,7 +2394,7 @@ class LifecycleManager:
                     observed = 'running'
                 if not (liveness and ready) and observed == 'running':
                     observed = 'degraded'
-            last_error = self._state.get('lastError') or ''
+            last_error = foreign_owner or self._state.get('lastError') or ''
             if liveness is True and ready is True:
                 # The returned snapshot should never contradict its own live
                 # probe while the background reconcile is between ticks.
@@ -1968,6 +2422,10 @@ class LifecycleManager:
                 'readinessState': probe.get('readinessState'),
                 'storageState': probe.get('storageState'),
                 'storageLease': storage_lease or None,
+                'nativeStorageService': {
+                    key: value for key, value in self._native_storage.record().items()
+                    if key in {'state', 'pid', 'nativePid', 'serviceId', 'error'}
+                } or None,
                 'owner': 'tofu-manager',
                 'managerPid': os.getpid(),
                 'resourceBudgetPolicyVersion': RESOURCE_BUDGET_POLICY_VERSION,
@@ -1999,15 +2457,12 @@ class LifecycleManager:
                     self._state.get('lastCgroupOomDelta') or 0),
                 'cgroupOomKillCount': self._state.get(
                     'lastCgroupOomKillCount'),
-                'workerRssBytes': self._state.get('workerRssBytes'),
-                'workerRssRecycleBytes': self.worker_rss_recycle_bytes,
-                'workerRssGuardEnabled': bool(self.worker_rss_recycle_bytes),
                 'workerBytecodeCache': dict(
                     self._state.get('workerBytecodeCache') or {}),
-                'lastMemoryRecycleAt': float(
-                    self._state.get('lastMemoryRecycleAt') or 0),
-                'lastMemoryRecycleRssBytes': self._state.get(
-                    'lastMemoryRecycleRssBytes'),
+                'workerRuntime': dict(
+                    self._state.get('workerRuntime') or {}),
+                'runtimeSuspect': dict(
+                    self._state.get('runtimeSuspect') or {}),
                 'lastRecoveredAt': float(self._state.get('lastRecoveredAt') or 0),
                 'lastRecoverySeconds': self._state.get('lastRecoverySeconds'),
                 'nextRetryAt': float(self._state.get('nextRetryAt') or 0),
@@ -2061,20 +2516,17 @@ class LifecycleManager:
 
     def _worker_environment(self, server_env: dict[str, str], port: int) -> dict[str, str]:
         """Compose the same launch environment for preparation and spawning."""
-        env = os.environ.copy()
-        env['TOFU_SERVER_WORKER'] = '1'
-        env['TOFU_MANAGED_BY'] = 'supervisor'
-        env['TOFU_EXTERNAL_CONSOLE_LOG'] = str(self.worker_log)
-        env['TOFU_EXTERNAL_CONSOLE_STREAM'] = 'server_console'
-        # The manager may supervise a project other than the checkout that
-        # supplied this module. Probe that project's persistent data volume,
-        # never an incidental source/supervisor filesystem.
-        env['TOFU_PROJECT_PATH'] = self.project
-        env['PORT'] = str(port)
-        env.update({str(key): str(value)
-                    for key, value in server_env.items()})
-        install_process_resource_defaults(env)
-        return env
+        return managed_worker_environment(self.project, {
+            'TOFU_SERVER_WORKER': '1',
+            'TOFU_MANAGED_BY': 'supervisor',
+            'TOFU_EXTERNAL_CONSOLE_LOG': str(self.worker_log),
+            'TOFU_EXTERNAL_CONSOLE_STREAM': 'server_console',
+            # The manager may supervise a project other than the checkout that
+            # supplied this module. Probe that project's persistent data volume,
+            # never an incidental source/supervisor filesystem.
+            'TOFU_PROJECT_PATH': self.project,
+            'PORT': str(port),
+        }, server_env)
 
     def _restart_configuration(self) -> str:
         """Detect another lifecycle operation while preparation releases the lock."""
@@ -2089,7 +2541,9 @@ class LifecycleManager:
         }, sort_keys=True)
 
     def _spawn(self, source: str, *,
-               prepared_environment: dict[str, str] | None = None) -> dict[str, Any]:
+               prepared_environment: dict[str, str] | None = None,
+               prepared_storage_plan: dict | None = None,
+               reset_failed_storage: bool = False) -> dict[str, Any]:
         # A persisted planned-recovery intent is consumed by this exact spawn
         # attempt.  If process creation itself fails, _spawn latches a real
         # crashloop instead of replaying the old clean marker forever.
@@ -2110,13 +2564,11 @@ class LifecycleManager:
             self._save()
             logger.error('%s; worker spawn was blocked', environment_error)
             return {'ok': False, 'message': environment_error}
-        self._release_worker_bytecode_cache_lease()
+        self._release_worker_leases()
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self._maintain_process_logs(force=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._disable_legacy_guard()
-        self.worker_rss_recycle_bytes = worker_rss_recycle_limit_bytes(
-            env.get('TOFU_PROCESS_RSS_RECYCLE_MB'), environment=env)
         # A restart carries its one verified launch environment across stop.
         # Cold starts/recovery still prepare here; never rebuild changing source
         # after an approved restart has removed the last serving worker.
@@ -2132,6 +2584,46 @@ class LifecycleManager:
             self._save()
             logger.error('%s', message)
             return {'ok': False, 'message': message}
+        try:
+            storage_plan = (prepared_storage_plan if prepared_environment is not None
+                            else self._native_storage.prepare(env))
+            if self._native_storage.needs_replacement(storage_plan, reset_failed=reset_failed_storage):
+                self._native_storage.stop()
+            if storage_plan:
+                env['TOFU_STORAGE_CONNECTION_FILE'] = self._native_storage.ensure(storage_plan, env)
+        except Exception as exc:
+            message = f'native storage service preparation failed: {exc}'
+            self._set_observed('crashloop', message)
+            self._save()
+            return {'ok': False, 'message': message}
+        runtime = None
+        worker_python = self.python
+        runtime_status: dict[str, object] = {
+            'replica': False,
+            'reason': 'runtime-helper-unavailable',
+            'python': self.python,
+        }
+        suspect = str((self._state.get('runtimeSuspect') or {}).get('generationPath') or '')
+        try:
+            from serverctl_pkg.runtime_replica import select_worker_runtime
+            runtime = select_worker_runtime(self.python, env, avoid=suspect)
+            worker_python = runtime.python
+            runtime_status = {
+                **runtime.status,
+                'replica': runtime.replica,
+                'reason': runtime.reason,
+                'python': runtime.python,
+                'generationPaths': list(runtime.generations),
+            }
+            self._pending_runtime_build = (
+                (runtime.build_root, list(runtime.build_pythons))
+                if runtime.build_pythons else None)
+            if runtime.replica and suspect:
+                # A newer generation superseded the suspect one.
+                self._state['runtimeSuspect'] = {}
+        except Exception as exc:
+            logger.warning('worker runtime replica selection skipped: %s', exc)
+        self._state['workerRuntime'] = runtime_status
         bytecode_activation = None
         bytecode_status: dict[str, object] = {
             'selected': False,
@@ -2142,6 +2634,9 @@ class LifecycleManager:
             from serverctl_pkg.python_bytecode_cache import (
                 prepare_server_python_cache,
             )
+            # Keyed by the source interpreter: a replica runs the identical
+            # binary, and project-module bytecode stays valid across replica
+            # generations and source/replica switches.
             bytecode_activation = prepare_server_python_cache(
                 self.project, self.python, env)
             bytecode_status = bytecode_activation.as_status()
@@ -2156,18 +2651,22 @@ class LifecycleManager:
         except OSError as exc:
             if bytecode_activation is not None:
                 bytecode_activation.close_parent_lock()
+            if runtime is not None:
+                runtime.close_parent_lock()
             self._set_observed('crashloop', f'cannot open worker log: {exc}')
             self._save()
             return {'ok': False, 'message': str(exc)}
         try:
             proc = subprocess.Popen(
-                [self.python, 'server.py', *args], cwd=self.project, env=env,
+                [worker_python, 'server.py', *args], cwd=self.project, env=env,
                 stdin=subprocess.DEVNULL, stdout=log_fh, stderr=subprocess.STDOUT,
                 start_new_session=True, close_fds=True,
             )
         except Exception as exc:
             if bytecode_activation is not None:
                 bytecode_activation.close_parent_lock()
+            if runtime is not None:
+                runtime.close_parent_lock()
             self._set_observed('crashloop', f'spawn failed: {exc}')
             self._save()
             return {'ok': False, 'message': f'spawn failed: {exc}'}
@@ -2175,6 +2674,18 @@ class LifecycleManager:
             log_fh.close()
         if bytecode_activation is not None:
             self._worker_bytecode_cache_lock_fd = bytecode_activation.lock_fd
+        if runtime is not None:
+            self._worker_runtime_lock_fds = list(runtime.lease_fds)
+        unrecorded, self._worker_process = self._worker_process, proc
+        if unrecorded is not None:
+            # An explicit start can outrun the reconcile tick that would have
+            # recorded the previous generation's exit.
+            returncode = unrecorded.poll()
+            logger.warning(
+                'worker pid=%s (%s) was replaced by generation pid=%s before '
+                'its exit was recorded', unrecorded.pid,
+                'still running' if returncode is None
+                else f'returncode {returncode}', proc.pid)
         self._state['worker'] = {
             'pid': proc.pid,
             'host': _hostname(),
@@ -2201,7 +2712,8 @@ class LifecycleManager:
     def start(self, *, server_args: list[str] | None = None,
               server_env: dict[str, str] | None = None,
               source: str = 'cli', explicit: bool = True,
-              _prepared_environment: dict[str, str] | None = None) -> dict[str, Any]:
+              _prepared_environment: dict[str, str] | None = None,
+              _prepared_storage_plan: dict | None = None) -> dict[str, Any]:
         with self._lock:
             if server_args is not None and not isinstance(server_args, list):
                 return {'ok': False, 'message': 'serverArgs must be a JSON array'}
@@ -2277,7 +2789,7 @@ class LifecycleManager:
                         'launcherPid': (self._state.get('worker') or {}).get('pid'),
                         'message': 'startup already in progress', **self.status()}
             storage_lease = self._wait_for_stopped_sidecar_release()
-            if storage_lease.get('held'):
+            if self._storage_lease_blocks_worker(storage_lease):
                 maintenance = self._defer_for_storage_lease(storage_lease)
                 return {
                     'ok': maintenance,
@@ -2289,8 +2801,10 @@ class LifecycleManager:
                     **self.status(),
                 }
             if _prepared_environment is not None:
-                return self._spawn(source, prepared_environment=_prepared_environment)
-            return self._spawn(source)
+                return self._spawn(source, prepared_environment=_prepared_environment,
+                                   prepared_storage_plan=_prepared_storage_plan,
+                                   reset_failed_storage=explicit)
+            return self._spawn(source, reset_failed_storage=explicit)
 
     def _worker_shutdown_hard_seconds(self) -> float:
         """Mirror the worker's configured graceful-shutdown hard budget.
@@ -2363,49 +2877,18 @@ class LifecycleManager:
             time.sleep(0.1)
         return False, True, f'pid {pid} survived SIGKILL'
 
-    def _enforce_worker_rss_limit(self, status: dict[str, Any]) -> bool:
-        """Recycle an owned worker before its RSS can reach the cgroup ceiling.
-
-        Returns true when reconciliation was consumed by a recycle attempt.
-        The in-process guard can free caches first once the new worker code is
-        loaded; this manager-side hard stop also protects an already-running
-        older worker and remains independent of application health.
-        """
-        pid = status.get('pid')
-        if not isinstance(pid, int):
-            self._state['workerRssBytes'] = None
-            return False
-        rss_bytes = proc_rss_bytes(pid)
-        self._state['workerRssBytes'] = rss_bytes
-        limit_bytes = self.worker_rss_recycle_bytes
-        if (not limit_bytes or rss_bytes is None
-                or rss_bytes < limit_bytes):
-            return False
-        message = (
-            f'manager RSS ceiling exceeded: worker pid {pid} used '
-            f'{rss_bytes / MIB:.1f} MiB >= {limit_bytes / MIB:.1f} MiB')
-        now = _now()
-        self._state['lastMemoryRecycleAt'] = now
-        self._state['lastMemoryRecycleRssBytes'] = rss_bytes
-        self._set_observed('stopping', message)
-        self._save()
-        ok, killed, error = self._terminate(status)
-        if not ok:
-            self._set_observed('conflict', f'{message}; {error}')
-            self._save()
-            logger.error('%s; termination failed: %s', message, error)
-            return True
-        self._state['worker'] = {}
-        self._release_worker_bytecode_cache_lease()
-        self._state['lastError'] = (
-            f'{message}; {"forced SIGKILL" if killed else "graceful SIGTERM"}')
-        logger.warning('%s; worker stopped (%s)', message, error)
-        self._record_failure()
-        return True
-
     def stop(self, *, source: str = 'cli', keep_desired_running: bool = False) -> dict[str, Any]:
         with self._lock:
             status = read_lock_status(self.project)
+            foreign_owner = (
+                '' if status.get('running') else self._foreign_owner(status))
+            if foreign_owner:
+                # desired=stopped written here would reach the owner host's
+                # manager only through the shared state file, on its next
+                # reload, and stop a worker this host never saw.
+                self._set_observed('conflict', foreign_owner)
+                return {'ok': False, 'wasRunning': False, 'exitCode': 1,
+                        'message': foreign_owner, **self.status()}
             if not status.get('running'):
                 status = self._remembered_worker_status() or status
             was_running = bool(status.get('running'))
@@ -2430,6 +2913,11 @@ class LifecycleManager:
             self._disable_legacy_guard()
             self._save()  # desired=stopped must win before the signal is sent
             ok, killed, message = self._terminate(status)
+            if ok and not keep_desired_running:
+                try:
+                    self._native_storage.stop()
+                except Exception as exc:
+                    ok, message = False, f'native storage shutdown incomplete: {exc}'
             if ok:
                 if was_running:
                     self._record_planned_exit(
@@ -2442,8 +2930,7 @@ class LifecycleManager:
                             'manager-restart' if keep_desired_running else ''),
                     )
                 else:
-                    self._state['worker'] = {}
-                    self._release_worker_bytecode_cache_lease()
+                    self._forget_worker()
                 self._state['storageBlocker'] = {}
                 self._set_observed('stopped')
                 self._state['lastError'] = ''
@@ -2496,6 +2983,10 @@ class LifecycleManager:
             f'manager {source} before shutdown')
         if not ready:
             return {'ok': False, 'message': error}
+        try:
+            storage_plan = self._native_storage.prepare(preparation_environment)
+        except Exception as exc:
+            return {'ok': False, 'message': f'native storage preparation failed before shutdown: {exc}'}
         with self._lock:
             if configuration != self._restart_configuration():
                 return {'ok': False, 'message': (
@@ -2524,7 +3015,8 @@ class LifecycleManager:
             result = self.start(server_args=self._state.get('serverArgs') or [],
                                 server_env=self._state.get('serverEnv') or {},
                                 source=source, explicit=True,
-                                _prepared_environment=preparation_environment)
+                                _prepared_environment=preparation_environment,
+                                _prepared_storage_plan=storage_plan)
             if result.get('ok'):
                 logger.info(
                     'worker restart replacement spawned in %.1fs%s',
@@ -2547,6 +3039,7 @@ class LifecycleManager:
     def reconcile(self) -> None:
         with self._lock:
             self._maintain_process_logs()
+            reap_children_of_previous_image()
             status = read_lock_status(self.project)
             if not status.get('running') and self._state.get('desired') == 'stopped':
                 status = self._remembered_worker_status() or status
@@ -2576,17 +3069,26 @@ class LifecycleManager:
                         self._set_observed('conflict', error)
                         self._save()
                         return
-                self._state['worker'] = {}
+                try:
+                    self._native_storage.stop()
+                except Exception as exc:
+                    self._set_observed('conflict', f'native storage shutdown incomplete: {exc}')
+                    self._save()
+                    return
+                self._forget_worker()
                 self._state['pendingWorkerExitIntent'] = {}
-                self._release_worker_bytecode_cache_lease()
                 self._state['storageBlocker'] = {}
                 self._set_observed('stopped')
                 self._save()
                 return
             if status.get('running'):
-                self._remember_worker(status)
-                if self._enforce_worker_rss_limit(status):
+                try:
+                    self._recover_native_storage_service()
+                except Exception as exc:
+                    self._set_observed('degraded', f'native storage recovery failed: {exc}')
+                    self._save()
                     return
+                self._remember_worker(status)
                 probe = self._http_probe(int(status['pid']))
                 if probe.get('liveness') and probe.get('ready'):
                     recovered_from = float(self._state.get('activeFailureAt') or 0)
@@ -2613,6 +3115,8 @@ class LifecycleManager:
                             (f' bootTime={boot_elapsed:.1f}s'
                              if boot_elapsed is not None else ''),
                             self._trace_total_suffix())
+                        self._settle_runtime_suspect()
+                        self._request_pending_runtime_build()
                     self._state['failureHistory'] = self._recent_failure_times(now)
                     oom_count = cgroup_oom_kill_count()
                     if oom_count is not None:
@@ -2623,6 +3127,7 @@ class LifecycleManager:
                     self._state['lastError'] = ''
                     self._set_observed('running')
                     self._save()
+                    self._request_bytecode_sweep()
                     return
                 if probe.get('liveness'):
                     # Dependency readiness is not process liveness. Keep the
@@ -2671,16 +3176,34 @@ class LifecycleManager:
                 self._save()
                 return
             if self._launcher_is_alive():
-                spawned = float((self._state.get('worker') or {}).get('spawnedAt') or 0)
-                if not spawned or _now() - spawned <= DEFAULT_BOOT_GRACE:
+                if self._worker_within_boot_grace():
                     self._set_observed('starting')
                     self._save()
                     return
+                # Still alive is never an exit: counting it as failed would
+                # start a second generation beside this one.
+                error = (
+                    f'worker pid {self._state["worker"]["pid"]} is alive but '
+                    f'holds no instance lock {DEFAULT_BOOT_GRACE:.0f}s after '
+                    'spawn; retained, no second worker is started')
+                if self._state.get('lastError') != error:
+                    logger.error('%s', error)
+                self._set_observed('degraded', error)
+                self._save()
+                return
+            foreign_owner = self._foreign_owner(status)
+            if foreign_owner:
+                # No failure accounting, no spawn, and no write to the state
+                # file shared with the owner host's manager.
+                if self._state.get('lastError') != foreign_owner:
+                    logger.warning('%s', foreign_owner)
+                self._set_observed('conflict', foreign_owner)
+                return
             prior_storage_blocker = dict(
                 self._state.get('storageBlocker') or {})
             if prior_storage_blocker:
                 storage_lease = self._active_storage_lease()
-                if storage_lease.get('held'):
+                if self._storage_lease_blocks_worker(storage_lease):
                     self._defer_for_storage_lease(
                         storage_lease,
                         resume_source=str(
@@ -2713,7 +3236,7 @@ class LifecycleManager:
                 self._state.get('pendingRecoverySource') or '')
             if pending_recovery:
                 storage_lease = self._wait_for_stopped_sidecar_release()
-                if storage_lease.get('held'):
+                if self._storage_lease_blocks_worker(storage_lease):
                     self._defer_for_storage_lease(
                         storage_lease, resume_source=pending_recovery)
                     return
@@ -2753,7 +3276,7 @@ class LifecycleManager:
                         recovery_source=recovery_source,
                     )
                     storage_lease = self._wait_for_stopped_sidecar_release()
-                    if storage_lease.get('held'):
+                    if self._storage_lease_blocks_worker(storage_lease):
                         self._defer_for_storage_lease(
                             storage_lease, resume_source=recovery_source)
                     else:
@@ -2780,7 +3303,7 @@ class LifecycleManager:
                         recovery_source='external-drain-recovery',
                     )
                     storage_lease = self._wait_for_stopped_sidecar_release()
-                    if storage_lease.get('held'):
+                    if self._storage_lease_blocks_worker(storage_lease):
                         self._defer_for_storage_lease(
                             storage_lease,
                             resume_source='external-drain-recovery')
@@ -2803,7 +3326,7 @@ class LifecycleManager:
                 if self._launcher_is_alive():
                     return
                 storage_lease = self._wait_for_stopped_sidecar_release()
-                if storage_lease.get('held'):
+                if self._storage_lease_blocks_worker(storage_lease):
                     self._defer_for_storage_lease(
                         storage_lease, resume_source='automatic-recovery')
                 return
@@ -2817,7 +3340,7 @@ class LifecycleManager:
             if self._launcher_is_alive():
                 return
             storage_lease = self._wait_for_stopped_sidecar_release()
-            if storage_lease.get('held'):
+            if self._storage_lease_blocks_worker(storage_lease):
                 self._defer_for_storage_lease(
                     storage_lease, resume_source='automatic-recovery')
 
@@ -2864,14 +3387,12 @@ class LifecycleManager:
         if current_oom is not None:
             self._state['lastCgroupOomKillCount'] = current_oom
         prior_error = self._state.get('lastError') or ''
-        process_exit = proc_exit_observation(self._state.get('worker') or {})
+        retired_worker = dict(self._state.get('worker') or {})
+        process_exit = self._worker_exit_observation(retired_worker)
         self._state['lastWorkerProcessExit'] = process_exit
         if exit_cause and failure_reason:
             classified_exit_cause = exit_cause
             classified_failure_reason = failure_reason
-        elif prior_error.startswith('manager RSS ceiling exceeded'):
-            classified_exit_cause = 'manager_rss_recycle'
-            classified_failure_reason = prior_error
         elif oom_delta:
             classified_exit_cause = 'cgroup_oom_event'
             classified_failure_reason = (
@@ -2906,19 +3427,20 @@ class LifecycleManager:
             self._state.get('workerFailureCount') or 0) + 1
         self._state['pendingWorkerExitIntent'] = {}
         self._state['worker'] = {}
-        self._release_worker_bytecode_cache_lease()
+        self._note_unready_runtime(classified_failure_reason)
+        self._release_worker_leases()
         logger.warning(
             'worker failure %d/%d in %.0fs window (consecutive=%d, cause=%s): %s',
             recent_failures, self.max_failures, self.failure_window,
             failures, classified_exit_cause, classified_failure_reason)
-        if process_exit:
-            logger.warning('worker process exit observation: %s', process_exit)
+        self._log_worker_exit(retired_worker, process_exit, logging.WARNING)
         if recent_failures >= self.max_failures:
             self._set_observed('crashloop',
                                f'worker failed {recent_failures} times in '
                                f'{self.failure_window:.0f}s; recovery paused')
             self._state['nextRetryAt'] = 0.0
             self._save()
+            self._reap_retired_worker(retired_worker)
             logger.error(
                 'worker recovery paused after %d failures in %.0fs; explicit '
                 'start/restart is required to reset the crash-loop budget',
@@ -2928,3 +3450,4 @@ class LifecycleManager:
         self._state['nextRetryAt'] = now + delay
         self._set_observed('starting', f'worker exited; retrying in {delay:.0f}s')
         self._save()
+        self._reap_retired_worker(retired_worker)

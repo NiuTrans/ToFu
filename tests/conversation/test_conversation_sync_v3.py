@@ -1369,6 +1369,41 @@ def test_v3_finite_stream_releases_subscription(
     assert isolated_broker.snapshot()["active"] == 0
 
 
+def test_v3_catch_up_beyond_the_window_re_anchors_from_the_stored_head(
+    flask_client, conversation_sync_db,
+):
+    from lib.conversation_sync.cursor import encode_cursor
+    from lib.turn_lifecycle import create_turn_pair
+
+    create_turn_pair(
+        "conv-sync-a",
+        command_id="catch-up-over-window",
+        input_projection={"content": "q" * 100_000},
+        config={"model": "gpt-4o"},
+        user_id=1,
+    )
+    head = conversation_sync_db.query(
+        "turn.sync.changes",
+        {"conversation_id": "conv-sync-a", "user_id": 1, "after": 0},
+    )["head"]
+
+    response = flask_client.get(
+        "/api/v4/conversations/conv-sync-a/events",
+        query_string={
+            "streamClientId": "page-a", "streamGeneration": "1",
+            "diagnosticPayload": "none", "windowBytes": "65536",
+        },
+    )
+
+    assert response.status_code == 200
+    blocks = [block for block in response.data.decode().split("\n\n") if block]
+    assert len(blocks) == 1
+    assert "event: sync.reset_required" in blocks[0]
+    reset = json.loads(blocks[0].split("data: ", 1)[1])
+    assert reset["reason"] == "replay_exceeds_window"
+    assert reset["cursor"] == encode_cursor("conv-sync-a", 1, head)
+
+
 def test_v3_start_failure_persists_and_returns_complete_actionable_error(
     flask_client, conversation_sync_db, monkeypatch,
 ):
@@ -1516,7 +1551,10 @@ def test_browser_has_one_generated_sync_owner_and_no_v2_fallback():
     assert "Api.turnsV2" not in app_runtime
     assert "/api/v2/conversations/" not in app_runtime
     assert app_runtime.count("api: conversationSyncApi") == 1
-    assert coordinator.count("new EventSource(") == 1
+    # Coordinators share the page's one stream owner; none opens its own.
+    # conversation-event-multiplexer.test.ts proves that owner carries every
+    # stream on a single EventSource.
+    assert "new EventSource(" not in coordinator
     assert "from routes.turns_v2" not in routes
     assert not (ROOT / "routes/turns_v2.py").exists()
 
@@ -1539,6 +1577,9 @@ def test_browser_does_not_consume_server_only_snapshot_evidence_fields():
     server_only_fields = (
         "_responsesItems",
         "_anthropicContentBlocks",
+        "thinkingSignature",
+        "recacheCause",
+        "measurementVersion",
         "_codex_cache",
         "_network_route",
         "_stream_state",
@@ -1654,6 +1695,31 @@ def test_v3_route_start_identity_pending_names_model_and_cause(
     assert error["model"] == "gpt-6-sol"
     assert "model_identity_pending" in error["detail"]
     assert "identity" in error["hint"].lower()
+
+
+def test_v3_route_start_provider_scoped_selection_names_its_request_name(
+    flask_client, conversation_sync_db, monkeypatch,
+):
+    """A pending provider model is selected as {provider_id, offering_id}, which
+    carries no model_id; the envelope must still name what the user picked."""
+    from lib.model_routing.domain import ModelRoutingError
+    import lib.conversation_sync.task_start as task_start_runtime
+
+    def fail_start(*args, **kwargs):
+        raise ModelRoutingError("identity pending", kind="model_identity_pending")
+
+    monkeypatch.setattr(task_start_runtime, "start_conversation_attempt_executor", fail_start)
+    response = flask_client.post(
+        "/api/v4/conversations/conv-sync-a/turns", json={
+            "commandId": "route-provider-scoped-pending",
+            "inputTurn": {"content": "hello"},
+            "config": {"model": "gpt-future-test", "modelRef": {
+                "provider_id": "oauth_codex", "offering_id": "off_pending"}},
+        })
+    assert response.status_code == 500
+    error = response.get_json()["error"]
+    assert error["model"] == "gpt-future-test"
+    assert "model_identity_pending" in error["detail"]
 
 
 def test_v3_read_routes_map_contract_drift_to_a_typed_informative_500(
@@ -1816,6 +1882,107 @@ def test_round_directory_exact_actor_ranks_without_projection_reads(conversation
     monkeypatch.setattr(Session, "fetch_all", body_free)
     assert service.round_directory("conv-sync-a", 1, lane_id="main", expected_sync_sequence=head,
                                    offset=2, limit=1)["entries"][0]["turnId"] == ids[4]
+
+
+def test_round_directory_answers_at_the_head_a_streaming_writer_moved_to(conversation_sync_db):
+    """A reply commits an attempt event every few hundred ms; the browser's
+    replayed head is behind by design and must still get exact ranks."""
+    from lib.conversation_sync.repository import SidecarConversationSyncRepository
+    from lib.conversation_sync.service import ConversationSyncService
+    client = conversation_sync_db
+    payload = {"conversation_id": "conv-sync-a", "user_id": 1}
+    ids = [client.command("turn.append_settled", {**payload, "command_id": f"moving-{i}",
+        "actor": actor, "projection": {"content": "rank"}}, f"moving-{i}")["turn"]["turnId"]
+        for i, actor in enumerate(("human", "assistant", "human"))]
+    head = client.query("turn.sync.snapshot", payload)["syncSequence"]
+    repository = SidecarConversationSyncRepository(client_factory=lambda write=False: client)
+    service = ConversationSyncService(repository)
+    commits = iter(range(3))
+    original = repository.round_directory
+
+    def head_moves_before_each_read(*args, **kwargs):
+        # Another streamed commit lands between observing the head and the
+        # read at it, twice, before the head holds still.
+        if next(commits, None) is not None and kwargs["expected_sync_sequence"] < head + 2:
+            client.command("turn.append_settled", {**payload, "command_id": f"stream-{kwargs['expected_sync_sequence']}",
+                "actor": "assistant", "projection": {"content": "tick"}}, f"stream-{kwargs['expected_sync_sequence']}")
+        return original(*args, **kwargs)
+
+    repository.round_directory = head_moves_before_each_read
+    page = service.round_directory("conv-sync-a", 1, lane_id="main", expected_sync_sequence=head,
+                                   anchor_turn_id=ids[2])
+    assert page["stale"] is False and page["syncSeq"] == head + 2
+    assert [entry["turnId"] for entry in page["entries"]] == [ids[0], ids[2]]
+    assert page["activeRound"] == 2
+    # A head behind the caller (restored authority) is never answered.
+    repository.round_directory = original
+    assert service.round_directory("conv-sync-a", 1, lane_id="main",
+                                   expected_sync_sequence=head + 9)["stale"] is True
+
+
+def test_round_directory_stops_chasing_a_head_that_never_settles(conversation_sync_db):
+    from lib.conversation_sync import service as service_module
+    from lib.conversation_sync.service import ConversationSyncService
+    reads = []
+
+    class Repository:
+        def round_directory(self, *_args, expected_sync_sequence, **_kwargs):
+            reads.append(expected_sync_sequence)
+            return {"ownerId": 1, "conversationId": "c", "laneId": "main", "stale": True,
+                    "syncSeq": expected_sync_sequence + 1, "totalRounds": 0, "offset": 0, "entries": []}
+
+    page = ConversationSyncService(Repository()).round_directory(
+        "c", 1, lane_id="main", expected_sync_sequence=5)
+    assert page["stale"] is True
+    assert reads == [5 + i for i in range(service_module.STREAMING_HEAD_READ_ATTEMPTS)]
+
+
+def _stale_until_head(heads):
+    """A history repository whose head moves through ``heads`` per read."""
+    reads = []
+
+    class Repository:
+        def turn_page(self, *_args, expected_sync_sequence, **_kwargs):
+            reads.append(expected_sync_sequence)
+            head = heads[min(len(reads), len(heads)) - 1]
+            if head != expected_sync_sequence:
+                return {"stale": True, "syncSequence": head}
+            return {"conversationRevision": head, "syncSequence": head, "laneId": "main",
+                    "beforeOrdinal": 7, "nextBeforeOrdinal": 6, "hasMore": True,
+                    "totalTurns": 7, "turns": [], "attempts": []}
+
+    return Repository(), reads
+
+
+def test_turn_page_answers_at_the_head_a_streaming_writer_moved_to():
+    """A reply commits an attempt event every few hundred ms; the browser's
+    replayed head trails it and must still get an exact older page."""
+    from lib.conversation_sync.service import ConversationSyncService
+    repository, reads = _stale_until_head([6, 8, 8])
+    page = ConversationSyncService(repository).turn_page(
+        "c", 1, lane_id="main", expected_sync_sequence=5, before_ordinal=7)
+    assert reads == [5, 6, 8]
+    assert page["syncSeq"] == 8 and page["beforeOrdinal"] == 7
+
+
+def test_turn_page_refuses_a_head_behind_the_reader_or_one_that_never_settles():
+    from lib.conversation_sync import service as service_module
+    from lib.conversation_sync.service import (
+        ConversationSyncService, ConversationTurnPageStale,
+    )
+    repository, reads = _stale_until_head([4])
+    with pytest.raises(ConversationTurnPageStale) as behind:
+        ConversationSyncService(repository).turn_page(
+            "c", 1, lane_id="main", expected_sync_sequence=5)
+    assert behind.value.current_sync_sequence == 4 and reads == [5]
+
+    attempts = service_module.STREAMING_HEAD_READ_ATTEMPTS
+    repository, reads = _stale_until_head(list(range(6, 6 + attempts + 1)))
+    with pytest.raises(ConversationTurnPageStale) as moving:
+        ConversationSyncService(repository).turn_page(
+            "c", 1, lane_id="main", expected_sync_sequence=5)
+    assert reads == list(range(5, 5 + attempts))
+    assert moving.value.current_sync_sequence == 5 + attempts
 
 
 def test_round_directory_route_validates_explicit_lane_and_head(flask_client, conversation_sync_db):

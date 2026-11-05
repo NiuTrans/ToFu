@@ -18,7 +18,7 @@ def release_replay_dispatcher():
     reset_dispatcher()
 
 
-def _run(name, tmp_path, monkeypatch, *, disable_auto_retry=False):
+def _run(name, tmp_path, monkeypatch, *, disable_auto_retry=False, record_fixture=True):
     from lib.tasks_pkg.invocation import execute_invocation, ROOT_INVOCATION_POLICY
 
     _install_replay_route()
@@ -32,7 +32,7 @@ def _run(name, tmp_path, monkeypatch, *, disable_auto_retry=False):
     monkeypatch.setenv('TOFU_GATEWAY_OUTAGE_BUDGET_S', '0.001')
     monkeypatch.setattr('lib.tasks_pkg.turn_retry.auto_turn_backoff_seconds', lambda _: 0)
     _install_transport(FIXTURES_ROOT / name, monkeypatch, cwd=str(tmp_path),
-                       record_fixture=not disable_auto_retry)
+                       record_fixture=record_fixture)
     execute_invocation(task, policy=ROOT_INVOCATION_POLICY)
     return task
 
@@ -65,8 +65,26 @@ def test_persistent_upstream_outage_exhausts_once_and_keeps_the_failure(tmp_path
     _assert_invariants_clean(task)
 
 
+def test_root_invocation_dispatches_outside_a_route_left_on_its_caller(tmp_path, monkeypatch):
+    """A root without its own route group uses its configured pool.
+
+    A retired request group still pinned on the caller's context confined the
+    root's dispatch to slots that no longer exist (``no_slot``).
+    """
+    from lib.llm_dispatch.provider_pin import get_pinned_provider, provider_pin
+    expected = _expected('upstream_turn_recovery')
+    with provider_pin('retired-request-route-group'):
+        task = _run('upstream_turn_recovery', tmp_path, monkeypatch,
+                    record_fixture=False)
+        assert get_pinned_provider() == 'retired-request-route-group'
+    assert task['status'] == expected['status'], task.get('error')
+    assert task['content'] == expected['content']
+    _assert_invariants_clean(task)
+
+
 def test_explicit_retry_opt_out_still_closes_the_failed_model_round(tmp_path, monkeypatch):
-    task = _run('upstream_turn_exhaustion', tmp_path, monkeypatch, disable_auto_retry=True)
+    task = _run('upstream_turn_exhaustion', tmp_path, monkeypatch, disable_auto_retry=True,
+                record_fixture=False)
     assert task['status'] == 'error'
     assert task['error']['kind'] == 'upstream_error'
     assert not task.get('_auto_turn_retry_count')

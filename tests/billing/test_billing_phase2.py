@@ -175,6 +175,8 @@ class StripeWebhookTest(_BillingPhase2Base):
         from lib.billing.users import create_user
         from lib.billing.payments.stripe import handle_stripe_webhook
         u = create_user('helen@example.com', password='password1')
+        from lib.billing.payments._common import prepare_payment
+        quote = prepare_payment(user_id=u.id, provider='stripe', amount_minor=2000, currency='USD')
         before = get_balance(u.id)
         payload = json.dumps({
             'id': 'evt_test_1',
@@ -183,7 +185,7 @@ class StripeWebhookTest(_BillingPhase2Base):
                 'id': 'pi_helen_1',
                 'amount_received': 2000,
                 'currency': 'usd',
-                'metadata': {'user_id': u.id},
+                'metadata': {'user_id': u.id, 'tofu_payment_id': quote.id},
             }},
         }).encode()
         status, body = handle_stripe_webhook(payload, self._sign(payload))
@@ -205,7 +207,7 @@ class StripeCheckoutTest(_BillingPhase2Base):
         super().setUpClass()
         from lib.json_store import write_json_atomic
         write_json_atomic(cls._payments_path, {
-            'stripe': {'secret_key': 'sk_test_xyz'},
+            'stripe': {'secret_key': 'sk_test_xyz', 'webhook_secret': 'whsec_testsecret'},
             'alipay': {},
             'credit_per_minor_unit': 1.0,
         })
@@ -254,32 +256,35 @@ class StripeCheckoutTest(_BillingPhase2Base):
         self.assertEqual(form['metadata[user_id]'], u.id)
         self.assertEqual(form['line_items[0][price_data][unit_amount]'], '1500')
         self.assertEqual(form['success_url'], 'https://example.com/ok')
-        # A pending payment row keyed on the session id is recorded.
+        # The metadata points to the durable quote; Session identity never
+        # creates a second payment row or authorizes settlement by itself.
         rows = list_payments(user_id=u.id, provider='stripe')
-        self.assertTrue(any(r.provider_id == 'cs_test_abc'
-                            and r.status == 'pending' for r in rows))
+        self.assertTrue(any(r.id == form['metadata[tofu_payment_id]']
+                            and r.provider_id == '' and r.status == 'pending' for r in rows))
 
     def test_create_checkout_requires_secret_key(self):
         import asyncio
         from lib.json_store import write_json_atomic
         from lib.billing.payments import create_stripe_checkout
         # Blank out the secret key.
+        from lib.error_envelope import BadRequest
         write_json_atomic(self._payments_path, {
             'stripe': {}, 'alipay': {}, 'credit_per_minor_unit': 1.0})
         try:
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(BadRequest):
                 asyncio.run(create_stripe_checkout(
                     user_id='u1', amount_minor=500, currency='usd',
                     success_url='https://example.com/ok'))
         finally:
             write_json_atomic(self._payments_path, {
-                'stripe': {'secret_key': 'sk_test_xyz'},
+                'stripe': {'secret_key': 'sk_test_xyz', 'webhook_secret': 'whsec_testsecret'},
                 'alipay': {}, 'credit_per_minor_unit': 1.0})
 
     def test_create_checkout_surfaces_stripe_error(self):
         import asyncio
         from unittest.mock import AsyncMock, MagicMock
         from lib.billing.payments import create_stripe_checkout
+        from lib.error_envelope import BadRequest
 
         fake_resp = MagicMock()
         fake_resp.status_code = 400
@@ -291,7 +296,7 @@ class StripeCheckoutTest(_BillingPhase2Base):
 
         with patch('lib.http_transport.client.async_http_post',
                     new=AsyncMock(side_effect=_fake_post)):
-            with self.assertRaises(RuntimeError) as ctx:
+            with self.assertRaises(BadRequest) as ctx:
                 asyncio.run(create_stripe_checkout(
                     user_id='u1', amount_minor=1, currency='usd',
                     success_url='https://example.com/ok'))
@@ -305,8 +310,8 @@ class AlipaySignStringTest(unittest.TestCase):
     drop `sign`/`sign_type`, and alpha-sort the remainder."""
 
     def test_canonical_form(self):
-        from lib.billing.payments.alipay import _build_sign_string
-        s = _build_sign_string({
+        from lib.billing.payments.alipay_protocol import _signing_content
+        s = _signing_content({
             'app_id': '2021000000',
             'method': 'alipay.trade.page.pay',
             'sign': 'X',

@@ -13,6 +13,7 @@ import json
 import re
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 
 from lib.identity import require_user_id
 from lib.storage.errors import StorageError
@@ -24,6 +25,8 @@ logger = get_logger(__name__)
 NAMESPACE = 'research.receipt_source_nodes.v1'
 HEX = re.compile(r'^[0-9a-f]{64}$')
 DIGITS = '0123456789abcdef'
+# A scratch window, never a receipt/history admission limit.
+PREPARATION_WINDOW_RECEIPTS = 1024
 
 
 def encoded(value):
@@ -91,17 +94,20 @@ class ReceiptSourceIndex:
             raise ValueError('Invalid Research source index cache capacity')
         self.capacity = cache_entries
         self.cache = OrderedDict()
+        self.cache_lock = Lock()
 
     def _cache(self, sha, node):
-        self.cache[sha] = node
-        self.cache.move_to_end(sha)
-        while len(self.cache) > self.capacity:
-            self.cache.popitem(last=False)
+        with self.cache_lock:
+            self.cache[sha] = node
+            self.cache.move_to_end(sha)
+            while len(self.cache) > self.capacity:
+                self.cache.popitem(last=False)
 
     def _read(self, sha):
-        if sha in self.cache:
-            self.cache.move_to_end(sha)
-            return self.cache[sha]
+        with self.cache_lock:
+            if sha in self.cache:
+                self.cache.move_to_end(sha)
+                return self.cache[sha]
         row = self.client.query('record.get', {'namespace': self.namespace, 'key': self.prefix + sha})
         node = row.get('value') if isinstance(row, dict) else None
         try:
@@ -117,10 +123,13 @@ class ReceiptSourceIndex:
 
     def _write(self, node):
         sha = digest(node)
+        # A cached node is not an acknowledgment of this durable write attempt.
+        with self.cache_lock:
+            self.cache.pop(sha, None)
         try:
             ack = self.client.command('record.put', {'namespace': self.namespace, 'key': self.prefix + sha,
                 'value': node, 'expected_version': 0}, 'research-source-node:' + self.prefix + sha)
-            if not isinstance(ack, dict) or ack.get('version') != 1:
+            if not isinstance(ack, dict) or type(ack.get('version')) is not int or ack['version'] != 1:
                 raise StorageError('database_internal', 'Research source node write was not acknowledged')
         except StorageError as exc:
             try:
@@ -128,7 +137,8 @@ class ReceiptSourceIndex:
                     raise exc
             except StorageError:
                 raise exc
-        self._cache(sha, deepcopy(node))
+        if self._read(sha) != node:
+            raise StorageError('database_integrity', 'Research source node was not exactly acknowledged')
         return sha
 
     def lookup(self, reference, key):
@@ -150,6 +160,10 @@ class ReceiptSourceIndex:
 
     def insert(self, reference, key, facts):
         return self._assign(reference, key, facts, replace=False)
+
+    def prepare(self):
+        """Stage path copies locally; persist a selected root before returning it."""
+        return PreparedSourceIndex(self)
 
     def _assign(self, reference, key, facts, *, replace):
         """Path-copy assignment; consumed-source insertion never enables replacement."""
@@ -201,6 +215,66 @@ class ReceiptSourceIndex:
         return seen and all_consumed
 
 
+class PreparedSourceIndex(ReceiptSourceIndex):
+    """Call-local trie overlay using the owner's unchanged assignment algorithm.
+
+    Intermediate roots are private scratch. persist writes only reachable new
+    nodes, children first, through the original owner's acknowledgment policy.
+    No staged node enters the owner's durable-node cache before that write.
+    Callers flush bounded receipt windows; a failure leaves only unpublished
+    immutable nodes and never exposes a partially acknowledged candidate root.
+    """
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.nodes = {}
+
+    def _read(self, sha):
+        if sha in self.nodes:
+            return self.nodes[sha]
+        return self.owner._read(sha)
+
+    def _write(self, node):
+        sha = digest(node)
+        self.nodes[sha] = deepcopy(node)
+        return sha
+
+    def persist(self, reference):
+        reference = normalize_reference(reference)
+
+        def write_branch(sha):
+            written = set()
+
+            def write(sha):
+                if sha not in self.nodes or sha in written:
+                    return
+                node = self.nodes[sha]
+                for child in node.get('children', {}).values():
+                    write(child)
+                self.owner._write(node)
+                written.add(sha)
+
+            write(sha)
+
+        try:
+            root = self.nodes.get(reference['root'], {})
+            children = list(dict.fromkeys(sha for sha in root.get('children', {}).values() if sha in self.nodes))
+            if len(children) > 1:
+                # The hexadecimal root supplies independent subtrees, not a
+                # worker quota. Never spawn per node or recurse into more pools.
+                # Joined cleanup precedes root ACK and scratch release on failure.
+                from lib.production.concurrency import owned_results
+                with owned_results(children, write_branch, name='research-index', inherit_context=True) as results:
+                    for _, future in results:
+                        future.result()
+                self.owner._write(root)
+            else:
+                write_branch(reference['root'])
+            return reference
+        finally:
+            self.nodes.clear()
+
+
 @contextmanager
 def open_receipt_sources(run, receipt_reader=None):
     """Every paged source requires a complete verified reader, including its inline tail."""
@@ -217,16 +291,26 @@ def prepare_source_index(index, reference, history_repository, prior_history, ca
                          receipt_reader=None):
     """Return an unpublished root; backfill existing observations once."""
     reference = normalize_reference(reference)
+    prepared = index.prepare()
+
+    def insert_rows(receipts):
+        nonlocal reference
+        for number, row in enumerate(receipts, 1):
+            key = receipt_key(row)
+            if key:
+                reference = prepared.insert(reference, key, receipt_digest(row))
+            if number % PREPARATION_WINDOW_RECEIPTS == 0:
+                prepared.persist(reference)
+            yield row
+
     existing = {run['id'] for run in prior_runs if run['execution_status'] == 'completed'}
     if reference['version'] == 0:
         reference = empty_reference()
         def backfill(run):
-            nonlocal reference
             with open_receipt_sources(run, receipt_reader) as receipts:
-                for row in receipts:
-                    key = receipt_key(row)
-                    if key:
-                        reference = index.insert(reference, key, receipt_digest(row))
+                for _ in insert_rows(receipts):
+                    pass
+            prepared.persist(reference)
         if prior_history and prior_history['head']:
             for _, page in history_repository.iter_chunks(prior_history):
                 for run in page['runs']:
@@ -241,7 +325,7 @@ def prepare_source_index(index, reference, history_repository, prior_history, ca
         seen = False
         all_consumed = True
         with open_receipt_sources(run, receipt_reader) as receipts:
-            for row in receipts:
+            for row in insert_rows(receipts):
                 seen = True
                 key = receipt_key(row)
                 facts = receipt_digest(row) if key else None
@@ -250,10 +334,9 @@ def prepare_source_index(index, reference, history_repository, prior_history, ca
                     all_consumed = False
                 elif found != facts:
                     raise ValueError('Research receipt source identity conflicts with retained observation')
-                if key:
-                    reference = index.insert(reference, key, facts)
         if seen and all_consumed:
             raise ValueError('Research completed observation contains already consumed receipt sources')
+        prepared.persist(reference)
     return reference
 
 

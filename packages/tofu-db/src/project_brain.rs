@@ -34,6 +34,16 @@ const EVENT_CHUNK_BYTES: usize =
     crate::generated_tofudb_ir::MAX_STREAM_EVENT_BYTES - EVENT_CHUNK_HEADER_BYTES;
 const PROJECT_BRAIN_VERSION: u64 = 1;
 
+#[cfg(test)]
+thread_local! {
+    static PROJECTION_HYDRATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn projection_hydrations() -> usize {
+    PROJECTION_HYDRATIONS.with(std::cell::Cell::get)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandAction {
     WorkStart,
@@ -72,7 +82,7 @@ fn conflict(message: &str) -> io::Error {
 
 fn payload_too_large(message: &str) -> io::Error {
     io::Error::new(
-        io::ErrorKind::OutOfMemory,
+        io::ErrorKind::InvalidInput,
         format!("storage_payload_too_large: {message}"),
     )
 }
@@ -160,6 +170,30 @@ fn updated_index_range(transaction: &AuthorityTransaction) -> io::Result<(Entity
     )
 }
 
+fn document_range(transaction: &AuthorityTransaction) -> io::Result<(EntityKey, EntityKey)> {
+    EntityKey::prefix_range(
+        transaction.tenant_id(),
+        transaction.owner_user_id(),
+        PROJECT_BRAIN_DOCUMENT_NAMESPACE,
+        b"",
+    )
+}
+
+/// Exact project identity of one scanned document, read from its envelope
+/// header without fetching the projection. A digest that does not match the
+/// recorded key fails closed instead of aliasing another project.
+fn stored_project_key(
+    transaction: &AuthorityTransaction,
+    physical: &EntityKey,
+    document: &[u8],
+) -> io::Result<String> {
+    let project_key = versioned_document::stored_document_logical_key(document, LOGICAL_NAMESPACE)?;
+    if document_key(transaction, &project_key)? != *physical {
+        return Err(invalid_data("Project Brain document identity differs"));
+    }
+    Ok(project_key)
+}
+
 fn empty_projection(owner_user_id: u64, project_key: &str) -> Map<String, Value> {
     json!({
         "version": PROJECT_BRAIN_VERSION,
@@ -184,8 +218,10 @@ fn load_projection(
     transaction: &mut AuthorityTransaction,
     project_key: &str,
 ) -> io::Result<Map<String, Value>> {
+    #[cfg(test)]
+    PROJECTION_HYDRATIONS.with(|count| count.set(count.get() + 1));
     let key = document_key(transaction, project_key)?;
-    let Some(raw) = versioned_document::get_value_with_blob_owner_bounded(
+    let Some(value) = versioned_document::get_decoded_value_with_blob_owner_bounded(
         database,
         transaction,
         &key,
@@ -197,7 +233,10 @@ fn load_projection(
     else {
         return Ok(empty_projection(transaction.owner_user_id(), project_key));
     };
-    parse_stored_projection(&raw, transaction, project_key)
+    let Value::Object(projection) = value else {
+        return Err(invalid_data("Project Brain projection is invalid"));
+    };
+    validate_stored_projection(projection, transaction, project_key)
 }
 
 fn parse_stored_projection(
@@ -205,8 +244,16 @@ fn parse_stored_projection(
     transaction: &AuthorityTransaction,
     project_key: &str,
 ) -> io::Result<Map<String, Value>> {
-    let mut projection = serde_json::from_slice::<Map<String, Value>>(raw)
+    let projection = serde_json::from_slice::<Map<String, Value>>(raw)
         .map_err(|_| invalid_data("Project Brain projection is invalid"))?;
+    validate_stored_projection(projection, transaction, project_key)
+}
+
+fn validate_stored_projection(
+    mut projection: Map<String, Value>,
+    transaction: &AuthorityTransaction,
+    project_key: &str,
+) -> io::Result<Map<String, Value>> {
     if projection.get("version").and_then(Value::as_u64) != Some(PROJECT_BRAIN_VERSION)
         || projection.get("ownerUserId").and_then(Value::as_u64)
             != Some(transaction.owner_user_id())
@@ -705,7 +752,7 @@ fn decode_event_chunks(
                 return Err(invalid_data("Project Brain event chunk sequence is malformed"));
             }
             encoded.try_reserve(expected_bytes)
-                .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory,"Project Brain event allocation failed"))?;
+                .map_err(|_| crate::resource_exhaustion::reservation_failure("Project Brain event allocation failed"))?;
             encoded.extend_from_slice(&payload[EVENT_CHUNK_HEADER_BYTES..]);
             index += 1;
         }
@@ -886,11 +933,12 @@ pub(crate) fn list_active(
         .map_err(|_| invalid_data("Project Brain active-list response cannot be encoded"))
 }
 
-/// Storage-issued position in the descending update index; never an offset.
+/// Storage-issued position after the last scanned project document; never an
+/// offset. Documents are keyed by project digest, so settling or updating a
+/// project never moves it across this position.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecoveryCursor {
-    pub updated_at: u64,
     pub owner_user_id: u64,
     pub project_key: String,
 }
@@ -912,49 +960,44 @@ pub(crate) fn recovery_snapshot(
     transaction: &mut AuthorityTransaction,
     cursor: Option<&RecoveryCursor>,
 ) -> io::Result<Vec<u8>> {
-    let (mut start, end) = updated_index_range(transaction)?;
+    // Yield a resumable prefix between projects. A legacy projection may be
+    // large, so the row cap alone is not a useful request-latency bound.
+    let started = std::time::Instant::now();
+    recovery_snapshot_with_yield(database, transaction, cursor, || {
+        started.elapsed() >= std::time::Duration::from_secs(1)
+    })
+}
+
+fn recovery_snapshot_with_yield(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    cursor: Option<&RecoveryCursor>,
+    mut should_yield: impl FnMut() -> bool,
+) -> io::Result<Vec<u8>> {
+    // One document per project, never update-index rows: older generations
+    // kept a row per historical save, which repeated legacy projects on every
+    // page. Digest order is also unaffected by settlement or later updates,
+    // so a complete walk visits each project exactly once.
+    let (mut start, end) = document_range(transaction)?;
     if let Some(cursor) = cursor {
         cursor.validate(transaction.owner_user_id())?;
-        // Advance past the exact key even if settlement deleted that index row.
-        start = updated_index_key(transaction, &cursor.project_key, cursor.updated_at)?
-            .exact_range()?.1;
+        // Advance past the exact key even if that project was since retired.
+        start = document_key(transaction, &cursor.project_key)?.exact_range()?.1;
     }
     let rows = database.entity_scan(transaction, &start, &end, 1000)?;
-    // Keep the entity scan's 1000-row bound; probe one successor in the
-    // same transaction so an exactly full final page is not called capped.
-    let capped = if rows.len() == 1000 {
-        let after = rows.last().expect("full page is nonempty").0.clone().exact_range()?.1;
-        !database.entity_scan(transaction, &after, &end, 1)?.is_empty()
-    } else {
-        false
-    };
-    let mut next_cursor = None;
-    if capped {
-        let (key, raw_project_key) = rows.last().expect("capped page is nonempty");
-        let project_key = std::str::from_utf8(raw_project_key)
-            .map_err(|_| invalid_data("Project Brain updated index is malformed"))?;
-        let timestamp_bytes: [u8; 8] = key.key_bytes().get(..8)
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or_else(|| invalid_data("Project Brain updated index is malformed"))?;
-        next_cursor = Some(RecoveryCursor {
-            updated_at: u64::MAX - u64::from_be_bytes(timestamp_bytes),
-            owner_user_id: transaction.owner_user_id(),
-            project_key: project_key.to_owned(),
-        });
-    }
     let mut projects = Vec::new();
-    // Legacy update-index entries can repeat one project hundreds of times.
-    // Deduplicate before loading its complete projection. Keep the raw row
-    // page/cursor unchanged so settlement and deletion cannot skip a project.
-    let mut seen_projects = HashSet::new();
-    for (_, raw_project_key) in &rows {
-        let project_key = std::str::from_utf8(raw_project_key)
-            .map_err(|_| invalid_data("Project Brain updated index is malformed"))?;
-        if !seen_projects.insert(project_key) {
+    let mut consumed = 0;
+    for (physical, document) in &rows {
+        // Always consume one document, including an inactive one.
+        // A short/empty active page must still advance its cursor.
+        if consumed > 0 && should_yield() { break; }
+        consumed += 1;
+        let project_key = stored_project_key(transaction, physical, document)?;
+        // The scanned envelope is the exact header its summary must match.
+        if recovery::proves_inactive(database, transaction, &project_key, document)? {
             continue;
         }
-        if recovery::can_skip(database, transaction, project_key)? { continue; }
-        let projection = load_projection(database, transaction, project_key)?;
+        let projection = load_projection(database, transaction, &project_key)?;
         let work_items = public_work_items(&projection, true)?;
         if !work_items.is_empty() {
             projects.push(json!({
@@ -964,8 +1007,21 @@ pub(crate) fn recovery_snapshot(
             }));
         }
     }
+    let capped = if consumed < rows.len() {
+        true
+    } else if rows.len() == 1000 {
+        let after = rows.last().expect("full page is nonempty").0.clone().exact_range()?.1;
+        !database.entity_scan(transaction, &after, &end, 1)?.is_empty()
+    } else {
+        false
+    };
     let mut result = json!({"projects": projects, "capped": capped});
-    if let Some(cursor) = next_cursor {
+    if capped {
+        let (physical, document) = &rows[consumed - 1];
+        let cursor = RecoveryCursor {
+            owner_user_id: transaction.owner_user_id(),
+            project_key: stored_project_key(transaction, physical, document)?,
+        };
         result["nextCursor"] = serde_json::to_value(cursor)
             .map_err(|_| invalid_data("Project Brain recovery cursor cannot be encoded"))?;
     }
@@ -2636,7 +2692,48 @@ mod tests {
     }
 
     #[test]
-    fn recovery_snapshot_deduplicates_legacy_index_rows_before_hydrating() {
+    fn recovery_snapshot_yields_after_inactive_rows_without_skipping_active_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        for (project, timestamp, active) in [("/inactive", 30, false), ("/second", 20, true), ("/last", 10, true)] {
+            let mut seed = database.begin(7, 11).unwrap();
+            let mut projection = empty_projection(11, project);
+            if active {
+                projection.insert("workItems".into(), json!([
+                    {"id": project, "taskId": project, "status": "active"}
+                ]));
+            }
+            save_projection(&database, &mut seed, project, &projection, timestamp).unwrap();
+            database.commit(seed).unwrap();
+        }
+        let mut cursor = None;
+        let mut seen = Vec::new();
+        for page_number in 0..3 {
+            let mut tx = database.begin(7, 11).unwrap();
+            let page: Value = serde_json::from_slice(&recovery_snapshot_with_yield(
+                &database, &mut tx, cursor.as_ref(), || true,
+            ).unwrap()).unwrap();
+            let projects = page["projects"].as_array().unwrap();
+            assert!(projects.len() <= 1, "each yielded page consumes one project");
+            seen.extend(projects.iter().map(|p| p["projectKey"].as_str().unwrap().to_owned()));
+            assert_eq!(page["capped"], page_number < 2);
+            cursor = page.get("nextCursor").cloned().map(|c| serde_json::from_value(c).unwrap());
+            if let Some(ref cursor) = cursor {
+                // A retired cursor project must not strand continuation or skip its successor.
+                let mut delete = database.begin(7, 11).unwrap();
+                let key = document_key(&delete, &cursor.project_key).unwrap();
+                database.entity_delete(&mut delete, key).unwrap();
+                database.commit(delete).unwrap();
+                let mut foreign = database.begin(7, 12).unwrap();
+                assert!(recovery_snapshot_with_yield(&database, &mut foreign, Some(cursor), || true).is_err());
+            }
+        }
+        seen.sort();
+        assert_eq!(seen, ["/last", "/second"]);
+    }
+
+    #[test]
+    fn recovery_snapshot_hydrates_once_despite_legacy_index_rows() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
         let project_key = "/legacy-duplicates";
@@ -2655,32 +2752,30 @@ mod tests {
             database.entity_put(&mut seed, key, project_key.as_bytes().to_vec()).unwrap();
         }
         database.commit(seed).unwrap();
-        let started = std::time::Instant::now();
+        let hydrations = projection_hydrations();
         let mut inspect = database.begin(7, 11).unwrap();
         let first: Value = serde_json::from_slice(
             &recovery_snapshot(&database, &mut inspect, None).unwrap()).unwrap();
-        eprintln!("duplicate_recovery elapsed_us={} projects={}",
-            started.elapsed().as_micros(), first["projects"].as_array().unwrap().len());
+        assert_eq!(projection_hydrations() - hydrations, 1);
         assert_eq!(first["projects"].as_array().unwrap().len(), 1);
         assert_eq!(first["projects"][0]["workItems"][0]["taskId"], "task");
-        assert_eq!(first["capped"], true);
-        let cursor: RecoveryCursor = serde_json::from_value(first["nextCursor"].clone()).unwrap();
+        assert_eq!(first["capped"], false);
         let mut settle = database.begin(7, 11).unwrap();
         projection.insert("workItems".to_owned(), json!([
             {"id": "work", "taskId": "task", "status": "completed"}
         ]));
         save_projection(&database, &mut settle, project_key, &projection, 3000).unwrap();
         database.commit(settle).unwrap();
+        let hydrations = projection_hydrations();
         let mut inspect = database.begin(7, 11).unwrap();
         let last: Value = serde_json::from_slice(
-            &recovery_snapshot(&database, &mut inspect, Some(&cursor)).unwrap()).unwrap();
+            &recovery_snapshot(&database, &mut inspect, None).unwrap()).unwrap();
         assert_eq!(last, json!({"projects": [], "capped": false}));
-        let mut foreign = database.begin(7, 12).unwrap();
-        assert!(recovery_snapshot(&database, &mut foreign, Some(&cursor)).is_err());
+        assert_eq!(projection_hydrations(), hydrations, "settlement published a negative summary");
     }
 
     #[test]
-    fn recovery_snapshot_pages_past_empty_work_and_deleted_cursor_rows() {
+    fn recovery_snapshot_pages_past_empty_work_and_retired_cursor_projects() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
         let mut seed = database.begin(7, 11).unwrap();
@@ -2692,27 +2787,31 @@ mod tests {
         database.commit(seed).unwrap();
         let mut inspect = database.begin(7, 11).unwrap();
         let first: Value = serde_json::from_slice(
-            &recovery_snapshot(&database, &mut inspect, None).unwrap()).unwrap();
+            &recovery_snapshot_with_yield(&database, &mut inspect, None, || false).unwrap()).unwrap();
         assert_eq!(first["projects"], json!([]));
         assert_eq!(first["capped"], true);
         let cursor: RecoveryCursor = serde_json::from_value(first["nextCursor"].clone()).unwrap();
+        // Update-order continuations of older engines are refused, never reinterpreted.
+        assert!(serde_json::from_value::<RecoveryCursor>(json!({
+            "updatedAt": 50, "ownerUserId": 11, "projectKey": cursor.project_key,
+        })).is_err());
         let mut settlement = database.begin(7, 11).unwrap();
         let projection = load_projection(&database, &mut settlement, &cursor.project_key).unwrap();
         save_projection(&database, &mut settlement, &cursor.project_key, &projection, 100).unwrap();
         database.commit(settlement).unwrap();
         let mut inspect = database.begin(7, 11).unwrap();
         let last: Value = serde_json::from_slice(
-            &recovery_snapshot(&database, &mut inspect, Some(&cursor)).unwrap()).unwrap();
+            &recovery_snapshot_with_yield(&database, &mut inspect, Some(&cursor), || false).unwrap()).unwrap();
         assert_eq!(last, json!({"projects": [], "capped": false}));
         let mut foreign = database.begin(7, 12).unwrap();
         assert!(recovery_snapshot(&database, &mut foreign, Some(&cursor)).is_err());
         let mut delete = database.begin(7, 11).unwrap();
         database.entity_delete(&mut delete,
-            updated_index_key(&inspect, &cursor.project_key, 100).unwrap()).unwrap();
+            document_key(&inspect, &cursor.project_key).unwrap()).unwrap();
         database.commit(delete).unwrap();
         let mut inspect = database.begin(7, 11).unwrap();
         let exact: Value = serde_json::from_slice(
-            &recovery_snapshot(&database, &mut inspect, None).unwrap()).unwrap();
+            &recovery_snapshot_with_yield(&database, &mut inspect, None, || false).unwrap()).unwrap();
         assert_eq!(exact, json!({"projects": [], "capped": false}));
     }
 
@@ -2754,7 +2853,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_snapshot_returns_only_active_work_in_recent_project_order() {
+    fn recovery_snapshot_returns_only_active_work() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
         for (project_key, task_id, timestamp) in

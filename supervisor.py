@@ -37,9 +37,9 @@ Endpoints (all under the proxied prefix):
     POST /reload  {projectPath, expectedFingerprint}
                                     → reload Supervisor, preserve worker
     POST /restart-deferred {projectPath}
-                                    → reply, await worker quiescence
-                                      (15s for approved application actions,
-                                      3600s otherwise); unapproved requests
+                                    → reply, honor approved interruption
+                                      immediately (3600s idle wait otherwise);
+                                      unapproved requests
                                       require confirmed quiet before replacement
 
 Launch (owner-ratified): a systemd USER UNIT with ``Restart=always``; fall back
@@ -61,9 +61,8 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from server_manager import (
-    LifecycleManager, _read_probe_json, project_server_env,
-    _path_is_pytest_owned)
-from runtime_guards import install_process_resource_defaults
+    LifecycleManager, SupervisorOwnership, _read_probe_json,
+    managed_worker_environment, project_server_env, _path_is_pytest_owned)
 from supervisor_protocol import (
     SUPERVISOR_PROTOCOL_VERSION,
     SUPERVISOR_VERSION,
@@ -98,7 +97,7 @@ ENV_APPLICATION_DEFER_QUIESCE_MAX_WAIT_S = (
     'TOFU_SUPERVISOR_APPLICATION_DEFER_QUIESCE_MAX_WAIT_S')
 ENV_DEFER_QUIESCE_POLL_S = 'TOFU_SUPERVISOR_DEFER_QUIESCE_POLL_S'
 _DEFER_QUIESCE_DEFAULT_MAX_WAIT_S = 3600.0
-_APPLICATION_DEFER_QUIESCE_DEFAULT_MAX_WAIT_S = 15.0
+_APPLICATION_DEFER_QUIESCE_DEFAULT_MAX_WAIT_S = 0.0
 _DEFER_QUIESCE_DEFAULT_POLL_S = 2.0
 # Only the application's declared, human-approved actions may interrupt work.
 _APPLICATION_RESTART_SOURCES = frozenset({'application-update', 'application-restart'})
@@ -228,16 +227,6 @@ def parse_owner_pid(raw):
     if pid <= 0:
         raise ValueError(f'{ENV_OWNER_PID} must be a positive PID')
     return pid
-
-
-def pid_is_alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except PermissionError:
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
 
 
 def is_allowed(project_path, allowlist):
@@ -379,12 +368,11 @@ def do_start(project_path, python_exe=None):
     try:
         # start_new_session detaches the child into its own process group so it
         # survives this request / a supervisor restart. Output → the log file.
-        child_env = os.environ.copy()
-        child_env.update(project_server_env(canon))
-        child_env['TOFU_PROJECT_PATH'] = canon
-        install_process_resource_defaults(child_env)
-        child_env['TOFU_EXTERNAL_CONSOLE_LOG'] = log_path
-        child_env['TOFU_EXTERNAL_CONSOLE_STREAM'] = 'supervisor_server_console'
+        child_env = managed_worker_environment(canon, {
+            'TOFU_PROJECT_PATH': canon,
+            'TOFU_EXTERNAL_CONSOLE_LOG': log_path,
+            'TOFU_EXTERNAL_CONSOLE_STREAM': 'supervisor_server_console',
+        }, project_server_env(canon))
         proc = subprocess.Popen(
             [py, 'server.py'],
             cwd=canon,
@@ -718,28 +706,34 @@ class ManagerHTTPServer(ThreadingHTTPServer):
                 manager = self.managers[project]
                 wait_s = deferred_quiesce_max_wait_s(source)
                 logger.info(
-                    'deferred worker restart waiting for quiescence '
+                    'deferred worker restart interruption policy '
                     'project=%s source=%s maxWaitS=%.1f',
                     project, source, wait_s)
                 quiesce_started = time.monotonic()
                 try:
-                    outcome = _await_worker_quiescence(
-                        manager,
-                        max_wait_s=wait_s,
-                        poll_s=_env_seconds(
-                            ENV_DEFER_QUIESCE_POLL_S,
-                            _DEFER_QUIESCE_DEFAULT_POLL_S))
+                    if wait_s == 0 and source in _APPLICATION_RESTART_SOURCES:
+                        # The application already obtained human approval for
+                        # interruption. Match direct CLI restart after the ACK
+                        # window; graceful teardown still owns task settlement.
+                        outcome = 'approved'
+                    else:
+                        outcome = _await_worker_quiescence(
+                            manager,
+                            max_wait_s=wait_s,
+                            poll_s=_env_seconds(
+                                ENV_DEFER_QUIESCE_POLL_S,
+                                _DEFER_QUIESCE_DEFAULT_POLL_S))
                 except Exception:
                     logger.exception(
                         'deferred worker restart quiescence probe failed '
                         'project=%s', project)
                     outcome = 'error'
                 quiesce_elapsed = time.monotonic() - quiesce_started
-                if outcome == 'quiet':
+                if outcome in ('quiet', 'approved'):
                     logger.info(
-                        'deferred worker restart: worker quiet after %.1fs, '
+                        'deferred worker restart: interruption=%s after %.1fs, '
                         'restarting project=%s source=%s',
-                        quiesce_elapsed, project, source)
+                        outcome, quiesce_elapsed, project, source)
                 elif str(source or '') not in _APPLICATION_RESTART_SOURCES:
                     logger.warning(
                         'deferred worker restart cancelled: quiescence=%s '
@@ -791,16 +785,11 @@ class ManagerHTTPServer(ThreadingHTTPServer):
         monitor thread.
         """
         super().service_actions()
-        sentinel = getattr(self, 'ownership_sentinel', '')
-        if sentinel and not os.path.isfile(sentinel):
+        ownership = getattr(self, 'ownership', None)
+        reason = ownership.lost() if ownership is not None else ''
+        if reason:
             self._retire_owned_workers()
-            raise SupervisorOwnershipLost(
-                f'supervisor ownership sentinel disappeared: {sentinel}')
-        owner_pid = getattr(self, 'ownership_pid', None)
-        if owner_pid and not pid_is_alive(owner_pid):
-            self._retire_owned_workers()
-            raise SupervisorOwnershipLost(
-                f'supervisor owner process disappeared: pid={owner_pid}')
+            raise SupervisorOwnershipLost(reason)
 
     def _retire_owned_workers(self):
         """Release process/port budget exactly once on ownership loss."""
@@ -845,8 +834,9 @@ def build_server():
     # Bind before constructing managers. A second supervisor therefore fails
     # without touching desired state or racing the active owner.
     httpd = ManagerHTTPServer((host, port), SupervisorHandler)
-    httpd.ownership_sentinel = os.path.realpath(__file__)
-    httpd.ownership_pid = parse_owner_pid(os.environ.get(ENV_OWNER_PID))
+    httpd.ownership = SupervisorOwnership(
+        os.path.realpath(__file__),
+        parse_owner_pid(os.environ.get(ENV_OWNER_PID)))
     httpd.allowlist = allowlist
     httpd.started_at = time.time()
     httpd.source_root = os.path.realpath(

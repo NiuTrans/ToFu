@@ -27,7 +27,7 @@ from lib.tasks_pkg.handlers.search._display import (
 
 from lib.tasks_pkg.handlers.search._presentation import (
     failed_search_observation, fetch_failure_text, format_search_observations,
-    join_fetch_results, search_observation,
+    join_fetch_results, oversized_query_refusal, search_observation,
 )
 
 logger = get_logger(__name__)
@@ -127,14 +127,17 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
     vertical_param = fn_args.get('vertical', 'auto')
     user_question = task.get('lastUserQuery', '')
 
-    # ── Fast-path: short-circuit empty/whitespace queries before hitting
-    # the orchestrator (5 engines + retry + browser fallback ≈ 4s of wasted work).
+    # ── Fast-path: refuse empty or over-long queries before hitting the
+    # orchestrator (5 engines + retry + browser fallback ≈ 4s of wasted work).
     if not query or not query.strip():
         logger.debug('[Search] web_search short-circuit: empty query')
         tool_content = (
             'Error: "query" must be a non-empty string. '
             'Pass the search terms in the `query` field (or `queries` for batch mode).'
         )
+    else:
+        tool_content = oversized_query_refusal(query)
+    if tool_content:
         round_entry['results'] = []
         round_entry['status'] = 'done'
         append_event(task, {'type': 'tool_result', 'roundNum': rn, 'query': query, 'results': [], 'status': 'done'})
@@ -142,9 +145,13 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
 
     search_core, format_search_for_tool_response = _load_search_backend()
     from lib.search.search_bridge import bind_search_browser
+    from lib.site_doctor.ownership import search_knowledge_scope
     with bind_search_browser(
             user_id=task.get('_userId', '') or '',
-            client_id=cfg.get('browserClientId') or ''):
+            client_id=cfg.get('browserClientId') or '') as binding, search_knowledge_scope(
+                task, binding, repair=True,
+                emit=lambda event: append_event(task, {'type': 'tool_progress',
+                    'roundNum': rn, 'toolCallId': tc_id, **event})):
         results, search_diag, engine_breakdown, vertical_result = search_core._web_search_one(
             query, user_question, freshness, vertical=vertical_param)
     display_results = _format_search_display_for_results(results)
@@ -220,29 +227,38 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
     search_core, format_search_for_tool_response = _load_search_backend()
     query_list = [q for q, _, _ in query_specs]
     n = len(query_list)
+    refusals = [oversized_query_refusal(q) for q in query_list]
+    runnable = [spec for spec, refusal in zip(query_specs, refusals) if not refusal]
 
     def _worker(spec):
         q, f, v = spec
         from lib.search.search_bridge import bind_search_browser
+        from lib.site_doctor.ownership import search_knowledge_scope
         with bind_search_browser(
                 user_id=task.get('_userId', '') or '',
-                client_id=cfg.get('browserClientId') or ''):
+                client_id=cfg.get('browserClientId') or '') as binding, search_knowledge_scope(
+                    task, binding, repair=True,
+                    emit=lambda event: append_event(task, {'type': 'tool_progress',
+                        'roundNum': rn, 'toolCallId': tc_id, **event})):
             results, search_diag, engine_breakdown, vertical_result = search_core._web_search_one(
                 q, user_question, f, vertical=v)
         return (q, results, search_diag, engine_breakdown, vertical_result)
 
-    ordered = run_batch_concurrent(query_specs, _worker, max_workers=5, tag='Search',
-                                   abort=lambda: bool(task.get('aborted')),
-                                   on_item=_batch_progress_reporter(
-                                       task, rn, round_entry, n,
-                                       lambda idx, _spec: query_list[idx]))
+    ran = iter(run_batch_concurrent(runnable, _worker, max_workers=5, tag='Search',
+                                    abort=lambda: bool(task.get('aborted')),
+                                    on_item=_batch_progress_reporter(
+                                        task, rn, round_entry, len(runnable),
+                                        lambda _idx, spec: spec[0])))
 
     all_display_results = []
     all_search_diags = []
     search_observations = []
     all_verticals = []
-    for idx, item in enumerate(ordered):
-        q = query_list[idx]
+    for q, refusal in zip(query_list, refusals):
+        if refusal:
+            search_observations.append(failed_search_observation(q, refusal))
+            continue
+        item = next(ran)
         if item is None:
             search_observations.append(failed_search_observation(q))
             continue
@@ -325,10 +341,9 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
 
     target_url = (fn_args.get('url') or '').strip()
     user_question = task.get('lastUserQuery', '')
-    fetch_reason = fn_args.get('reason', '')
 
     # ── Guard: no target URL. Models sometimes emit a placeholder call like
-    #    fetch_url({"reason": "placeholder", "urls": []}) — an empty `urls`
+    #    fetch_url({"urls": []}) — an empty `urls`
     #    array is falsy so it lands here with url=''. Reject it clearly
     #    instead of trying to fetch the empty string (which produced the
     #    confusing "Failed to fetch ." rows). ──
@@ -377,7 +392,7 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
             user_id=task.get('_userId', '') or '',
             client_id=cfg.get('browserClientId') or ''):
         item = (prefetched_items[0] if prefetched_items is not None else
-                search_core._fetch_url_one(target_url, user_question, fetch_reason=fetch_reason))
+                search_core._fetch_url_one(target_url, user_question))
 
     from lib.tasks_pkg.tool_display import _short_url
     dr = _format_fetch_display(item, _short_url)
@@ -613,7 +628,7 @@ def _handle_browser_download_url_to_server(
         }],
         query_override=f'⬇ {parsed.hostname}',
     )
-    return tc_id, tool_content, True
+    return tc_id, tool_content, False
 
 
 def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, round_entry, cfg, project_path, project_enabled, all_tools=None, *, prefetched_items=None):
@@ -647,8 +662,7 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
         with bind_search_browser(
                 user_id=task.get('_userId', '') or '',
                 client_id=cfg.get('browserClientId') or ''):
-            return search_core._fetch_url_one(
-                target_url, user_question, fetch_reason='')
+            return search_core._fetch_url_one(target_url, user_question)
 
     ordered = prefetched_items
     if ordered is None:

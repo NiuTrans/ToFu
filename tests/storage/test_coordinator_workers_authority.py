@@ -69,7 +69,8 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
     names = ['read_files', 'write_file', 'run_command', 'spawn_agents', 'timer_create']
     if continue_after_restart:
         names += CONTRACT['continuationTools']
-    capture_worker_policy(task, task['config'], [{'function': {'name': n}} for n in names], 'fixture-model')
+    capture_worker_policy(task, task['config'], [{'function': {'name': n}} for n in names], 'fixture-model',
+                          worker_model='fixture-model')
     if continue_after_restart:
         # Capture the original ceiling through actual root assembly, then later
         # recover it from a planning-only synthetic Coordinator catalog.
@@ -79,7 +80,7 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
             'desktop_enabled': False, 'image_gen_enabled': False})
         assert 'get_project_workers' in task['_coordinatorWorkerPolicy'].coordinator_tools
     repo = ProjectDispatchRepository(owner, str(root))
-    from lib.project_dispatch.request_budget import bind_source_account, allowance
+    from lib.project_dispatch.request_budget import bind_source_account, usage
     source_budget = bind_source_account(task, repository=repo)
     source_lease = task['_executionBudget'].reserve_model(task, input_tokens=5, max_output_tokens=5)
     source_lease.mark_dispatched(); source_lease.settle({'prompt_tokens': 5, 'completion_tokens': 5})
@@ -145,7 +146,8 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
         was_aborted_after=lambda *args: False, start_task=transport)
     service = ProjectDispatchService(repo, commands=commands)
     monkeypatch.setattr(coordinator_workers, 'ProjectDispatchService', lambda repository: service)
-    arguments = {'title': 'Independent implementation', 'brief': 'Write and verify result.txt', 'idempotency_key': 'implementation'}
+    brief = 'Write and verify result.txt.\n' + 'Keep the original authorization and every constraint.\n' * 100
+    arguments = {'title': 'Independent implementation', 'brief': brief, 'idempotency_key': 'implementation'}
     first = json.loads(execute_coordinator_tool(task, 'delegate_project_work', arguments))
     assert first.get('status') == 'completed', first
     second = json.loads(execute_coordinator_tool(task, 'delegate_project_work', arguments))
@@ -155,8 +157,9 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
     evidence = json.loads(execute_coordinator_tool(task, 'await_project_workers', {'assignment_ids': [first['assignment_id']]}))
     assert evidence['wait'] == 'settled' and evidence['workers'][0]['result_excerpt'] == 'Verified independent worker bytes'
     row = repo.read(first['assignment_id'])
+    assert row['request']['brief'] == brief
     assert row['modelAttempts'][0]['reported_tokens'] == 10
-    assert allowance(repo, repo._load()[0], source_budget['id'])['observedTokens'] == 20
+    assert usage(repo, repo._load()[0], source_budget['id'])['tokens'] == 20
     assert row['toolAttempts'][0]['phase'] == 'executor_returned'
     assert row['toolAttempts'][1]['phase'] == 'executor_returned'
     delivery.settle_task_workspace(str(root), sends[0], user_id=owner, outcome='completed')
@@ -164,6 +167,11 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
     view = service.view_for_coordinator(first['assignment_id'], scope={'user_id': owner,
         'project_path': str(root), 'conversation_id': conv, 'binding_revision': binding['revision']})
     assert view['delivery']['status'] == 'blocked' and not view['canonicalDelivery']
+    # A held receipt settles a delivery wait at once and names its cause.
+    held = json.loads(execute_coordinator_tool(task, 'await_project_workers', {
+        'assignment_ids': [first['assignment_id']], 'wait_for': 'delivery', 'timeout_seconds': 60}))
+    assert held['wait'] == 'settled' and held['workers'][0]['delivery'] == view['delivery'], held
+    assert 'delivery.reason' in held['instruction']
     if continue_after_restart:
         factory(write=True).command('turn.event.record', dict(user_id=owner,
             attempt_id=task['_attemptId'], task_id=task['id'], terminal=True, status='completed',
@@ -180,8 +188,8 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
         assert recover_coordinator(repo, service=service) == []
         page = json.loads(execute_coordinator_tool(task, 'get_project_workers', {}))
         assert page['workers'][0]['assignment_id'] == first['assignment_id'], page
-        assert page['request_allowance']['id'] == source_budget['id']
-        assert page['request_allowance']['consumption']['observedTokens'] >= 20
+        assert page['request_usage']['id'] == source_budget['id']
+        assert page['request_usage']['usage']['tokens'] >= 20
         result = _execute_tool_one(task, {}, 'get_project_workers', 'native-control-read', {}, 0,
             {'name': 'get_project_workers', 'arguments': {}, 'query': 'Follow Worker results'},
             task['config'], str(root), True, task['_testCoordinatorSchemas'])
@@ -201,15 +209,11 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
         'title': 'Implementation delivered', 'message': 'Worker verification passed and canonical delivery is confirmed.',
         'kind': 'delivery', 'idempotency_key': 'verified'}))
     assert report.get('turnId'), report
-    from lib.conversations.coordinator_budget import CoordinatorBudgetSettings, read_state
-    defaults = CoordinatorBudgetSettings(owner, str(root))
-    defaults.update({'path': str(root), 'conversationId': conv, 'bindingRevision': binding['revision'],
-        'expectedRevision': 0, 'settings': {**defaults.read()['settings'], 'maxTokens': 1234}})
+    from lib.conversations.coordinator_budget import read_state
     engine.crash_cycle()
     persisted = read_state(owner, str(root))
-    assert persisted['settings']['maxTokens'] == 1234
-    assert persisted['request']['policy'] == source_budget['policy']
-    assert persisted['request']['consumption']['observedTokens'] >= 20
+    assert persisted['request']['id'] == source_budget['id'] and 'policy' not in persisted['request']
+    assert persisted['request']['usage']['tokens'] >= 20
     assert CoordinatorReports(owner, str(root)).read()['unread'] is True
     assert json.loads(execute_coordinator_tool(task, 'delegate_project_work', arguments)) == first
     assert len(sends) == 1 and not workspaces[0].exists()

@@ -11,6 +11,9 @@ fn database() -> (Arc<DeterministicVfs>, AuthorityDatabase) {
     vfs.sync_directory(Path::new("/")).unwrap();
     let mut db = AuthorityDatabase::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
     db.set_write_overlay_for_test(true);
+    // These witnesses specify the default OCC boundary; TOFU_DB_TOMBSTONE_RECLAIM
+    // deliberately makes leaf-changing range validation conservative.
+    db.set_entity_tombstone_reclaim_override_for_test(Some(false));
     (vfs, db)
 }
 
@@ -23,6 +26,34 @@ fn stage(db: &AuthorityDatabase, namespace: &str, bytes: &[u8]) -> AuthorityTran
     db.entity_put(&mut tx, key(namespace, bytes), b"value".to_vec())
         .unwrap();
     tx
+}
+
+#[test]
+fn replica_persistent_snapshot_uses_captured_pin_and_remains_read_only_after_live_removal() {
+    for overlay in [false, true] {
+        let (_, mut db) = database();
+        db.set_write_overlay_for_test(overlay);
+        db.commit(stage(&db, "rows", b"old")).unwrap();
+        let mut pin = db.begin(1, 1).unwrap();
+        db.stage_persistent_snapshot_pin(&mut pin, b"retirement").unwrap();
+        db.commit(pin).unwrap();
+        let replica = db.build_read_replica().unwrap();
+        let mut remove = db.begin(1, 1).unwrap();
+        assert!(db.remove_persistent_snapshot_pin(&mut remove, b"retirement").unwrap());
+        db.entity_put(&mut remove, key("rows", b"old"), b"new value".to_vec()).unwrap();
+        db.commit(remove).unwrap();
+        assert!(db.begin_persistent_snapshot(1, 1, b"retirement").unwrap().is_none());
+        assert!(replica.begin_persistent_snapshot(1, 2, b"retirement").unwrap().is_none());
+        let mut historical = replica.begin_persistent_snapshot(1, 1, b"retirement").unwrap().unwrap();
+        assert_eq!(replica.entity_get(&mut historical, &key("rows", b"old")).unwrap(), Some(b"value".to_vec()));
+        assert_eq!(replica.entity_put(&mut historical, key("rows", b"old"), b"forbidden".to_vec()).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        // The historical transaction registers its own older root pin; it
+        // outlives both the durable pin and the replica's captured-root lease.
+        drop(replica);
+        assert_eq!(db.entity_get(&mut historical, &key("rows", b"old")).unwrap(), Some(b"value".to_vec()));
+        assert_eq!(db.commit(historical).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(db.snapshot_pin_metrics().unwrap().active_handles, 0);
+    }
 }
 
 #[test]

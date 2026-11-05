@@ -198,7 +198,7 @@ def test_fetch_title_all_sources_fail_returns_empty():
 
 # ─── Layer 2a: Paper-Card title extraction ───────────────────────
 
-def testextract_title_from_report_en():
+def test_extract_title_from_report_en():
     from lib.paper.images.titles import extract_title_from_report
     report = (
         '# arXiv:1706.03762\n\n## ⚡ TL;DR\nblah\n\n## 📋 Paper Card\n'
@@ -210,7 +210,7 @@ def testextract_title_from_report_en():
     _ok('extract_title_from_report parses the EN Paper Card title row')
 
 
-def testextract_title_from_report_zh():
+def test_extract_title_from_report_zh():
     from lib.paper.images.titles import extract_title_from_report
     report = (
         '## ⚡ 一句话总结\n...\n\n## 📋 论文信息卡\n'
@@ -456,8 +456,8 @@ def main():
         test_fetch_title_recovers_via_abs_page,
         test_fetch_title_api_success_no_fallback,
         test_fetch_title_all_sources_fail_returns_empty,
-        testextract_title_from_report_en,
-        testextract_title_from_report_zh,
+        test_extract_title_from_report_en,
+        test_extract_title_from_report_zh,
         test_extract_title_rejects_placeholder_and_arxiv,
         test_extract_title_strips_markdown_link,
         test_ensure_heading_repairs_placeholder_h1_from_card,

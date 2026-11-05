@@ -12,7 +12,13 @@ cohesive sub-modules:
 
   * ``_prompt``  — ``_SUMMARY_SYSTEM_PROMPT`` + input formatting/budget.
   * ``_anchor``  — objective anchor / boundary / query & file extraction.
-  * ``_summary`` — ``_generate_query_aware_summary`` (cheap-model dispatch).
+  * ``_summary`` — authorized summary routing, credential lifetime and settlement.
+  * ``_summary_input`` — evidence assembly and owner-scoped prior receipts.
+  * ``_summary_transport`` — provider observations, completion proof and usage.
+  * ``_source_plan`` — whole-unit source selection and summary reservation.
+  * ``_candidate_policy`` — source eligibility and adoption economics.
+  * ``_summary_acceptance`` — critical-state checks and recovery decorations.
+  * ``_projection`` — retained shells and complete-candidate convergence.
   * ``_compact`` — public entrypoints (``execute_compact_tool`` etc.).
 
 Public surface:

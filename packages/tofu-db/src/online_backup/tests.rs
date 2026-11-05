@@ -287,6 +287,184 @@ fn driver_answers_a_doorbell_with_a_receipt() {
     driver.stop_and_join().unwrap();
 }
 
+/// Records the bytes every read returns, per path.
+struct ReadRecordingVfs {
+    inner: Arc<DeterministicVfs>,
+    reads: Arc<Mutex<Vec<(PathBuf, usize)>>>,
+}
+impl crate::vfs::Vfs for ReadRecordingVfs {
+    fn open(&self, path: &Path, request: crate::vfs::OpenRequest) -> io::Result<Box<dyn crate::vfs::VfsFile>> {
+        let file = self.inner.open(path, request)?;
+        Ok(Box::new(ReadRecordingFile { inner: file, path: path.to_path_buf(), reads: self.reads.clone() }))
+    }
+    fn create_dir(&self, path: &Path) -> io::Result<()> { self.inner.create_dir(path) }
+    fn rename(&self, source: &Path, destination: &Path) -> io::Result<()> { self.inner.rename(source, destination) }
+    fn remove_file(&self, path: &Path) -> io::Result<()> { self.inner.remove_file(path) }
+    fn metadata(&self, path: &Path) -> io::Result<crate::vfs::FileKind> { self.inner.metadata(path) }
+    fn read_directory(&self, path: &Path) -> io::Result<Vec<PathBuf>> { self.inner.read_directory(path) }
+    fn read_directory_bounded(&self, path: &Path, maximum: usize) -> io::Result<crate::vfs::BoundedDirectoryEntries> {
+        self.inner.read_directory_bounded(path, maximum)
+    }
+    fn match_directory_prefix_bounded(&self, path: &Path, prefix: &str, maximum: usize, matches: usize)
+        -> io::Result<crate::vfs::BoundedDirectoryMatches> {
+        self.inner.match_directory_prefix_bounded(path, prefix, maximum, matches)
+    }
+    fn sync_directory(&self, path: &Path) -> io::Result<()> { self.inner.sync_directory(path) }
+}
+struct ReadRecordingFile {
+    inner: Box<dyn crate::vfs::VfsFile>,
+    path: PathBuf,
+    reads: Arc<Mutex<Vec<(PathBuf, usize)>>>,
+}
+impl crate::vfs::VfsFile for ReadRecordingFile {
+    fn len(&self) -> io::Result<u64> { self.inner.len() }
+    fn read_all(&mut self, maximum: usize) -> io::Result<Vec<u8>> {
+        let bytes = self.inner.read_all(maximum)?;
+        self.reads.lock().unwrap().push((self.path.clone(), bytes.len()));
+        Ok(bytes)
+    }
+    fn read_exact_at(&mut self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+        self.inner.read_exact_at(offset, bytes)?;
+        self.reads.lock().unwrap().push((self.path.clone(), bytes.len()));
+        Ok(())
+    }
+    fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> { self.inner.write_all_at(offset, bytes) }
+    fn set_len(&mut self, length: u64) -> io::Result<()> { self.inner.set_len(length) }
+    fn sync_data(&mut self) -> io::Result<()> { self.inner.sync_data() }
+    fn sync_all(&mut self) -> io::Result<()> { self.inner.sync_all() }
+    fn try_lock_exclusive(&mut self) -> io::Result<()> { self.inner.try_lock_exclusive() }
+}
+
+#[test]
+fn unchanged_generation_reads_no_held_blob_chunk_from_either_store() {
+    let inner = Arc::new(DeterministicVfs::new(None));
+    for directory in ["/data", "/backup"] {
+        inner.create_dir(Path::new(directory)).unwrap();
+        inner.sync_directory(Path::new("/")).unwrap();
+    }
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let vfs = Arc::new(ReadRecordingVfs { inner: inner.clone(), reads: reads.clone() });
+    let mut authority = AuthorityDatabase::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+    let document = EntityKey::new(7, 11, "record", b"chunked").unwrap();
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let text: String = (0..3 * crate::blob::BLOB_CHUNK_BYTES + 1024).map(|_| {
+        state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+        char::from(b"0123456789abcdef"[(state & 15) as usize])
+    }).collect();
+    let mut transaction = authority.begin(7, 11).unwrap();
+    crate::versioned_document::put(&authority, &mut transaction, crate::versioned_document::PutRequest {
+        key: document.clone(), namespace: "record".into(), logical_key: "chunked".into(),
+        value_json: serde_json::to_vec(&text).unwrap(), expected_version: None, updated_at_ms: 1,
+    }).unwrap();
+    let stored = authority.entity_get(&mut transaction, &document).unwrap().unwrap();
+    authority.commit(transaction).unwrap();
+    let reference = crate::versioned_document::stored_blob_reference(&stored).unwrap().unwrap();
+    let manifest = reference.manifest_block_id;
+    let mut chunks = Vec::new();
+    crate::blob::visit_blob_references(7, 11, reference, |id| authority.block_store_shared().get(id),
+        |id| { chunks.push(id); Ok(()) }).unwrap();
+    chunks.retain(|id| *id != manifest);
+    assert_eq!(chunks.len(), 4);
+    authority.configure_hot_data_caches(0, 0).unwrap();
+    let database = Arc::new(Mutex::new(authority));
+    let context = context(&inner);
+    let context = EpochContext { destination_vfs: vfs.clone(), ..context };
+    let first = run(&database, &context);
+    assert!(first.copied_blocks >= 5);
+    reads.lock().unwrap().clear();
+    let second = run(&database, &context);
+    assert_eq!(second.copied_blocks, 0);
+    let reads = reads.lock().unwrap().clone();
+    // Neither store reads a held chunk as a block: not its loose file in
+    // either directory, and no source payload-segment read as large as one
+    // encoded chunk (each exceeds 256 KiB). Retained history segments are
+    // still decoded to enumerate their transactions.
+    let loose = |root: &str, id: &BlockId| {
+        let name = id.to_hex();
+        Path::new(root).join("blocks").join(&name[..2]).join(format!("{name}.blk"))
+    };
+    let held = chunks.iter().flat_map(|id| [loose("/backup", id), loose("/data", id)]).collect::<Vec<_>>();
+    assert!(reads.iter().all(|(path, _)| !held.contains(path)), "{reads:?}");
+    let segment_bytes: usize = reads.iter()
+        .filter(|(path, _)| path.starts_with("/data/payload-segments"))
+        .map(|(_, bytes)| bytes).sum();
+    assert!(segment_bytes < 256 * 1024, "unchanged generation read {segment_bytes} source segment bytes");
+    let destination_bytes: usize = reads.iter()
+        .filter(|(path, _)| path.starts_with("/backup/blocks"))
+        .map(|(_, bytes)| bytes).sum();
+    println!("unchanged_generation source_segment_bytes={segment_bytes} destination_block_bytes={destination_bytes} reads={}",
+        reads.len());
+}
+
+#[test]
+fn driver_attributes_copy_reads_to_the_online_backup_component() {
+    let (vfs, database) = authority();
+    commit_value(&database, b"attributed", b"value-attributed");
+    let reads = || crate::fsync_stats::component_stage_calls(
+        crate::fsync_stats::COMPONENT_ONLINE_BACKUP, crate::fsync_stats::STAGE_BLOCK_GET);
+    let before = reads();
+    let driver = OnlineBackupDriver::start_with_destination_vfs(
+        &database,
+        PathBuf::from("/backup"),
+        vfs.clone(),
+    )
+    .unwrap();
+    assert!(driver.observer().run_and_wait(now_unix_ms() + 30_000).unwrap().ok);
+    driver.stop_and_join().unwrap();
+    assert!(reads() > before, "backup copies must not be billed to foreground");
+}
+
+#[test]
+fn concurrent_doorbells_each_receive_the_finished_epoch_receipt() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let backup_dir = root.path().join("backup");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&backup_dir).unwrap();
+    let database = Arc::new(Mutex::new(AuthorityDatabase::initialize(&source).unwrap()));
+    commit_value(&database, b"seed", b"seed-value");
+    let (entered, reached) = std::sync::mpsc::sync_channel(1);
+    let gate = Arc::new(GatedDestination {
+        armed: AtomicBool::new(true),
+        fail_writes: AtomicBool::new(false),
+        entered,
+        released: Mutex::new(false),
+        signal: Condvar::new(),
+    });
+    let driver = OnlineBackupDriver::start_with_destination_vfs(&database, backup_dir, gate.clone())
+        .unwrap();
+    let observer = driver.observer();
+    let first = std::thread::spawn({
+        let observer = observer.clone();
+        move || observer.run_and_wait(now_unix_ms() + 30_000)
+    });
+    let reached_result = reached.recv_timeout(Duration::from_secs(10));
+    if reached_result.is_err() {
+        gate.release();
+    }
+    assert!(reached_result.is_ok());
+    let later: Vec<_> = (0..2)
+        .map(|_| {
+            let observer = observer.clone();
+            std::thread::spawn(move || observer.run_and_wait(now_unix_ms() + 30_000))
+        })
+        .collect();
+    while observer.shared.doorbell.load(Ordering::Acquire) < 3 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // Both later requests wait on the in-flight epoch before it finishes.
+    std::thread::sleep(Duration::from_millis(100));
+    gate.release();
+    let mut receipts = vec![first.join().unwrap()];
+    receipts.extend(later.into_iter().map(|waiter| waiter.join().unwrap()));
+    driver.stop_and_join().unwrap();
+    for receipt in receipts {
+        let receipt = receipt.expect("every concurrent doorbell receives a receipt");
+        assert!(receipt.ok);
+        assert!(Path::new(&receipt.manifest).is_file());
+    }
+}
+
 struct GatedDestination {
     armed: AtomicBool,
     fail_writes: AtomicBool,
@@ -492,13 +670,23 @@ fn native_shadow_failures_back_off_without_losing_foreground_data() {
         Some(lease),
     )
     .unwrap();
+    // The first epoch's anchor/copy latency follows the host volume; the
+    // anti-spin window starts at its observed failure.
+    let first_failure_deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while driver.observer().metrics().epochs_failed == 0 {
+        assert!(
+            std::time::Instant::now() < first_failure_deadline,
+            "the failing replication epoch never ran"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     std::thread::sleep(Duration::from_millis(2250));
     commit_value(&database, b"after-failure", b"preserved-local");
     let metrics = driver.observer().metrics();
     driver.stop_and_join().unwrap();
     assert!(
         (1..=3).contains(&metrics.epochs_failed),
-        "failed replication must not spin"
+        "failed replication must not spin: {metrics:?}"
     );
     assert!(metrics.last_error.is_some());
     let mut guard = database.lock().unwrap();

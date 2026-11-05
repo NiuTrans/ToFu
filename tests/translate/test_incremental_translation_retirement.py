@@ -65,7 +65,7 @@ def _cached_accumulator(monkeypatch):
     monkeypatch.setattr(
         accumulator, '_translate', lambda *args, **kwargs: ('已完成推理译文', 'm'),
     )
-    monkeypatch.setattr(accumulator, '_push', lambda _payload: None)
+    monkeypatch.setattr(accumulator, '_push', lambda _payload, **_options: None)
     accumulator._process_preview_segment(key, 'Completed reasoning')
     monkeypatch.setattr(incremental, '_accumulators', {task['id']: accumulator})
     return incremental, task, accumulator, key
@@ -189,7 +189,8 @@ def test_complete_long_output_is_retained_in_file_cache(monkeypatch):
         accumulator._process_preview_segment('thinking:long', 'small source')
         assert accumulator.translations['thinking:long'] == translated
         assert accumulator.originals['thinking:long'] == 'small source'
-        assert not accumulator._preview_disabled
+        assert not incremental._preview_paused(
+            accumulator._preview_state, 'reasoning')
     finally:
         incremental.cancel_incremental(task)
 
@@ -218,7 +219,7 @@ def test_reference_preview_cache_measures_full_file_backed_retention(monkeypatch
     monkeypatch.setattr(
         accumulator, '_translate', lambda *args, **kwargs: (translated, 'm'),
     )
-    monkeypatch.setattr(accumulator, '_push', lambda _payload: None)
+    monkeypatch.setattr(accumulator, '_push', lambda _payload, **_options: None)
     for number in range(100):
         accumulator._process_preview_segment(f'thinking:round-{number}', source)
     accumulator._process_preview_segment('thinking:terminal', source)

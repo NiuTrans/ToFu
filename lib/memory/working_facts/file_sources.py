@@ -7,6 +7,7 @@ through the shared descriptor guard. No file body or independent store lives her
 from dataclasses import dataclass
 
 from lib.artifacts.file_snapshot import read_project_snapshot
+from lib.error_envelope import BadRequest
 from .repository import digest
 
 
@@ -73,6 +74,6 @@ class FileSources:
             return 'stale', 'source_version_changed', ''
         if unsealed:
             if source['quote'] not in snapshot.found_quotes:
-                raise ValueError('File quote was not found in the exact source version')
+                raise BadRequest('File quote was not found in the exact source version')
             self.document.setdefault('_fileSources', {})[key] = seal
         return 'observed', '', source['quote']

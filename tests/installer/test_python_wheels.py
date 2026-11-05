@@ -151,6 +151,11 @@ def test_unsafe_archive_never_replaces_previous_cache(tmp_path, member):
 def test_uv_resolver_and_real_local_wheel_acquisition(tmp_path, monkeypatch):
     if install_artifacts.shutil.which('uv') is None:
         pytest.skip('uv is unavailable')
+    # The target identity probe reads pip's tag table, as in the pip-seeded
+    # environments install.sh creates; a venv built without --seed has none.
+    if subprocess.run([sys.executable, '-I', '-c', 'import pip._vendor.packaging.tags'],
+                      capture_output=True, timeout=60).returncode:
+        pytest.skip('this interpreter has no pip to report its wheel tags')
     artifact = wheel(tmp_path / 'local')
     requirements = tmp_path / 'requirements.txt'
     requirements.write_text(str(artifact) + '\n')

@@ -23,8 +23,10 @@ def task_and_route(monkeypatch, *, window=128_000, output_cap=128_000,
                 context_window=window, max_output_tokens=output_cap,
                 provider_id='request-budget', routing_provider_id='gateway',
                 routing_owner_user_id=7, request_scoped=True)
+    from lib.llm_dispatch.slot_pool import SlotPool
+    live = SlotPool([slot])
     monkeypatch.setattr('lib.llm_dispatch.factory.get_dispatcher',
-                        lambda: SimpleNamespace(slots=[slot]))
+                        lambda: SimpleNamespace(slots=live))
     monkeypatch.setattr('lib.context_limits.resolve_learned_context_limit',
                         lambda provider, model, declared: declared)
     task = {'id': 'budget-task', '_userId': 7,

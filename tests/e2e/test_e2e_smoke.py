@@ -43,8 +43,11 @@ concrete reason only when launch genuinely can't happen on the host).
 """
 from __future__ import annotations
 
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+
 import json
 import time
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -213,18 +216,18 @@ def _install_llm_stubs(flask_app):
     # production-research API resolves tofu_search at call time, so retain the
     # source patch as a second, distinct dependency seam.
     saved = {
-        'llm_fb': llm_fb.stream_llm_response,
+        'llm_fb': _fallback_transport.stream_llm_response,
         'search_core': search_core.perform_web_search,
         'tofu': getattr(tofu_search, 'perform_web_search', None),
     }
     stub = _stub_stream_llm_response_factory()
-    llm_fb.stream_llm_response = stub
+    _fallback_transport.stream_llm_response = stub
     tofu_search.perform_web_search = _stub_perform_web_search
     search_core.perform_web_search = _stub_perform_web_search
     try:
         yield
     finally:
-        llm_fb.stream_llm_response = saved['llm_fb']
+        _fallback_transport.stream_llm_response = saved['llm_fb']
         search_core.perform_web_search = saved['search_core']
         if saved['tofu'] is not None:
             tofu_search.perform_web_search = saved['tofu']
@@ -235,6 +238,15 @@ def _wait_app_ready(page, timeout=15000):
     page.wait_for_function(
         "window.TofuModules && window.TofuModules.version === 3",
         timeout=timeout)
+
+
+def _open_settled_tool_panel(page):
+    """A settled reply keeps its calls in a closed panel; open it like a reader."""
+    toggle = page.locator(
+        '.conversation-turn[data-turn-status="completed"] .conversation-tool-panel__toggle').last
+    toggle.wait_for(state='visible', timeout=30000)
+    if toggle.get_attribute('aria-expanded') == 'false':
+        toggle.click()
 
 
 def _select_stub_model(page):
@@ -311,12 +323,27 @@ def test_send_message_streams_and_renders(page, assert_no_js_errors):
     _select_stub_model(page)
 
     calls_before = _SENTINEL['stream_calls']
+    stream_paths = []
+    page.on('request', lambda request: stream_paths.append(urlsplit(request.url).path)
+            if request.resource_type == 'eventsource' else None)
+    stream_statuses = []
+    page.on('response', lambda response: stream_statuses.append(
+        (urlsplit(response.url).path, response.status))
+        if response.request.resource_type == 'eventsource' else None)
     page.locator('#userInput').fill('Hello E2E')
     page.locator('#sendBtn').click()
 
     page.wait_for_function(
         "document.querySelector('#chatInner').innerText.includes('stubbed model')",
         timeout=30000)
+    # The page carries every live conversation on one shared response; a
+    # stream per conversation exhausts an HTTP/1.1 origin's six connections.
+    assert any(path.endswith('/api/v4/conversation-events') for path in stream_paths), stream_paths
+    assert not any('/api/v4/conversations/' in path for path in stream_paths), stream_paths
+    # Admitted, not merely requested: snapshot polling still renders the reply
+    # while every page stream is refused, leaving each busy row unconfirmed.
+    assert any(path.endswith('/api/v4/conversation-events') and status == 200
+               for path, status in stream_statuses), stream_statuses
 
     body_text = page.inner_text('#chatInner')
     assert 'Hello E2E' in body_text, 'user message not rendered'
@@ -345,7 +372,7 @@ def test_tool_round_renders(page, assert_no_js_errors):
     page.locator('#userInput').fill('__e2e_tool__ please search')
     page.locator('#sendBtn').click()
     page.get_by_text(_STREAM_TEXT, exact=False).first.wait_for(state='visible')
-    page.locator('.conversation-history-process > summary').click()
+    _open_settled_tool_panel(page)
 
     try:
         page.wait_for_selector(
@@ -384,7 +411,7 @@ def test_program_observation_and_measurements_render_and_restore(
     page.locator('#sendBtn').click()
     page.get_by_text(_STREAM_TEXT, exact=False).first.wait_for(
         state='visible', timeout=30000)
-    page.locator('.conversation-history-process > summary').click()
+    _open_settled_tool_panel(page)
     card = page.locator('.conversation-block--program .ptc-needs-model')
     try:
         card.wait_for(state='visible', timeout=30000)
@@ -413,7 +440,7 @@ def test_program_observation_and_measurements_render_and_restore(
     page.reload(wait_until='domcontentloaded')
     _wait_app_ready(page)
     restored = page.locator('.conversation-block--program .ptc-needs-model')
-    page.locator('.conversation-history-process > summary').click()
+    _open_settled_tool_panel(page)
     restored.wait_for(state='visible', timeout=30000)
     restored.locator('.ptc-technical > summary').click()
     assert restored.locator('.ptc-measurements').inner_text()

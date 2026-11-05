@@ -50,8 +50,11 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+from lib.conversation_sync.settled_rows import SettledDict, memo_get, memo_put
 from lib.log import get_logger
-from lib.pricing import DEFAULT_USD_CNY_RATE, get_pricing_data, lookup_pricing
+from lib.pricing import (
+    DEFAULT_USD_CNY_RATE, get_pricing_data, lookup_pricing, pricing_revision,
+)
 
 logger = get_logger(__name__)
 
@@ -74,11 +77,11 @@ logger = get_logger(__name__)
 #
 # Vendor cache-read spellings beyond the two canonical ones (probed live):
 #   cached_tokens                — Moonshot/Kimi top-level (also what the
-#                                  sankuai gateway emits for kimi-k3; it
+#                                  example-corp gateway emits for kimi-k3; it
 #                                  reports the auto-cache hit HERE while
 #                                  pinning cache_read_tokens=0 — probed
 #                                  2026-07-24, 3328/3367 tok = 98.8% hit)
-#   effectiveCachedTokens        — sankuai gateway camelCase variant
+#   effectiveCachedTokens        — example-corp gateway camelCase variant
 #   prompt_cache_hit_tokens      — DeepSeek direct API
 #   cached_content_token_count   — Gemini (usageMetadata shape)
 # First TRUTHY value wins, so an explicit 0 on a canonical key (the gateway's
@@ -362,7 +365,7 @@ def _anthropic_residual_input(usage: Optional[dict], normalized_input: int) -> i
     that spells BOTH conventions at once. ``normalize_usage`` documents the
     assumption that a payload "carries ONE convention only (OpenAI keys XOR
     Anthropic keys)", under which its alias order is explicitly "immaterial".
-    The sankuai_anthropic gateway violates that XOR: it emits ``prompt_tokens``
+    The example_corp_anthropic gateway violates that XOR: it emits ``prompt_tokens``
     (the cache-INCLUSIVE total) *beside* ``cache_*_input_tokens`` (residual
     semantics). The alias order then resolves ``input`` to the TOTAL while the
     structural detector says ``'anthropic'`` — so the whole prefix was re-priced
@@ -417,7 +420,7 @@ def split_input_tokens(usage: Optional[dict]) -> tuple[int, int]:
     total = inp
     # A provider that reports cache tokens WITHOUT any prompt-token field
     # (``prompt_tokens`` / ``input_tokens`` both absent or 0 — e.g. the
-    # Kimi/sankuai gateway reports the auto-cache hit in ``cached_tokens`` and
+    # Kimi/example-corp gateway reports the auto-cache hit in ``cached_tokens`` and
     # omits the prompt total) would otherwise collapse ``total`` to 0 while
     # ``cache_read`` is tens of thousands — the frontend then renders the
     # contradictory "total input 0 · cache read 39.2k". The total prompt can
@@ -614,6 +617,22 @@ def _round(value: float, places: int = 4) -> float:
     return round(value * factor) / factor
 
 
+# Anthropic bills 1-hour cache writes at 2x base input (5-minute writes 1.25x):
+# https://platform.claude.com/docs/en/about-claude/pricing
+_ANTHROPIC_CACHE_WRITE_1H_MUL = 2.0
+
+
+def _cache_write_1h_tokens(usage: dict, cache_write: int) -> int:
+    """Share of ``cache_write`` that Anthropic's TTL breakdown marks 1-hour."""
+    detail = usage.get('cache_creation')
+    value = (detail.get('ephemeral_1h_input_tokens')
+             if isinstance(detail, dict) else None)
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value)):
+        return 0
+    return max(0, min(int(value), cache_write))
+
+
 def compute_cost(
     usage: Optional[dict],
     model_id: str = '',
@@ -622,12 +641,14 @@ def compute_cost(
     at: Optional[float] = None,
 
     pricing_override: Optional[dict] = None,
+    pricing_data: Optional[dict] = None,
 ) -> Optional[dict]:
     """Compute USD + CNY cost from a usage dict.
 
     Returns ``None`` when the usage is empty/null or all token counts
     are zero. Otherwise returns the same keys the JS ``calcCostCny``
-    produces so callers can swap freely.
+    produces so callers can swap freely. Loops pass one ``pricing_data``
+    snapshot (``get_pricing_data()``) instead of copying it per round.
     """
     if not usage or not isinstance(usage, dict):
         return None
@@ -649,7 +670,8 @@ def compute_cost(
     if inp == 0 and out == 0 and cache_write == 0 and cache_read == 0:
         return None
 
-    pricing_data = get_pricing_data()
+    if pricing_data is None:
+        pricing_data = get_pricing_data()
     rate = pricing_data.get('usdToCny') or DEFAULT_USD_CNY_RATE
     uncached, total_input = split_input_tokens(usage)
 
@@ -683,6 +705,23 @@ def compute_cost(
         currency = 'USD'
         selected_tier = None
 
+    # Only the reported 1-hour TTL share is repriced; without the breakdown
+    # every write keeps the row's (5-minute) cacheWriteMul.
+    cache_write_1h = _cache_write_1h_tokens(usage, cache_write)
+    cw_1h_mul = None
+    if cache_write_1h:
+        cw_1h_mul = (mp or {}).get('cacheWrite1hMul')
+        if cw_1h_mul is None:
+            from lib.model_info import is_claude
+            # The 2x default belongs to Anthropic's official schedule (5-minute
+            # writes at 1.25x); a row declaring its own write multiplier keeps
+            # it for both TTLs until it declares a 1-hour rate.
+            official_schedule = math.isclose(cw_mul, 1.25)
+            cw_1h_mul = (_ANTHROPIC_CACHE_WRITE_1H_MUL
+                         if official_schedule and model_id and is_claude(model_id)
+                         else cw_mul)
+        cw_1h_mul = float(cw_1h_mul)
+
     unit_to_usd = (1.0 / rate) if currency == 'CNY' else 1.0
     base_in_usd = base_in * unit_to_usd
     out_p_usd = out_p * unit_to_usd
@@ -698,7 +737,8 @@ def compute_cost(
     if cache_write > 0 or cache_read > 0:
         uncached, total_input = split_input_tokens(usage)
         input_cost_usd = (uncached * base_in_usd) / 1e6
-        cw_cost_usd = (cache_write * base_in_usd * cw_mul) / 1e6
+        cw_cost_usd = ((cache_write - cache_write_1h) * base_in_usd * cw_mul
+                       + cache_write_1h * base_in_usd * (cw_1h_mul or 0.0)) / 1e6
         cr_cost_usd = (cache_read * base_in_usd * cr_mul) / 1e6
     else:
         uncached = inp
@@ -724,12 +764,15 @@ def compute_cost(
             'maxPromptTokens': (selected_tier.get('maxPromptTokens')
                                 if selected_tier else None),
             'rates': {'input': base_in, 'output': out_p,
-                      'cacheWriteMul': cw_mul, 'cacheReadMul': cr_mul},
+                      'cacheWriteMul': cw_mul, 'cacheReadMul': cr_mul,
+                      **({'cacheWrite1hMul': cw_1h_mul}
+                         if cache_write_1h else {})},
         },
         'inputTokens': uncached,
         'outputTokens': out,
         'totalInputTokens': total_input,
         'cacheWriteTokens': cache_write,
+        **({'cacheWrite1hTokens': cache_write_1h} if cache_write_1h else {}),
         'cacheReadTokens': cache_read,
         'thinkingTokens': think_tok,
         'inputCostCny': _round(input_cost_usd * rate, 6),
@@ -769,11 +812,18 @@ def compute_api_rounds_cost(
     prices every round under its own model/provider/tier, then folds only the
     resulting money and normalized token components for the top-level display.
     It does not mutate the round ledger.
+
+    The fold reads one pricing snapshot. A settled round (``SettledDict``)
+    is priced once per pricing state: its memoized cost stays valid while
+    the pricing revision, the snapshot's rates and the peak multiplier in
+    force for its model/provider are unchanged.
     """
     costs: list[dict] = []
+    cached_terms: list = []
     models: set[str] = set()
     providers: set[str] = set()
     sources: set[str] = set()
+    pricing = None
     for round_entry in api_rounds or ():
         if not isinstance(round_entry, dict):
             continue
@@ -790,12 +840,15 @@ def compute_api_rounds_cost(
             cost = round_entry.get('cost')
             if cost is not None and not isinstance(cost, dict):
                 raise ValueError('frozen round cost must be a canonical mapping')
+            terms = None
         else:
-            cost = compute_cost(
-                usage, model_id=model, provider_id=provider)
+            if pricing is None:
+                pricing = _LedgerPricing()
+            cost, terms = pricing.round_cost(round_entry, usage, model, provider)
         if not cost:
             continue
         costs.append(cost)
+        cached_terms.append(terms)
         if model:
             models.add(model)
         if provider:
@@ -805,25 +858,16 @@ def compute_api_rounds_cost(
     if not costs:
         return None
 
-    token_keys = (
-        'inputTokens', 'outputTokens', 'totalInputTokens',
-        'cacheWriteTokens', 'cacheReadTokens', 'thinkingTokens',
-    )
-    usd_component_keys = (
-        'inputCostUsd', 'outputCostUsd',
-        'cacheWriteCostUsd', 'cacheReadCostUsd',
-    )
-    cny_component_keys = (
-        'inputCostCny', 'outputCostCny',
-        'cacheWriteCostCny', 'cacheReadCostCny',
-    )
-
-    def total(key: str) -> float:
-        return sum(float(cost.get(key) or 0.0) for cost in costs)
+    # Per-key column sums over the same floats in the same order as summing
+    # each key across ``costs``; columns of settled rounds are reused.
+    columns = zip(*(
+        terms if terms is not None else _aggregate_terms(cost)
+        for cost, terms in zip(costs, cached_terms)))
+    totals = dict(zip(_AGGREGATE_KEYS, map(sum, columns)))
 
     aggregate = {
-        'costUsd': _round(sum(total(key) for key in usd_component_keys)),
-        'costCny': _round(sum(total(key) for key in cny_component_keys)),
+        'costUsd': _round(sum(totals[key] for key in _AGGREGATE_USD_KEYS)),
+        'costCny': _round(sum(totals[key] for key in _AGGREGATE_CNY_KEYS)),
         'pricingSource': 'api_round_aggregate',
         'pricingSnapshot': {
             'kind': 'apiRoundAggregate',
@@ -832,13 +876,79 @@ def compute_api_rounds_cost(
             'providers': sorted(providers),
             'sources': sorted(sources),
         },
-        **{key: int(total(key)) for key in token_keys},
-        **{key: _round(total(key), 9) for key in usd_component_keys},
-        **{key: _round(total(key), 6) for key in cny_component_keys},
-        'cacheSavingsUsd': _round(total('cacheSavingsUsd'), 6),
-        'cacheSavingsCny': _round(total('cacheSavingsCny'), 6),
+        **{key: int(totals[key]) for key in _AGGREGATE_TOKEN_KEYS},
+        **{key: _round(totals[key], 9) for key in _AGGREGATE_USD_KEYS},
+        **{key: _round(totals[key], 6) for key in _AGGREGATE_CNY_KEYS},
+        'cacheSavingsUsd': _round(totals['cacheSavingsUsd'], 6),
+        'cacheSavingsCny': _round(totals['cacheSavingsCny'], 6),
     }
     return aggregate
+
+
+_AGGREGATE_TOKEN_KEYS = (
+    'inputTokens', 'outputTokens', 'totalInputTokens',
+    'cacheWriteTokens', 'cacheReadTokens', 'thinkingTokens',
+)
+_AGGREGATE_USD_KEYS = (
+    'inputCostUsd', 'outputCostUsd',
+    'cacheWriteCostUsd', 'cacheReadCostUsd',
+)
+_AGGREGATE_CNY_KEYS = (
+    'inputCostCny', 'outputCostCny',
+    'cacheWriteCostCny', 'cacheReadCostCny',
+)
+_AGGREGATE_KEYS = (_AGGREGATE_TOKEN_KEYS + _AGGREGATE_USD_KEYS
+                   + _AGGREGATE_CNY_KEYS + ('cacheSavingsUsd', 'cacheSavingsCny'))
+# Exactly the snapshot fields ``compute_cost`` reads.
+_PRICING_DATA_FIELDS = ('usdToCny', 'inputPrice', 'outputPrice',
+                        'cacheWriteMul', 'cacheReadMul')
+
+
+def _aggregate_terms(cost: dict) -> tuple:
+    return tuple(float(cost.get(key) or 0.0) for key in _AGGREGATE_KEYS)
+
+
+class _LedgerPricing:
+    """One ledger fold's pricing view and settled-round cost memo validity.
+
+    The revision is read before the snapshot (``lib.pricing._revision``
+    protocol), so a racing price change can only invalidate a memo early.
+    """
+
+    def __init__(self):
+        self.revision = pricing_revision()
+        self.data = get_pricing_data()
+        self.data_key = tuple(
+            repr(self.data.get(field)) for field in _PRICING_DATA_FIELDS)
+        self.validity_by_route: dict = {}
+
+    def _validity(self, model: str, provider) -> tuple:
+        route = (model, provider)
+        validity = self.validity_by_route.get(route)
+        if validity is None:
+            # compute_cost resolves with ``at=None``: the multiplier in force
+            # now is part of a settled round's price, not of pricing state.
+            resolved = lookup_pricing(model, provider) if model else None
+            validity = (self.revision, self.data_key,
+                        repr((resolved or {}).get('peakMul')))
+            self.validity_by_route[route] = validity
+        return validity
+
+    def round_cost(self, round_entry, usage, model: str, provider):
+        if type(round_entry) is not SettledDict or not (
+                provider is None or type(provider) is str):
+            return compute_cost(usage, model_id=model, provider_id=provider,
+                                pricing_data=self.data), None
+        key = ('api-round-cost', model, provider)
+        validity = self._validity(model, provider)
+        cached = memo_get(round_entry, key)
+        if cached is not None and cached[0] == validity:
+            return cached[1], cached[2]
+        cost = compute_cost(usage, model_id=model, provider_id=provider,
+                            pricing_data=self.data)
+        terms = _aggregate_terms(cost) if cost else None
+        memo_put(round_entry, key, (validity, cost, terms))
+        return cost, terms
 
 
 __all__ = ['compute_cost', 'compute_api_rounds_cost',

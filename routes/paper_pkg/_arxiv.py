@@ -81,6 +81,7 @@ def http_get(*args, **kwargs):
     return _http_get(*args, **kwargs)
 
 from routes.paper_pkg._common import (
+    _PaperInvalidPDF,
     _declared_pdf_length,
     _load_valid_cached_pdf,
     _new_pdf_part,
@@ -177,7 +178,7 @@ async def fetch_arxiv():
 
             _ok, _np, _verr = _validate_pdf_bytes(pdf_bytes)
             if not _ok:
-                raise ValueError("Downloaded file is not a readable PDF: " + _verr)
+                raise _PaperInvalidPDF("Downloaded file is not a readable PDF: " + _verr)
             os.replace(part_path, filepath)
             part_path = None
         finally:
@@ -199,7 +200,7 @@ async def fetch_arxiv():
                 os.remove(filepath)
             except OSError as e:
                 logger.debug("[Paper:arXiv] empty-cache cleanup failed: %s", e)
-            raise ValueError("Downloaded PDF body was empty")
+            raise _PaperInvalidPDF("Downloaded PDF body was empty")
         elapsed = time.time() - t0
         logger.info(
             "[Paper:arXiv] Downloaded %s: %d bytes in %.1fs", arxiv_id, size, elapsed
@@ -216,9 +217,11 @@ async def fetch_arxiv():
             }
         )
 
-    except ValueError as e:
+    except _PaperInvalidPDF as e:
+        # arXiv, not the caller, supplied these bytes, so this is an upstream
+        # fault like the transport failures below, never a client 400.
         logger.warning("[Paper:arXiv] Rejected invalid PDF for %s: %s", arxiv_id, e)
-        return api_bad_request(str(e))
+        return api_error(str(e), status=502)
     except _RequestTimeout:
         logger.warning("[Paper:arXiv] Download timeout (60s): %s", pdf_url)
         return api_error("Download timed out (60s)", status=504)

@@ -241,6 +241,8 @@ def _wired_supervisor(*, interval=0.01, deadline=0.01, threshold=3):
     # recycle and wedge the monitor thread.
     supervisor._liveness_overload_mem_ratio = 1.0
     supervisor._liveness_overload_load_factor = 32.0
+    # Count-threshold mechanics; the unresponsiveness budget has its own specs.
+    supervisor._liveness_unresponsive_seconds = 0.0
     return supervisor
 
 

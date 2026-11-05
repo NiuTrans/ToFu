@@ -188,8 +188,10 @@ def resolve_conv_config(
             _coerce_bool(conv.get('autoApply'), True),
             is_active=is_active,
         ),
+        # Always on like fetch: the composer has no browser toggle. Tools
+        # still require a connected extension and stay Tool-Search deferred.
         'browserEnabled': _pick(
-            _coerce_bool(ov.get('browserEnabled')),
+            _coerce_bool(ov.get('browserEnabled'), True),
             _coerce_bool(conv.get('browserEnabled')),
             is_active=is_active,
         ),
@@ -263,6 +265,14 @@ def resolve_conv_config(
         _coerce_bool(conv.get('planMode'), False),
         is_active=is_active,
     )
+    # Delegate Mode (root orchestrates, workers execute) is the same radio's
+    # fourth choice; normalization below clears it under Plan/Flow/Goal.
+    out['delegateMode'] = _pick(
+        _coerce_bool(ov.get('delegateMode'),
+                     _coerce_bool(conv.get('delegateMode'), False)),
+        _coerce_bool(conv.get('delegateMode'), False),
+        is_active=is_active,
+    )
     if isinstance(_chat_mode, str) and _chat_mode.strip():
         out['chatMode'] = _chat_mode.strip().lower()
     out['activeFlow'] = active_flow if isinstance(active_flow, str) else ''
@@ -309,9 +319,15 @@ def resolve_conv_settings(
     ov = dict(overrides or {})
     server_model = ov.get('serverModel') or ''
 
-    raw_model = conv.get('model') or ov.get('model') or server_model
-    model = canonicalise_model_id(raw_model)
-    model_ref_raw = conv.get('modelRef') or ov.get('modelRef')
+    # The model choice (name, routed reference, preferred provider) is one
+    # unit. A conversation that already names a model keeps its own; only a
+    # conversation without one adopts the composer's. Merging the fields
+    # independently glued another conversation's routed reference onto this
+    # conversation's model name when the browser persisted it with a
+    # different composer state.
+    choice = conv if (conv.get('model') or conv.get('modelRef')) else ov
+    raw_model = choice.get('model') or server_model
+    model_ref_raw = choice.get('modelRef')
     model_ref = None
     if isinstance(model_ref_raw, Mapping):
         candidate = dict(model_ref_raw)
@@ -322,10 +338,12 @@ def resolve_conv_settings(
             }
             if not all(model_ref.values()):
                 model_ref = None
-    preferred_provider_id = str(
-        conv.get('preferredProviderId')
-        if conv.get('preferredProviderId') is not None
-        else ov.get('preferredProviderId') or '').strip()
+    if model_ref is not None and model_ref.get('model_id'):
+        # The reference binds routing, so the stored name follows it (task
+        # registration aligns the runtime name the same way).
+        raw_model = model_ref['model_id']
+    model = canonicalise_model_id(raw_model)
+    preferred_provider_id = str(choice.get('preferredProviderId') or '').strip()
     legacy_depth = extract_legacy_thinking_depth(raw_model)
     raw_image_count = conv.get('imageGenCount', ov.get('imageGenCount', 1))
     try:
@@ -400,6 +418,8 @@ def resolve_conv_settings(
         # flags (stored conv value wins; live toolbar override as fallback).
         'planMode': _coerce_bool(conv.get('planMode'),
                                  _coerce_bool(ov.get('planMode'), False)),
+        'delegateMode': _coerce_bool(conv.get('delegateMode'),
+                                     _coerce_bool(ov.get('delegateMode'), False)),
     }
     # Two-tier chat mode — persist the stored/override value (chat/studio). A
     # legacy air/pro value is left as-is here and normalised forward to 'chat'

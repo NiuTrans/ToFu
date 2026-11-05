@@ -34,6 +34,8 @@ export function createModelRoutingEndpoints(ports: EndpointPorts) {
       `/api/v4/providers/${encodeURIComponent(providerId)}/probe-cells/start`, body || {}),
     probeCellsStatus: (providerId: string) => get(
       `/api/v4/providers/${encodeURIComponent(providerId)}/probe-cells/status`),
+    importListedModels: (providerId: string) => post(
+      `/api/v4/providers/${encodeURIComponent(providerId)}/listed-models/import`, {}),
   };
   return modelRouting;
 }

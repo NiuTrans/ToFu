@@ -343,14 +343,18 @@ def _prepend_system_reminder(messages: list, user_system: str) -> None:
 def apply_claude_cloak(body: dict) -> tuple[dict, dict]:
     """Apply the Claude Code 2026 cloaking spec to an Anthropic-shaped body.
 
-    Call this on the output of ``openai_body_to_anthropic`` (a FRESH dict —
-    the transform mutates it in place). Returns ``(body, reverse_tool_map)``;
+    Call this on the output of ``openai_body_to_anthropic``: the transform
+    edits that converter-owned envelope, its lists and its emitted blocks in
+    place, and replaces (never edits) values the converter shares with the
+    canonical body, such as a native ``tool_choice``. Returns
+    ``(body, reverse_tool_map)``;
     the reverse map restores renamed tool names on the response side
     (:func:`restore_claude_tool_names` / the SSE translator).
 
     Steps (each ported from CLIProxyAPI ``claude_executor_cloaking.go`` /
     ``claude_executor_request.go``):
-      1. system[] rebuilt to [billing header, identity, static prompt];
+      1. system[] rebuilt to [billing header, identity, static prompt],
+         keeping the system cache breakpoint on its last block;
       2. the user's own system text moved into a stable user carrier after
          the first user message;
       3. tool names remapped to Claude Code TitleCase equivalents;
@@ -365,9 +369,12 @@ def apply_claude_cloak(body: dict) -> tuple[dict, dict]:
     system = body.get('system')
     if isinstance(system, str):
         sys_texts = [system] if system.strip() else []
+        sys_markers = []
     else:
         sys_texts = [b.get('text', '') for b in (system or [])
                      if isinstance(b, dict) and b.get('type') == 'text']
+        sys_markers = [b['cache_control'] for b in (system or [])
+                       if isinstance(b, dict) and b.get('cache_control')]
     already = bool(sys_texts) and sys_texts[0].startswith(_BILLING_PREFIX)
     if already:
         return body, reverse
@@ -380,6 +387,13 @@ def apply_claude_cloak(body: dict) -> tuple[dict, dict]:
         {'type': 'text', 'text': CLAUDE_CODE_IDENTITY},
         {'type': 'text', 'text': CLAUDE_CODE_STATIC_PROMPT},
     ]
+    # The rebuilt system[] is byte-stable (the billing header hashes only the
+    # first system text), so the breakpoint add_cache_breakpoints put on the
+    # replaced blocks moves to its last block instead of vanishing. One marker
+    # never exceeds the count it replaces and keeps its tools → system →
+    # messages slot, so the 4-marker ceiling and 1h-before-5m order still hold.
+    if sys_markers:
+        body['system'][-1]['cache_control'] = dict(sys_markers[-1])
 
     # ── 2. User system text → stable post-first-user carrier.
     if user_system:
@@ -394,7 +408,8 @@ def apply_claude_cloak(body: dict) -> tuple[dict, dict]:
         tool['name'] = _rename_tool_name(tool.get('name', ''), reverse)
     tc = body.get('tool_choice')
     if isinstance(tc, dict) and tc.get('type') == 'tool':
-        tc['name'] = _rename_tool_name(tc.get('name', ''), reverse)
+        body['tool_choice'] = {
+            **tc, 'name': _rename_tool_name(tc.get('name', ''), reverse)}
     _cloak_message_tools(body.get('messages') or [], reverse)
 
     # ── 4. metadata.user_id in Claude Code shape.
@@ -480,18 +495,27 @@ def resolve_oauth_request(oauth: str, body: dict, extra_headers: dict | None,
         if expected_account_id is not None and account_id != expected_account_id:
             from lib.llm.llm_errors import SubscriptionCredentialUnavailableError
             raise SubscriptionCredentialUnavailableError(reason='account_changed', credential_source='tofu_oauth', transient=False)
-        hdrs['OpenAI-Beta'] = 'responses=experimental'
+        # Codex CLI 0.165 sends no OpenAI-Beta on HTTP /responses; its only
+        # beta value is the WebSocket handshake's, owned by that transport.
         hdrs['originator'] = _CODEX_ORIGINATOR
-        from lib.oauth.codex_version import codex_user_agent
+        from lib.oauth.codex_version import codex_client_version, codex_user_agent
         hdrs['User-Agent'] = codex_user_agent()
+        # Built-in provider header carrying the released CLI version.
+        hdrs['version'] = codex_client_version()
+        hdrs['Accept'] = 'text/event-stream'
+        model = str(body.get('model') or '').strip()
+        if model:
+            # Codex-backend routing hint; no service tier is ever requested.
+            hdrs['x-codex-routing-hint'] = f'model={model}'
         # Codex keeps these values stable for the lifetime of one thread and
         # uses the same lifetime for ``prompt_cache_key``.  A fresh session id
         # per round destroys backend cache affinity: a live Luna tool-call A/B
         # measured 0 cached tokens with random ids versus 5,504 cached tokens
-        # on every warm round with stable ids.  Hashing the internal conv/task
-        # id keeps the upstream value non-identifying.
-        from lib.llm.responses_outbound import responses_cache_affinity_key
-        cache_key = responses_cache_affinity_key(body) if cache_affinity_key is None else cache_affinity_key
+        # on every warm round with stable ids.  The lineage key is a digest,
+        # so the upstream value stays non-identifying.
+        from lib.llm import cache_affinity
+        cache_key = (cache_affinity.cache_affinity_key(body)
+                     if cache_affinity_key is None else cache_affinity_key)
         # Codex CLI 0.147 sends the SAME UUID value in all three headers and
         # in Responses ``prompt_cache_key``.  Do not create two merely-related
         # namespaces here: exact equality is the first-party contract.
@@ -501,6 +525,10 @@ def resolve_oauth_request(oauth: str, body: dict, extra_headers: dict | None,
         hdrs['x-client-request-id'] = affinity_id
         if account_id:
             hdrs['chatgpt-account-id'] = account_id
+        from lib.oauth.codex_turn_state import TURN_STATE_HEADER, turn_state
+        routing_state = turn_state(body.get('_task_id'))
+        if routing_state:
+            hdrs[TURN_STATE_HEADER] = routing_state
         return token, hdrs, body
 
     if oauth == 'claude':
@@ -741,51 +769,6 @@ def _oauth_owner_boundary(
     )
 
 
-def _remove_v2_provider(document: dict, provider_id: str) -> list[str]:
-    access_ids = {
-        row['provider_access_id'] for row in document['provider_accesses']
-        if row['provider_id'] == provider_id
-    }
-    connection_ids = {
-        row['connection_id'] for row in document['connections']
-        if row['provider_access_id'] in access_ids
-    }
-    offering_ids = {
-        row['offering_id'] for row in document['offerings']
-        if row['provider_access_id'] in access_ids
-    }
-    secret_references = [
-        row['secret_reference'] for row in document['credentials']
-        if row['provider_access_id'] in access_ids and row['secret_reference']
-    ]
-    document['providers'] = [
-        row for row in document['providers']
-        if row['provider_id'] != provider_id
-    ]
-    document['provider_accesses'] = [
-        row for row in document['provider_accesses']
-        if row['provider_id'] != provider_id
-    ]
-    document['connections'] = [
-        row for row in document['connections']
-        if row['connection_id'] not in connection_ids
-    ]
-    document['credentials'] = [
-        row for row in document['credentials']
-        if row['provider_access_id'] not in access_ids
-    ]
-    document['offerings'] = [
-        row for row in document['offerings']
-        if row['offering_id'] not in offering_ids
-    ]
-    document['deployments'] = [
-        row for row in document['deployments']
-        if row['offering_id'] not in offering_ids
-        and row['connection_id'] not in connection_ids
-    ]
-    return secret_references
-
-
 def _merge_v2_catalog_entities(document: dict, imported: dict) -> None:
     from lib.model_routing.catalog_merge import merge_missing_catalog_entities
     merge_missing_catalog_entities(document, imported)
@@ -808,8 +791,13 @@ def _upsert_oauth_provider(
     owner_user_id: int | None,
     tenant_id: str | None,
     repository=None,
+    current=None,
 ) -> bool:
-    """Replace one OAuth ProviderAccess inside the sole v2 authority."""
+    """Replace one OAuth ProviderAccess inside the sole v2 authority.
+
+    ``current`` is an authority revision the caller read in this same pass;
+    a stale one only costs a CAS conflict, which re-reads like any retry.
+    """
     from lib.model_routing import (
         ModelRoutingError,
         ModelRoutingRepository,
@@ -817,12 +805,18 @@ def _upsert_oauth_provider(
         plan_legacy_migration,
     )
 
+    from lib.model_routing.managed_provider import (
+        remove_provider_resources_in_place,
+        unreferenced_secret_references,
+    )
+
     boundary = _oauth_owner_boundary(owner_user_id, tenant_id)
     repo = repository or ModelRoutingRepository()
     last_error: ModelRoutingError | None = None
     for _attempt in range(_UPSERT_MAX_ATTEMPTS):
         try:
-            current = repo.get(boundary)
+            if current is None:
+                current = repo.get(boundary)
             if (entry.get('id') == 'oauth_codex'
                     and entry.get('catalog_source') == 'static_fallback'
                     and any(row['provider_id'] == 'oauth_codex'
@@ -853,7 +847,7 @@ def _upsert_oauth_provider(
                 from lib.model_routing.catalog_merge import defer_incomplete_discovered_models
                 defer_incomplete_discovered_models(plan.document, existing_models=current.document['models'])
             candidate = copy.deepcopy(current.document)
-            old_secret_references = _remove_v2_provider(candidate, entry['id'])
+            old_secret_references = remove_provider_resources_in_place(candidate, entry['id'])
             _merge_v2_catalog_entities(candidate, plan.document)
             controls = {
                 'providers': ('name',),
@@ -937,24 +931,22 @@ def _upsert_oauth_provider(
                 )
             committed = repo.compare_and_swap(
                 boundary, normalized, expected_revision=current.revision)
-            active_references = {
-                row['secret_reference'] for row in committed.document['credentials']
-                if row['secret_reference']
-            }
-            for reference in old_secret_references:
-                if reference not in active_references:
-                    try:
-                        repo.delete_secret(boundary, reference)
-                    except Exception as exc:
-                        logger.warning(
-                            '[OAuth] stale model-routing secret cleanup failed: %s',
-                            str(exc)[:300],
-                        )
+            for reference in unreferenced_secret_references(
+                committed.document, old_secret_references,
+            ):
+                try:
+                    repo.delete_secret(boundary, reference)
+                except Exception as exc:
+                    logger.warning(
+                        '[OAuth] stale model-routing secret cleanup failed: %s',
+                        str(exc)[:300],
+                    )
             return True
         except ModelRoutingError as exc:
             if exc.kind not in _UPSERT_TRANSIENT_KINDS:
                 raise
             last_error = exc
+            current = None
     raise ModelRoutingError(
         'model-routing aggregate kept changing during OAuth provider upsert',
         kind='model_routing_revision_conflict',
@@ -968,8 +960,12 @@ def provision_oauth_provider(
     owner_user_id: int | None = None,
     tenant_id: str | None = None,
     repository=None,
+    current=None,
 ) -> bool:
-    """Add or refresh one subscription ProviderAccess in model-routing v2."""
+    """Add or refresh one subscription ProviderAccess in model-routing v2.
+
+    ``current`` reuses an authority revision read earlier in the same pass.
+    """
     entry = _managed_oauth_entry(provider, plan_type)
     if not entry:
         return False
@@ -978,6 +974,7 @@ def provision_oauth_provider(
         owner_user_id=owner_user_id,
         tenant_id=tenant_id,
         repository=repository,
+        current=current,
     )
     if changed:
         _activate_oauth_config_change()
@@ -992,48 +989,60 @@ def reconcile_oauth_providers(
     tenant_id: str | None = None,
     repository=None,
 ) -> dict:
-    """Repair token-to-ProviderAccess drift for direct OAuth logins."""
-    from lib.oauth.token_store import load_token
+    """Repair token-to-ProviderAccess drift for direct OAuth logins.
+
+    Returns the provider statuses projected after the repair, so a caller
+    that also renders status cards needs no second authority read.
+    """
+    from lib.model_routing import ModelRoutingRepository
+    from lib.oauth.token_store import load_token, token_snapshot
 
     from lib.oauth.codex_shared_login import reconcile_shared_login
     reconcile_shared_login(owner_user_id=owner_user_id)
 
-    desired: dict[str, dict] = {}
-    for provider in OAUTH_PROVIDERS:
-        token = load_token(provider) or {}
-        if token.get('access_token'):
-            desired[provider] = _managed_oauth_entry(
-                provider, token.get('plan_type'))
-    changed = False
-    for provider in OAUTH_PROVIDERS:
-        if provider in desired:
-            changed = provision_oauth_provider(
-                provider,
-                plan_type=(load_token(provider) or {}).get('plan_type'),
-                owner_user_id=owner_user_id,
-                tenant_id=tenant_id,
-                repository=repository,
-            ) or changed
-        else:
-            # Shared source outages must not delete model grants or switches.
-            if provider == 'codex' and (load_token(provider) or {}).get('codex_shared_reference'):
-                continue
-            changed = deprovision_oauth_provider(
-                provider,
-                owner_user_id=owner_user_id,
-                tenant_id=tenant_id,
-                repository=repository,
-            ) or changed
-    if changed:
-        logger.info('[OAuth] Reconciled subscription ProviderAccess resources: %s',
-                    ', '.join(sorted(desired)) or '(none)')
-    return {provider: managed_oauth_provider_status(
-                provider,
-                owner_user_id=owner_user_id,
-                tenant_id=tenant_id,
-                repository=repository,
-            )
-            for provider in OAUTH_PROVIDERS}
+    boundary = _oauth_owner_boundary(owner_user_id, tenant_id)
+    repo = repository or ModelRoutingRepository()
+    # The provisioning entry, catalog account check and status projection all
+    # observe one credential read per provider.
+    with token_snapshot():
+        tokens = {provider: load_token(provider) or {}
+                  for provider in OAUTH_PROVIDERS}
+        desired = [provider for provider in OAUTH_PROVIDERS
+                   if tokens[provider].get('access_token')]
+        # One authority read serves every provider step and the readback; a
+        # step that commits re-reads so the next starts from the new revision.
+        current = repo.get(boundary)
+        changed = False
+        for provider in OAUTH_PROVIDERS:
+            if provider in desired:
+                step_changed = provision_oauth_provider(
+                    provider,
+                    plan_type=tokens[provider].get('plan_type'),
+                    owner_user_id=owner_user_id,
+                    tenant_id=tenant_id,
+                    repository=repo,
+                    current=current,
+                )
+            else:
+                # Shared source outages must not delete model grants or switches.
+                if provider == 'codex' and tokens[provider].get('codex_shared_reference'):
+                    continue
+                step_changed = deprovision_oauth_provider(
+                    provider,
+                    owner_user_id=owner_user_id,
+                    tenant_id=tenant_id,
+                    repository=repo,
+                    current=current,
+                )
+            if step_changed:
+                changed = True
+                current = repo.get(boundary)
+        if changed:
+            logger.info('[OAuth] Reconciled subscription ProviderAccess resources: %s',
+                        ', '.join(sorted(desired)) or '(none)')
+        return managed_oauth_provider_statuses(
+            owner_user_id=owner_user_id, tenant_id=tenant_id, repository=repo,
+            authority=current)
 
 
 def managed_oauth_provider_status(
@@ -1047,24 +1056,55 @@ def managed_oauth_provider_status(
     spec = _MANAGED_SPECS.get(provider)
     if not spec:
         return {'provider_ready': False, 'provider_id': '', 'model_ids': []}
+    return managed_oauth_provider_statuses(
+        (provider,), owner_user_id=owner_user_id,
+        tenant_id=tenant_id, repository=repository)[provider]
+
+
+def managed_oauth_provider_statuses(
+    providers=OAUTH_PROVIDERS,
+    *,
+    owner_user_id: int | None = None,
+    tenant_id: str | None = None,
+    repository=None,
+    authority=None,
+) -> dict:
+    """Project supported provider cards from one request-owned routing revision.
+
+    Each new call reads its owner authority afresh, unless the caller passes
+    the ``authority`` revision its own pass just read or committed. Only this
+    response shares the validated document/compiler; credentials and grants
+    are never cached.
+    """
     from lib.model_routing import ModelRoutingRepository
+    from lib.model_routing.routing import RouteCandidateCompiler
 
     boundary = _oauth_owner_boundary(owner_user_id, tenant_id)
     repo = repository or ModelRoutingRepository()
     try:
-        document = repo.get(boundary).document
+        document = (authority if authority is not None
+                    else repo.get(boundary)).document
     except Exception as exc:
         logger.debug(
             '[OAuth] model-routing status unavailable for owner=%s: %s',
             boundary.owner_user_id,
             str(exc)[:300],
         )
-        return {
+        return {provider: {
             'provider_ready': False,
-            'provider_id': spec['id'],
+            'provider_id': _MANAGED_SPECS[provider]['id'],
             'model_ids': [],
             'model_count': 0,
-        }
+        } for provider in providers}
+    compiler = RouteCandidateCompiler(document)
+    return {provider: _managed_oauth_status(provider, document, compiler)
+            for provider in providers}
+
+
+def _managed_oauth_status(provider, document, compiler):
+    from lib.model_routing.domain import NativeModelSelection, ProviderOfferingRef
+
+    spec = _MANAGED_SPECS[provider]
     access_ids = {
         row['provider_access_id'] for row in document['provider_accesses']
         if row['provider_id'] == spec['id'] and row['enabled']
@@ -1079,10 +1119,6 @@ def managed_oauth_provider_status(
         for row in offerings
         if (row.get('model') or {}).get('model_id') or row.get('pending_model_id')
     })
-    from lib.model_routing.domain import NativeModelSelection, ProviderOfferingRef
-    from lib.model_routing.routing import RouteCandidateCompiler
-
-    compiler = RouteCandidateCompiler(document)
     ready = any(
         candidate.credential['kind'] == 'oauth'
         for offering in offerings
@@ -1107,8 +1143,12 @@ def deprovision_oauth_provider(
     owner_user_id: int | None = None,
     tenant_id: str | None = None,
     repository=None,
+    current=None,
 ) -> bool:
     """Remove the subscription ProviderAccess for an owner (logout).
+
+    ``current`` reuses an authority revision read earlier in the same pass;
+    the CAS still rejects it if the aggregate moved meanwhile.
 
     Returns True when an entry was removed.
     """
@@ -1117,11 +1157,17 @@ def deprovision_oauth_provider(
         return False
     from lib.model_routing import ModelRoutingRepository, normalize_document
 
+    from lib.model_routing.managed_provider import (
+        remove_provider_resources_in_place,
+        unreferenced_secret_references,
+    )
+
     boundary = _oauth_owner_boundary(owner_user_id, tenant_id)
     repo = repository or ModelRoutingRepository()
-    current = repo.get(boundary)
+    if current is None:
+        current = repo.get(boundary)
     candidate = copy.deepcopy(current.document)
-    secret_references = _remove_v2_provider(candidate, spec['id'])
+    secret_references = remove_provider_resources_in_place(candidate, spec['id'])
     if candidate == current.document:
         return False
     candidate['revision'] = current.revision
@@ -1130,19 +1176,16 @@ def deprovision_oauth_provider(
         normalize_document(candidate),
         expected_revision=current.revision,
     )
-    active_references = {
-        row['secret_reference'] for row in committed.document['credentials']
-        if row['secret_reference']
-    }
-    for reference in secret_references:
-        if reference not in active_references:
-            try:
-                repo.delete_secret(boundary, reference)
-            except Exception as exc:
-                logger.warning(
-                    '[OAuth] stale model-routing secret cleanup failed: %s',
-                    str(exc)[:300],
-                )
+    for reference in unreferenced_secret_references(
+        committed.document, secret_references,
+    ):
+        try:
+            repo.delete_secret(boundary, reference)
+        except Exception as exc:
+            logger.warning(
+                '[OAuth] stale model-routing secret cleanup failed: %s',
+                str(exc)[:300],
+            )
     if spec['id'] not in {
         row['provider_id'] for row in committed.document['providers']
     }:
@@ -1165,5 +1208,6 @@ __all__ = [
     'provision_oauth_provider',
     'reconcile_oauth_providers',
     'managed_oauth_provider_status',
+    'managed_oauth_provider_statuses',
     'deprovision_oauth_provider',
 ]

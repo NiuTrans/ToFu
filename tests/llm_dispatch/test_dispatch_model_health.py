@@ -221,26 +221,28 @@ def test_non_chat_models_never_get_tier_tags():
     assert models[0]['capabilities'] == ['embedding']
 
 
-def test_non_chat_pricing_refresh_strips_stale_tier_tags():
+@pytest.mark.parametrize('capability', ['embedding', 'reranking'])
+def test_non_chat_pricing_refresh_strips_stale_tier_tags(capability):
     models = [{
         'model_id': 'embedding-stale',
-        'capabilities': ['embedding', 'cheap'],
+        'capabilities': [capability, 'cheap'],
         'pricing': {'input': 0.1, 'output': 0.1},
     }]
 
     result = reevaluate_pricing_tags(models)
 
-    assert models[0]['capabilities'] == ['embedding']
+    assert models[0]['capabilities'] == [capability]
     assert result['removed']['cheap'] == 1
     assert result['changed'] == 1
 
 
-def test_stale_non_chat_tier_tag_cannot_enter_chat_dispatch():
+@pytest.mark.parametrize('capability', ['embedding', 'reranking'])
+def test_stale_non_chat_tier_tag_cannot_enter_chat_dispatch(capability):
     slot = Slot(
         key_name='key_0',
         api_key='k',
         model='text-embedding-stale',
-        capabilities={'embedding', 'cheap'},
+        capabilities={capability, 'cheap'},
         provider_id='prov1',
     )
     dispatcher = _dispatcher_with([slot])

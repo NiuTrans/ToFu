@@ -103,10 +103,19 @@ const update = async data=>{snapshot=data;runtimeScope.updateBackgroundActivity(
   assert.equal(one.querySelector('.conv-background-dot'),null);
   assert.equal([...timers.values()][0].ms,10000,'terminal roster uses idle polling cadence');
   await update(liveSnapshot);
-  // A foreground turn still owns Answering; errors must remain inspectable.
+  // A foreground turn still owns the status over background work: a neutral
+  // syncing tag until its stream is confirmed live, then Answering. Errors
+  // must remain inspectable.
   turns.set('one',{t:{actor:'assistant',status:'running',projection:{}}});
   renderConversationList();
+  assert.equal(one.querySelector('.conv-status-tag.conv-state-unconfirmed').textContent,
+    locale['sidebar.syncingTag']);
+  assert.equal(one.querySelector('.conv-status-streaming'),null,'unconfirmed liveness never claims Answering');
+  assert.equal(status('one'),null,'a foreground turn hides background status');
+  rows[0]._conversationSyncHealth={state:'live'};
+  renderConversationList();
   assert.equal(one.querySelector('.conv-status-streaming').textContent,locale['sidebar.answering']);
+  assert.equal(status('one'),null,'a foreground turn hides background status');
   turns.set('one',{t:{actor:'assistant',status:'failed',projection:{error:'failed'}}});
   renderConversationList();
   assert.ok(one.querySelector('.conv-error-dot'));

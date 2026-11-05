@@ -51,7 +51,9 @@ The `kind` enum is closed — callers must pick one of these values:
   - ``abnormal_stop``       missing finish marker, partial reply
   - ``aborted``             user clicked Stop (rare in error path)
   - ``server_offline``      frontend lost contact with the server
-  - ``server_busy``         backend admission capacity is temporarily full
+  - ``server_busy``         legacy service-unavailable category
+  - ``event_delivery_failed`` local event persistence/worker failure
+  - ``storage_unavailable`` the storage authority could not serve the request
   - ``task_start_failed``   durable turn exists but its executor did not start
   - ``internal``            backend bug / unhandled exception
   - ``generic``             unrecognized — last-resort fallback
@@ -67,10 +69,14 @@ serializes the dict as JSON; the SSE / poll payloads carry the dict
 verbatim; the frontend reducer reads ``error.message`` for display and
 ``error.kind`` / ``error.severity`` for classification.
 
+``BadRequest`` (``_rejection``) is the one typed client-fault exception: the
+only exception an HTTP boundary may answer with 400. Builtin ``ValueError`` /
+``TypeError`` are server faults (redacted, logged 500); see its module.
+
 This module is a pure re-export facade — all implementations live in the
 sub-modules (``_constants``, ``_classify``, ``_build``, ``_serde``,
-``_causes``).  The ``from lib.error_envelope import X`` surface is preserved
-byte-identically.
+``_causes``, ``_rejection``).  The ``from lib.error_envelope import X``
+surface is preserved byte-identically.
 """
 
 from __future__ import annotations
@@ -125,8 +131,12 @@ from lib.error_envelope._schema import (  # noqa: E402,F401
     typed_error_envelope_schema,
 )
 
+# ── Typed client fault (the only 400) ────────────────────────────────
+from lib.error_envelope._rejection import BadRequest  # noqa: E402,F401
+
 
 __all__ = [
+    'BadRequest',
     'KINDS',
     'make_envelope',
     'from_exception',

@@ -47,6 +47,11 @@ table with tofu-db speedup ratios.  Search samples include every page round trip
 limit (or exhaust the projection), including empty partial pages. This is a
 measurement tool, not a timing gate: CI must never assert wall-clock thresholds from it.
 
+Each native daemon launch writes its stderr to one private temporary directory
+per engine. ``stop()`` deletes it after a clean run and keeps it, naming it on
+stderr, after a launch failure, an unclean daemon exit or a reported workload
+error.
+
 Usage::
 
     python3 scripts/tofudb_perf_compare.py [--scale small|medium]
@@ -83,6 +88,7 @@ from unittest.mock import patch
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+from runtime_guards import pid_is_alive  # noqa: E402
 from tofu_db.wire import (  # noqa: E402
     StorageV2Error,
     StorageV2Session,
@@ -104,6 +110,10 @@ def _cid() -> str:
 # ── Engine drivers ───────────────────────────────────────────────────────
 class BenchError(Exception):
     pass
+
+
+class UnsupportedBenchmarkOperation(BenchError):
+    """An adapter explicitly lacks an operation; execution failures are distinct."""
 
 
 def _v2_execute(session: 'StorageV2Session', operation: str, payload: dict,
@@ -519,6 +529,9 @@ class TofuDbEngine:
         self._write_bytes_observed = False
         self._write_bytes_incomplete = False
         self._cache_environment_requested: dict[str, str] | None = None
+        self._log_dir: Path | None = None
+        self._log_launches = 0
+        self._retain_logs = False
 
     def _write_bytes_pid(self) -> int | None:
         return os.getpid() if self._client_mode == 'embedded' else getattr(self._process, 'pid', None)
@@ -546,6 +559,7 @@ class TofuDbEngine:
         try:
             self._start_isolated()
         except BaseException:
+            self._retain_logs = True
             self.stop()
             raise
 
@@ -580,9 +594,13 @@ class TofuDbEngine:
         self._build_identity = build_identity(self._binary)
         self._checkout_source_sha256 = source_fingerprint(_PROJECT_ROOT)
         parent = self._authority_dir_parent
-        data_dir = Path(tempfile.mkdtemp(
+        authority_parent = Path(tempfile.mkdtemp(
             prefix='tofudb-perf-authority-', dir=parent))
-        self._dirs.append(data_dir)
+        self._dirs.append(authority_parent)
+        # Native backups are siblings of --data-dir in both daemon and
+        # embedded modes. Own that parent so runs cannot share or leak backups.
+        data_dir = authority_parent / 'authority'
+        data_dir.mkdir()
         projection_parent = Path(tempfile.mkdtemp(
             prefix='tofudb-perf-proj-', dir=parent))
         self._dirs.append(projection_parent)
@@ -747,8 +765,10 @@ class TofuDbEngine:
         if self._process.stdin:
             self._process.stdin.close()
         try:
-            self._process.wait(timeout=120)
+            if self._process.wait(timeout=120) != 0:
+                self._retain_logs = True
         except subprocess.TimeoutExpired as exc:
+            self._retain_logs = True
             self._process.kill()
             self._process.wait(timeout=10)
             raise BenchError('tofu-db graceful shutdown exceeded 120 s') from exc
@@ -844,10 +864,31 @@ class TofuDbEngine:
         ), self)
 
     def _serve_log(self):
-        self._log = tempfile.NamedTemporaryFile(  # noqa: SIM115
-            mode='w', prefix='tofudb-perf-serve-', suffix='.log', delete=False)
-        self.log_path = self._log.name
+        """Open this launch's stderr log in the engine's private log directory."""
+        if self._log_dir is None:
+            self._log_dir = Path(tempfile.mkdtemp(prefix='tofudb-perf-serve-'))
+            self._log_launches = 0
+        self._log_launches += 1
+        path = self._log_dir / f'serve-{self._log_launches}.log'
+        self._log = path.open('x', encoding='utf-8')
+        self.log_path = str(path)
         return self._log
+
+    def retain_logs(self) -> None:
+        """Keep the daemon logs past ``stop()``; call before reporting a failure."""
+        self._retain_logs = True
+
+    def _settle_logs(self) -> None:
+        """Delete the logs of a clean run; keep and name them after a failure."""
+        log_dir, retain = self._log_dir, self._retain_logs
+        self._log_dir, self._retain_logs = None, False
+        if log_dir is None:
+            return
+        if retain:
+            print(f'tofu-db serve logs retained: {log_dir}', file=sys.stderr, flush=True)
+        else:
+            shutil.rmtree(log_dir, ignore_errors=True)
+            self.log_path = None
 
     def stop(self) -> None:
         if self._embedded is not None:
@@ -869,12 +910,15 @@ class TofuDbEngine:
             if self._process.stdin:
                 self._process.stdin.close()
             try:
-                self._process.wait(timeout=30)
+                if self._process.wait(timeout=30) != 0:
+                    self._retain_logs = True
             except subprocess.TimeoutExpired:
+                self._retain_logs = True
                 self._process.kill()
                 self._process.wait(timeout=10)
         for path in self._dirs:
             shutil.rmtree(path, ignore_errors=True)
+        self._settle_logs()
 
 
 class LegacyEngine:
@@ -1019,12 +1063,10 @@ class LegacyEngine:
             except OSError:
                 pid = None
         if pid is not None:
+            # The killed sidecar is this process's child: it stays a zombie
+            # until the runtime's monitor polls it, which is not its death.
             deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                try:
-                    os.kill(pid, 0)
-                except OSError:
-                    break
+            while time.monotonic() < deadline and pid_is_alive(pid):
                 time.sleep(0.05)
         self._accumulate_write_bytes()
         try:
@@ -1143,7 +1185,6 @@ class RawSqliteEngine:
         conn.execute('PRAGMA journal_mode=WAL')
         # symmetric with the sidecar's FULL journal and tofudb strict mode
         conn.execute('PRAGMA synchronous=FULL')
-        conn.execute('PRAGMA busy_timeout=30000')
         return conn
 
     def _install_schema(self, conn: sqlite3.Connection) -> None:
@@ -1273,7 +1314,7 @@ CREATE TABLE IF NOT EXISTS credentials(
                   payload: dict, command: bool):
         handler = getattr(self, '_op_' + operation.replace('.', '__'), None)
         if handler is None:
-            raise BenchError(f'unsupported operation {operation}')
+            raise UnsupportedBenchmarkOperation(f'unsupported operation {operation}')
         if command:
             return self._transact(conn, lambda: handler(conn, payload))
         return handler(conn, payload)
@@ -1499,857 +1540,20 @@ def _record_value(i: int) -> dict:
 
 
 def _workloads(scale: dict[str, int], user: int, *, namespace: str | None = None):
-    ns = namespace if namespace is not None else f'perf_{uuid.uuid4().hex[:8]}'
-    conv_ts = _TS_BASE
+    from scripts.tofudb_workloads import WorkloadInputs, WorkloadPorts, build_workloads
 
-    def conv_id(prefix: str, i: int) -> str:
-        return f'{ns}_{prefix}_conv_{i:06d}'
-
-    def key(i: int) -> str:
-        return f'k/{i:06d}'
-
-    def record_put_setup(engine):
-        for i in range(scale['seed_records']):
-            engine.execute('record.put', {
-                'namespace': ns, 'key': key(i), 'value': _record_value(i),
-            }, command=True)
-
-    def record_put_op(i):
-        return ('record.put', {
-            'namespace': ns, 'key': key(scale['seed_records'] + i),
-            'value': _record_value(i),
-        }, True)
-
-    def record_get_op(i):
-        return ('record.get', {
-            'namespace': ns, 'key': key(i % scale['seed_records']),
-        }, False)
-
-    def conv_create_op(i):
-        return ('conversation.create', {
-            'conv_id': conv_id('cb', i), 'user_id': user,
-            'title': f'Perf conversation {i}',
-            'settings': {'projectPath': f'/perf/{i}'},
-            'created_at': conv_ts + i, 'updated_at': conv_ts + i,
-        }, True)
-
-    def conv_seed_setup(prefix):
-        def setup(engine):
-            for i in range(scale['seed_convs']):
-                engine.execute('conversation.create', {
-                    'conv_id': conv_id(prefix, i), 'user_id': user,
-                    'title': f'Perf conversation {i}',
-                    'settings': {'projectPath': f'/perf/{i}'},
-                    'created_at': conv_ts + i, 'updated_at': conv_ts + i,
-                }, command=True)
-        return setup
-
-    def conv_list_op(i):
-        # Production sidebar payload: the catalog always passes
-        # include_messages=False (lib/conversations/catalog.py). The engine
-        # defaults an omitted flag to full transcript hydration, which is a
-        # different (bulk) contract measured by transcript_bulk_hydration.
-        return ('conversation.list', {
-            'user_id': user, 'limit': 50, 'include_messages': False,
-        }, False)
-
-    def conv_get_op(i):
-        # Production conversation open is a bounded message window
-        # (repository.get(message_window=...)), never an unbounded history.
-        return ('conversation.get', {
-            'conv_id': conv_id('op', i % scale['seed_convs']),
-            'user_id': user, 'message_window': 50,
-        }, False)
-
-    def make_turn_append(tag: str):
-        """One (setup, op) pair with identities private to this workload.
-
-        Every workload that appends turns must own a distinct tag: workloads
-        share one authority per engine, and reused conversation/command/turn
-        identities collide as database_conflict on the second seeder.
-        """
-        conv = f'{ns}_{tag}_turns'
-
-        def setup(engine):
-            engine.execute('conversation.create', {
-                'conv_id': conv, 'user_id': user,
-                'title': 'Turn append target',
-                'settings': {},
-                'created_at': conv_ts, 'updated_at': conv_ts,
-            }, command=True)
-
-        def op(i):
-            at = _SEARCH_TS + 60_000 + i
-            return ('turn.append_settled', {
-                'conversation_id': conv, 'user_id': user,
-                'actor': 'human', 'status': 'completed',
-                'projection': {
-                    'content': (
-                        f'agent round {i} '
-                        + 'lorem ipsum dolor sit amet ' * 8
-                    ),
-                },
-                'lane_id': 'main', 'command_id': f'{conv}_{i}_command',
-                'turn_id': f'{conv}_turn_{i:06d}', 'created_at': at, 'now': at,
-                'conversation_defaults': {
-                    'allowCreate': False, 'title': 'Turn append target',
-                    'createdAt': conv_ts, 'settings': {},
-                },
-            }, True)
-
-        return setup, op
-
-    turn_append_setup, turn_append_op = make_turn_append('main')
-    maint_turn_setup, maint_turn_op = make_turn_append('reopen')
-
-    search_word = f'wq{uuid.uuid4().hex[:10]}'
-
-    def search_setup(engine):
-        for i in range(scale['search_docs']):
-            at = _SEARCH_TS + i * 1_000
-            engine.execute('turn.append_settled', {
-                'conversation_id': f'{ns}_search_{i:04d}', 'user_id': user,
-                'actor': 'human', 'status': 'completed',
-                'projection': {
-                    'content': (
-                        f'document {i} padding text {search_word} '
-                        'probe body with more words'
-                    ),
-                },
-                'lane_id': 'main', 'command_id': f'{ns}_search_{i}_command',
-                'turn_id': f'{ns}_search_turn_{i:04d}',
-                'created_at': at, 'now': at,
-                'conversation_defaults': {
-                    'allowCreate': True, 'title': f'Search doc {i}',
-                    'createdAt': _SEARCH_TS, 'settings': {},
-                },
-            }, command=True)
-        # Both authorities index through an asynchronous projection worker.
-        # The legacy engines only flip their search coverage to 'ready' after
-        # an explicit global backfill sweep; without it they report 'indexing'
-        # forever even once every seeded document is searchable. Schedule the
-        # sweep now, then wait until the seeded documents are all visible and
-        # coverage is ready. (tofu-db reports 'ready' as soon as its owner is
-        # not actively indexing, so this command is a harmless no-op for it.)
-        try:
-            engine.execute('turn.search.backfill', {}, command=True)
-        except BenchError:
-            pass
-        # Backfill schedules a destructive rebuild, not a resumable nudge.
-        # Issue it once: repeating it can reset the cursor before an accumulated
-        # corpus finishes. Coverage changes alone are not a progress witness;
-        # use the existing bounded total preparation deadline for every engine.
-        started = time.monotonic()
-        deadline = started + 600.0 + 2.0 * scale['search_docs']
-        last_state = None
-        while True:
-            now = time.monotonic()
-            if now >= deadline:
-                raise BenchError(
-                    f'search projection did not stabilize for {engine.name} '
-                    f'within {now - started:.0f}s (last state: {last_state})')
-            hits = _execute_workload_operation(engine, 'conversation.search', {
-                'user_id': user, 'query': search_word,
-                'limit': max(50, scale['search_docs']), 'snippet_radius': 10,
-            }, command=False)
-            # Observe coverage even before all seed hits become visible.
-            coverage = engine.execute('conversation.search', {
-                'user_id': user, 'query': '', 'page': True, 'limit': 1,
-            }, command=False)
-            if isinstance(coverage, dict):
-                last_state = (len(hits), coverage.get('coverage'),
-                              tuple(coverage.get('coverage_reasons') or ()))
-                if len(hits) >= scale['search_docs'] \
-                        and coverage.get('coverage') == 'ready' \
-                        and coverage.get('coverage_reasons') == []:
-                    engine._search_readiness_observation = {
-                        'available': True, 'source': 'conversation.search',
-                        'phase': 'conversation_search_setup',
-                        'coverage': 'ready', 'coverage_reasons': [],
-                        'seed_documents_visible': len(hits),
-                        'seed_documents_expected': scale['search_docs'],
-                        'observed_at_unix_ms': int(time.time() * 1000),
-                    }
-                    engine._search_stabilization_s = round(
-                        time.monotonic() - started, 1)
-                    return
-            time.sleep(0.1)
-
-    def search_op(i):
-        return ('conversation.search', {
-            'user_id': user, 'query': search_word,
-            'limit': 20, 'snippet_radius': 10,
-        }, False)
-
-    def mixed_setup(engine):
-        record_put_setup(engine)
-        conv_seed_setup('mx')(engine)
-
-    def mixed_op(i):
-        slot = i % 10
-        if slot < 8:
-            return record_get_op(i)
-        if slot == 8:
-            return ('record.put', {
-                'namespace': ns, 'key': f'mix/{i:06d}',
-                'value': _record_value(i),
-            }, True)
-        return conv_list_op(i)
-
-    def concurrent_read_runner(engine, setup, operation, iterations):
-        """One writer plus four concurrent readers (the harness's real shape).
-
-        Reader latency is the headline statistic; writer throughput/p99 carry
-        the charter's "reads must not block writer" gate. Any thread failure
-        is loud: the engine's phase becomes an error, never a silently
-        degraded sample set.
-        """
-        readers = 4
-        writes = scale['concurrent_writes']
-        reads_each = iterations
-        prepare = getattr(engine, 'prepare_workload', None)
-        if prepare is not None:
-            prepare()
-        record_put_setup(engine)
-        conv_seed_setup('cr')(engine)
-        start = threading.Event()
-        errors: list[str] = []
-        reader_samples: list[list[float]] = [[] for _ in range(readers)]
-        writer_samples: list[float] = []
-
-        def open_thread_session():
-            opener = getattr(engine, 'open_session', None)
-            return opener() if opener is not None else engine
-
-        def close_thread_session(session) -> None:
-            closer = getattr(session, 'close', None)
-            if closer is not None:
-                closer()
-
-        def reader(index: int) -> None:
-            session = open_thread_session()
-            try:
-                start.wait()
-                for i in range(reads_each):
-                    pick = (index + i) % 3
-                    if pick == 0:
-                        op, payload, command = record_get_op(i)
-                    elif pick == 1:
-                        op, payload, command = (
-                            'conversation.get',
-                            {'conv_id': conv_id('cr', i % scale['seed_convs']),
-                             'user_id': user},
-                            False,
-                        )
-                    else:
-                        op, payload, command = conv_list_op(i)
-                    began = time.perf_counter_ns()
-                    _execute_workload_operation(session, op, payload, command)
-                    reader_samples[index].append(
-                        (time.perf_counter_ns() - began) / 1e6)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f'reader {index}: {type(exc).__name__}: {exc}')
-            finally:
-                close_thread_session(session)
-
-        def writer() -> None:
-            session = open_thread_session()
-            try:
-                start.wait()
-                for i in range(writes):
-                    began = time.perf_counter_ns()
-                    session.execute('record.put', {
-                        'namespace': ns, 'key': f'cw/{i:06d}',
-                        'value': _record_value(i),
-                    }, True)
-                    writer_samples.append(
-                        (time.perf_counter_ns() - began) / 1e6)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f'writer: {type(exc).__name__}: {exc}')
-            finally:
-                close_thread_session(session)
-
-        threads = [
-            threading.Thread(target=reader, args=(index,), daemon=True,
-                             name=f'perf-reader-{index}')
-            for index in range(readers)
-        ]
-        threads.append(threading.Thread(
-            target=writer, daemon=True, name='perf-writer'))
-        for thread in threads:
-            thread.start()
-        phase_started = time.perf_counter_ns()
-        start.set()
-        # Threads stop on their own bounded op counts; the join deadline only
-        # guards a wedged engine (each op already carries a 30 s deadline).
-        deadline = time.monotonic() + 120.0 + 0.1 * (
-            writes + readers * reads_each)
-        for thread in threads:
-            remaining = deadline - time.monotonic()
-            thread.join(timeout=max(1.0, remaining))
-        stuck = [thread.name for thread in threads if thread.is_alive()]
-        if stuck:
-            errors.append('threads past join deadline: ' + ', '.join(stuck))
-        if errors:
-            return {'error': '; '.join(errors)}
-        if len(writer_samples) != writes:
-            return {'error': (
-                f'writer completed {len(writer_samples)}/{writes} ops: '
-                'reads blocked the writer')}
-        flat = [sample for per_reader in reader_samples
-                for sample in per_reader]
-        if not flat:
-            return {'error': 'concurrent readers produced no samples'}
-        result = _latency_summary(flat)
-        writer_stats = _latency_summary(writer_samples)
-        phase_wall_seconds = (time.perf_counter_ns() - phase_started) / 1e9
-        result.update({
-            'scope': 'concurrent',
-            'concurrent_readers': readers,
-            'reads_completed': len(flat),
-            'writer_iterations': len(writer_samples),
-            # Wall-clock phase throughput, not 1/mean-latency: the latter
-            # inflates concurrency whenever per-op latency varies.
-            'writer_ops_per_sec': round(
-                len(writer_samples) / phase_wall_seconds, 1)
-                if phase_wall_seconds else 0.0,
-            'writer_p50_ms': writer_stats['p50_ms'],
-            'writer_p99_ms': writer_stats['p99_ms'],
-        })
-        return result
-
-    def maintenance_setup(engine):
-        """Seed restart-worthy state: point records plus one turn history.
-
-        The conversation gets its own identity: reusing the turn-append
-        workload's conversation collides with it inside one shared authority.
-        """
-        record_put_setup(engine)
-        engine.execute('conversation.create', {
-            'conv_id': f'{ns}_maint', 'user_id': user,
-            'title': 'Maintenance reopen target',
-            'settings': {},
-            'created_at': conv_ts, 'updated_at': conv_ts,
-        }, command=True)
-        for i in range(scale['turn_writes']):
-            at = _SEARCH_TS + 120_000 + i
-            engine.execute('turn.append_settled', {
-                'conversation_id': f'{ns}_maint', 'user_id': user,
-                'actor': 'human', 'status': 'completed',
-                'projection': {
-                    'content': (
-                        f'maintenance round {i} '
-                        + 'lorem ipsum dolor sit amet ' * 8
-                    ),
-                },
-                'lane_id': 'main', 'command_id': f'{ns}_maint_{i}_command',
-                'turn_id': f'{ns}_maint_turn_{i:06d}',
-                'created_at': at, 'now': at,
-                'conversation_defaults': {
-                    'allowCreate': False,
-                    'title': 'Maintenance reopen target',
-                    'createdAt': conv_ts, 'settings': {},
-                },
-            }, command=True)
-
-    def maintenance_reopen_runner(engine, setup, operation, iterations):
-        """Graceful stop + reopen cycles on the seeded authority.
-
-        The charter's lifecycle gate: reopen wall is the headline statistic
-        (flat summary keys below), shutdown captures the clean catch-up
-        (CONTROL publication for tofu-db, WAL truncation on SQLite close),
-        and first_read prices the first query after recovery. A failed cycle
-        is loud, never a dropped sample.
-        """
-        prepare = getattr(engine, 'prepare_workload', None)
-        if prepare is not None:
-            prepare()
-        if setup is not None:
-            setup(engine)
-        restart = getattr(engine, 'restart_cycle', None)
-        if restart is None:
-            return {'error': f'{engine.name} does not expose restart cycles'}
-        # Cold-read families mirror the app boot warm-up set. The 2026-09-16/18
-        # timeout storm showed every cold family pays the full first-read cost
-        # after a restart while each later read is nearly free; track both per
-        # family so cold-path optimizations are visible in this report.
-        cold_families: list[tuple[str, dict, bool]] = [
-            ('record.get', {'namespace': ns, 'key': key(0)}, False),
-            ('record.list', {'namespace': ns, 'prefix': 'k/', 'limit': 5}, False),
-            ('conversation.count', {'user_id': user}, False),
-            ('conversation.list', {'user_id': user, 'limit': 1}, False),
-            ('task_results.recovery_pending', {'limit': 1}, False),
-            ('timer.active.count', {'user_id': user}, False),
-            ('credential.list', {'owner_user_id': user, 'tenant_id': ''}, False),
-        ]
-        shutdowns: list[float] = []
-        reopens: list[float] = []
-        first_reads: list[float] = []
-        cold_reads: dict[str, list[float]] = {family: [] for family, _, _ in cold_families}
-        warm_reads: dict[str, list[float]] = {family: [] for family, _, _ in cold_families}
-        family_errors: dict[str, str] = {}
-        for _ in range(iterations):
-            shutdown_ms, reopen_ms = restart()
-            for family, payload, write in cold_families:
-                if family in family_errors:
-                    continue
-                began = time.perf_counter_ns()
-                try:
-                    _execute_workload_operation(engine, family, payload, write)
-                except BenchError as exc:
-                    # An engine lacking a family is an explicit gap in the
-                    # report, never a dropped sample or a failed phase.
-                    family_errors[family] = str(exc)[:120]
-                    continue
-                cold_reads[family].append((time.perf_counter_ns() - began) / 1e6)
-                began = time.perf_counter_ns()
-                _execute_workload_operation(engine, family, payload, write)
-                warm_reads[family].append((time.perf_counter_ns() - began) / 1e6)
-            first_reads.append(cold_reads['record.get'][-1])
-            shutdowns.append(shutdown_ms)
-            reopens.append(reopen_ms)
-        result = _latency_summary(reopens)
-        result.update({
-            'scope': 'maintenance',
-            'rounds': iterations,
-            'shutdown': _latency_summary(shutdowns),
-            'first_read': _latency_summary(first_reads),
-            'cold_read': {
-                family: _latency_summary(samples)
-                for family, samples in cold_reads.items() if samples
-            },
-            'warm_read': {
-                family: _latency_summary(samples)
-                for family, samples in warm_reads.items() if samples
-            },
-        })
-        if family_errors:
-            result['cold_read_unsupported'] = family_errors
-        return result
-
-    def swarm_write_runner(engine, setup, operation, iterations):
-        """W concurrent writers (one conversation each) + R concurrent readers.
-
-        The real swarm shape: per-conversation sequential writers, concurrent
-        across conversations. Aggregate writer throughput exposes the
-        single-writer authority's serialization ceiling; per-writer latency
-        keeps the interactive gate honest; reader latency proves reads stay
-        unblocked. Any thread failure is loud, never a dropped sample.
-        """
-        writers = scale['swarm_writers']
-        readers = scale['swarm_readers']
-        writes_each = iterations
-        reads_each = scale['swarm_reads_each']
-        prepare = getattr(engine, 'prepare_workload', None)
-        if prepare is not None:
-            prepare()
-        record_put_setup(engine)
-        for writer in range(writers):
-            engine.execute('conversation.create', {
-                'conv_id': f'{ns}_swarm_{writer}', 'user_id': user,
-                'title': f'Swarm writer {writer}', 'settings': {},
-                'created_at': conv_ts, 'updated_at': conv_ts,
-            }, command=True)
-        start = threading.Event()
-        errors: list[str] = []
-        writer_samples: list[list[float]] = [[] for _ in range(writers)]
-        reader_samples: list[list[float]] = [[] for _ in range(readers)]
-
-        def open_thread_session():
-            opener = getattr(engine, 'open_session', None)
-            return opener() if opener is not None else engine
-
-        def close_thread_session(session) -> None:
-            closer = getattr(session, 'close', None)
-            if closer is not None:
-                closer()
-
-        def writer(index: int) -> None:
-            session = open_thread_session()
-            conv = f'{ns}_swarm_{index}'
-            try:
-                start.wait()
-                for i in range(writes_each):
-                    at = _SEARCH_TS + 3_600_000 + i
-                    began = time.perf_counter_ns()
-                    session.execute('turn.append_settled', {
-                        'conversation_id': conv, 'user_id': user,
-                        'actor': 'human', 'status': 'completed',
-                        'projection': {
-                            'content': (
-                                f'swarm agent {index} round {i} '
-                                + 'lorem ipsum dolor sit amet ' * 8
-                            ),
-                        },
-                        'lane_id': 'main',
-                        'command_id': f'{conv}_{i}_command',
-                        'turn_id': f'{conv}_turn_{i:06d}',
-                        'created_at': at, 'now': at,
-                        'conversation_defaults': {
-                            'allowCreate': False,
-                            'title': f'Swarm writer {index}',
-                            'createdAt': conv_ts, 'settings': {},
-                        },
-                    }, True)
-                    writer_samples[index].append(
-                        (time.perf_counter_ns() - began) / 1e6)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f'writer {index}: {type(exc).__name__}: {exc}')
-            finally:
-                close_thread_session(session)
-
-        def reader(index: int) -> None:
-            session = open_thread_session()
-            try:
-                start.wait()
-                for i in range(reads_each):
-                    pick = (index + i) % 3
-                    if pick == 0:
-                        op, payload, command = (
-                            'conversation.get',
-                            {'conv_id': f'{ns}_swarm_{index % writers}',
-                             'user_id': user},
-                            False,
-                        )
-                    elif pick == 1:
-                        op, payload, command = conv_list_op(i)
-                    else:
-                        op, payload, command = record_get_op(i)
-                    began = time.perf_counter_ns()
-                    _execute_workload_operation(session, op, payload, command)
-                    reader_samples[index].append(
-                        (time.perf_counter_ns() - began) / 1e6)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f'reader {index}: {type(exc).__name__}: {exc}')
-            finally:
-                close_thread_session(session)
-
-        threads = [
-            threading.Thread(target=writer, args=(index,), daemon=True,
-                             name=f'perf-swarm-writer-{index}')
-            for index in range(writers)
-        ] + [
-            threading.Thread(target=reader, args=(index,), daemon=True,
-                             name=f'perf-swarm-reader-{index}')
-            for index in range(readers)
-        ]
-        for thread in threads:
-            thread.start()
-        phase_started = time.perf_counter_ns()
-        start.set()
-        deadline = time.monotonic() + 180.0 + 0.2 * (
-            writers * writes_each + readers * reads_each)
-        for thread in threads:
-            remaining = deadline - time.monotonic()
-            thread.join(timeout=max(1.0, remaining))
-        stuck = [thread.name for thread in threads if thread.is_alive()]
-        if stuck:
-            errors.append('threads past join deadline: ' + ', '.join(stuck))
-        if errors:
-            return {'error': '; '.join(errors)}
-        flat_writers = [sample for per_writer in writer_samples
-                        for sample in per_writer]
-        flat_readers = [sample for per_reader in reader_samples
-                        for sample in per_reader]
-        if len(flat_writers) != writers * writes_each or not flat_readers:
-            return {'error': (
-                f'swarm phase incomplete: writers '
-                f'{len(flat_writers)}/{writers * writes_each}, readers '
-                f'{len(flat_readers)}/{readers * reads_each}')}
-        result = _latency_summary(flat_writers)
-        reader_stats = _latency_summary(flat_readers)
-        phase_wall_seconds = (time.perf_counter_ns() - phase_started) / 1e9
-        result.update({
-            'scope': 'swarm',
-            'swarm_writers': writers,
-            'concurrent_readers': readers,
-            'writer_iterations': len(flat_writers),
-            # Headline: one writer's interactive append latency under swarm
-            # pressure; wall-clock aggregate throughput exposes the
-            # authority's serialization ceiling (never 1/mean-latency, which
-            # inflates concurrency whenever per-op latency varies).
-            'aggregate_writer_ops_per_sec': round(
-                len(flat_writers) / phase_wall_seconds, 1)
-                if phase_wall_seconds else 0.0,
-            'writer_ops_per_sec': result['ops_per_sec'],
-            'writer_p50_ms': result['p50_ms'],
-            'writer_p99_ms': result['p99_ms'],
-            'reader_p50_ms': reader_stats['p50_ms'],
-            'reader_p99_ms': reader_stats['p99_ms'],
-            'reads_completed': len(flat_readers),
-        })
-        return result
-
-    def large_turn_setup(engine):
-        engine.execute('conversation.create', {
-            'conv_id': f'{ns}_large_turns', 'user_id': user,
-            'title': 'Large turn target',
-            'settings': {},
-            'created_at': conv_ts, 'updated_at': conv_ts,
-        }, command=True)
-        for i in range(-scale.get('large_turn_history', 0), 0):
-            op, payload, command = large_turn_op(i)
-            engine.execute(op, payload, command)
-
-    def large_turn_op(i):
-        """A turn carrying a tool-result-class payload (256 KiB of text).
-
-        Agent harness reality: tool results dominate turn bytes. Large
-        payloads exercise carried-block spill, WAL record size, and the
-        pack/segment pipeline that small turns never touch.
-        """
-        at = _SEARCH_TS + 7_200_000 + i
-        return ('turn.append_settled', {
-            'conversation_id': f'{ns}_large_turns', 'user_id': user,
-            'actor': 'human', 'status': 'completed',
-            'projection': {
-                'content': _large_turn_content(i, scale.get('large_turn_bytes', 262_144),
-                    scale.get('large_turn_pattern', 'repetitive')),
-            },
-            'lane_id': 'main', 'command_id': f'{ns}_large_turn_{i}_command',
-            'turn_id': f'{ns}_large_turn_{i:06d}', 'created_at': at,
-            'now': at,
-            'conversation_defaults': {
-                'allowCreate': False, 'title': 'Large turn target',
-                'createdAt': conv_ts, 'settings': {},
-            },
-        }, True)
-
-    def history_open_setup(engine):
-        """One conversation carrying a realistic accumulated history.
-
-        The charter's header-only ``conversation_open`` corpus cannot see
-        history-scaled read paths; this phase's corpus can. The op reads
-        the production open path (windowed main-lane snapshot), so any
-        O(history) work behind an O(window) contract shows up linearly.
-        """
-        engine.execute('conversation.create', {
-            'conv_id': f'{ns}_history_open', 'user_id': user,
-            'title': 'Long history target', 'settings': {},
-            'created_at': conv_ts, 'updated_at': conv_ts,
-        }, command=True)
-        for i in range(scale['history_turns']):
-            at = _SEARCH_TS + 3_600_000 + i
-            engine.execute('turn.append_settled', {
-                'conversation_id': f'{ns}_history_open', 'user_id': user,
-                'actor': 'human', 'status': 'completed',
-                'projection': {
-                    'content': f'history round {i} ' + 'lorem ipsum ' * 8,
-                },
-                'lane_id': 'main', 'command_id': f'{ns}_hist_{i}_command',
-                'turn_id': f'{ns}_hist_turn_{i:06d}', 'created_at': at,
-                'now': at,
-                'conversation_defaults': {
-                    'allowCreate': False, 'title': 'Long history target',
-                    'createdAt': conv_ts, 'settings': {},
-                },
-            }, command=True)
-
-    def history_open_op(i):
-        return ('turn.sync.snapshot', {
-            'conversation_id': f'{ns}_history_open', 'user_id': user,
-            'turn_limit': 20,
-        }, False)
-
-    def sidebar_history_setup(engine):
-        """Sidebar conversations that carry real turn history.
-
-        ``sidebar_list_page`` seeds headers only; production sidebars are
-        dominated by conversations with accumulated turns, and any
-        per-conversation history work inside ``conversation.list`` scales
-        with the summed history instead of the page size.
-        """
-        for c in range(scale['sidebar_hist_convs']):
-            cid = f'{ns}_sbh_{c:05d}'
-            engine.execute('conversation.create', {
-                'conv_id': cid, 'user_id': user,
-                'title': f'History sidebar {c}', 'settings': {},
-                'created_at': conv_ts + c, 'updated_at': conv_ts + c,
-            }, command=True)
-            for t in range(scale['sidebar_hist_turns']):
-                # _TS_BASE-based timestamps keep these conversations ahead of
-                # the header-only seed corpora (conv_ts + i) in recency
-                # order; otherwise a full-suite run pages the header-only
-                # conversations and the phase silently re-measures
-                # sidebar_list_page instead of history-bearing entries.
-                at = _TS_BASE + 7_900_000 + c * 10_000 + t
-                engine.execute('turn.append_settled', {
-                    'conversation_id': cid, 'user_id': user,
-                    'actor': 'human', 'status': 'completed',
-                    'projection': {'content': f'sidebar {c} turn {t}'},
-                    'lane_id': 'main',
-                    'command_id': f'{ns}_sbh_{c}_{t}_command',
-                    'turn_id': f'{ns}_sbh_{c}_turn_{t:06d}',
-                    'created_at': at, 'now': at,
-                    'conversation_defaults': {
-                        'allowCreate': False, 'title': f'History sidebar {c}',
-                        'createdAt': conv_ts + c, 'settings': {},
-                    },
-                }, command=True)
-
-    def sidebar_history_op(i):
-        return ('conversation.list', {
-            'user_id': user, 'limit': 50, 'include_messages': False,
-        }, False)
-
-    def hydration_setup(engine):
-        for c in range(scale['sidebar_hist_convs']):
-            cid = f'{ns}_hyd_{c:05d}'
-            engine.execute('conversation.create', {
-                'conv_id': cid, 'user_id': user,
-                'title': f'Hydration sidebar {c}', 'settings': {},
-                'created_at': conv_ts + c, 'updated_at': conv_ts + c,
-            }, command=True)
-            for t in range(scale['sidebar_hist_turns']):
-                at = _TS_BASE + 8_900_000 + c * 10_000 + t
-                engine.execute('turn.append_settled', {
-                    'conversation_id': cid, 'user_id': user,
-                    'actor': 'human', 'status': 'completed',
-                    'projection': {'content': f'hydration {c} turn {t}'},
-                    'lane_id': 'main',
-                    'command_id': f'{ns}_hyd_{c}_{t}_command',
-                    'turn_id': f'{ns}_hyd_{c}_turn_{t:06d}',
-                    'created_at': at, 'now': at,
-                    'conversation_defaults': {
-                        'allowCreate': False, 'title': f'Hydration sidebar {c}',
-                        'createdAt': conv_ts + c, 'settings': {},
-                    },
-                }, command=True)
-
-    def hydration_op(i):
-        # The bulk transcript path (sync/export): conversation.list's engine
-        # default hydrates every entry's full main lane. Kept as its own
-        # workload so the O(history-sum) contract stays visible and is never
-        # conflated with the production sidebar path above.
-        return ('conversation.list', {
-            'user_id': user, 'limit': 50, 'include_messages': True,
-        }, False)
-
-    def crash_setup(engine):
-        engine.execute('conversation.create', {
-            'conv_id': f'{ns}_crash_target', 'user_id': user,
-            'title': 'Crash recovery target', 'settings': {},
-            'created_at': conv_ts, 'updated_at': conv_ts,
-        }, command=True)
-
-    def crash_op(i):
-        at = _TS_BASE + 9_500_000 + i
-        return ('turn.append_settled', {
-            'conversation_id': f'{ns}_crash_target', 'user_id': user,
-            'actor': 'human', 'status': 'completed',
-            'projection': {'content': f'crash round {i}'},
-            'lane_id': 'main', 'command_id': f'{ns}_crash_{i}_command',
-            'turn_id': f'{ns}_crash_turn_{i:06d}', 'created_at': at,
-            'now': at,
-            'conversation_defaults': {
-                'allowCreate': False, 'title': 'Crash recovery target',
-                'createdAt': conv_ts, 'settings': {},
-            },
-        }, True)
-
-    def crash_msg_count(engine) -> int:
-        document = engine.execute('conversation.get', {
-            'conv_id': f'{ns}_crash_target', 'user_id': user,
-            'message_window': 1,
-        }, False)
-        metadata = (document or {}).get('metadata') or {}
-        count = metadata.get('msg_count')
-        if not isinstance(count, int):
-            raise BenchError('crash phase could not read a turn count')
-        return count
-
-    def crash_recovery_runner(engine, setup, operation, iterations):
-        """SIGKILL mid-load: recovery wall, first read, zero acknowledged loss.
-
-        Crash-recovery latency is a first-class engine metric. Each round
-        appends ``crash_appends`` acknowledged turns, SIGKILLs the storage
-        process with no graceful catch-up, then measures the
-        kill-to-serving wall, the first windowed read after recovery, exact
-        acknowledged-turn visibility (zero loss), and writability after
-        recovery. A wrong count fails the phase loudly.
-        """
-        prepare = getattr(engine, 'prepare_workload', None)
-        if prepare is not None:
-            prepare()
-        if setup is not None:
-            setup(engine)
-        crash = getattr(engine, 'crash_cycle', None)
-        if crash is None:
-            return {'error': f'{engine.name} does not expose crash cycles'}
-        appends = scale['crash_appends']
-        recovers: list[float] = []
-        first_reads: list[float] = []
-        expected = 0
-        appended = 0
-        for _ in range(iterations):
-            for _ in range(appends):
-                op, payload, command = operation(appended)
-                _execute_workload_operation(engine, op, payload, command)
-                appended += 1
-            expected += appends
-            if crash_msg_count(engine) != expected:
-                raise BenchError(
-                    f'pre-crash turn count drifted from {expected} acknowledged')
-            recovers.append(crash())
-            began = time.perf_counter_ns()
-            visible = crash_msg_count(engine)
-            first_reads.append((time.perf_counter_ns() - began) / 1e6)
-            if visible != expected:
-                raise BenchError(
-                    f'crash recovery lost acknowledged turns: {visible} of '
-                    f'{expected} visible after reopen')
-            op, payload, command = operation(appended)
-            _execute_workload_operation(engine, op, payload, command)
-            appended += 1
-            expected += 1
-            if crash_msg_count(engine) != expected:
-                raise BenchError('authority is not writable after crash recovery')
-        result = _latency_summary(recovers)
-        embedded = getattr(engine, '_client_mode', None) == 'embedded'
-        method = ('connection_close_reopen' if engine.name == 'rawsqlite' else
-                  'embedded_abandon_reopen' if embedded else 'process_sigkill')
-        result.update({
-            'scope': ('graceful_reopen_control' if engine.name == 'rawsqlite' else
-                      'embedded_abandon_control' if embedded else 'crash_recovery'),
-            'recovery_method': method,
-            'certifies_process_crash': method == 'process_sigkill',
-            'rounds': iterations,
-            'crash_appends': appends,
-            'acknowledged_turns_recovered': expected,
-            'zero_acknowledged_loss': True,
-            'first_read': _latency_summary(first_reads),
-        })
-        return result
-
-    return [
-        ('record_put_burst', None, record_put_op, scale['writes']),
-        ('record_get_points', record_put_setup, record_get_op, scale['reads']),
-        ('conversation_create_burst', None, conv_create_op, scale['writes']),
-        ('sidebar_list_page', conv_seed_setup('sb'), conv_list_op,
-         scale['reads']),
-        ('conversation_open', conv_seed_setup('op'), conv_get_op,
-         scale['reads']),
-        ('turn_append_burst', turn_append_setup, turn_append_op,
-         scale['turn_writes']),
-        ('conversation_search', search_setup, search_op, scale['search_reads']),
-        ('mixed_80_10_10', mixed_setup, mixed_op, scale['mixed']),
-        ('open_windowed_long_history', history_open_setup, history_open_op,
-         scale['reads']),
-        ('sidebar_with_history', sidebar_history_setup, sidebar_history_op,
-         scale['reads']),
-        ('transcript_bulk_hydration', hydration_setup, hydration_op,
-         max(10, scale['reads'] // 10)),
-        ('concurrent_read', None, None, scale['concurrent_reads'],
-         concurrent_read_runner),
-        ('swarm_write', None, None, scale['swarm_writes_each'],
-         swarm_write_runner),
-        ('turn_append_large', large_turn_setup, large_turn_op,
-         scale['large_turn_writes']),
-        ('maintenance_reopen', maintenance_setup, None,
-         scale['maintenance_rounds'], maintenance_reopen_runner),
-        ('crash_recovery', crash_setup, crash_op,
-         scale['maintenance_rounds'], crash_recovery_runner),
-    ]
+    inputs = WorkloadInputs(
+        scale=scale, user=user,
+        namespace=namespace if namespace is not None else f'perf_{uuid.uuid4().hex[:8]}',
+        conversation_timestamp=_TS_BASE, search_timestamp=_SEARCH_TS,
+    )
+    ports = WorkloadPorts(
+        record_value=_record_value, large_turn_content=_large_turn_content,
+        execute=_execute_workload_operation, summarize=_latency_summary,
+        error=BenchError, unsupported_error=UnsupportedBenchmarkOperation,
+        raw_sqlite_type=RawSqliteEngine,
+    )
+    return build_workloads(inputs, ports, search_word=f'wq{uuid.uuid4().hex[:10]}')
 
 
 _SCALES = {
@@ -2736,8 +1940,10 @@ def _operation_runtime_evidence(name, engine):
                 'profiling': profile.get('enabled'),
                 'profile_sample_every': profile.get('sampleEvery', 0)}
     if name == 'rawsqlite':
-        return {'synchronous': engine._conn.execute('PRAGMA synchronous').fetchone()[0],
-                'journal_mode': engine._conn.execute('PRAGMA journal_mode').fetchone()[0]}
+        synchronous, journal_mode = engine._conn.execute(
+            'SELECT s.synchronous, j.journal_mode'
+            ' FROM pragma_synchronous AS s, pragma_journal_mode AS j').fetchone()
+        return {'synchronous': synchronous, 'journal_mode': journal_mode}
     if name == 'sqlite':
         fastpath = engine._client.metrics().get('fastpath', {})
         # FULL is enforced by the source-pinned adapter's writer factory, not
@@ -2848,7 +2054,7 @@ def _measurement_metadata(engines: dict, args=None) -> dict:
         metadata['tofudb_wire_client'] = {
             'source_sha256': hashlib.sha256(Path(wire_client.__file__).read_bytes()).hexdigest(),
             'crc32c': 'compiled' if wire_client._NATIVE_CRC32C is not None else 'python',
-            'large_text_json': 'orjson-compatible-subset' if wire_client._fast_json is not None else 'stdlib',
+            'large_text_json': 'orjson-exact-digit-scan' if wire_client._fast_json is not None else 'stdlib',
             'json_accelerator_version': getattr(wire_client._fast_json, '__version__', None),
         }
 
@@ -3184,6 +2390,7 @@ def main() -> int:
                     message = f'{type(exc).__name__}: {exc}'
                     log_path = getattr(engine, 'log_path', None)
                     if log_path:
+                        engine.retain_logs()
                         message += f' (daemon log: {log_path})'
                     per_engine[engine_name] = {'error': message}
             report['workloads'][name] = per_engine

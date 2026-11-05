@@ -48,6 +48,7 @@ from ._markdown import (
 
 # NiuTrans v1/v2 API adapters
 from ._niutrans import (
+    MtProviderError,
     _niutrans_translate,
     _niutrans_v1,
     _niutrans_v2,
@@ -64,6 +65,7 @@ logger = get_logger(__name__)
 __all__ = [
     # public entrypoints
     'mt_translate', 'mt_translate_chunked', 'is_mt_configured',
+    'MtProviderError',
     # config
     '_get_mt_config', '_normalize_lang',
     '_LANG_MAP', '_NIUTRANS_MAX_CHARS', '_REQUEST_TIMEOUT',

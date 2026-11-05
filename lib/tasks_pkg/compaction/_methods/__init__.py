@@ -19,9 +19,9 @@ Methods
     the read→compact→re-read churn loop the placeholder approach causes.
 
 * ``fold_observations`` (M2)
-    Replace a cold ``grep_search`` / ``find_files`` / ``list_dir`` result
+    Replace a cold ``search_files`` / ``find_files`` / ``list_dir`` result
     with a one-line *structured fact* extracted cheaply (no LLM): e.g.
-    ``grep_search → 3 match line(s)``.  Preserves the *answer* the tool
+    ``search_files → 3 match line(s)``.  Preserves the *answer* the tool
     produced rather than just "it was compacted", so the model rarely
     needs to re-call it.
 

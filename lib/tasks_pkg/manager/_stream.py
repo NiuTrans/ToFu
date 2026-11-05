@@ -1,29 +1,29 @@
 """LLM streaming — ``stream_llm_response`` wires ``dispatch_stream`` deltas into
 the task's event system, with periodic crash-recovery checkpoints, TTFT timing,
 retry/waiting-model phases, and usage/context-limit auto-learning.
-
-Also ``_display_model_name`` — strips internal gateway/provider prefixes for a
-user-facing label.
 """
 
 import time
 
 from lib.agent_core.events import EventType, Phase, build_event, build_phase
 from lib.cost import normalize_usage
+from lib.error_envelope import _classify_exception
 from lib.llm.stream_result import (
     ProviderStreamResult,
     ensure_provider_stream_result,
 )
 from lib.llm_dispatch.retry_i18n import (
-    GATEWAY_PREFIXES as _GATEWAY_PREFIXES,  # noqa: F401  (re-exported by the manager facade)
     GATEWAY_RETRY_TOKEN as _GATEWAY_RETRY_TOKEN,
     RetryPhaseEventBudget,
-    display_model_name as _display_model_name,
     retry_phase_fields,
 )
 from lib.log import get_logger
 from lib.logging_pkg.log_record_values import text_value
-from lib.turn_verdict import INTERNAL_FENCE_ABORT_REASONS
+from lib.turn_verdict import (
+    DISPATCH_AUTHORITY_ABORT_REASONS,
+    INTERNAL_FENCE_ABORT_REASONS,
+    dispatch_authority_stop_detail,
+)
 
 from lib.tasks_pkg.manager._delta_coalescer import TaskTextDeltaCoalescer
 from lib.tasks_pkg.manager._events import append_event
@@ -39,6 +39,7 @@ from lib.tasks_pkg.manager._registry import (
     task_user_id,
 )
 from lib.tasks_pkg.manager._sync import checkpoint_task_partial
+from lib.tasks_pkg.round_prep_timing import finish_round_prep
 
 logger = get_logger(__name__)
 
@@ -84,11 +85,8 @@ def _opaque_reasoning_replay_tokens(
         return 0
 
 
-# ``_GATEWAY_PREFIXES`` / ``_display_model_name`` / the retry-reason mapping
-# live in lib/llm_dispatch/retry_i18n.py (single source of truth shared with
-# the swarm emitter, ) — imported above under their legacy
-# private names so this module's existing references AND the manager facade's
-# re-export (manager/__init__.py) keep working byte-identically.
+# The retry-reason mapping lives in lib/llm_dispatch/retry_i18n.py (single
+# source of truth shared with the swarm emitter).
 #
 # The dispatcher (lib/llm_dispatch/api.py) passes short English log tokens as
 # ``reason``; leaking them verbatim into the phase HUD showed raw English
@@ -183,9 +181,12 @@ def _abort_request_attribution(task, error):
     """Classify a request-killing exception for the request-complete event.
 
     Returns ``(status, error_kind, error_detail)``. An AbortedError planted by
-    an internal storage/attempt fence is an authority-side FAILURE, not a
-    user Stop: emit 'failed' with the fence attribution so the activity
-    timeline explains the stop instead of rendering a plain user abort.
+    an internal storage/attempt fence or by project-dispatch authority is an
+    authority-side FAILURE, not a user Stop: emit 'failed' with that
+    attribution so the activity timeline explains the stop instead of
+    rendering a plain user abort. A non-None ``error_kind`` is the closed
+    error-envelope kind of that failure (``storage_fence`` /
+    ``dispatch_grant_revoked`` / ``dispatch_authority_lost``).
     """
     if type(error).__name__ not in ('AbortedError', 'CancelledError',
                                     'EventDeliveryCancelled', 'GeneratorExit'):
@@ -199,6 +200,9 @@ def _abort_request_attribution(task, error):
             f'request (internal abort reason: {reason}); this was not a '
             'manual stop or a model/network failure.',
         )
+    if reason in DISPATCH_AUTHORITY_ABORT_REASONS:
+        return 'failed', reason, dispatch_authority_stop_detail(
+            reason, str(task.get('_abortReasonDetail') or ''))
     return 'aborted', None, None
 
 
@@ -273,6 +277,10 @@ def _model_request_complete_fields(
     if error is not None:
         fields['errorKind'] = str(
             error_kind or type(error).__name__)[:160]
+        if status == 'failed':
+            # An authority attribution names its own kind; classifying the
+            # AbortedError that carried it would say 'aborted'.
+            fields['envelopeKind'] = error_kind or _classify_exception(error)
         fields['errorDetail'] = ' '.join(
             text_value(
                 error if error_detail is None else error_detail,
@@ -308,10 +316,14 @@ def _model_request_complete_fields(
                     or 0))) if isinstance(usage_value, dict) else 0.0
         except (TypeError, ValueError, OverflowError):
             semantic_stall_s = 0.0
-        fields['errorKind'] = (
-            'SemanticProgressTimeout' if semantic_progress_timeout else
-            'MalformedProviderStream' if malformed_stream else
-            'PrematureStreamClose')
+        # Envelope kinds match what stream recovery settles these failures
+        # as once its retries are exhausted.
+        fields['errorKind'], fields['envelopeKind'] = (
+            ('SemanticProgressTimeout', 'abnormal_stop')
+            if semantic_progress_timeout else
+            ('MalformedProviderStream', 'premature_close')
+            if malformed_stream else
+            ('PrematureStreamClose', 'premature_close'))
         fields['errorDetail'] = (
             ('No new reasoning progress, assistant text, or tool action for '
              f'{semantic_stall_s:.1f}s; the rolling semantic-stall window '
@@ -323,11 +335,17 @@ def _model_request_complete_fields(
     return fields
 
 
-def _log_stream_completion(task, *, prefix, model, finish_reason, message):
-    """Log the compact terminal shape of one provider stream."""
+def _log_stream_completion(task, *, prefix, model, finish_reason, message, dispatch=None):
+    """Log the compact terminal shape of one provider stream.
+
+    ``route_selection_ms`` is the dispatch's summed slot-pick time from its
+    evidence (``-`` when the transport reports none); docs/LOGGING.md.
+    """
+    picked = (dispatch or {}).get('route_selection_ms')
     logger.info(
         '%s conv=%s stream_llm_response complete: finish_reason=%s model=%s '
-        'provider=%s content=%dchars thinking=%dchars tool_calls=%d',
+        'provider=%s content=%dchars thinking=%dchars tool_calls=%d '
+        'route_selection_ms=%s',
         prefix,
         task.get('convId', ''),
         finish_reason,
@@ -336,6 +354,7 @@ def _log_stream_completion(task, *, prefix, model, finish_reason, message):
         len(message.get('content', '') or ''),
         len(message.get('reasoning_content', '') or ''),
         len(message.get('tool_calls', [])),
+        picked if isinstance(picked, (int, float)) else '-',
     )
 
 
@@ -432,6 +451,37 @@ def _learn_expanded_context_limit(task, *, model, prefix,
     except Exception as exc:
         logger.debug('%s context_limits expand-learn failed: %s', prefix, exc,
                      exc_info=True)
+
+
+def _tool_wire_projection_fields(diagnostic, *, model, parent_span_id,
+                                 dispatch_seq, turn, round_num):
+    """Bounded ``tool_wire_projection`` event fields from one wire diagnostic."""
+    def _names(key):
+        return [str(name)[:160] for name in (diagnostic.get(key) or [])[:128]]
+
+    def _count(key):
+        return max(0, int(diagnostic.get(key) or 0))
+
+    fields = {
+        'model': str(diagnostic.get('model') or model or '?')[:160],
+        'backend': str(diagnostic.get('backend') or '')[:80],
+        'toolNames': _names('toolNames'),
+        'toolCount': _count('toolCount'),
+        'schemaTokens': _count('schemaTokens'),
+        'schemaFingerprint': str(diagnostic.get('schemaFingerprint') or '')[:64],
+        'schemaBudgetTokens': _count('schemaBudgetTokens'),
+        'budgetDroppedNames': _names('budgetDroppedNames'),
+        'compactedNames': _names('compactedNames'),
+        'toolNameBytes': _count('toolNameBytes'),
+        'toolNameBudgetBytes': _count('toolNameBudgetBytes'),
+        'executableToolCount': _count('executableToolCount'),
+        'parentSpanId': parent_span_id,
+        'dispatchSeq': dispatch_seq,
+        'turn': turn,
+    }
+    if round_num is not None:
+        fields['roundNum'] = round_num
+    return fields
 
 
 def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
@@ -567,37 +617,10 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         if not isinstance(diagnostic, dict):
             return
         if diagnostic.get('kind') == 'wire_projection':
-            fields = {
-                'model': str(diagnostic.get('model') or model or '?')[:160],
-                'backend': str(diagnostic.get('backend') or '')[:80],
-                'toolNames': [
-                    str(name)[:160]
-                    for name in (diagnostic.get('toolNames') or [])[:128]
-                ],
-                'toolCount': max(0, int(diagnostic.get('toolCount') or 0)),
-                'schemaTokens': max(
-                    0, int(diagnostic.get('schemaTokens') or 0)),
-                'schemaFingerprint': str(
-                    diagnostic.get('schemaFingerprint') or '')[:64],
-                'schemaBudgetTokens': max(
-                    0, int(diagnostic.get('schemaBudgetTokens') or 0)),
-                'budgetDroppedNames': [
-                    str(name)[:160]
-                    for name in (
-                        diagnostic.get('budgetDroppedNames') or [])[:128]
-                ],
-                'compactedNames': [
-                    str(name)[:160]
-                    for name in (diagnostic.get('compactedNames') or [])[:128]
-                ],
-                'executableToolCount': max(
-                    0, int(diagnostic.get('executableToolCount') or 0)),
-                'parentSpanId': _model_request_span,
-                'dispatchSeq': _provider_dispatch_ordinal,
-                'turn': _activity_turn,
-            }
-            if _activity_round_num is not None:
-                fields['roundNum'] = _activity_round_num
+            fields = _tool_wire_projection_fields(
+                diagnostic, model=model, parent_span_id=_model_request_span,
+                dispatch_seq=_provider_dispatch_ordinal, turn=_activity_turn,
+                round_num=_activity_round_num)
             append_event(
                 task,
                 build_event(EventType.TOOL_WIRE_PROJECTION, **fields),
@@ -672,7 +695,9 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     #   '_t_prep_done' (set in run_task once context is assembled) and fired
     #   once, on the first content/thinking delta. Guarded so tool-round
     #   re-calls and tasks without the anchor don't re-log.
-    _t_request_start = time.time()
+    # ``request`` starts at stream entry, after build_body, the event
+    #   durability barrier and receipt checks; [RoundPrepTiming] owns those.
+    _t_request_start = time.monotonic()
     # A retry is allowed to wait forever, but its transient phase history is
     # not.  The callbacks still refresh liveness on every cycle; this sampler
     # bounds only duplicate durable/UI frames for the current LLM round.
@@ -683,11 +708,12 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             return
         task['_ttft_done'] = True
         _prep_done = task.get('_t_prep_done')
-        _now = time.time()
+        _now = time.monotonic()
         if _prep_done:
             _ttft_seconds = max(0.0, _now - _prep_done)
             logger.info('%s [Timing] TTFT=%.3fs (context-ready→first-token), '
-                        'request=%.3fs (build_body→first-token) model=%s',
+                        'request=%.3fs (stream-entry→first-token, '
+                        'after build_body+barrier) model=%s',
                         pfx, _now - _prep_done, _now - _t_request_start, model)
         else:
             _ttft_seconds = max(0.0, _now - _t_request_start)
@@ -802,7 +828,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         _append_dispatch_retry_phase(
             task,
             _retry_phase_budget,
-            model=_display_model_name(attempt_model or model),
+            model=attempt_model or model,
             attempt=attempt,
             reason=reason,
             status_code=status_code,
@@ -840,7 +866,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         _secs = max(0, int(_request_elapsed or 0))
         _idle_secs = max(0, int(_semantic_idle or 0))
         _attempt_model = getattr(slot, 'model', '') if slot is not None else ''
-        _label = _display_model_name(_attempt_model or model)
+        _label = _attempt_model or model
         if not _status_kind:
             with task['content_lock']:
                 _started = bool(task['content'] != _round_base_content
@@ -911,7 +937,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     #   the previous "Analyzing results…" label and the task looks hung.
     #   Cleared automatically by the first content/thinking delta, or by
     #   tool_start (hasActiveSearch) on the frontend.
-    _model_label = _display_model_name(model)
+    _model_label = model
     # The callable is task-scoped request metadata and is stripped at every
     # provider serialization boundary. Install it only when the model span is
     # ready to open, so an earlier setup exception cannot retain the closure on
@@ -942,6 +968,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     except Exception:
         _clear_request_activity_state()
         raise
+    finish_round_prep(task, span_id=_model_request_span, request_tag=tag, tail='request')
 
     # The normal in-memory Stop/tombstone channels remain immediate.  The
     # cross-process DB probe is asynchronous in this closure so a degraded
@@ -966,6 +993,18 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             append_event(task, build_event(
                 EventType.MODEL_REQUEST_START if kind == 'start'
                 else EventType.MODEL_REQUEST_COMPLETE, **fields))
+            _attempt_model = fields.get('model') or ''
+            if (kind == 'start' and _dispatcher_attempt_ordinal == 1
+                    and _attempt_model and _attempt_model != model):
+                # The pre-dispatch frame could only name the logical model.
+                # Later attempts must not overwrite their retrying frame.
+                append_event(task, build_phase(
+                    Phase.WAITING_MODEL,
+                    detail=(f'Sent to {_attempt_model}, '
+                            'waiting for it to start replying…'),
+                    detailKey='stream.phase.waitingForModel',
+                    detailArgs={'model': _attempt_model},
+                    model=_attempt_model))
         except Exception as exc:
             # The dispatcher isolates observer errors from retry/billing. Make
             # this lost diagnostic explicit even if text convergence succeeds.
@@ -1117,7 +1156,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
 
     _log_stream_completion(
         task, prefix=pfx, model=model,
-        finish_reason=finish_reason, message=msg,
+        finish_reason=finish_reason, message=msg, dispatch=_dispatch,
     )
 
     total_prompt_tokens = _record_stream_prompt_usage(

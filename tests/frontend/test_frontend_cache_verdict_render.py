@@ -160,6 +160,21 @@ check('culprit_extracted', culp.indexOf('user:ab12.content') !== -1
   && culp.indexOf('tool_result(c1).tool_result') !== -1);
 check('culprit_empty_when_none', _cacheBreakCulprits({ server_side: _proven }) === '');
 
+// ── 4. Prefix-mutation billing comes from provider usage (incident
+//    mvywcu5qqy5ocy round 3); persisted pre-fix rows still translate. ──
+const _pmPartial = 'cached prefix bytes changed between turns (non-idempotent history edit) — 40968 tokens were still read from cache and 4076 tokens from the last cache point before the change onward were written to cache [changed: tool_result(Zydohm1sPTGD).tool_result]';
+const zhPmPartial = _translateCacheCause(_pmPartial);
+check('prefix_mutation_partial_is_chinese',
+  zhPmPartial.indexOf('40968 个 token 仍从缓存读取') !== -1
+  && zhPmPartial.indexOf('4076 个 token') !== -1
+  && zhPmPartial.indexOf('整段') === -1
+  && !/tokens|cache|change/.test(zhPmPartial.replace(/\[[^\]]*\]/, '')));
+check('prefix_mutation_partial_culprit',
+  _cacheBreakCulprits({ prefix_mutation: _pmPartial }) === 'tool_result(Zydohm1sPTGD).tool_result');
+const _pmLegacy = 'cached prefix bytes changed between turns (non-idempotent history edit) — the whole body was re-billed uncached [changed: tool_result(5yozUTuvU9X1).tool_result]';
+check('prefix_mutation_legacy_still_translates',
+  _translateCacheCause(_pmLegacy) === '两轮之间缓存前缀的字节被改写（历史被非幂等编辑）——整段上下文按未命中重新计费 [改动: tool_result(5yozUTuvU9X1).tool_result]');
+
 console.log(out.join('\n'));
 """
 
@@ -365,7 +380,8 @@ def _derive_backend_causes():
 
     def cause(**kw):
         base = dict(client_changes={}, prefix_mutation_break=False,
-                    elapsed=10, cache_read=5000, prefix_mutated=False)
+                    elapsed=10, cache_read=5000, cache_write=0,
+                    prefix_mutated=False)
         base.update(kw)
         return R(**base)
 
@@ -395,8 +411,19 @@ def _derive_backend_causes():
         ('bytes_region', cause(prefix_culprits=['<bytes>system'])),
         ('bytes_generic', cause(prefix_culprits=['<bytes>user:ab.content'])),
         ('prefix_mutation',
-         cause(prefix_mutation_break=True, cache_read=0,
+         cause(prefix_mutation_break=True, cache_read=0, cache_write=45044,
                prefix_culprits=['user:ab.content'])),
+        ('prefix_mutation_partial_reuse',
+         cause(prefix_mutation_break=True, cache_read=40968, cache_write=4076,
+               prefix_culprits=['tool_result(Zydohm1sPTGD).tool_result'])),
+        ('prefix_mutation_unmetered_write',
+         cause(prefix_mutation_break=True, cache_read=40968, cache_write=0,
+               prefix_culprits=['tool_result(Zydohm1sPTGD).tool_result'])),
+        # Persisted pre-fix rows keep the old fixed billing clause.
+        ('prefix_mutation_legacy_row',
+         'cached prefix bytes changed between turns (non-idempotent history '
+         'edit) — the whole body was re-billed uncached '
+         '[changed: tool_result(5yozUTuvU9X1).tool_result]'),
         # TTL expiry + the no-wire-fingerprint fallbacks (honestly hedged).
         ('ttl_expiry', cause(elapsed=400)),
         ('unproven_read', cause(cache_read=5000)),

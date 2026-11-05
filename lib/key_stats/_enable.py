@@ -6,6 +6,9 @@ never leaves a provider with zero usable keys.  All state lives in
 """
 
 import sys as _sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from lib.log import get_logger
 
@@ -13,15 +16,51 @@ from lib.key_stats._admission import is_strict_billing_stop_admission
 from lib.key_stats._state import (
     MIN_ATTEMPTS,
     MIN_SUCCESS_RATE,
+    _SELECTION_CREDENTIALS,
     _cache,
     _ensure_fresh_unlocked,
     _last_resort_logged,
     _list_siblings,
     _lock,
+    _observe_store,
     _pair_key,
 )
 
 logger = get_logger(__name__)
+
+
+_FRESH_WITHIN_BATCH: ContextVar[bool] = ContextVar(
+    'key_admission_batch_fresh', default=False)
+
+
+@contextmanager
+def key_admission_batch(credentials=None) -> Iterator[None]:
+    """Share one store-freshness check among the key reads of one selection.
+
+    Outside a batch every :func:`is_key_enabled` call stats the store file so
+    another process's commit is seen at once. A dispatcher pick reads one
+    verdict per candidate within a few milliseconds; entering this block
+    checks freshness once, before the caller takes its own locks, and the
+    reads inside it skip the check. In-memory decisions and telemetry stay
+    visible to every read, and the batch is local to its execution context.
+
+    *credentials* is the selecting pool's credential index (a callable like
+    ``SlotPool.key_stats_key_names``). Sibling reads inside the block use it
+    instead of resolving the dispatcher, which a pick must not do while it
+    holds the dispatcher lock.
+    """
+    observed = _observe_store()
+    with _lock:
+        _ensure_fresh_unlocked(observed)
+    token = _FRESH_WITHIN_BATCH.set(True)
+    source = (None if credentials is None
+              else _SELECTION_CREDENTIALS.set(credentials))
+    try:
+        yield
+    finally:
+        if source is not None:
+            _SELECTION_CREDENTIALS.reset(source)
+        _FRESH_WITHIN_BATCH.reset(token)
 
 
 def _pkg():
@@ -185,14 +224,16 @@ def is_key_enabled(provider_id: str, key_name: str, model: str = '') -> bool:
     pk = (_pk._pair_key(provider_id, key_name) if _pk is not None
           else _pair_key(provider_id, key_name))
 
-    # Read siblings OUTSIDE the hot-path lock — config I/O is slow and must
-    # not block other dispatchers.  Resolve through the package so tests can
-    # monkeypatch ``ks._list_siblings``.
+    # Read siblings before taking _lock: resolving the dispatcher may take
+    # its lock, which a pick holds while it takes _lock.  Resolve through the
+    # package so tests can monkeypatch ``ks._list_siblings``.
     list_siblings = (_pk._list_siblings if _pk is not None else _list_siblings)
     siblings = list_siblings(provider_id)
 
+    observed = None if _FRESH_WITHIN_BATCH.get() else _observe_store()
     with _lock:
-        _ensure_fresh_unlocked()
+        if observed is not None:
+            _ensure_fresh_unlocked(observed)
         entry = _cache['stats'].get(pk) or {}
         if is_strict_billing_stop_admission() and (
                 entry.get('exhausted')

@@ -12,14 +12,36 @@ outbound dependencies are resolved through the explicit ``_ports`` module.
 
 from __future__ import annotations
 
-import re
+import copy
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
-from lib.cost import accumulate_usage_into, normalize_usage
+from lib.conversation_sync.settled_rows import is_settled
+from lib.tool_results.tool_round_status import (
+    AWAITING_ACTOR_TOOL_ROUND_STATUSES,
+    TERMINAL_TOOL_ROUND_STATUSES,
+)
+from lib.tasks_pkg.round_costs import (
+    stamp_round_costs, stamp_terminal_cost, usage_with_round_costs,
+)
+from ._completion_receipt import build_done_event
+from ._completion_observers import observe_completion
 from lib.tasks_pkg.failure_attribution import append_turn_retry_receipt
 from lib.tasks_pkg.stream_handler._canned_greeting import is_canned_greeting_reply
-from lib.turn_verdict import INTERNAL_FENCE_ABORT_REASONS
+from lib.turn_verdict import (
+    CONTENT_FILTER_SETTLEMENT_KEY,
+    DISPATCH_AUTHORITY_ABORT_REASONS,
+    INTERNAL_FENCE_ABORT_REASONS,
+    MODEL_REFUSAL_CAUSE,
+    dispatch_authority_stop_detail,
+)
+from lib.tasks_pkg.llm_fallback._refusal import (
+    model_refusal_envelope,
+    model_refusal_error,
+    stamp_content_filter_settlement,
+    turn_input_is_automatic,
+)
 from lib.llm.stream_result import (
     ProviderStreamResult,
     ensure_provider_stream_result,
@@ -46,8 +68,7 @@ from lib.tasks_pkg.manager import (
 )
 from lib.tasks_pkg.manager._events import _strip_base64_for_snapshot
 from lib.tasks_pkg.llm_fallback._usage import (
-    _emit_round_usage,
-    project_usage_for_round_record,
+    record_attempt_usage,
 )
 from lib.tasks_pkg.commit_round._commit import (  # noqa: E402
     _spawn_async_commit_round,
@@ -57,7 +78,6 @@ from lib.tasks_pkg.commit_round._profile import (  # noqa: E402
 )
 from lib.tasks_pkg.tool_dispatch._labels import tool_label
 from lib.tasks_pkg.tool_dispatch._pipeline import bounded_search_results_text
-
 
 
 import lib.tasks_pkg.orchestrator._ports as orchestrator_ports
@@ -179,7 +199,7 @@ def _check_suspicious_completion(task, last_finish_reason, _loop_exit_reason,
 
 # ── Suspicious-completion INTERCEPTION (act, not just warn) ───────────────
 #
-# WHY this exists (2026-07-28 09:51–10:45 incident): the sankuai gateway
+# WHY this exists (2026-07-28 09:51–10:45 incident): the example-corp gateway
 # intermittently returned a 29-char canned greeting ("Hi! How can I help you
 # today?") with ``finish_reason=stop`` for every Opus 5 request — 68 times,
 # each carrying a real M-TraceId. Tasks that had just spent N rounds doing real
@@ -270,7 +290,6 @@ def _maybe_preserve_accumulated_on_suspicion(task, last_finish_reason,
     return True
 
 
-
 def _emit_tool_round_phase(task, assistant_msg, round_num):
     """Emit a 'phase' event describing the current tool round for the frontend.
 
@@ -310,7 +329,6 @@ def _emit_tool_round_phase(task, assistant_msg, round_num):
         ))
 
 
-
 def _finalize_dangling_tool_rounds(task: dict[str, Any]) -> int:
     """Finalize any tool round left in a non-terminal state at task end.
 
@@ -337,22 +355,24 @@ def _finalize_dangling_tool_rounds(task: dict[str, Any]) -> int:
 
     # States that are already settled (terminal) or are legitimately waiting
     # on an external actor and resolved elsewhere — never sweep these.
-    _settled = {
-        'done', 'error', 'aborted', 'rejected', 'skipped',
-        'awaiting_human', 'awaiting_stdin', 'awaiting_client_tool',
-        'submitted', 'pending_approval',
+    _settled = TERMINAL_TOOL_ROUND_STATUSES | AWAITING_ACTOR_TOOL_ROUND_STATUSES | {
+        'skipped',
         # Effect-ledger refusal (prior attempt may have applied) is settled
         # at claim time with a receipt — sweeping it to 'aborted' would lie.
         'unknown',
     }
     tid = (task.get('id', '?') or '?')[:8]
     finalized = 0
-    for entry in rounds:
+    for index, entry in enumerate(rounds):
         if not isinstance(entry, dict):
             continue
         status = entry.get('status')
         if status in _settled:
             continue
+        if is_settled(entry):
+            # Settled history is replaced copy-on-write, never edited.
+            entry = copy.deepcopy(entry)
+            rounds[index] = entry
         if entry.get('results'):
             # Has results but a non-terminal status (rare) — normalize the
             # status to 'done' so it doesn't render as running, but don't
@@ -438,7 +458,7 @@ def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
     # pressure retries its exact write elsewhere; it must never buy another
     # model request or replay an already-started external effect.
     if task.get('toolCallCount') or any(
-            row.get('status') not in {'pending', 'searching'}
+            row.get('status') not in {'pending', 'queued', 'searching'}
             for row in task.get('toolRounds') or [] if isinstance(row, dict)):
         return False
 
@@ -587,53 +607,74 @@ def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
     return True
 
 
-_SRC_URL_RE = re.compile(r'https?://[^\s<>\]\)"`）】]+')
+#: Tools whose settled result rows name the page they delivered to the model.
+#: A ``fetch_url`` row is ``fetched`` once page content reached the model on
+#: any path (handler, streaming prefetch, dedup replay, native gateway); a
+#: ``browser_read_page`` row carries the tab's accepted URL only for a
+#: successful text read. Search-hit rows are engine candidates, not openings.
+_PAGE_READING_TOOLS = frozenset({'fetch_url', 'browser_read_page'})
+
+#: Markdown delimiters percent-encoded so a model-chosen URL stays one inert
+#: list item: no link, image or code span can open inside the footer.
+_FOOTER_URL_ESCAPES = str.maketrans({
+    '(': '%28', ')': '%29', '[': '%5B', ']': '%5D', '<': '%3C', '>': '%3E',
+    '"': '%22', '`': '%60', '\\': '%5C'})
 
 
-def _maybe_append_sources_footer(task: dict[str, Any], all_search_results_text: list[str]) -> None:
-    """Deterministic guard: if the model actually consulted web pages this turn
-    (``all_search_results_text`` non-empty) but its final answer cites NONE of
-    the URLs it opened, append a compact "来源 / Sources" footer listing the
-    deduped URLs it actually retrieved.
+def _opened_page_url(value: Any) -> str:
+    """Fragment-free http(s) URL of one opened page, or '' if it names none."""
+    if not isinstance(value, str):
+        return ''
+    url = value.split('#', 1)[0]
+    if (not url.startswith(('http://', 'https://')) or not url.isprintable()
+            or any(ch.isspace() for ch in url)):
+        return ''
+    try:
+        return url if urlsplit(url).netloc else ''
+    except ValueError:
+        return ''
 
-    Mechanism-first backstop for the system-prompt citation nudge: a
-    non-compliant model can ignore the prompt, but this footer can't be
-    ignored — it directly closes the 有据性=0 gap on web-research turns.
 
-    Rules (never fabricate): only URLs that literally appeared in the fetched
-    search-result text this turn; http(s) only; deduped preserving order;
-    capped at 5. No-op when the answer already contains ≥1 opened URL, when no
-    web results exist, or when the answer is empty/aborted.
+def _opened_page_urls(tool_rounds: Any) -> list[str]:
+    """Pages this turn's settled page-reading rounds opened, first-open order."""
+    opened: list[str] = []
+    for round_entry in tool_rounds or ():
+        if (not isinstance(round_entry, dict)
+                or round_entry.get('toolName') not in _PAGE_READING_TOOLS
+                or round_entry.get('status') != 'done'):
+            continue
+        for row in round_entry.get('results') or ():
+            if not isinstance(row, dict) or not row.get('fetched'):
+                continue
+            url = _opened_page_url(row.get('url'))
+            if url and url not in opened:
+                opened.append(url)
+    return opened
+
+
+def _maybe_append_sources_footer(task: dict[str, Any]) -> None:
+    """Deterministic citation backstop for answers built on opened pages.
+
+    When this turn opened web pages but the final answer cites none of them,
+    append a compact "来源 / Sources" footer listing up to five opened pages
+    in first-open order. Pairs with the system-prompt citation nudge as the
+    half a non-compliant model cannot ignore.
+
+    Evidence is the turn's settled page-reading rounds (``task['toolRounds']``,
+    see ``_PAGE_READING_TOOLS``), which every execution path settles alike.
+    Search-hit listings and links inside an opened page are never sources, so
+    a turn that only searched gets no footer. No-op for an empty or aborted
+    answer, a turn that opened nothing, or an answer citing an opened page.
     """
     content = task.get('content') or ''
     if not content.strip() or task.get('aborted'):
         return
-    if not all_search_results_text:
+    opened = _opened_page_urls(task.get('toolRounds'))
+    if not opened or any(url.rstrip('/') in content for url in opened):
         return
-    # URLs the model actually saw (format.py emits "URL: <url>" per result).
-    seen = _SRC_URL_RE.findall(
-        bounded_search_results_text(all_search_results_text, separator='\n'))
-    if not seen:
-        return
-
-    def _norm(u: str) -> str:
-        return u.split('#')[0].rstrip('/.,);：、')
-
-    opened, order = set(), []
-    for u in seen:
-        n = _norm(u)
-        if n and n not in opened:
-            opened.add(n)
-            order.append(n)
-    # Already cited at least one opened source? Then respect the model's choice.
-    if any(n in content for n in opened):
-        return
-    footer_urls = order[:5]
-    if not footer_urls:
-        return
-    footer = "\n\n---\n**来源 / Sources**（本轮检索所用，供核对）：\n" + \
-             "\n".join(f"- {u}" for u in footer_urls)
-    task['content'] = content + footer
+    footer_urls = [url.translate(_FOOTER_URL_ESCAPES) for url in opened[:5]]
+    task['content'] = (content + "\n\n---\n**来源 / Sources**（本轮检索所用，供核对）：\n"
+                       + "\n".join(f"- {url}" for url in footer_urls))
     logger.info('[%s] appended Sources footer (%d urls) — answer cited none of the '
                 'pages it opened this turn', task['id'][:8], len(footer_urls))
 
@@ -696,6 +737,13 @@ def _salvage_undelivered_steer(task: dict[str, Any]) -> int:
                             'deliveryState': 'queued',
                             'queueId': queued.get('queueId'),
                         })
+                    # A timer that delivered this steer recorded ``steered``
+                    # as its receipt; the same transition applies to it.
+                    injection_id = sit.get('injectionId')
+                    if isinstance(injection_id, str) and injection_id:
+                        from lib.scheduler.timer import record_requeued_continuation
+                        record_requeued_continuation(
+                            injection_id, user_id=owner_user_id)
                 except Exception as _sqe:
                     logger.error('[Orchestrator] steer salvage enqueue failed '
                                  'conv=%s: %s', conv_id[:8], _sqe, exc_info=True)
@@ -776,35 +824,9 @@ def _run_post_loop_fallback(
         last_finish_reason = finish_reason
         if usage:
             last_usage = usage
-            accumulate_usage_into(accumulated_usage, usage)
-            api_rounds.append({
-                'round': 'fallback',
-                'model': model,
-                'usage': project_usage_for_round_record(usage),
-                'tag': 'FALLBACK',
-            })
-            _emit_round_usage(
-                task, 'fallback', model, usage, tag='FALLBACK')
-            # Every processed FloorRetry resend is billed even when discarded.
-            for billed_round in usage.get('_extra_billing_rounds') or []:
-                billed_usage = billed_round.get('usage') or {}
-                accumulate_usage_into(accumulated_usage, billed_usage)
-                billed_model = billed_round.get('model') or model
-                billed_tag = (
-                    billed_round.get('tag') or 'FALLBACK-DISCARDED'
-                )
-                api_rounds.append({
-                    'round': 'fallback',
-                    'model': billed_model,
-                    'usage': project_usage_for_round_record(billed_usage),
-                    'tag': billed_tag,
-                    'responseAuthoring': False,
-                })
-                _emit_round_usage(
-                    task, 'fallback', billed_model, billed_usage,
-                    tag=billed_tag,
-                    response_authoring=False,
-                )
+            record_attempt_usage(
+                task, usage, model, 'fallback', accumulated_usage, api_rounds,
+                tag='FALLBACK')
     except Exception as error:
         logger.error(
             '[%s] ⚠️ Post-loop fallback failed: %s',
@@ -833,44 +855,6 @@ def _run_post_loop_fallback(
                 raw=str(error),
             )
     return last_finish_reason, last_usage, last_stream_result
-
-
-def _build_done_event_base(
-    task: dict[str, Any],
-    *,
-    last_finish_reason: Any,
-    last_stream_result: ProviderStreamResult | None,
-    accumulated_usage: dict,
-    last_usage: Any,
-    model: str,
-    thinking_depth: str | None,
-) -> dict[str, Any]:
-    """Project the authoritative terminal task fields onto one done event."""
-    done_event = build_event(EventType.DONE)
-    done_event['taskId'] = task['id']
-    if last_finish_reason:
-        done_event['finishReason'] = last_finish_reason
-    if isinstance(last_stream_result, ProviderStreamResult):
-        done_event['streamState'] = last_stream_result.state.value
-    final_usage = accumulated_usage if accumulated_usage else last_usage
-    if final_usage:
-        done_event['usage'] = final_usage
-    if task.get('preset'):
-        done_event['preset'] = task['preset']
-    done_event['model'] = model
-    task['model'] = model
-    if thinking_depth:
-        done_event['thinkingDepth'] = thinking_depth
-        task['thinkingDepth'] = thinking_depth
-    for field in ('error', 'toolSummary'):
-        if task.get(field):
-            done_event[field] = task[field]
-    if task.get('_todoState'):
-        from lib.tools.todo import public_todo_state
-        done_event['todoState'] = public_todo_state(task['_todoState'])
-    if task.get('_waiting_on'):
-        done_event['waitingOn'] = task['_waiting_on']
-    return done_event
 
 
 def _settle_post_loop_finish_reason(
@@ -924,6 +908,30 @@ def _settle_post_loop_finish_reason(
                 )
             logger.warning(
                 '[%s] INTERNAL FENCE abort reached finalize '
+                '(_abort_reason=%s) — settling finishReason=error, NOT '
+                'user_abort. Loop exit was "%s" model=%s.',
+                tid, _abort_reason, loop_exit_reason, model,
+            )
+        elif _abort_reason in DISPATCH_AUTHORITY_ABORT_REASONS:
+            # The project-dispatch authority that admitted this task ended it
+            # (revoked grant or lost authority); no person stopped it. The
+            # typed envelope is non-retryable: the same grant refuses again.
+            last_finish_reason = 'error'
+            if not task.get('error'):
+                from lib.error_envelope import make_envelope as _make_env
+                task['error'] = _make_env(
+                    _abort_reason,
+                    detail=dispatch_authority_stop_detail(
+                        _abort_reason, str(task.get('_abortReasonDetail') or '')),
+                    model=model,
+                    context='post-loop-settle',
+                    source='turn-finalize',
+                    raw=(f'abort_reason={_abort_reason} '
+                         f'finish={pre_abort_finish}'),
+                    retryable=False,
+                )
+            logger.warning(
+                '[%s] DISPATCH AUTHORITY stop reached finalize '
                 '(_abort_reason=%s) — settling finishReason=error, NOT '
                 'user_abort. Loop exit was "%s" model=%s.',
                 tid, _abort_reason, loop_exit_reason, model,
@@ -1082,62 +1090,32 @@ def _close_finalize_window(task):
     task.pop('_finalize_started_at', None)
 
 
-def _stamp_child_round_costs(task, api_rounds, *, model):
-    """Snapshot each child request with the ordinary cost engine before release.
-
-    No pricing at replay/projection time, and no repricing mixed-model aggregate
-    usage under the terminal model. Missing usage stays unpriced. Compaction
-    detail can be truncated; the Flow receipt reports that coverage separately.
-    """
-    from lib.cost import compute_cost
-    from math import isfinite
-
-    for row in api_rounds:
-        if not isinstance(row, dict) or row.get('cost'):
-            continue
-        usage = row.get('usage')
-        if not isinstance(usage, dict) or not any(
-            not isinstance(usage.get(key), bool)
-            and isinstance(usage.get(key), (int, float))
-            and usage[key] >= 0
-            and (not isinstance(usage[key], float) or isfinite(usage[key]))
-            for key in ('prompt_tokens', 'input_tokens', 'completion_tokens',
-                        'output_tokens', 'cache_read_input_tokens',
-                        'cache_read_tokens', 'cache_creation_input_tokens',
-                        'cache_write_tokens')
-        ):
-            continue
-        try:
-            dispatch = usage.get('_dispatch')
-            dispatch = dispatch if isinstance(dispatch, dict) else {}
-            cost = compute_cost(
-                usage, model_id=row.get('model') or dispatch.get('model') or model or '',
-                provider_id=(row.get('provider_id') or row.get('providerId')
-                             or dispatch.get('provider_id') or None),
-            )
-            if cost is not None:
-                row['cost'] = cost
-        except Exception as exc:
-            # Cost display is best-effort, never a reason to lose paid usage or
-            # prevent child terminal delivery. Unpriced rows remain explicit.
-            logger.warning('[Cost] child round snapshot failed: %s', exc)
-
-
-def _child_cost_usage(usage, api_rounds):
-    """Fold request-local prices, never reprice cumulative restored tokens."""
-    from math import isfinite
-    result = dict(usage or {})
-    priced = []
-    for row in api_rounds:
-        if not isinstance(row, dict):
-            continue
-        reported = (row.get('usage') or {}).get('cost_usd')
-        cost = reported if reported is not None else (row.get('cost') or {}).get('costUsd')
-        if type(cost) in (int, float) and isfinite(cost) and cost >= 0:
-            priced.append(cost)
-    if priced:
-        result['cost_usd'] = sum(priced)
-    return result
+def _settle_unstamped_content_filter(
+    task: dict[str, Any],
+    *,
+    last_finish_reason: Any,
+    loop_exit_reason: Any,
+    last_stream_result: ProviderStreamResult,
+    original_messages: list,
+    model: str,
+    tid: str,
+) -> None:
+    """Settle an unstamped content_filter finish as a typed model refusal."""
+    # The fallback layer stamps refusals and gateway blocks where it decides
+    # them; a content_filter finish reaching here unstamped came through a
+    # pool rescue, reactive retry or post-loop synthesis and is the model's.
+    if (not task['aborted']
+            and not task.get(CONTENT_FILTER_SETTLEMENT_KEY)
+            and (last_finish_reason == 'content_filter'
+                 or (loop_exit_reason and 'content_filter' in str(loop_exit_reason).lower()))):
+        stamp_content_filter_settlement(
+            task, cause=MODEL_REFUSAL_CAUSE,
+            envelope=model_refusal_envelope(
+                model_refusal_error(model, last_stream_result.usage),
+                automatic=turn_input_is_automatic(original_messages)))
+        logger.info('[%s] Settled unstamped content_filter as a model refusal '
+                    '(finish_reason=%s, loop_exit=%s)',
+                    tid, last_finish_reason, loop_exit_reason)
 
 
 def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, thinking_depth: str | None, cfg: dict[str, Any],
@@ -1197,14 +1175,11 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             last_usage if isinstance(last_usage, dict) else None,
         )
 
-    # ── Content-filter: give user a meaningful error instead of blank bubble ──
-    if (not task['content'].strip()
-            and not task['aborted']
-            and (last_finish_reason == 'content_filter'
-                 or (_loop_exit_reason and 'content_filter' in str(_loop_exit_reason).lower()))):
-        task['content'] = '⚠️ 该回复被模型安全过滤器拦截，请尝试换一种方式提问。\n\n_The response was blocked by the model\'s safety filter. Please try rephrasing your question._'
-        logger.info('[%s] Injected content_filter user-facing message (finish_reason=%s, loop_exit=%s)',
-                    tid, last_finish_reason, _loop_exit_reason)
+    # ── Content filter: settle typed evidence, never canned answer text ──
+    _settle_unstamped_content_filter(
+        task, last_finish_reason=last_finish_reason, loop_exit_reason=_loop_exit_reason,
+        last_stream_result=last_stream_result, original_messages=original_messages,
+        model=model, tid=tid)
 
     # ── Strip the END_TURN control token from the delivered answer ──
     # The intent-stall nudge TEACHES `[END_TURN: <reason>]` so a model can
@@ -1234,11 +1209,11 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         logger.warning('[%s] END_TURN strip failed: %s', tid, _et_e)
 
     # ── Deterministic source-citation backstop (web-research turns) ──
-    # If the model consulted web pages but cited none of them, append a compact
-    # Sources footer of the URLs it actually opened. Pairs with the system-prompt
-    # citation nudge (section_tone_and_style web_tools path) as the robust half.
+    # If the model opened web pages but cited none of them, append a compact
+    # Sources footer of those pages (never search hits). Pairs with the
+    # system-prompt citation nudge (section_tone_and_style web_tools path).
     try:
-        _maybe_append_sources_footer(task, all_search_results_text)
+        _maybe_append_sources_footer(task)
     except Exception as _src_e:  # never let the backstop break finalization
         logger.warning('[%s] sources-footer backstop failed: %s', tid, _src_e)
 
@@ -1367,8 +1342,8 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     detached_presentation = callable(task.get('_invocationEventSink'))
     from lib.tasks_pkg.segments import assemble_segments
     task['segments'] = assemble_segments(task)
-    _stamp_child_round_costs(task, api_rounds, model=model)
-    accumulated_usage = _child_cost_usage(accumulated_usage, api_rounds)
+    stamp_round_costs(task, api_rounds, model=model)
+    accumulated_usage = usage_with_round_costs(accumulated_usage, api_rounds)
 
     # ── Generate tool summary for cross-turn context (non-blocking) ──
     if not detached_presentation and tool_call_happened and not task['aborted']:
@@ -1450,8 +1425,10 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     _maybe_preserve_accumulated_on_suspicion(
         task, last_finish_reason, tool_call_happened, messages)
 
-    done_evt = _build_done_event_base(
+    done_evt = build_done_event(
         task,
+        cfg=cfg,
+        api_rounds=api_rounds,
         last_finish_reason=last_finish_reason,
         last_stream_result=last_stream_result,
         accumulated_usage=accumulated_usage,
@@ -1459,97 +1436,6 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         model=model,
         thinking_depth=thinking_depth,
     )
-    # The toolbar capsule is only a send-time client snapshot. Project the
-    # server-authoritative model/depth/modes at done so mid-turn fallback or a
-    # preset switch cannot leave the durable turn labelled with stale facts;
-    # the info-rail reducer replaces, rather than merges, these values.
-    done_evt['actualModel'] = task.get('_fallback_model') or model
-    if thinking_depth:
-        done_evt['actualDepth'] = thinking_depth
-    # Anchor for the frontend turn-ctx capsule reconcile: the stable _msgId
-    # of the user turn that TRIGGERED this task, stamped by
-    # ``start_conversation_attempt_executor`` (send/regenerate/continue) or inherited by
-    # autopilot VU sub-tasks from their parent. Frontend prefers this over
-    # "the last user in conv" — the latter is wrong under autopilot VU,
-    # concurrent conv, or a regenerate targeting a historical user turn.
-    # Empty string when a headless / external / legacy caller never stamped
-    # it → frontend falls back to the last-user heuristic (safe default).
-    if task.get('_userMsgId'):
-        done_evt['userMsgId'] = task['_userMsgId']
-    _actual_modes: list[dict[str, str]] = []
-    _flow = cfg.get('activeFlow') if isinstance(cfg.get('activeFlow'), str) else ''
-    if _flow:
-        _actual_modes.append({'label': _flow, 'tone': 'mode'})
-    else:
-        if cfg.get('autopilot'):
-            _actual_modes.append({'label': 'Goal Mode', 'tone': 'mode'})
-    done_evt['actualModes'] = _actual_modes
-    if api_rounds:
-        done_evt['apiRounds'] = api_rounds
-        task['apiRounds'] = api_rounds
-    if task.get('_fallback_model'):
-        done_evt['fallbackModel'] = task['_fallback_model']
-        done_evt['fallbackFrom'] = task.get('_fallback_from', '')
-        if task.get('_fallback_reason'):
-            done_evt['fallbackReason'] = task['_fallback_reason']
-        if task.get('_fallback_kind'):
-            done_evt['fallbackKind'] = task['_fallback_kind']
-    # ── Modified-files derivation moved OFF the done hot path ──
-    # ``derive_round_modified_files`` reads the per-root modifications journal
-    # (+ per-mod filesystem probes for run_command classification). That I/O
-    # used to sit between the last round_end and the terminal done; it now runs
-    # inside the async commit-round thread (``_run_commit_round_async``), which
-    # persists/emits the list via ``round_committed``.  The done frame ships
-    # WITHOUT this round's file list (checkpoint-list merge below still runs),
-    # so the terminal frame is never blocked by journal I/O.
-    # ── Continue checkpoint merging: merge pre-checkpoint metadata into
-    #   both the done event and the task dict so that:
-    #   (a) the frontend done handler sees merged data (even though it also
-    #       merges client-side, this makes poll fallback consistent), and
-    #   (b) the turn-event projection persists the full merged set. ──
-    _cp_usage = task.get('_checkpointUsage')
-    if _cp_usage and done_evt.get('usage'):
-        merged_usage = dict(_cp_usage)
-        merged_usage.update(done_evt['usage'])
-        counters = {}
-        accumulate_usage_into(counters, _cp_usage)
-        accumulate_usage_into(counters, done_evt['usage'])
-        merged_usage.update(counters)
-        done_evt['usage'] = merged_usage
-        task['usage'] = merged_usage
-    elif _cp_usage and not done_evt.get('usage'):
-        done_evt['usage'] = _cp_usage
-        task['usage'] = _cp_usage
-
-    if _cp_usage:
-        task['_invocationCheckpointUsageMerged'] = True
-        task['ownUsage'] = dict(task['usage'])
-
-    _cp_api_rounds = task.get('_checkpointApiRounds')
-    if _cp_api_rounds:
-        merged_api = list(_cp_api_rounds) + (done_evt.get('apiRounds') or [])
-        done_evt['apiRounds'] = merged_api
-        task['apiRounds'] = merged_api
-
-    _cp_mod_files = task.get('_checkpointModifiedFiles')
-    if _cp_mod_files is not None and done_evt.get('modifiedFiles') is not None:
-        done_evt['modifiedFiles'] = _cp_mod_files + done_evt['modifiedFiles']
-        task['modifiedFiles'] = done_evt['modifiedFiles']
-
-    _cp_mod_list = task.get('_checkpointModifiedFileList')
-    if _cp_mod_list:
-        from lib.project_mod.receipts import bound_file_changes, merge_file_changes
-        merged_list, truncated = bound_file_changes(merge_file_changes(
-            _cp_mod_list, done_evt.get('modifiedFileList') or []))
-        if truncated:
-            task['modifiedFilesTruncated'] = True
-        done_evt['modifiedFileList'] = merged_list
-        task['modifiedFileList'] = merged_list
-        done_evt['modifiedFiles'] = task['modifiedFiles'] = len(merged_list)
-
-    if task.get('modifiedFilesTruncated'):
-        done_evt['modifiedFilesTruncated'] = True
-
     if _suspicion_reasons:
         done_evt['_diagnostics'] = {
             'loop_exit_reason': _loop_exit_reason,
@@ -1598,137 +1484,9 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         logger.debug('[Artifacts:scan] orchestrator hook failed (non-fatal): %s',
                      e, exc_info=True)
 
-    # ── Stamp cost snapshot on the done event ──
-    # Cost depends only on each round's usage + model + provider + the active
-    # pricing table, all of which are final at this point. Price each round
-    # before folding the display total so compaction/fallback models cannot be
-    # silently repriced as the terminal model. Sending it on the done event eliminates the
-    # per-render `/api/v1/messages/cost` round-trips on the LIVE path —
-    # the persisted-cost write covers reload paths.
-    try:
-        from lib.cost import (
-            compute_api_rounds_cost as _compute_api_rounds_cost,
-            compute_cost as _compute_cost,
-        )
-        for _rd in done_evt.get('apiRounds') or []:
-            if not isinstance(_rd, dict) or _rd.get('cost') or task.get('_nativeFrozenCostProjection') is True:
-                continue
-            _ru = _rd.get('usage') or {}
-            if not _ru:
-                continue
-            _rc = _compute_cost(
-                _ru,
-                model_id=_rd.get('model') or done_evt.get('model') or '',
-                provider_id=(_rd.get('provider_id')
-                              or _rd.get('providerId')
-                              or task.get('provider_id') or None),
-            )
-            if _rc:
-                _rd['cost'] = _rc
-        _msg_cost = _compute_api_rounds_cost(
-            done_evt.get('apiRounds'),
-            fallback_model_id=(
-                done_evt.get('model') or task.get('model') or ''),
-            fallback_provider_id=task.get('provider_id') or None,
-            use_frozen_costs=task.get('_nativeFrozenCostProjection') is True,
-        )
-        if _msg_cost is None and done_evt.get('usage') and task.get('_nativeFrozenCostProjection') is not True:
-            _msg_cost = _compute_cost(
-                done_evt['usage'],
-                model_id=done_evt.get('model') or task.get('model') or '',
-                provider_id=task.get('provider_id') or None,
-            )
-        if _msg_cost:
-            done_evt['cost'] = _msg_cost
-    except Exception as _ce:
-        logger.warning('[Cost] done-event stamp failed (non-fatal): %s', _ce)
-
-    # Same real-cost outcome sent on the live terminal event. The durable copy
-    # was produced by the persist_task_result conversation sync above; this
-    # closes the live/reload parity gap without making experiment telemetry
-    # critical-path.
-    try:
-        from lib.cost_experiments.cost_experiments import build_cost_experiment_outcome
-        _outcome = build_cost_experiment_outcome(
-            task.get('_costExperiment'),
-            usage=done_evt.get('usage'),
-            cost=done_evt.get('cost'),
-            api_rounds=done_evt.get('apiRounds'),
-            finish_reason=(done_evt.get('finishReason')
-                           or task.get('finishReason')),
-            error=done_evt.get('error') or task.get('error'),
-            elapsed_ms=(time.time() - task.get('created_at', time.time())) * 1000,
-            compactions=task.get('_costExperimentCompactions', 0),
-            model=done_evt.get('model') or task.get('model') or '',
-            provider_id=task.get('provider_id') or '',
-            task=task,
-        )
-        if _outcome:
-            done_evt['costExperiment'] = _outcome
-            task['costExperiment'] = _outcome
-            _round_tag = {
-                'experiment_id': _outcome.get('experiment_id'),
-                'arm': _outcome.get('arm'),
-            }
-            for _rd in done_evt.get('apiRounds') or []:
-                if isinstance(_rd, dict) and _outcome.get('arm'):
-                    _rd.setdefault('costExperiment', _round_tag)
-    except Exception as _xe:
-        logger.warning('[CostExperiment] done-event outcome failed '
-                       '(non-fatal): %s', _xe, exc_info=True)
-
-    # Terminal SLO sample. Correlation ids stay in events/logs only; the
-    # Prometheus dimensions are deliberately limited to provider/model/outcome.
-    try:
-        from lib.observability import record_llm_task
-        _metric_error = done_evt.get('error') or task.get('error')
-        _metric_code = (_metric_error or {}).get('code') \
-            if isinstance(_metric_error, dict) else ''
-        if 'budget' in str(_metric_code):
-            _metric_outcome = 'budget'
-        elif task.get('aborted') or last_finish_reason == 'aborted':
-            _metric_outcome = 'aborted'
-        elif _metric_error:
-            _metric_outcome = 'error'
-        else:
-            _metric_outcome = 'success'
-        record_llm_task(
-            done_evt.get('model') or task.get('model') or '',
-            task.get('provider_id') or '',
-            time.time() - task.get('created_at', time.time()),
-            len(done_evt.get('apiRounds') or []),
-            done_evt.get('usage') or {},
-            float((done_evt.get('cost') or {}).get('costUsd') or 0.0),
-            _metric_outcome,
-        )
-    except Exception as _metric_err:
-        logger.debug('[Metrics] terminal LLM sample skipped: %s', _metric_err)
-
-    # Comprehensive task-completion summary — keyed on the FULL task id so a
-    #   user who quotes the id from the cost popover can grep ONE line that
-    #   spans the whole turn (all tool rounds). Includes the per-round cache
-    #   miss count so "why did cache break" is answerable straight from the
-    #   log without re-deriving it. INFO level → lands in logs/app.log.
-    try:
-        _rounds = done_evt.get('apiRounds') or []
-        _miss_rounds = [r.get('round') for r in _rounds
-                        if isinstance(r, dict) and r.get('cacheBreak')]
-        _nu = normalize_usage(done_evt.get('usage') or {})
-        _cw = _nu['cache_write']
-        _cr = _nu['cache_read']
-        _cost = (done_evt.get('cost') or {}).get('costCny')
-        logger.info(
-            '[Task:%s] ■ DONE conv=%s model=%s rounds=%d finish=%s '
-            'cache_write=%d cache_read=%d cost=%s elapsed=%.1fs%s',
-            task['id'], task.get('convId', '') or '-', model, len(_rounds),
-            last_finish_reason or '-', _cw, _cr,
-            (f'\u00a5{_cost:.3f}' if isinstance(_cost, (int, float)) else '?'),
-            time.time() - task.get('created_at', time.time()),
-            (f' \u26a0 CACHE_MISS rounds={_miss_rounds}' if _miss_rounds else ''),
-        )
-    except Exception as _se:
-        logger.debug('[Task:%s] completion summary log failed: %s',
-                     task['id'][:8], _se)
+    stamp_terminal_cost(task, done_evt)
+    observe_completion(task, done_evt, model=model,
+                       finish_reason=last_finish_reason)
 
     # ── Supersede-successor stamp ( wire completion) ──
     # Same contract as the LATE-done synthesis (lib/chat_dispatch.py): when

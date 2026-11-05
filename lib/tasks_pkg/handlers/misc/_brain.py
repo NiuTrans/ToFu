@@ -54,13 +54,20 @@ def _handle_conv_ref_tool(
 
 @tool_registry.tool_set(
     frozenset({'create_conversation', 'dispatch_project_assignment', 'get_project_assignment', 'report_to_user',
-               'delegate_project_work', 'await_project_workers', 'review_project_work', 'get_project_workers', 'cancel_project_work', 'finish_project_request'}),
+               'update_task_progress', 'delegate_project_work', 'await_project_workers', 'review_project_work', 'get_project_workers', 'cancel_project_work', 'finish_project_request', 'request_user_decision',
+               'route_to_project', 'get_router_projects', 'router_instruction_create', 'router_instruction_list', 'router_instruction_cancel',
+               'watchdog_snapshot', 'watchdog_resolve_signals', 'watchdog_schedule_recheck', 'watchdog_message',
+               'watchdog_notify_router', 'watchdog_configure_review'}),
     category='coordination', description='Independent worker conversations and authorized dispatch')
 def _handle_coordinator_tools(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg,
                               project_path, project_enabled, all_tools=None):
     from lib.conversations.coordinator_tools import execute_coordinator_tool
+    from lib.tasks_pkg.tool_runtime import active_context_for_call
+    runtime_context = active_context_for_call(
+        task, round_num=rn, tool_call_id=tc_id, round_entry=round_entry)
     return simple_call(task, fn_name, fn_args, rn, round_entry, tc_id,
-                       executor=lambda name, args: execute_coordinator_tool(task, name, args),
+                       executor=lambda name, args: execute_coordinator_tool(
+                           task, name, args, runtime_context=runtime_context),
                        source='Coordinator', module_tag='Coordinator')
 
 

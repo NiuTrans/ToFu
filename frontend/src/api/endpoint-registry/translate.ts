@@ -1,7 +1,7 @@
 /** translate endpoint facade. Owns wire paths and projections; transport/retry policy arrives through explicit ports. */
 import type { EndpointPorts, EndpointOptions, JsonObject } from './contracts';
 export function createTranslateEndpoints(ports: EndpointPorts) {
-  const { request, post } = ports;
+  const { request, get, post } = ports;
   const translate = {
     run: async (body: JsonObject, opts?: EndpointOptions) => {
       const resp = await request<Response>('/api/v4/translate', Object.assign({
@@ -31,6 +31,13 @@ export function createTranslateEndpoints(ports: EndpointPorts) {
       if (d == null) return null;
       if (Array.isArray(d.items)) return d.items;
       return null;
+    },
+    // Completed live previews of the caller's running turns in one
+    // conversation. Push publishes each block once, so a reload, reconnect
+    // or unmounted conversation re-reads them; a failed probe stays null.
+    previews: async (convId: string) => {
+      const d = await get(`/api/v4/translate/previews/${encodeURIComponent(convId)}`, { onError: 'null' });
+      return d != null && Array.isArray(d.previews) ? d.previews : null;
     },
     // Settings → MT-config probe. Backend returns {ok, translated, error?}.
     mtTest:    (mtConfig: JsonObject, text: string) => post('/api/v4/translate/mt-test', { mt_config: mtConfig, text }, { onError: 'null' }),

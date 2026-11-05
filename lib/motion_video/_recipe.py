@@ -58,7 +58,7 @@ from lib.production.llm_policy import (
     production_llm_dispatch_kwargs,
     production_llm_max_429_attempts,
 )
-from lib.production.stages import Stage, StageAborted, run_stages
+from lib.production.stages import Stage, StageAborted
 
 logger = get_logger(__name__)
 
@@ -956,13 +956,27 @@ def _gate_timeline(ctx: dict, artifact: dict) -> list:
 TIMELINE = Stage('timeline', _run_timeline, gate=_gate_timeline, retry=0)
 
 
-def video_recipe_stages(creative_mode: str = 'director') -> list:
-    """The ordered front-half stage list: research → script → timeline."""
+def video_workflow(creative_mode: str = 'director'):
+    """Topic-planning subworkflow invoked by the complete film workflow."""
+    from lib.production.workflows import AgentToolWorkflow, WorkflowNode
     creative_mode = normalise_creative_mode(creative_mode)
     script = Stage(
         'script', _run_script, gate=_gate_script, retry=1,
         checkpoint_version=f'{_SCRIPT_CHECKPOINT_VERSION}-{creative_mode}')
-    return [RESEARCH, script, TIMELINE]
+    return AgentToolWorkflow('motion-video.storyboard', '1', (
+        WorkflowNode(RESEARCH, 'deterministic', {'type': 'object'}),
+        WorkflowNode(script, 'model', {'type': 'object'}),
+        WorkflowNode(TIMELINE, 'deterministic', {
+            'type': 'object', 'required': ['scenes_path', 'scenes', 'span_s'],
+            'properties': {'scenes_path': {'type': 'string', 'minLength': 1},
+                           'scenes': {'type': 'integer', 'minimum': 1},
+                           'span_s': {'type': 'number', 'exclusiveMinimum': 0}}}),
+    ))
+
+
+def video_recipe_stages(creative_mode: str = 'director') -> list:
+    """Domain stages from the same authored workflow definition."""
+    return [node.stage for node in video_workflow(creative_mode).nodes]
 
 
 # ── Public entry ──────────────────────────────────────────
@@ -1001,7 +1015,8 @@ def build_scenes_from_topic(topic: str, workdir: str, *, lang: str = 'zh',
     ctx['abort_check'] = abort_check
     ctx['max_429_attempts'] = production_llm_max_429_attempts()
     state_path = os.path.join(workdir, 'pipeline_state.json')
-    artifacts = run_stages(
-        video_recipe_stages(creative_mode), ctx, state_path=state_path, emit=emit,
+    from lib.production.workflows import run_workflow
+    artifacts = run_workflow(
+        video_workflow(creative_mode), ctx, state_path=state_path, emit=emit,
         abort_check=abort_check)
     return artifacts['timeline']

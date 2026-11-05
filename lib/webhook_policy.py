@@ -1,6 +1,8 @@
 """Launch-derived webhook file/worker reuse hints.
 
 Hints size reuse, never subscription, delivery, retry or event admission.
+Encoding and per-delivery HTTP jobs are short blocking work, so worker reuse
+follows the fixed ``TOFU_SYNC_WORKERS`` hint rather than agent-task concurrency.
 Remote transient failures retain deliveries for backoff until success, permanent
 refusal, explicit revocation or shutdown. No second host probe is performed.
 """
@@ -22,8 +24,8 @@ def resolve_webhook_budget(environment: Mapping[str, str] | None = None) -> Webh
     environment = os.environ if environment is None else environment
     registry = resolve_resource_budget('TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY',
                                       environment, minimum=16, maximum=4096)
-    workers = resolve_resource_budget('TOFU_AGENT_WORKERS', environment,
-                                     minimum=1, maximum=65536)
+    workers = resolve_resource_budget('TOFU_SYNC_WORKERS', environment,
+                                     minimum=1, maximum=512)
     return WebhookBudget(spool_segment_bytes=registry * 64 * 1024,
                          worker_reuse_target=workers,
                          subscription_cache_seconds=1.0)

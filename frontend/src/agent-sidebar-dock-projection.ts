@@ -4,7 +4,6 @@
  */
 import type { AgentDockItem } from './agent-sidebar-dock';
 import { mergeSwarmAgent, swarmStatusAgents, normalizeSwarmAgent, swarmRoundExplicitRunId, swarmAgentWaitLabel, swarmFrameMatchesExecution, swarmFrameExecutionTaskId } from './conversation/presentation/swarm-agent-presentation';
-import { escapeHtml } from './html-safety';
 type Row = Record<string, any>;
 interface Ports {
   turns: Row[];
@@ -13,10 +12,13 @@ interface Ports {
   renderPanel(round: Row, rounds: Row[]): string;
   renderActivity(agent: Row): HTMLElement;
   openConversation(id: string): void;
+  /** Resolves true once the stop signal is accepted, false when nothing was left to stop. */
+  stopAgent(swarmId: string, agentId: string): Promise<boolean>;
   translate(key: string, fallback: string, vars?: Record<string, string | number>): string;
 }
 interface Assignment {
   scope: string;
+  runId: string;
   turnId: string;
   producerTask: string;
   agent: Row;
@@ -25,28 +27,43 @@ interface Assignment {
   ambiguous?: boolean;
   // Durable settlement outranks a provisional end marker, which outranks live state.
   authority: number;
+  live?: Activity;
 }
-interface Activity { frame: Row; index: number; agent: Row }
+interface Activity { frame: Row; agent: Row; scope: string; runId: string; producerTask: string }
+/** Stop needs the live registry's word: its exact run lists the agent running now.
+ * Canonical Turn evidence alone never grants it, and a settled verdict withholds it. */
+function liveStop(agent: Row, live: Activity | undefined, ports: Ports): (() => Promise<boolean>) | undefined {
+  const run = String(live?.frame.swarm_id || '');
+  if (!run || !agent.id || agent.status !== 'running' || live!.agent.status !== 'running') return undefined;
+  return () => ports.stopAgent(run, String(agent.id));
+}
 function statusLabel(agent: Row, tt: Ports['translate']): string {
   const phase = ({ pending: 'queued', done: 'complete', completed: 'complete', unknown: 'noResult', canceled: 'aborted', cancelled: 'aborted' } as Record<string, string>)[agent.status] || agent.status;
-  let label = swarmAgentWaitLabel(agent, tt) || tt('swarm.phase.' + phase, phase);
-  if (agent.status === 'running' && Number(agent.round) > 0) label += ' · ' + tt('bgActivity.agentRound', 'round {round}', { round: agent.round });
-  return label;
+  // A state word only; the round count is its own row field.
+  return swarmAgentWaitLabel(agent, tt) || tt('swarm.phase.' + phase, phase);
 }
-function assignmentScope(turn: Row, round: Row, index: number, agent: Row): string {
-  const run = swarmRoundExplicitRunId(round);
+/** Live progress, status polls and durable snapshots all carry rounds as `round`. */
+function roundCount(agent: Row): number | undefined {
+  const rounds = Number(agent.round);
+  return rounds > 0 ? rounds : undefined;
+}
+function assignmentScope(turn: Row, round: Row, index: number, agent: Row, run: string): string {
   // Array position is not assignment identity. Without run evidence retain
   // launch occurrence scope: a reused agent/tool ID alone cannot prove a union.
   const scope = run ? ['run', run] : ['launch', round.taskId, round.toolCallId,
     round.roundNum != null ? ['round', round.roundNum] : ['index', index]];
   return JSON.stringify([turn.turnId, round.attemptId, scope, agent.id]);
 }
-function activityScope({ frame, index, agent }: Activity): string {
-  const run = String(frame.swarm_id || frame.swarm_run_id || '');
+function activityScope(frame: Row, index: number, agent: Row, run: string): string {
   const scope = run ? ['run', run] : frame.swarm_key
     ? ['session', frame.swarm_key, frame.created_at] : ['unbound', index];
   return JSON.stringify(['activity', frame.turnId, frame.attemptId, scope, agent.id]);
 }
+function appendIndex<T>(index: Map<string, T[]>, key: string, value: T): void {
+  const entries = index.get(key);
+  if (entries) entries.push(value); else index.set(key, [value]);
+}
+const agentScopeKey = (agent: Row, scope: unknown): string => JSON.stringify([agent.id, scope]);
 function partitionByTask<T>(entries: T[], taskOf: (entry: T) => string, otherTasks: string[] = [], allowExternalOnly = false): Map<string, T[]> {
   const ownTasks = new Set(entries.map(taskOf).filter(Boolean));
   const tasks = new Set([...ownTasks, ...otherTasks].filter(Boolean));
@@ -66,18 +83,33 @@ function mergeAgentEvidence(base: Row, next: Row, settled?: Row): Row {
   return merged;
 }
 /** Compare assignment scope before considering individual worker stamps. */
-function matchesActivityScope({ frame, agent }: Activity, candidate: Assignment, allowMissingProducer = false): boolean {
-  const run = String(frame.swarm_id || frame.swarm_run_id || '');
+function matchesActivityScope({ frame, agent, runId, producerTask }: Activity, candidate: Assignment, allowMissingProducer = false): boolean {
   return candidate.agent.id === agent.id && (!frame.turnId || frame.turnId === candidate.turnId)
     && swarmFrameMatchesExecution(frame, { ...candidate.round,
-      taskId: candidate.producerTask || (allowMissingProducer ? swarmFrameExecutionTaskId(frame) : '') })
-    && (run ? swarmRoundExplicitRunId(candidate.round) === run
+      taskId: candidate.producerTask || (allowMissingProducer ? producerTask : '') })
+    && (runId ? candidate.runId === runId
       : Boolean(frame.swarm_key) && candidate.round._swarmKey === frame.swarm_key && !candidate.authority
         && !['done', 'completed', 'failed', 'error', 'aborted', 'cancelled', 'canceled', 'interrupted'].includes(candidate.agent.status));
 }
-export function agentDockProjection(ports: Ports): AgentDockItem[] {
-  const observations: Activity[] = ports.swarms.flatMap((frame, index) =>
-    (frame.agents || []).map((raw: Row) => ({ frame, index, agent: normalizeSwarmAgent(raw) })));
+function resolveAgentEvidence(ports: Pick<Ports, 'turns' | 'swarms' | 'recover'>) {
+  // These indexes expire with this projection. They narrow candidates only;
+  // execution/attempt stamps and ambiguity remain owned by the predicates below.
+  const observedRuns = new Map<string, Activity[]>(), observedSessions = new Map<string, Activity[]>();
+  const activityPeers = new Map<string, Activity[]>();
+  const observations: Activity[] = [];
+  for (const [index, frame] of ports.swarms.entries()) {
+    const runId = String(frame.swarm_id || frame.swarm_run_id || '');
+    const producerTask = swarmFrameExecutionTaskId(frame);
+    for (const raw of frame.agents || []) {
+      const agent = normalizeSwarmAgent(raw);
+      const scope = activityScope(frame, index, agent, runId);
+      const activity = { frame, agent, scope, runId, producerTask };
+      observations.push(activity);
+      appendIndex(activityPeers, scope, activity);
+      if (runId) appendIndex(observedRuns, agentScopeKey(agent, runId), activity);
+      else if (frame.swarm_key) appendIndex(observedSessions, agentScopeKey(agent, frame.swarm_key), activity);
+    }
+  }
   const evidence = new Map<string, Assignment[]>();
   for (const turn of ports.turns) {
     const rounds: Row[] = turn.projection?.toolRounds || [];
@@ -87,12 +119,13 @@ export function agentDockProjection(ports: Ports): AgentDockItem[] {
       // partitioning so reused IDs cannot inherit another execution's evidence.
       const agents = swarmStatusAgents(round, [...ports.recover(round, rounds),
         ...(round._swarmSnapshot?.settled ? [] : round._swarmAgents || [])]);
+      const runId = swarmRoundExplicitRunId(round);
       const authority = round._swarmSnapshot?.settled ? 2 : round._swarmEndTime ? 1 : 0;
       for (const recorded of agents) {
         const agent = normalizeSwarmAgent(recorded);
-        const scope = assignmentScope(turn, round, index, agent);
+        const scope = assignmentScope(turn, round, index, agent, runId);
         const copies = evidence.get(scope) || [];
-        copies.push({ scope, turnId: turn.turnId, producerTask: String(round.taskId || ''), agent, round, rounds, authority });
+        copies.push({ scope, runId, turnId: turn.turnId, producerTask: String(round.taskId || ''), agent, round, rounds, authority });
         evidence.set(scope, copies);
       }
     });
@@ -102,11 +135,18 @@ export function agentDockProjection(ports: Ports): AgentDockItem[] {
   for (const copies of evidence.values()) {
     // A missing producer/worker stamp joins one known execution, never chooses
     // between two. Keys always include known stamps, even when only one exists.
-    const activity = observations.filter(item => copies.some(copy => matchesActivityScope(item, copy, true)));
-    const producerTasks = activity.map(item => swarmFrameExecutionTaskId(item.frame));
+    const related = new Set<Activity>();
+    for (const copy of copies) {
+      for (const item of observedRuns.get(agentScopeKey(copy.agent, copy.runId)) || []) related.add(item);
+      for (const item of observedSessions.get(agentScopeKey(copy.agent, copy.round._swarmKey)) || []) related.add(item);
+    }
+    // Set order only contributes uniqueness evidence. Merging below still walks
+    // the original observations, so run/session bucket order cannot pick a winner.
+    const activity = [...related].filter(item => copies.some(copy => matchesActivityScope(item, copy, true)));
+    const producerTasks = activity.map(item => item.producerTask);
     const producerCount = new Set([...copies.map(copy => copy.producerTask), ...producerTasks].filter(Boolean)).size;
     for (const [producerTask, siblings] of partitionByTask(copies, copy => copy.producerTask, producerTasks,
-      Boolean(swarmRoundExplicitRunId(copies[0].round)))) {
+      Boolean(copies[0].runId))) {
       const workerTasks = activity.filter(item => siblings.some(copy => matchesActivityScope(item, { ...copy, producerTask }, true)))
         .map(item => String(item.agent.executionTaskId || ''));
       const workerCount = new Set([...siblings.map(copy => String(copy.agent.executionTaskId || '')), ...workerTasks].filter(Boolean)).size;
@@ -129,21 +169,30 @@ export function agentDockProjection(ports: Ports): AgentDockItem[] {
     }
   }
 
+  const assignedRuns = new Map<string, Assignment[]>(), assignedSessions = new Map<string, Assignment[]>();
+  for (const owner of assignments) {
+    if (owner.runId) appendIndex(assignedRuns, agentScopeKey(owner.agent, owner.runId), owner);
+    if (owner.round._swarmKey) appendIndex(assignedSessions, agentScopeKey(owner.agent, owner.round._swarmKey), owner);
+  }
+
   // Missing stamps in activity are subject to the same ambiguity rule as
   // canonical copies. Include evidence already owned by another row so that
   // consuming a stamped frame cannot make an ambiguous remainder look unique.
-  function activityTaskEvidence(activity: Activity, producerTask = swarmFrameExecutionTaskId(activity.frame)) {
-    const canonical = assignments.filter(candidate => matchesActivityScope(activity, candidate, true));
-    const peers = observations.filter(other => activityScope(other) === activityScope(activity));
+  function activityTaskEvidence(activity: Activity, producerTask = activity.producerTask) {
+    const candidates = activity.runId
+      ? assignedRuns.get(agentScopeKey(activity.agent, activity.runId))
+      : assignedSessions.get(agentScopeKey(activity.agent, activity.frame.swarm_key));
+    const canonical = (candidates || []).filter(candidate => matchesActivityScope(activity, candidate, true));
+    const peers = activityPeers.get(activity.scope) || [];
     const producerTasks = [...canonical.map(candidate => candidate.producerTask),
-      ...peers.map(other => swarmFrameExecutionTaskId(other.frame))];
+      ...peers.map(other => other.producerTask)];
     const workerTasks = [
       ...canonical.filter(candidate => !producerTask || !candidate.producerTask || producerTask === candidate.producerTask)
         .map(candidate => String(candidate.agent.executionTaskId || '')),
-      ...peers.filter(other => !producerTask || !swarmFrameExecutionTaskId(other.frame)
-        || producerTask === swarmFrameExecutionTaskId(other.frame)).map(other => String(other.agent.executionTaskId || '')),
+      ...peers.filter(other => !producerTask || !other.producerTask
+        || producerTask === other.producerTask).map(other => String(other.agent.executionTaskId || '')),
     ];
-    return { producerTasks, workerTasks };
+    return { canonical, producerTasks, workerTasks };
   }
 
   // Resolve the complete bipartite evidence set before hydrating any worker.
@@ -151,10 +200,10 @@ export function agentDockProjection(ports: Ports): AgentDockItem[] {
   // two executions receives an unstamped launch's objective and tool records.
   const bindings = observations.map(activity => {
     const { agent } = activity;
-    const { producerTasks, workerTasks } = activityTaskEvidence(activity);
-    const ambiguous = (!swarmFrameExecutionTaskId(activity.frame) && new Set(producerTasks.filter(Boolean)).size > 1)
+    const { canonical, producerTasks, workerTasks } = activityTaskEvidence(activity);
+    const ambiguous = (!activity.producerTask && new Set(producerTasks.filter(Boolean)).size > 1)
       || (!agent.executionTaskId && new Set(workerTasks.filter(Boolean)).size > 1);
-    let candidates = assignments.filter(candidate => !ambiguous && !candidate.ambiguous && matchesActivityScope(activity, candidate)
+    let candidates = canonical.filter(candidate => !ambiguous && !candidate.ambiguous && matchesActivityScope(activity, candidate)
       && (!agent.executionTaskId || !candidate.agent.executionTaskId
         || agent.executionTaskId === candidate.agent.executionTaskId));
     if (agent.executionTaskId) {
@@ -173,12 +222,30 @@ export function agentDockProjection(ports: Ports): AgentDockItem[] {
     if (owner && (workersByOwner.get(owner)?.size ?? 0) <= 1) {
       owner.agent = owner.authority ? mergeAgentEvidence(activity.agent, owner.agent, owner.agent)
         : mergeAgentEvidence(owner.agent, activity.agent);
+      owner.live = activity;
     } else {
-      const scope = activityScope(activity);
+      const scope = activity.scope;
       const copies = activityOnly.get(scope) ?? []; copies.push(activity); activityOnly.set(scope, copies);
     }
   }
 
+  const unassigned: { identity: { scope: string; producerTask: string; workerTask: string }; activity: Activity }[] = [];
+  for (const [scope, copies] of activityOnly) {
+    const producerTasks = copies.flatMap(copy => activityTaskEvidence(copy).producerTasks);
+    for (const [producerTask, siblings] of partitionByTask(copies, copy => copy.producerTask, producerTasks)) {
+      const workerTasks = siblings.flatMap(copy => activityTaskEvidence(copy, producerTask).workerTasks);
+      for (const [workerTask, duplicates] of partitionByTask(siblings, copy => String(copy.agent.executionTaskId || ''), workerTasks)) {
+        const agent = duplicates.slice(1).reduce((base, copy) => mergeSwarmAgent(base, copy.agent), duplicates[0].agent);
+        unassigned.push({ identity: { scope, producerTask, workerTask }, activity: { ...duplicates[0], agent } });
+      }
+    }
+  }
+  return { assignments, unassigned };
+}
+
+export function agentDockProjection(ports: Ports): AgentDockItem[] {
+  // Deferred render closures cannot retain the resolver's temporary indexes.
+  const { assignments, unassigned } = resolveAgentEvidence(ports);
   const result: AgentDockItem[] = [];
   for (const owner of assignments) {
     const { agent, round, rounds } = owner;
@@ -190,54 +257,47 @@ export function agentDockProjection(ports: Ports): AgentDockItem[] {
     const source: Row = { ...round, _swarmAgents: [agent],
       _swarmSnapshot: { ...round._swarmSnapshot, agents: [agent] } };
     const childId = agent.conversationId || agent.conversation_id;
+    const stop = liveStop(agent, owner.live, ports);
     result.push({
       key: JSON.stringify([identity.scope, identity.producerTask, identity.workerTask]), identity,
       name: agent.name || agent.id || agent.role || 'general',
-      status: agent.status, statusLabel: statusLabel(agent, ports.translate), objective: agent.objective,
-      agentId: agent.id, swarmRunId: swarmRoundExplicitRunId(round) || undefined,
+      status: agent.status, statusLabel: statusLabel(agent, ports.translate), roundCount: roundCount(agent),
+      objective: agent.objective, agentId: agent.id, swarmRunId: owner.runId || undefined,
       revision: JSON.stringify([source, agent]),
       ...(childId ? { openConversation: () => ports.openConversation(childId) } : {}),
+      ...(stop ? { stop } : {}),
       async render() {
         const fragment = document.createElement('template');
         fragment.innerHTML = ports.renderPanel(source, rounds);
         const card = Array.from(fragment.content.querySelectorAll<HTMLElement>('.sw-agent'))
           .find(node => node.dataset.agentId === String(agent.id));
-        const body = card?.querySelector('.sw-a-body');
-        const note = ports.translate('agentDock.boundedEvidence', 'Recent execution records. Omitted calls and truncated previews are disclosed below; this is not a full transcript.');
-        const empty = ports.translate('agentDock.noRecords', 'Execution records are not yet available in this conversation.');
-        return `<p class="agent-dock-evidence-note">${escapeHtml(note)}</p>${body?.outerHTML || `<p>${escapeHtml(empty)}</p>`}`;
+        return card?.querySelector('.sw-a-body')?.outerHTML || '';
       },
     });
   }
-  for (const [scope, copies] of activityOnly) {
-    const producerTasks = copies.flatMap(copy => activityTaskEvidence(copy).producerTasks);
-    for (const [producerTask, siblings] of partitionByTask(copies, copy => swarmFrameExecutionTaskId(copy.frame), producerTasks)) {
-      const workerTasks = siblings.flatMap(copy => activityTaskEvidence(copy, producerTask).workerTasks);
-      for (const [workerTask, duplicates] of partitionByTask(siblings, copy => String(copy.agent.executionTaskId || ''), workerTasks)) {
-        const agent = duplicates.slice(1).reduce((base, copy) => mergeSwarmAgent(base, copy.agent), duplicates[0].agent);
-        const identity = { scope, producerTask, workerTask };
-        const frame = duplicates[0].frame;
-        result.push({
-          key: JSON.stringify([scope, producerTask, workerTask]), identity,
-          name: agent.name || agent.id || agent.role || 'general',
-          status: agent.status, statusLabel: statusLabel(agent, ports.translate), objective: agent.objective,
-          agentId: agent.id, swarmRunId: String(frame.swarm_id || frame.swarm_run_id || '') || undefined,
-          revision: JSON.stringify(agent),
-          async render() {
-            const note = ports.translate('agentDock.noRecords', 'Execution records are not yet available in this conversation.');
-            const activity = ports.renderActivity(agent);
-            // Serialized HTML cannot retain factory listeners. Keep evidence
-            // readable without exposing inert copy controls.
-            for (const button of activity.querySelectorAll('button')) {
-              const code = activity.ownerDocument.createElement('code');
-              code.textContent = button.textContent;
-              button.replaceWith(code);
-            }
-            return `${activity.outerHTML}<p>${escapeHtml(note)}</p>`;
-          },
-        });
-      }
-    }
+  for (const { identity, activity: live } of unassigned) {
+    const { agent } = live;
+    const stop = liveStop(agent, live, ports);
+    result.push({
+      key: JSON.stringify([identity.scope, identity.producerTask, identity.workerTask]), identity,
+      name: agent.name || agent.id || agent.role || 'general',
+      status: agent.status, statusLabel: statusLabel(agent, ports.translate), roundCount: roundCount(agent),
+      objective: agent.objective, agentId: agent.id,
+      swarmRunId: live.runId || undefined,
+      revision: JSON.stringify(agent),
+      ...(stop ? { stop } : {}),
+      async render() {
+        const activity = ports.renderActivity(agent);
+        // Serialized HTML cannot retain factory listeners. Keep evidence
+        // readable without exposing inert copy controls.
+        for (const button of activity.querySelectorAll('button')) {
+          const code = activity.ownerDocument.createElement('code');
+          code.textContent = button.textContent;
+          button.replaceWith(code);
+        }
+        return activity.outerHTML;
+      },
+    });
   }
   return result;
 }

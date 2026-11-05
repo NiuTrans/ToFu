@@ -14,7 +14,7 @@ import searchPanel from '../../../../static/settings_panels/search.html?raw';
 import speechPanel from '../../../../static/settings_panels/speech.html?raw';
 import translatePanel from '../../../../static/settings_panels/translate.html?raw';
 import featureBridge from '../../runtime/sections/feature-bridge.js?raw';
-import mainEntry from '../../main.ts?raw';
+import applicationEntry from '../../application.ts?raw';
 import zhLocale from '../../i18n/locales/zh.json?raw';
 
 import {
@@ -82,6 +82,10 @@ describe('resolveSettingJumpTarget', () => {
       .toEqual({ tab: 'general', elementId: 'settingDebugMode' });
   });
 
+  it('routes the local knowledge base to its Settings tab', () => {
+    expect(resolveSettingJumpTarget('knowledge')).toEqual({ tab: 'knowledge' });
+  });
+
   it('rejects unknown, empty, and non-string keys', () => {
     expect(resolveSettingJumpTarget('no-such-setting')).toBeNull();
     expect(resolveSettingJumpTarget('')).toBeNull();
@@ -99,10 +103,10 @@ describe('PAGE_JUMP_TARGETS', () => {
 
   it('names a routed entry point for every page key', () => {
     /* Entries resolve at click time through the module bridge: a feature-
-     * bridge stub (feature-bridge.js) or a registered action (main.ts). */
+     * bridge stub (feature-bridge.js) or a registered action (application.ts). */
     for (const [key, target] of Object.entries(PAGE_JUMP_TARGETS)) {
       const wired = featureBridge.includes(`'${target.entry}'`)
-        || mainEntry.includes(`'${target.entry}'`);
+        || applicationEntry.includes(`'${target.entry}'`);
       expect(wired, `${key} → entry ${target.entry}`).toBe(true);
     }
   });

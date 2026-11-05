@@ -131,14 +131,12 @@ def test_eight_gib_reference_probe_keeps_long_text_without_vlm_multiplier():
         name: deployment_resource_default(name, {}, snapshot=snapshot)
         for name in (
             'TOFU_PDF_PROCESSES',
-            'TOFU_PDF_MAX_PAGES',
             'TOFU_PDF_WORKER_IDLE_SECONDS',
         )
     }
 
     assert resolved == {
         'TOFU_PDF_PROCESSES': 4,
-        'TOFU_PDF_MAX_PAGES': 512,
         'TOFU_PDF_WORKER_IDLE_SECONDS': 60,
     }
 

@@ -144,7 +144,8 @@ def build_server() -> MCPServer:
         annotations=_READ_ONLY_OPEN_WORLD,
         description=(
             'Search the web across multiple engines (DuckDuckGo, Brave, Bing, '
-            'SearXNG when configured, Marginalia) in parallel. Return provider '
+            'SearXNG when configured, Marginalia, plus keyed gateway sources '
+            'when configured) in parallel. Return provider '
             'snippets and available fetched page content with evidence labels; '
             'read those labels to distinguish listings from page evidence.\n\n'
             'A query containing a structured identifier (CVE ID, arXiv ID, '
@@ -213,8 +214,9 @@ def build_server() -> MCPServer:
             'Use it when the user gives you a URL, or to read in depth a page '
             '`web_search` surfaced. Browser rendering is optional: it requires '
             'an available browser integration or installed Playwright browser. '
-            'Access challenges may still prevent reading. PDF extraction also '
-            'requires its optional dependencies.\n\n'
+            'Access challenges may still prevent reading. Text PDF extraction '
+            'is included locally; enhanced layout is optional. Scanned PDFs '
+            'without a text layer require OCR and may be unavailable.\n\n'
             'Returns the extracted text, truncated at `max_chars`. Returns an '
             'explicit failure note, including the cause when known, when the page cannot be '
             'read — treat that as "this page is unavailable", not as "this '

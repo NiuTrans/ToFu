@@ -35,7 +35,7 @@ final class CookieHeadersTests: XCTestCase {
                            expiresAtMs: nil, secure: true, httpOnly: true)
         XCTAssertEqual(
             CookieHeaders.toPersistentHeader(c),
-            "code-server-session=abc; Path=/; Max-Age=\(CookieHeaders.persistSeconds); Secure; HttpOnly; SameSite=Lax"
+            "code-server-session=abc; Path=/; Max-Age=\(CookieHeaders.persistSeconds); Secure; HttpOnly"
         )
     }
 
@@ -45,7 +45,7 @@ final class CookieHeadersTests: XCTestCase {
                            expiresAtMs: now + 5_000_000, secure: false, httpOnly: false)
         XCTAssertEqual(
             CookieHeaders.toPersistentHeader(c, nowMs: now),
-            "n=v; Path=/app; Max-Age=5000; SameSite=Lax"
+            "n=v; Path=/app; Max-Age=5000"
         )
     }
 }

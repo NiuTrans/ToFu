@@ -43,7 +43,7 @@ def ip_is_public(ip_string: str) -> bool:
     if mapped is not None:
         ip = mapped
     return not (
-        ip.is_private
+        not ip.is_global
         or ip.is_loopback
         or ip.is_link_local
         or ip.is_multicast

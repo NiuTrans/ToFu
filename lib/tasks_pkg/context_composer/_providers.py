@@ -81,14 +81,22 @@ def _reset_tail_transitions_for_tests() -> None:
 
 def _tail_transition_scope(request: ComposeRequest) -> str:
     task = request.task or {}
+    task_id = str(task.get("id") or "")
+    storage_free = task.get("_transientRuntime") is True
+    conv_id = "" if storage_free else str(request.conv_id or task.get("convId") or "")
+    if not task_id and not conv_id:
+        # Anonymous compositions (debug wire snapshots, throwaway tasks) have
+        # no previous turn; a shared baseline would let one caller's path or
+        # MCP catalog surface as another caller's transition.
+        return ""
     try:
         from lib.mcp.tool_search import mcp_selection_scope_id
 
         return mcp_selection_scope_id(
-            task_id=str(task.get("id") or ""),
-            conv_id=str(request.conv_id or task.get("convId") or ""),
+            task_id=task_id,
+            conv_id=conv_id,
             owner_user_id=int(request.user_id or 0),
-            storage_free=task.get("_transientRuntime") is True,
+            storage_free=storage_free,
         )
     except Exception as exc:
         logger.debug(
@@ -230,14 +238,18 @@ def _skill_context(request: ComposeRequest, query: str) -> dict:
     from lib.skills.paths import extra_skill_project_paths
     index = _skill_index(request)
     selection = {'content': '', 'receipts': []}
-    if request.has_real_tools:
+    cfg = ((request.task or {}).get('config') or {})
+    required = cfg.get('skillSelection') or []
+    if request.has_real_tools or required:
         paths = (((request.task or {}).get('config') or {}).get('projectPaths')
                  if request.project_enabled else [])
         selection = explicit_skill_context(
             query, task=request.task,
-            project_path=request.project_path if request.project_enabled else None,
+            project_path=(request.project_path if request.project_enabled else
+                          cfg.get('skillSelectionProjectPath') if required else None),
             extra_paths=extra_skill_project_paths(paths, request.project_path),
-            owner_user_id=request.user_id or None, model=request.model)
+            owner_user_id=request.user_id or None, model=request.model,
+            required=required, review_only=cfg.get('skillSelectionMode') == 'review')
     return {'index': index, 'selection': selection}
 
 
@@ -265,6 +277,16 @@ def _capability_available(request: ComposeRequest, name: str) -> bool:
                for tool in (request.task or {}).get('_executable_tool_catalog') or [])
 
 
+def _delegable_capability_available(request: ComposeRequest, name: str) -> bool:
+    """The root holds the tool, or a Delegate Mode root's workers do."""
+    if _capability_available(request, name):
+        return True
+    if not request.has_real_tools:
+        return False
+    from lib.tasks_pkg.delegate_mode import delegable_tool_names
+    return name in delegable_tool_names(request.task)
+
+
 def _directory_capability_absence(request: ComposeRequest, name: str) -> str:
     """Distinguish a declared catalog absence from missing authority evidence.
 
@@ -279,6 +301,10 @@ def _directory_capability_absence(request: ComposeRequest, name: str) -> str:
 def _swarm_guidance(request: ComposeRequest, query: str) -> str:
     """Return guidance only when the request's task shape can use it."""
     if not _capability_available(request, 'spawn_agents'):
+        return ''
+    from lib.tasks_pkg.delegate_mode import delegate_mode_active
+    if delegate_mode_active(request.task):
+        # <delegate_mode> replaces it: a delegating root has no local work.
         return ''
     try:
         from lib.context_experiment_flags import normalize_context_experiment_flags
@@ -328,6 +354,9 @@ def _programmatic_capability_available(request: ComposeRequest) -> bool:
 def _programmatic_guidance(request: ComposeRequest) -> str:
     """Return one conversation-stable dataflow boundary, without round state."""
     if not _programmatic_capability_available(request):
+        return ""
+    from lib.tasks_pkg.delegate_mode import delegate_mode_active
+    if delegate_mode_active(request.task):
         return ""
     try:
         from lib.context_experiment_flags import normalize_context_experiment_flags
@@ -538,6 +567,21 @@ def _plan_mode_block(request: ComposeRequest) -> str:
         return ""
 
 
+def _delegate_mode_block(request: ComposeRequest) -> str:
+    """Delegate Mode orchestration contract for a root narrowed at assembly.
+
+    Keys on the assembled delegate surface, not the config flag alone: a
+    request whose catalog cannot delegate keeps its ordinary tools and must
+    not be told otherwise.
+    """
+    from lib.tasks_pkg.delegate_mode import (
+        delegate_mode_active, delegate_mode_prompt_block,
+    )
+    if not delegate_mode_active(request.task):
+        return ""
+    return delegate_mode_prompt_block()
+
+
 def _tool_search_guidance_available(request: ComposeRequest) -> bool:
     """Return whether this frozen task can discover hidden tool schemas."""
     if not request.has_real_tools:
@@ -630,7 +674,8 @@ def collect_context_blocks(
             return "", "build_failed"
 
     def _build_vault() -> str:
-        if not _capability_available(request, 'run_command'):
+        # A delegating root passes credential names on to its workers.
+        if not _delegable_capability_available(request, 'run_command'):
             return ""
         try:
             from lib.credentials_vault import build_vault_index
@@ -805,6 +850,8 @@ def collect_context_blocks(
     memory = values["memory"]
     skills = values["skills"]['index']
     selected_skills = values["skills"]['selection']
+    if ((live_task or {}).get('config') or {}).get('skillSelection') and statuses.get('skills') != 'ok':
+        raise ValueError('Required skill selection could not be loaded; execution cannot omit its checks')
     vault = values["vault"]
     swarm = values["swarm"]
     project_blocks = values["project"]
@@ -840,8 +887,11 @@ def collect_context_blocks(
                provenance={"promptProfile": prompt_evidence})
     )
     swarm_reason = ""
+    from lib.tasks_pkg.delegate_mode import delegate_mode_active as _delegating
     if not swarm:
-        if not _capability_available(request, 'spawn_agents'):
+        if _capability_available(request, 'spawn_agents') and _delegating(request.task):
+            swarm_reason = 'superseded_by_delegate_mode'
+        elif not _capability_available(request, 'spawn_agents'):
             # spawn_agents absent from the live wire is a transient catalog
             # state, not an authoritative withdrawal of the guidance.
             swarm_reason = 'provider_unavailable'
@@ -925,7 +975,7 @@ def collect_context_blocks(
         _block('credential_vault', vault,
                reason=('' if vault else 'vault_disabled'
                        if not request.has_real_tools else _directory_capability_absence(request, 'run_command')
-                       if not _capability_available(request, 'run_command') else 'provider_unavailable'
+                       if not _delegable_capability_available(request, 'run_command') else 'provider_unavailable'
                        if statuses.get('vault') != 'ok' else 'vault_empty'))
     )
     blocks.append(
@@ -939,8 +989,10 @@ def collect_context_blocks(
             mode = normalize_context_experiment_flags(
                 (request.task or {}).get("config") or {}
             )["tools"]["programmaticCalling"]
-            # Explicit off retracts old guidance even when the catalog is absent.
-            programmatic_reason = ("programmatic_disabled" if mode == "off"
+            # Explicit off retracts old guidance even when the catalog is absent;
+            # a delegating root never runs programs, whatever the setting.
+            programmatic_reason = ("programmatic_disabled"
+                                   if mode == "off" or _delegating(request.task)
                                    else "provider_unavailable")
         except Exception as exc:
             logger.debug('programmatic-mode flag read failed: %s', type(exc).__name__)
@@ -1022,6 +1074,11 @@ def collect_context_blocks(
     blocks.append(
         _block('plan_mode', _plan_mode, reason='' if _plan_mode else 'plan_mode_off')
     )
+    _delegate_mode = _delegate_mode_block(request)
+    blocks.append(
+        _block('delegate_mode', _delegate_mode,
+               reason='' if _delegate_mode else 'delegate_mode_off')
+    )
     environment = ""
     environment_reason = "disabled"
     env_cwd = request.project_path if request.project_enabled else ""
@@ -1060,7 +1117,8 @@ def collect_context_blocks(
                     )
                 environment += (
                     "\n - Bare relative file paths use the primary root; command cwd "
-                    "uses its last valid directory, then the primary root. Preserve "
+                    "uses the last explicit `working_dir`, then the primary root. "
+                    "Preserve "
                     "each historical path's rootname; do not append it to another root. "
                     "File existence never switches roots. Declared server-local MCP "
                     "file parameters use the same rootname/absolute/primary mapping; "
@@ -1173,6 +1231,10 @@ def _mcp_tools_delta(request: ComposeRequest) -> tuple[str, str, dict]:
     delegate_exposure = str(
         (task.get("config") or {}).get("mcpToolExposure")
         or "").strip().lower() == "delegate"
+    # A Delegate Mode root holds no MCP tools; they are worker capabilities,
+    # advertised here by name only and reachable through spawn_agents.
+    from lib.tasks_pkg.delegate_mode import delegable_tool_names
+    worker_reachable = delegable_tool_names(task)
     try:
         from lib.mcp.tool_search import (
             frozen_wire_tool_names,
@@ -1185,14 +1247,15 @@ def _mcp_tools_delta(request: ComposeRequest) -> tuple[str, str, dict]:
             owner_user_id=int(request.user_id or 0),
             storage_free=task.get("_transientRuntime") is True,
         )
-        wire_names, frozen = frozen_wire_tool_names(scope)
+        if delegate_exposure or worker_reachable:
+            # Neither delegate surface writes a selection freeze; its MCP wire
+            # is empty by construction, so the connected catalog is the delta.
+            wire_names, frozen = (), True
+        else:
+            wire_names, frozen = frozen_wire_tool_names(scope)
     except Exception as exc:
         logger.debug("[ContextComposer] mcp wire state unavailable: %s", exc)
         return "", "state_unavailable", {}
-    if delegate_exposure:
-        # Delegate mode writes no selection freeze; its wire is empty by
-        # construction, so the whole connected catalog is the delta.
-        wire_names, frozen = (), True
     if not frozen:
         # First turn: the wire is assembled after composition, so there is
         # nothing frozen to diff against yet.
@@ -1210,13 +1273,15 @@ def _mcp_tools_delta(request: ComposeRequest) -> tuple[str, str, dict]:
     for tool in defs or ():
         fn = tool.get("function") or {}
         name = str(fn.get("name") or "")
-        if name and name not in wire:
+        if (name and name not in wire
+                and (not worker_reachable or name in worker_reachable)):
             delta.append((
                 name,
                 str(fn.get("description") or ""),
             ))
     names = sorted(row[0] for row in delta)
-    previous_names, delta_changed = _tail_transition(scope, "mcp_delta", names)
+    previous_names, delta_changed = _tail_transition(
+        _tail_transition_scope(request), "mcp_delta", names)
     if delta_changed:
         current = set(names)
         previous = set(previous_names or [])
@@ -1229,12 +1294,18 @@ def _mcp_tools_delta(request: ComposeRequest) -> tuple[str, str, dict]:
         task.pop("_mcpToolsDelta", None)
     if not delta:
         return "", "no_delta", {"wire": len(wire)}
-    if not (_tool_search_guidance_available(request)
-            and _capability_available(request, 'execute_tools')):
+    if not worker_reachable and not (_tool_search_guidance_available(request)
+                                     and _capability_available(request, 'execute_tools')):
         return '', 'discovery_unavailable', {'delta': len(delta), 'wire': len(wire)}
     delta.sort(key=lambda row: row[0])
     shown = delta[:8]
-    if delegate_exposure and _capability_available(request, 'spawn_agents'):
+    if worker_reachable:
+        guidance = (
+            "Connected MCP tools are worker capabilities in Delegate mode. Give a "
+            "spawn_agents worker the ones its objective needs through its tools "
+            "allowlist (e.g. tools: ['mcp__...']). Names below are hints, not "
+            "schemas or permission grants; reachability may change.")
+    elif delegate_exposure and _capability_available(request, 'spawn_agents'):
         guidance = (
             "All connected MCP tools are kept off your declarations by the "
             "delegate exposure mode — their schemas never enter your context. "
@@ -1259,7 +1330,9 @@ def _mcp_tools_delta(request: ComposeRequest) -> tuple[str, str, dict]:
         lines.append(f"- {name}" + (f" — {desc}" if desc else ""))
     overflow = len(delta) - len(shown)
     if overflow > 0:
-        lines.append(f"…and {overflow} more; discover them with search_tools.")
+        lines.append(f"…and {overflow} more; name them in a worker's tools allowlist."
+                     if worker_reachable else
+                     f"…and {overflow} more; discover them with search_tools.")
     lines.append("</available_mcp_tools>")
     return ("\n".join(lines), "",
             {"delta": len(delta), "shown": len(shown), "wire": len(wire)})

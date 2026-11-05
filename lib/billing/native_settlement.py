@@ -4,7 +4,8 @@ Entry project/freeze/decode/recover: terminal results or atomic native retiremen
 one bounded capsule; the existing reserve sweeper consumes it with wallet/owner
 binding. No model, pricing lookup, executor, new ledger or storage is created.
 """
-from lib.billing.cost import CostBreakdown, native_task_cost
+from lib.billing.cost_types import CostBreakdown
+from lib.billing.native_cost import native_task_cost
 from lib.agent_core.native_content_contract import FEE_CHECKPOINT_SCHEMA
 
 # Shared wire authority; the checkpoint embeds the same terminal capsule shape.

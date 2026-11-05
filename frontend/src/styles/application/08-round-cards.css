@@ -102,12 +102,12 @@
 .ptc-status.ptc-status-error { color: var(--chip-err-color); background: var(--chip-err-bg); font-weight: var(--weight-semibold); }
 .ptc-meta { flex-basis: 100%; min-width: 0; padding-inline-start: var(--space-3); color: var(--text-secondary); font-size: var(--font-size-xs); overflow-wrap: anywhere; white-space: normal; }
 .ptc-status { padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); background: var(--chip-neutral-bg); color: var(--chip-neutral-color); }
-.ptc-tools { display: flex; flex-wrap: wrap; gap: var(--space-1); margin: 0 0 var(--space-2); }
-.ptc-tool-chip { padding: var(--space-1) var(--space-2); max-width: 100%; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-secondary); font: var(--font-size-xs)/var(--leading-title) var(--font-mono); background: var(--bg-primary); }
 .ptc-detail { min-width: 0; margin: var(--space-2) 0 0; color: var(--text-secondary); font-size: var(--font-size-sm); }
 .ptc-detail summary { cursor: pointer; user-select: none; }
 .ptc-detail pre { max-height: 40vh; overflow: auto; margin: var(--space-2) 0 0; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-primary); color: var(--text-primary); font: var(--font-size-sm)/var(--leading-body) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .ptc-result pre { max-height: 35vh; }
+/* The result already sits on the card spine; its lazy-load body wrapper adds no second rail. */
+.ptc-result > .ptool-result-body { margin: 0; padding: 0; border: 0; }
 /* Source preserves tokens; its own scroll container owns long lines. */
 .ptc-code pre { white-space: pre; overflow-wrap: normal; }
 .ptc-result-error summary { color: var(--error-text); }

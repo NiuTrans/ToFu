@@ -70,8 +70,10 @@ def test_tofu_card_buttons_use_standard_block_language():
     must keep the same flat-fill + ink-border blocks (no gradient breads)."""
     css = _read(TOFU_CONTROLS_CSS)
     expected = {
+        # Flat gold fill with a 2px ink border; the ink hex follows each owner's
+        # palette (#3B2E1E in project controls, #1a1814 in core panels).
         r'\.settings-panel\s+\.stg-btn-balance\{[^}]*background:#C9993F[^}]*'
-        r'border:2px solid #1a1814': 'stg-btn-balance gold block',
+        r'border:2px solid #[0-9A-Fa-f]{6}': 'stg-btn-balance gold block',
         r'\.oauth-provider-actions\s+\.btn-small\.btn-danger[^}]*\{\s*background:#C0392B':
             'oauth danger red block',
         r'\.oauth-provider-actions\s+\.btn-small\.btn-primary[^}]*\{\s*background:#C9993F':

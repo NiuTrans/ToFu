@@ -1,254 +1,28 @@
-import { entityRecordKeys, entityRecordValues } from './entity-record';
-import type {
-  AppendSettledTurnRequest,
-  ConnectionHealth,
-  ConversationSyncApi,
-  ConversationSyncSnapshot,
-  CreateAttemptRequest,
-  CreateLaneRequest,
-  CreateTurnRequest,
-  DeleteTurnsRequest,
-  ExecutePlanRequest,
-  FileChangesCommandRequest,
-  ConversationTurnPage,
-  ConversationRoundDirectory,
-  ConversationRoundEntry,
-  UpdateTurnRequest,
-  TurnRecord,
-} from '../api/conversation-sync.generated';
-import { assertConversationSyncSchema } from '../api/conversation-sync.generated';
-
+/**
+ * Conversation Turn composition: canonical stores, sync coordinators and shell
+ * bindings. Entry: createConversationTurnRuntime; injected host ports own DOM
+ * rendering. Render observations and receipt delivery have separate owners.
+ */
+import { entityRecordValues } from './entity-record';
+import type { ConversationTurnPage, ConversationRoundDirectory, ConversationRoundEntry } from '../api/conversation-sync.generated';
 import { conversationConnectionHealth } from './connection-health';
-import type { RequestOptions } from '../api/transport';
-import {
-  buildTurnOperationRequest,
-  buildTurnSubmitRequest,
-  createTurnCommandId,
-} from './turn-command';
-import {
-  createTurnProjectionReconciler,
-  type ProjectedConversation,
-} from './turn-projection';
+import { createTurnCommands } from './turn-command-execution';
+import { createTurnHydration } from './turn-hydration';
+import { createTurnAttemptLifecycle, type TurnAttemptLifecycle } from './turn-attempt-lifecycle';
+import { createTurnProjectionReconciler } from './turn-projection';
 import { presentTurnFinish, resumeTurnOptions } from './turn-presentation';
-import { renderTurnStateInto, type TurnRenderer } from './turn-render';
+import { renderTurnStateInto } from './turn-render';
+import { ConversationSyncCoordinator, type ConversationSyncConnection } from './conversation-sync';
+import { createConversationEventMultiplexer } from './conversation-event-multiplexer';
+import { createTurnRenderObservations } from './turn-render-observations';
 import {
-  ConversationSyncCoordinator,
-  type ConversationSyncConnection,
-} from './conversation-sync';
-import {
-  createTurnPerceptionRecorder,
-  type PerceptionAttemptIdentity,
-} from './perception-recorder';
-import {
-  createTurnState,
-  createTurnStore,
-  reduceTurnState,
-  type TurnEvent,
-  type TurnState,
-  type TurnStateUpdate,
-  type TurnStore,
-  type TurnStoreOptions,
+  createTurnState, createTurnStore, reduceTurnState,
+  type TurnEvent, type TurnState, type TurnStateUpdate, type TurnStore,
 } from './turn-state';
-
-type UnknownRecord = Record<string, unknown>;
-type RuntimeStore = TurnStore & {
-  _snapshotLoaded?: boolean;
-};
-
-export interface RuntimeConversation extends ProjectedConversation {
-  id: string;
-  title?: string;
-  createdAt?: number;
-  _localOnly?: boolean;
-}
-
-
-export interface TurnRuntimeOptions {
-  api: ConversationSyncApi;
-  streamClientId?: string;
-
-  snapshotViewport?(): { width: number; height: number };
-  findConversation?(conversationId: string): RuntimeConversation | null;
-  persist?(conversation: RuntimeConversation): void;
-  isActive?(conversation: RuntimeConversation): boolean;
-  /** Observe canonical state independently of DOM projection or windowing. */
-  onConversationInvalidated?(conversationId: string): void;
-  onStateApplied?(conversation: RuntimeConversation, state: TurnState, update?: TurnStateUpdate): void;
-  isDomStale?(conversation: RuntimeConversation): boolean;
-  replaceAll?(
-    conversation: RuntimeConversation,
-    repaint?: { force?: boolean },
-  ): void;
-  /** Preferred production DOM port; false explicitly requests legacy fallback. */
-  renderState?(
-    conversation: RuntimeConversation,
-    state: TurnState,
-    render?: { force?: boolean; update?: TurnStateUpdate },
-  ): boolean | void;
-  disposeRenderedState?(conversationId: string): void;
-
-  /** Recheck windowing/unmount between DOM commit and the paint opportunity. */
-  isTurnMounted?(conversationId: string, turnId: string): boolean;
-
-  /** Stable across in-place commits, different after removal or replacement. */
-  getTurnMountToken?(conversationId: string, turnId: string): string | number | null;
-  deferTerminalRelease?(release: () => void): void;
-  buildNavigation?(conversation: RuntimeConversation): void;
-  renderConversationList?(): void;
-  updateSendButton?(): void;
-  onProtocolError?(error: Error): void;
-  onResyncError?(error: unknown, turnId: string): void;
-  onHealth?(conversationId: string, health: ConnectionHealth): void;
-  /** Diagnostic evidence frames (messages_snapshot / tool_compacted) from
-   * durable attempt events — live and replay. Feeds the debug panel. */
-  onDebugFrame?(conversationId: string, frame: UnknownRecord): void;
-  onTurnSettled?(conversation: RuntimeConversation, turn: UnknownRecord): void;
-  applySettings?(conversation: RuntimeConversation, settings: UnknownRecord): void;
-  applySnapshotMetadata?(
-    conversation: RuntimeConversation,
-    snapshot: ConversationSyncSnapshot,
-  ): void;
-  eventSourceFactory?: (url: string) => EventSource;
-}
-
-export interface TurnRuntime {
-  emptyState: typeof createTurnState;
-  reducer: typeof reduceTurnState;
-  createStore: typeof createTurnStore;
-  submit(
-    store: TurnStore,
-    inputTurn: unknown,
-    config: unknown,
-    extra?: UnknownRecord,
-    requestOptions?: unknown,
-  ): Promise<UnknownRecord>;
-  runOperation(
-    store: TurnStore,
-    turnId: string,
-    operation: string,
-    config?: unknown,
-    options?: UnknownRecord,
-  ): Promise<UnknownRecord>;
-  connect(
-    store: TurnStore,
-    attemptId: string,
-    hooks?: TurnConnectionHooks,
-  ): ConversationSyncConnection;
-  renderInto(
-    container: Element,
-    state: TurnState,
-    renderTurn?: TurnRenderer,
-  ): void;
-  finishPresentation: typeof presentTurnFinish;
-  resumeOptions: typeof resumeTurnOptions;
-  hydrateConversation(conversation: RuntimeConversation): Promise<RuntimeStore>;
-  wakeConversation(conversation: RuntimeConversation): Promise<RuntimeStore>;
-  roundDirectoryKey(conversationId: string): string;
-  loadConversationRoundDirectory(conversation: RuntimeConversation, laneId: string,
-    offset?: number, limit?: number, anchorTurnId?: string): Promise<ConversationRoundDirectory>;
-  hydrateConversationRound(conversation: RuntimeConversation, laneId: string,
-    entry: ConversationRoundEntry): Promise<void>;
-  loadConversationTurnPage(
-    conversation: RuntimeConversation,
-    laneId: string,
-    beforeOrdinal?: number,
-    limit?: number,
-  ): Promise<ConversationTurnPage>;
-  submitConversation(
-    conversation: RuntimeConversation,
-    message: unknown,
-    config: unknown,
-    extra?: UnknownRecord,
-  ): Promise<UnknownRecord>;
-  appendSettledConversationTurn(
-    conversation: RuntimeConversation,
-    actor: AppendSettledTurnRequest['actor'],
-    projection: unknown,
-    extra?: UnknownRecord,
-  ): Promise<UnknownRecord>;
-  submitBranch(
-    conversation: RuntimeConversation,
-    branch: UnknownRecord,
-    parentTurnId: string,
-    message: unknown,
-    config: unknown,
-    extra?: UnknownRecord,
-  ): Promise<UnknownRecord>;
-  operateConversation(
-    conversation: RuntimeConversation,
-    turnId: string,
-    operation: string,
-    config?: unknown,
-    options?: UnknownRecord,
-  ): Promise<UnknownRecord>;
-  executeConversationPlan(
-    conversation: RuntimeConversation,
-    sourceTurnId: string,
-    expectedPlanId: string,
-    expectedProjectionRevision: number,
-    contextMode: 'current' | 'fresh',
-    config?: unknown,
-  ): Promise<UnknownRecord>;
-  updateConversationTurn(
-    conversation: RuntimeConversation,
-    turnId: string,
-    projection: unknown,
-  ): Promise<UnknownRecord>;
-  mutateConversationFileChanges(
-    conversation: RuntimeConversation,
-    turnId: string,
-    operation: 'undo' | 'redo',
-  ): Promise<UnknownRecord>;
-  createBranchLane(
-    conversation: RuntimeConversation,
-    parentTurnId: string,
-    descriptor?: UnknownRecord,
-  ): Promise<UnknownRecord>;
-  deleteBranchLane(
-    conversation: RuntimeConversation,
-    parentTurnId: string,
-    laneId: string,
-  ): Promise<UnknownRecord>;
-  deleteConversationTurns(
-    conversation: RuntimeConversation,
-    turnIds: readonly string[],
-  ): Promise<UnknownRecord>;
-  cancelQueuedTurn(
-    conversation: RuntimeConversation,
-    queueId: string,
-  ): Promise<UnknownRecord>;
-  markCommandPending(
-    conversation: RuntimeConversation,
-    turnId: string,
-    operation: string,
-  ): void;
-  markCommandFailed(conversation: RuntimeConversation, turnId: string): void;
-  abortConversation(conversation: RuntimeConversation): Promise<unknown>;
-  abortAttempt(attemptId: string): Promise<unknown>;
-  readRuntimeState(conversationId: string): TurnState | null;
-
-  /** Called only AFTER DOM commit; accepted/scheduled renders are not evidence. */
-  notifyRenderedState(
-    conversationId: string, state: TurnState, mountedTurnIds: readonly string[],
-  ): void;
-  hasAuthoritativeCommand(conversationId: string, commandId: string): boolean;
-  /** Re-evaluate only the shells affected by an external active-id change. */
-  reconcileConversationActivity(
-    ...conversationIds: Array<string | null | undefined>
-  ): void;
-  ensureRuntimeStore(conversationId: string): RuntimeStore;
-  /** Suspend display streams without cancelling backend work or losing replay cursors. */
-  setTransportSuspended(suspended: boolean): void;
-  invalidateConversation(conversationId: string, cursorHint?: string): void;
-  disposeConversation(conversationId: string): void;
-  hasLiveConnection(conversationId: string): boolean;
-  findConversation(conversationId: string): RuntimeConversation | null;
-  readonly TERMINAL: ReadonlySet<string>;
-}
-
-interface TurnConnectionHooks {
-  onTerminal?(event: TurnEvent): void;
-}
+import type {
+  RuntimeConversation, TurnRuntime, TurnRuntimeOptions, TurnConnectionHooks, UnknownRecord,
+} from './turn-runtime-contracts';
+export type { RuntimeConversation, TurnRuntime, TurnRuntimeOptions } from './turn-runtime-contracts';
 
 function record(value: unknown): UnknownRecord {
   return value && typeof value === 'object' ? value as UnknownRecord : {};
@@ -262,130 +36,55 @@ function stringValue(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-/**
- * A new-conversation shell owns a display placeholder, not a durable title.
- * Leave that placeholder empty on the first Turn command so the command
- * service can derive the authoritative fallback from the user's message.
- */
-function titleForTurnConversationCreate(
-  conversation: RuntimeConversation,
-): string {
-  const title = stringValue(conversation.title).trim();
-  if (conversation._localOnly && (!title || title === 'New Chat')) return '';
-  return title || 'New Chat';
-}
-
-function latestTurnFrom(error: unknown): TurnRecord | null {
-  const failure = record(error);
-  const body = record(failure.body);
-  const response = record(failure.response);
-  const latest = body.latestTurn || response.latestTurn;
-  if (!latest || typeof latest !== 'object') return null;
-  try {
-    return assertConversationSyncSchema<TurnRecord>('TurnRecord', latest);
-  } catch {
-    return null;
-  }
-}
-
-/* Bounded abort command: the send pipeline awaits abortConversation /
- * abortAttempt inside its catch recovery, and the typed transport only
- * enforces a declared timeout — an unbounded stalled abort POST held the
- * composer send lock pending until the page was reloaded. */
-const ABORT_COMMAND_TIMEOUT_MS = 15_000;
-
 /** Create the complete Turn/Attempt runtime without reading ambient globals. */
 export function createConversationTurnRuntime(
   options: TurnRuntimeOptions,
 ): TurnRuntime {
   const terminal = new Set(['completed', 'interrupted', 'truncated', 'failed']);
   const shellProjection = createTurnProjectionReconciler();
-  const runtimeStores = new Map<string, RuntimeStore>();
+  const runtimeStores = new Map<string, TurnStore>();
+  // Weak membership distinguishes a retired runtime store from a caller-owned
+  // standalone store accepted by the low-level submit/runOperation API.
+  const ownedStores = new WeakSet<TurnStore>();
   const coordinators = new Map<string, ConversationSyncCoordinator>();
+  const eventSourceFactory = options.eventSourceFactory ?? createConversationEventMultiplexer({
+    api: options.api,
+    streamClientId: options.streamClientId ?? '',
+    onProtocolError: options.onProtocolError,
+  }).open;
   let transportSuspended = false;
-  const attemptConnectionLeases = new Map<string, ConversationSyncConnection>();
-  const attemptHooks = new Map<string, TurnConnectionHooks>();
-  const boundConversations = new WeakMap<RuntimeConversation, {
-    store: RuntimeStore;
+  const attemptLifecycles = new WeakMap<TurnStore, TurnAttemptLifecycle>();
+  const boundConversations = new Map<string, {
+    conversation: RuntimeConversation;
+    store: TurnStore;
     unsubscribe: () => void;
   }>();
   const scheduledTerminalReleases = new WeakMap<RuntimeConversation, string>();
-  const boundConversationById = new Map<string, RuntimeConversation>();
-  const observedLiveAttempts = new Set<string>();
-  const renderedTurns = new Map<string, PerceptionAttemptIdentity & {
-    mountToken?: string | number | null;
-  }>();
-  const receivedEvents = new Map<string, {
-    attemptId: string; revision: number; receivedAt?: number; publishedAt?: number;
-  }>();
-  let renderedConversationId = '';
-
-  let renderedHealthSignature = '';
-  const healthSignature = (conversationId: string): string => {
-    const health = conversationConnectionHealth.get(conversationId);
-    return `${health?.state || ''}\u0000${health?.reason || ''}`;
-  };
-  const receiptKey = (conversationId: string, turnId: string): string =>
-    `${conversationId}\u0000${turnId}`;
-  const perceptionRecorder = createTurnPerceptionRecorder({
-    api: options.api,
-    clientId: options.streamClientId,
-
-    getTurnMountToken: options.getTurnMountToken,
-    isRendered(conversationId, identity) {
-      const conversation = boundConversationById.get(conversationId);
-      const turn = renderedTurns.get(identity.turnId);
-      const current = runtimeStores.get(conversationId)?.getState()
-        .turnsById[identity.turnId];
-      return renderedConversationId === conversationId
-        && Boolean(conversation && options.isActive?.(conversation))
-        && Boolean(options.isTurnMounted?.(conversationId, identity.turnId))
-
-        && renderedHealthSignature === healthSignature(conversationId)
-        && turn?.attemptId === identity.attemptId
-        && turn?.projectionRevision === identity.projectionRevision
-        && current?.currentAttemptId === identity.attemptId
-        && Number(current?.projectionRevision) === identity.projectionRevision;
+  const disposingConversations = new Set<string>();
+  const renderObservations = createTurnRenderObservations(options, {
+    readState: conversationId => runtimeStores.get(conversationId)?.getState() ?? null,
+    isActive(conversationId) {
+      const conversation = boundConversations.get(conversationId)?.conversation;
+      return Boolean(conversation && options.isActive?.(conversation));
     },
+    readHealth: conversationId => conversationConnectionHealth.get(conversationId),
+    terminalStatuses: terminal,
   });
-
-  const perceptionIdentity = (
-    conversationId: string,
-  ): PerceptionAttemptIdentity | null => {
-    const state = runtimeStores.get(conversationId)?.getState();
-    if (!state) return null;
-    /* A queued Turn's attempt is durable before any executor owns it
-     * (`taskId` empty until dispatch). Timing receipts attach to an executor
-     * attempt, so selecting that row made every observation a rejected
-     * receipt; skip rows with no task identity. */
-    const attempts = entityRecordValues(state.attemptsById)
-      .filter((attempt) => attempt?.attemptId && attempt.turnId && attempt.taskId
-        && (attempt.status === 'pending' || attempt.status === 'running'))
-      .sort((left, right) => {
-        const leftLive = left?.status === 'pending' || left?.status === 'running';
-        const rightLive = right?.status === 'pending' || right?.status === 'running';
-        if (leftLive !== rightLive) return leftLive ? 1 : -1;
-        return Number(left?.settledAt || left?.startedAt || left?.createdAt || 0)
-          - Number(right?.settledAt || right?.startedAt || right?.createdAt || 0);
-      });
-    const attempt = attempts.at(-1);
-    if (!attempt?.attemptId || !attempt.turnId) return null;
-    return {
-      attemptId: attempt.attemptId,
-      turnId: attempt.turnId,
-      projectionRevision: Number(
-        state.turnsById[attempt.turnId]?.projectionRevision || 0,
-      ),
-    };
-  };
 
   const reconcileConversationConnection = (
     conversation: RuntimeConversation,
     state: TurnState,
-    active = options.isActive?.(conversation) ?? false,
   ): void => {
+    const binding = boundConversations.get(conversation.id);
     const coordinator = coordinators.get(conversation.id);
-    if (!coordinator) return;
+    const current = () => binding?.conversation === conversation
+      && boundConversations.get(conversation.id) === binding
+      && runtimeStores.get(conversation.id) === binding.store
+      && binding.store.getState() === state
+      && hydration.isCurrentConversation(conversation);
+    if (!coordinator || !current()) return;
+    const active = options.isActive?.(conversation) ?? false;
+    if (!current()) return;
     if (conversation._localOnly) {
       coordinator.pause();
       return;
@@ -403,7 +102,15 @@ export function createConversationTurnRuntime(
     state: TurnState,
     update?: TurnStateUpdate,
   ): void => {
+    const binding = boundConversations.get(conversation.id);
+    const currentBinding = () => binding?.conversation === conversation
+      && boundConversations.get(conversation.id) === binding
+      && runtimeStores.get(conversation.id) === binding.store
+      && hydration.isCurrentConversation(conversation);
+    if (!binding || !currentBinding()) return;
+    const currentProjection = () => currentBinding() && binding.store.getState() === state;
     options.onStateApplied?.(conversation, state, update);
+    if (!currentProjection()) return;
     let terminalSettled = false;
     const finishingAttemptId = conversation._finishingAttemptId;
     if (conversation._finishingStream && finishingAttemptId) {
@@ -412,11 +119,18 @@ export function createConversationTurnRuntime(
       terminalSettled = terminal.has(turnStatus || '');
     }
     const active = options.isActive?.(conversation) ?? false;
+    const domStale = options.isDomStale?.(conversation) ?? false;
+    if (!currentProjection()) return;
     let terminalRepainted = false;
     let stateRendered = false;
-    const renderActiveState = (force = false): void => {
+    const renderActiveState = (force = false, projection = state): void => {
+      const current = () => currentBinding() && binding.store.getState() === projection;
+      if (!current()) return;
       if (!options.isActive?.(conversation)) return;
-      const handled = options.renderState?.(conversation, state, { force, update });
+      if (!current()) return;
+      const handled = options.renderState?.(conversation, projection,
+        { force, update: projection === state ? update : undefined });
+      if (!current()) return;
       if (handled !== false && options.renderState) {
         stateRendered = true;
       } else if (options.replaceAll) {
@@ -438,7 +152,9 @@ export function createConversationTurnRuntime(
         // Reconcile once more immediately before exposing Send. Async cost,
         // transport, and snapshot work may have repainted between settlement
         // and the next browser frame.
-        renderActiveState(true);
+        renderActiveState(true, binding.store.getState());
+        if (!currentBinding() || !conversation._finishingStream
+            || conversation._finishingAttemptId !== finishingAttemptId) return;
         conversation._finishingStream = false;
         conversation._finishingAttemptId = null;
         options.updateSendButton?.();
@@ -446,23 +162,25 @@ export function createConversationTurnRuntime(
       if (options.deferTerminalRelease) options.deferTerminalRelease(release);
       else release();
     };
-    const projectionChanged = shellProjection.apply({
+    shellProjection.apply({
       conversation,
       state,
       active,
-      domStale: options.isDomStale?.(conversation) ?? false,
-      persist: options.persist,
+      domStale,
+      persist: () => { if (currentProjection()) options.persist?.(conversation); },
       replaceAll: () => {
+        if (!currentProjection()) return;
         renderActiveState(terminalSettled);
-        if (terminalSettled) {
+        if (terminalSettled && currentProjection()) {
           terminalRepainted = true;
           scheduleTerminalRelease();
         }
       },
-      buildNavigation: options.buildNavigation,
-      renderConversationList: options.renderConversationList,
-      updateSendButton: options.updateSendButton,
+      buildNavigation: () => { if (currentProjection()) options.buildNavigation?.(conversation); },
+      renderConversationList: () => { if (currentProjection()) options.renderConversationList?.(); },
+      updateSendButton: () => { if (currentProjection()) options.updateSendButton?.(); },
     }, update);
+    if (!currentProjection()) return;
     /* Transport-only frames may not change the shell fingerprint, but the
      * typed surface still consumes the authoritative state directly. */
     if (active && options.renderState && !stateRendered) {
@@ -477,19 +195,69 @@ export function createConversationTurnRuntime(
       renderActiveState(true);
       scheduleTerminalRelease();
     }
-    for (const turn of entityRecordValues(state.turnsById)) {
-      const attemptId = stringValue(turn?.currentAttemptId);
-      if (!turn || !attemptId) continue;
-      if (turn.status === 'pending' || turn.status === 'running') {
-        observedLiveAttempts.add(attemptId);
-      } else if (terminal.has(turn.status || '') && observedLiveAttempts.delete(attemptId)) {
-        options.onTurnSettled?.(conversation, turn);
-      }
-    }
-    reconcileConversationConnection(conversation, state, active);
+    if (!currentBinding() || binding.store.getState() !== state) return;
+    attemptLifecycles.get(binding.store)?.observe(state, turn => {
+      const current = boundConversations.get(conversation.id);
+      if (current?.store === binding.store) options.onTurnSettled?.(current.conversation, turn);
+    });
+    reconcileConversationConnection(conversation, state);
   };
 
-  const ensureRuntimeStore = (conversationId: string): RuntimeStore => {
+  /* A replacing tail-window snapshot keeps the Turns this replica had loaded
+   * below its window (TurnHistoryLaneState.retainedFromOrdinal). Re-read that
+   * range through the continuous history frontier once the coordinator has
+   * committed the snapshot cursor and opened its stream: each frontier page
+   * confirms its retained Turns, replaces stale ones or removes deleted ones.
+   * Both the snapshot and every stream opened while the range is unverified
+   * arm a pass, so a pass skipped because the stream was paused (a hydrate
+   * of an inactive conversation) or one that failed runs again; the range is
+   * never left stale until reload. The coordinator's default page size is
+   * the Surface's, so a reader-driven read joins it. */
+  const retainedHistoryReads = new Map<
+    TurnStore, ReturnType<typeof setTimeout> | 'reading' | 'superseded'
+  >();
+  const retainedHistoryFrontier = (
+    state: TurnState,
+  ): { laneId: string; beforeOrdinal: number } | null => {
+    for (const [laneId, history] of Object.entries(state.historyByLane)) {
+      if (history?.retainedFromOrdinal !== undefined && history.nextBeforeOrdinal !== null) {
+        return { laneId, beforeOrdinal: history.nextBeforeOrdinal };
+      }
+    }
+    return null;
+  };
+  const readRetainedHistory = async (conversationId: string, store: TurnStore): Promise<void> => {
+    // A frontier page lowers the frontier or clears the retained range; one
+    // published off the frontier does neither, which ends this pass.
+    for (let previous = Number.POSITIVE_INFINITY; ;) {
+      const coordinator = coordinators.get(conversationId);
+      const frontier = retainedHistoryFrontier(store.getState());
+      if (!frontier || frontier.beforeOrdinal >= previous || !coordinator?.connected
+          || runtimeStores.get(conversationId) !== store) return;
+      previous = frontier.beforeOrdinal;
+      await coordinator.loadTurnPage(frontier.laneId, frontier.beforeOrdinal);
+    }
+  };
+  const scheduleRetainedHistoryRead = (conversationId: string, store: TurnStore): void => {
+    const current = retainedHistoryReads.get(store);
+    // A snapshot applied during a pass can raise the frontier above the one
+    // that pass is reading; that pass then stops and one more follows it.
+    if (current === 'reading') retainedHistoryReads.set(store, 'superseded');
+    if (current !== undefined || runtimeStores.get(conversationId) !== store
+        || !retainedHistoryFrontier(store.getState())) return;
+    retainedHistoryReads.set(store, setTimeout(() => {
+      retainedHistoryReads.set(store, 'reading');
+      // The coordinator already reported a failed read; the next opened
+      // stream or reader paging retries the same frontier.
+      void readRetainedHistory(conversationId, store).catch(() => undefined).finally(() => {
+        const superseded = retainedHistoryReads.get(store) === 'superseded';
+        retainedHistoryReads.delete(store);
+        if (superseded) scheduleRetainedHistoryRead(conversationId, store);
+      });
+    }, 0));
+  };
+
+  const ensureRuntimeStore = (conversationId: string): TurnStore => {
     const existing = runtimeStores.get(conversationId);
     if (existing) return existing;
     let coordinator: ConversationSyncCoordinator;
@@ -499,62 +267,63 @@ export function createConversationTurnRuntime(
         return { ...snapshot, authoritativeFull: true };
       },
       onResyncError: options.onResyncError,
-    }) as RuntimeStore;
+    }) as TurnStore;
     coordinator = new ConversationSyncCoordinator({
       conversationId,
-      streamClientId: options.streamClientId,
-
       snapshotViewport: options.snapshotViewport,
       api: options.api,
       onSnapshot(snapshot) {
-        store._snapshotLoaded = true;
-        const conversation = boundConversationById.get(conversationId);
-        if (conversation) options.applySettings?.(
-          conversation, record(snapshot.settings),
-        );
-        if (conversation) options.applySnapshotMetadata?.(
-          conversation, snapshot,
-        );
+        // A newer partial command ACK does not contain this snapshot's other
+        // Turns. The reducer intentionally rejects an older conversation
+        // revision; that rejection must keep the coordinator's reset barrier.
+        if (snapshot.conversationRevision < store.getState().conversationRevision) {
+          throw new Error('Conversation snapshot is stale and was not applied');
+        }
         store.dispatch({ type: 'snapshot', snapshot });
+        store._snapshotLoaded = true;
+        hydration.applyBoundSnapshot(store, snapshot);
+        scheduleRetainedHistoryRead(conversationId, store);
+      },
+      onStreamOpened() {
+        scheduleRetainedHistoryRead(conversationId, store);
       },
       onTurnPage(page, mode) {
-        // History pages add bounded older records. They are never deletion
-        // authority and therefore intentionally omit authoritativeFull.
+        // History pages add bounded older records and never carry
+        // authoritativeFull. A continuous frontier page removes only the
+        // Turns retained below a replacing tail window that it omits.
         store.dispatch({ type: 'snapshot', snapshot: { ...page, historyMode: mode } });
       },
       onAttemptEvent(event, receivedAt, serverPublishedAt) {
         const previousRevision = Number(
           store.getState().turnsById[event.turnId]?.projectionRevision || 0,
         );
-        const key = receiptKey(event.conversationId, event.turnId);
-        if (previousRevision < Number(event.projectionRevision || 0)) {
-          // Install before dispatch: a forced render may commit synchronously.
-          // Retain clocks/identity only, never the event's text/projection body.
-          receivedEvents.delete(key);
-          receivedEvents.set(key, {
-            attemptId: event.attemptId, revision: event.projectionRevision,
-            receivedAt, publishedAt: serverPublishedAt,
-          });
-          while (receivedEvents.size > 64) {
-            receivedEvents.delete(receivedEvents.keys().next().value!);
-          }
-        }
+        const observationKey = renderObservations.stageReceivedEvent(
+          event, previousRevision, receivedAt, serverPublishedAt,
+        );
         store.dispatch({ type: 'event', event: event as TurnEvent });
         const turn = store.getState().turnsById[event.turnId];
         const applied = Number(turn?.projectionRevision || 0)
           >= Number(event.projectionRevision || 0);
         if (event.type === 'terminal_settlement') {
-          attemptHooks.get(event.attemptId)?.onTerminal?.(event as TurnEvent);
-          attemptHooks.delete(event.attemptId);
-          attemptConnectionLeases.delete(event.attemptId);
+          attemptLifecycles.get(store)?.deliverTerminal(event as TurnEvent);
         }
-        if (!applied) receivedEvents.delete(key);
+        if (!applied) renderObservations.discardReceivedEvent(observationKey);
         return applied;
       },
       onTurnDelta(delta) {
+        // Upserts, tombstones and queue changes have the same revision fence
+        // as patches. A vacuous patch-only check acknowledged rejected rows.
+        if (Number(delta.conversationRevision || 0)
+            < store.getState().conversationRevision) return false;
         store.dispatch({ type: 'snapshot', snapshot: delta });
         const state = store.getState();
-        return records(delta.turnPatches).every((change) => {
+        const rowsApplied = records(delta.turns).every((incoming) => {
+          const local = state.turnsById[stringValue(incoming.turnId)];
+          return Boolean(local && Number(local.projectionRevision)
+            >= Number(incoming.projectionRevision));
+        }) && (Array.isArray(delta.deletedTurnIds) ? delta.deletedTurnIds : [])
+          .every((id) => typeof id === 'string' && !state.turnsById[id]);
+        return rowsApplied && records(delta.turnPatches).every((change) => {
           const turnId = stringValue(change.turnId);
           const target = Number(change.targetProjectionRevision || 0);
           return Boolean(turnId && target > 0
@@ -562,20 +331,53 @@ export function createConversationTurnRuntime(
         });
       },
       onProtocolError: options.onProtocolError,
-      onHealth(conversationId, health) {
-        options.onHealth?.(conversationId, health);
-        // The host schedules/commits the health projection. Only its commit
-        // port may turn this transport transition into a painted receipt.
+      onHealth(conversationId, health, demand) {
+        const current = conversationConnectionHealth.get(conversationId);
+        // Raw observers can re-enter pause/recovery before this callback. Never
+        // regress the shell to an outer reading after a newer verdict commits.
+        if (current && (current.generation !== health.generation
+            || current.state !== health.state
+            || current.transport !== health.transport
+            || current.reason !== health.reason
+            || current.observedAt !== health.observedAt
+            || current.lastFrameAt !== health.lastFrameAt
+            || current.retryCount !== health.retryCount)) return;
+        const latest = current ?? health;
+        const conversation = boundConversations.get(conversationId)?.conversation
+          ?? options.findConversation?.(conversationId);
+        const previous = conversation?._conversationSyncHealth;
+        if (conversation) conversation._conversationSyncHealth = latest;
+        if (conversation && latest.state === 'live'
+            && previous?.state === 'live'
+            && previous.transport === latest.transport
+            && previous.reason === latest.reason
+            // A healthy transport is not proof that its canonical graph has
+            // committed to the active Surface. Keep the existing heartbeat
+            // demand until that independent DOM owner acknowledges convergence.
+            && !(demand === 'heartbeat' && options.isActive?.(conversation)
+              && options.isDomStale?.(conversation))) return;
+        options.onHealth?.(conversationId, latest);
+        // Only the host's DOM commit port can turn this into a painted receipt.
       },
       onPushWithheld(withheld) {
         store.dispatch({ type: 'push_withheld', pushWithheld: withheld });
       },
       onDebugFrame: options.onDebugFrame,
-      eventSourceFactory: options.eventSourceFactory,
+      eventSourceFactory,
     });
     // Constructors do not publish externally. Register the complete pair
     // first so health-driven renders can safely re-enter any runtime method.
+    attemptLifecycles.set(store, createTurnAttemptLifecycle(store, {
+      coordinator,
+      terminalStatuses: terminal,
+      onProtocolError: options.onProtocolError,
+      onTerminal() {
+        const binding = boundConversations.get(conversationId);
+        if (binding?.store === store) projectConversation(binding.conversation, store.getState());
+      },
+    }));
     store._snapshotLoaded = false;
+    ownedStores.add(store);
     runtimeStores.set(conversationId, store);
     coordinators.set(conversationId, coordinator);
     coordinator.setSuspended(transportSuspended);
@@ -590,19 +392,39 @@ export function createConversationTurnRuntime(
   const readRuntimeState = (conversationId: string): TurnState | null =>
     runtimeStores.get(conversationId)?.getState() ?? null;
 
+  const unbindConversation = (conversationId: string): void => {
+    const binding = boundConversations.get(conversationId);
+    if (!binding) return;
+    boundConversations.delete(conversationId);
+    binding.unsubscribe();
+    scheduledTerminalReleases.delete(binding.conversation);
+    shellProjection.forget(binding.conversation);
+  };
+
   const bindConversation = (
     conversation: RuntimeConversation,
-    store: RuntimeStore,
+    store: TurnStore,
   ): void => {
-    const previous = boundConversations.get(conversation);
-    if (previous?.store === store) return;
-    previous?.unsubscribe();
-    boundConversationById.set(conversation.id, conversation);
+    hydration.claimBoundConversation(conversation);
+    const previous = boundConversations.get(conversation.id);
+    if (previous?.conversation === conversation && previous.store === store) return;
+    unbindConversation(conversation.id);
+    const health = conversationConnectionHealth.get(conversation.id);
+    if (health) conversation._conversationSyncHealth = health;
     const unsubscribe = store.subscribe(
       (state, update) => projectConversation(conversation, state, update),
     );
-    boundConversations.set(conversation, { store, unsubscribe });
+    boundConversations.set(conversation.id, { conversation, store, unsubscribe });
     projectConversation(conversation, store.getState());
+  };
+
+  const requireAttemptLifecycle = (store: TurnStore): TurnAttemptLifecycle => {
+    const id = store.getState().conversationId;
+    const owner = attemptLifecycles.get(store);
+    if (!owner || runtimeStores.get(id) !== store || disposingConversations.has(id)) {
+      throw new Error('Conversation store was disposed or is not owned by this runtime.');
+    }
+    return owner;
   };
 
   const connect = (
@@ -610,146 +432,28 @@ export function createConversationTurnRuntime(
     attemptId: string,
     hooks: TurnConnectionHooks = {},
   ): ConversationSyncConnection => {
-    const conversationId = store.getState().conversationId;
-    const coordinator = coordinators.get(conversationId);
-    if (!coordinator) throw new Error('Conversation coordinator is not initialized.');
-    if (attemptId) attemptHooks.set(attemptId, hooks);
-    void coordinator.resume().catch(options.onProtocolError);
-    let leaseClosed = false;
-    return {
-      close() {
-        if (leaseClosed) return;
-        leaseClosed = true;
-        if (attemptId) attemptHooks.delete(attemptId);
-      },
-      get cursor() { return coordinator.cursor; },
-    };
+    return requireAttemptLifecycle(store).connect(attemptId, hooks);
   };
 
   const connectAttempt = (
-    conversation: RuntimeConversation,
-    store: RuntimeStore,
+    _conversation: RuntimeConversation,
+    store: TurnStore,
     attemptId: string,
   ): ConversationSyncConnection | null => {
     if (!attemptId) return null;
-    const previous = attemptConnectionLeases.get(attemptId);
-    if (previous) return previous;
-    const connection = connect(store, attemptId, {
-      onTerminal() {
-        attemptConnectionLeases.delete(attemptId);
-        projectConversation(conversation, store.getState());
-      },
-    });
-    attemptConnectionLeases.set(attemptId, connection);
-    return connection;
+    return requireAttemptLifecycle(store).connectOnce(attemptId);
   };
 
-  const submit = async (
-    store: TurnStore,
-    inputTurn: unknown,
-    config: unknown,
-    extra: UnknownRecord = {},
-    requestOptions: unknown = {},
-  ): Promise<UnknownRecord> => {
-    const payload = buildTurnSubmitRequest(inputTurn, config, extra);
-    const response = record(await options.api.createTurn(
-      store.getState().conversationId,
-      payload as unknown as CreateTurnRequest,
-      requestOptions as RequestOptions,
-    ));
-    store.dispatch({ type: 'command_response', response });
-    return response;
-  };
-
-  const runOperation = async (
-    store: TurnStore,
-    turnId: string,
-    operation: string,
-    config: unknown = {},
-    operationOptions: UnknownRecord = {},
-  ): Promise<UnknownRecord> => {
-    const turn = store.getState().turnsById[turnId];
-    if (!turn) throw new Error('Unknown turn; refresh the authoritative snapshot.');
-    store.dispatch({ type: 'command_pending', turnId, operation });
-    try {
-      const response = record(await options.api.createAttempt(
-        stringValue(turn.conversationId),
-        turnId,
-        buildTurnOperationRequest(
-          turn, operation, config, operationOptions,
-        ) as unknown as CreateAttemptRequest,
-      ));
-      store.dispatch({ type: 'command_response', response });
-      return response;
-    } catch (error) {
-      store.dispatch({ type: 'command_failed', turnId });
-      const latest = latestTurnFrom(error);
-      if (latest) {
-        store.dispatch({ type: 'snapshot', snapshot: {
-          conversationRevision: store.getState().conversationRevision,
-          turns: [latest],
-        } });
-      }
-      throw error;
-    }
-  };
-
-  const runHydrate = async (
-    conversation: RuntimeConversation,
-  ): Promise<RuntimeStore> => {
-    if (!conversation?.id) throw new Error('Conversation is required.');
-    const store = ensureRuntimeStore(conversation.id);
-    const coordinator = coordinators.get(conversation.id);
-    if (!coordinator) throw new Error('Conversation coordinator is not initialized.');
-    const snapshot = await coordinator.hydrate(false);
-    const turns = records(snapshot.turns);
-    options.applySettings?.(conversation, record(snapshot.settings));
-    options.applySnapshotMetadata?.(conversation, snapshot);
-    bindConversation(conversation, store);
-    if (options.isActive?.(conversation)) void coordinator.resume();
-    for (const turn of turns) {
-      const status = stringValue(turn.status);
-      const attemptId = stringValue(turn.currentAttemptId);
-      if ((status === 'pending' || status === 'running') && attemptId) {
-        connectAttempt(conversation, store, attemptId);
-      }
-    }
-    return store;
-  };
-
-  /* Explicit snapshot calls coalesce into one lane. Live changes never enter
-   * this scheduler: the conversation coordinator owns their ordered SSE.
-   *
-   * The lane MUST be published before runHydrate starts. runHydrate announces
-   * `connecting` synchronously; presentation hooks may re-enter
-   * hydrateConversation while handling that health frame. Starting the work
-   * before claiming the lane recursively launched hundreds of full snapshots
-   * on a cold page and eventually overflowed the browser stack.
-   *
-   * Overlapping callers share the same authoritative snapshot. A trailing
-   * snapshot is unnecessary: the coordinator opens its ordered event stream
-   * from the snapshot cursor, so commits racing the read are replayed there. */
-  const hydrateLanes = new Map<string, Promise<RuntimeStore>>();
-
-  const hydrateConversation = (
-    conversation: RuntimeConversation,
-  ): Promise<RuntimeStore> => {
-    if (!conversation?.id) return Promise.reject(
-      new Error('Conversation is required.'),
-    );
-    const id = conversation.id;
-    const existing = hydrateLanes.get(id);
-    if (existing) return existing;
-    // Promise.then defers runHydrate until after hydrateLanes.set below. This
-    // ordering is the re-entrancy boundary; do not inline runHydrate here.
-    const running = Promise.resolve()
-      .then(() => runHydrate(conversation))
-      .finally(() => {
-        if (hydrateLanes.get(id) === running) hydrateLanes.delete(id);
-      });
-    hydrateLanes.set(id, running);
-    return running;
-  };
+  const hydration = createTurnHydration(options, {
+    ensureRuntimeStore,
+    readRuntimeStore: conversationId => runtimeStores.get(conversationId),
+    coordinatorFor: conversationId => coordinators.get(conversationId),
+    isDisposing: conversationId => disposingConversations.has(conversationId),
+    boundConversation: conversationId => boundConversations.get(conversationId)?.conversation,
+    bindConversation,
+    connectAttempt,
+  });
+  const { hydrateConversation } = hydration;
 
   /**
    * Revalidate a previously loaded conversation from its durable SSE cursor.
@@ -760,7 +464,7 @@ export function createConversationTurnRuntime(
    */
   const wakeConversation = async (
     conversation: RuntimeConversation,
-  ): Promise<RuntimeStore> => {
+  ): Promise<TurnStore> => {
     if (!conversation?.id) throw new Error('Conversation is required.');
     const store = ensureRuntimeStore(conversation.id);
     // A local-only draft has no server row yet: hydrating it 404s and the
@@ -790,403 +494,54 @@ export function createConversationTurnRuntime(
     return coordinator.loadTurnPage(laneId, beforeOrdinal, limit);
   };
 
-  const submitConversation = async (
-    conversation: RuntimeConversation,
-    message: unknown,
-    config: unknown,
-    extra: UnknownRecord = {},
-  ): Promise<UnknownRecord> => {
-    if (!conversation?.id) throw new Error('Conversation is required.');
-    const store = ensureRuntimeStore(conversation.id);
-    if (!store._snapshotLoaded) {
-      if (!conversation._localOnly) {
-        try {
-          const coordinator = coordinators.get(conversation.id);
-          if (!coordinator) throw new Error(
-            'Conversation coordinator is not initialized.');
-          await coordinator.hydrate(false);
-        } catch (error) {
-          if (Number(record(error).status || 0) !== 404) throw error;
-        }
-      }
-      store._snapshotLoaded = true;
-    }
-    try {
-      const {
-        requestOptions,
-        settings,
-        ...commandExtra
-      } = extra;
-      const response = await submit(store, null, config, {
-        ...commandExtra,
-        commandId: extra.commandId || createTurnCommandId(),
-        message,
-        conversation: {
-          allowCreate: true,
-          title: titleForTurnConversationCreate(conversation),
-          createdAt: conversation.createdAt || Date.now(),
-          settings: settings || {},
-        },
-      }, requestOptions);
-      conversation._localOnly = false;
-      bindConversation(conversation, store);
-      connectAttempt(
-        conversation,
-        store,
-        stringValue(record(response.attempt).attemptId),
-      );
-      return response;
-    } catch (error) {
-      const latest = latestTurnFrom(error);
-      if (latest) {
-        store.dispatch({ type: 'snapshot', snapshot: {
-          conversationRevision: store.getState().conversationRevision,
-          turns: [latest],
-        } });
-        bindConversation(conversation, store);
-      }
-      throw error;
-    }
+  const resolveCommandConversation = (
+    conversation: RuntimeConversation, store: TurnStore,
+  ): RuntimeConversation | null => {
+    if (runtimeStores.get(conversation.id) !== store
+        || disposingConversations.has(conversation.id)) return null;
+    return hydration.requestedConversation(conversation.id)
+      ?? boundConversations.get(conversation.id)?.conversation ?? conversation;
   };
 
-  const submitBranch = async (
-    conversation: RuntimeConversation,
-    branch: UnknownRecord,
-    parentTurnId: string,
-    message: unknown,
-    config: unknown,
-    extra: UnknownRecord = {},
-  ): Promise<UnknownRecord> => {
-    if (!conversation?.id || !branch || !parentTurnId) {
-      throw new Error(
-        'Branch generation requires a conversation, branch, and parent turn.',
-      );
-    }
-    const store = ensureRuntimeStore(conversation.id);
-    if (!store._snapshotLoaded) await hydrateConversation(conversation);
-    bindConversation(conversation, store);
-    const laneId = stringValue(branch._laneId || branch.laneId || branch.id);
-    if (!laneId) throw new Error('Branch is missing its stable lane identity.');
-    const response = await submit(store, null, config, {
-      ...extra,
-      commandId: extra.commandId || createTurnCommandId(),
-      message,
-      laneId,
-      parentTurnId,
-      actor: extra.actor || 'assistant',
-      kind: extra.kind || 'branch_reply',
-    });
-    connectAttempt(
-      conversation,
-      store,
-      stringValue(record(response.attempt).attemptId),
-    );
-    return response;
-  };
-
-  const ensureTurn = async (
-    conversation: RuntimeConversation,
-    turnId: string,
-  ): Promise<RuntimeStore> => {
-    const store = ensureRuntimeStore(conversation.id);
-    if (!store._snapshotLoaded || !store.getState().turnsById[turnId]) {
-      await hydrateConversation(conversation);
-    } else {
-      bindConversation(conversation, store);
-    }
-    return store;
-  };
-
-  const operateConversation = async (
-    conversation: RuntimeConversation,
-    turnId: string,
-    operation: string,
-    config: unknown = {},
-    operationOptions: UnknownRecord = {},
-  ): Promise<UnknownRecord> => {
-    if (!conversation?.id || !turnId) {
-      throw new Error('A stable turnId is required.');
-    }
-    const store = await ensureTurn(conversation, turnId);
-    const response = await runOperation(
-      store, turnId, operation, config, operationOptions,
-    );
-    connectAttempt(
-      conversation,
-      store,
-      stringValue(record(response.attempt).attemptId),
-    );
-    return response;
-  };
-
-  const updateConversationTurn = async (
-    conversation: RuntimeConversation,
-    turnId: string,
-    projection: unknown,
-  ): Promise<UnknownRecord> => {
-    if (!conversation?.id || !turnId) {
-      throw new Error('A stable turnId is required.');
-    }
-    const store = await ensureTurn(conversation, turnId);
-    let turn = store.getState().turnsById[turnId];
-    if (!turn) throw new Error('Unknown turn; refresh the authoritative snapshot.');
-    try {
-      let writableProjection = record(projection);
-      const rounds = writableProjection.toolRounds;
-      if (Array.isArray(rounds) && rounds.some(round =>
-        round && typeof round === 'object' && '_snapshotToolResult' in round)) {
-        // Snapshot-only result references are a readonly presentation. A whole
-        // projection edit must restore complete tool lanes in ONE owner read,
-        // rather than issuing hundreds of detail requests or saving omissions.
-        const complete = (await options.api.turn(conversation.id, turnId, {
-          timeout: 30_000,
-        })).turn;
-        if (complete.projectionRevision !== turn.projectionRevision) {
-          throw Object.assign(new Error('The turn changed; review it before saving again.'), {
-            body: { latestTurn: complete },
-          });
-        }
-        writableProjection = {
-          ...writableProjection,
-          toolRounds: complete.projection.toolRounds,
-          segments: complete.projection.segments,
-        };
-        store.dispatch({ type: 'snapshot', snapshot: {
-          conversationRevision: store.getState().conversationRevision,
-          turns: [complete],
-        } });
-        turn = complete;
-      }
-      const response = record(await options.api.updateTurn(
-        conversation.id,
-        turnId,
-        {
-          expectedProjectionRevision: turn.projectionRevision,
-          projection: writableProjection,
-        } as UpdateTurnRequest,
-      ));
-      store.dispatch({ type: 'command_response', response });
-      return response;
-    } catch (error) {
-      const latest = latestTurnFrom(error);
-      if (latest) {
-        store.dispatch({ type: 'snapshot', snapshot: {
-          conversationRevision: store.getState().conversationRevision,
-          turns: [latest],
-        } });
-      }
-      throw error;
-    }
-  };
-
-  const executeConversationPlan = async (
-    conversation: RuntimeConversation,
-    sourceTurnId: string,
-    expectedPlanId: string,
-    expectedProjectionRevision: number,
-    contextMode: 'current' | 'fresh',
-    config: unknown = {},
-  ): Promise<UnknownRecord> => {
-    if (!conversation?.id || !sourceTurnId || !expectedPlanId) {
-      throw new Error('An exact proposed-plan identity is required.');
-    }
-    const store = await ensureTurn(conversation, sourceTurnId);
-    const source = store.getState().turnsById[sourceTurnId];
-    const proposedPlan = source?.projection.proposedPlan;
-    if (!source || source.projectionRevision !== expectedProjectionRevision
-        || proposedPlan?.planId !== expectedPlanId) {
-      throw new Error('The proposed plan changed; review the latest plan first.');
-    }
-    const operation = `execute-plan-${contextMode}`;
-    store.dispatch({ type: 'command_pending', turnId: sourceTurnId, operation });
-    try {
-      const body: ExecutePlanRequest = {
-        commandId: createTurnCommandId(),
-        expectedProjectionRevision,
-        planId: expectedPlanId,
-        contextMode,
-        config: record(config),
+  const commands = createTurnCommands(options, {
+    ensureRuntimeStore, hydrateConversation, bindConversation, connectAttempt,
+    readRuntimeStore: conversationId => runtimeStores.get(conversationId) ?? null,
+    isCurrentStore(store) {
+      const id = store.getState().conversationId;
+      return !ownedStores.has(store)
+        || (runtimeStores.get(id) === store && !disposingConversations.has(id));
+    },
+    resolveConversation: resolveCommandConversation,
+    captureConversation(conversation, store) {
+      const binding = boundConversations.get(conversation.id);
+      const requested = hydration.requestedConversation(conversation.id);
+      return () => {
+        const current = resolveCommandConversation(conversation, store);
+        if (!current) return null;
+        // The command's incoming shell wins unless a later binding claimed
+        // the same store while the request was pending.
+        return boundConversations.get(conversation.id) === binding
+          && hydration.requestedConversation(conversation.id) === requested ? conversation : current;
       };
-      const response = record(await options.api.executePlan(
-        conversation.id, sourceTurnId, body,
-      ));
-      store.dispatch({ type: 'command_response', response });
-      options.applySettings?.(conversation, {
-        planMode: false,
-        autopilotEnabled: false,
-        activeFlow: '',
-        imageGenMode: false,
-      });
-      bindConversation(conversation, store);
-      connectAttempt(
-        conversation,
-        store,
-        stringValue(record(response.attempt).attemptId),
-      );
-      return response;
-    } catch (error) {
-      store.dispatch({ type: 'command_failed', turnId: sourceTurnId });
-      const latest = latestTurnFrom(error);
-      if (latest) {
-        store.dispatch({ type: 'snapshot', snapshot: {
-          conversationRevision: store.getState().conversationRevision,
-          turns: [latest],
-        } });
-      }
-      throw error;
-    }
-  };
-
-  const appendSettledConversationTurn = async (
-    conversation: RuntimeConversation,
-    actor: AppendSettledTurnRequest['actor'],
-    projection: unknown,
-    extra: UnknownRecord = {},
-  ): Promise<UnknownRecord> => {
-    if (!conversation?.id) throw new Error('Conversation is required.');
-    const store = ensureRuntimeStore(conversation.id);
-    if (!store._snapshotLoaded && !conversation._localOnly) {
-      try {
-        await hydrateConversation(conversation);
-      } catch (error) {
-        if (Number(record(error).status || 0) !== 404) throw error;
-      }
-    }
-    store._snapshotLoaded = true;
-    const body: AppendSettledTurnRequest = {
-      commandId: stringValue(extra.commandId) || createTurnCommandId(),
-      actor,
-      projection: record(projection),
-      ...(extra.kind ? { kind: stringValue(extra.kind) } : {}),
-      ...(extra.status ? {
-        status: extra.status as AppendSettledTurnRequest['status'],
-      } : {}),
-      ...(extra.settlement ? {
-        settlement: extra.settlement as AppendSettledTurnRequest['settlement'],
-      } : {}),
-      ...(Number.isFinite(Number(extra.createdAt)) ? {
-        createdAt: Number(extra.createdAt),
-      } : {}),
-      ...(extra.laneId ? { laneId: stringValue(extra.laneId) } : {}),
-      ...(extra.runId ? { runId: stringValue(extra.runId) } : {}),
-      conversation: {
-        allowCreate: true,
-        title: titleForTurnConversationCreate(conversation),
-        createdAt: conversation.createdAt || Date.now(),
-        settings: record(extra.settings),
-      },
-    };
-    const response = record(await options.api.appendSettledTurn(
-      conversation.id, body,
-    ));
-    store.dispatch({ type: 'command_response', response });
-    conversation._localOnly = false;
-    bindConversation(conversation, store);
-    return response;
-  };
-
-  const mutateConversationFileChanges = async (
-    conversation: RuntimeConversation,
-    turnId: string,
-    operation: 'undo' | 'redo',
-  ): Promise<UnknownRecord> => {
-    if (!conversation?.id || !turnId) {
-      throw new Error('A stable turnId is required.');
-    }
-    const store = await ensureTurn(conversation, turnId);
-    const turn = store.getState().turnsById[turnId];
-    if (!turn) throw new Error('Unknown turn; refresh the authoritative snapshot.');
-    const body: FileChangesCommandRequest = {
-      commandId: createTurnCommandId(),
-      expectedProjectionRevision: turn.projectionRevision,
-    };
-    const command = operation === 'undo'
-      ? options.api.undoFileChanges
-      : options.api.redoFileChanges;
-    try {
-      const response = record(await command(conversation.id, turnId, body));
-      store.dispatch({ type: 'command_response', response });
-      return response;
-    } catch (error) {
-      const latest = latestTurnFrom(error);
-      if (latest) {
-        store.dispatch({ type: 'snapshot', snapshot: {
-          conversationRevision: store.getState().conversationRevision,
-          turns: [latest],
-        } });
-      }
-      throw error;
-    }
-  };
-
-  const createBranchLane = async (
-    conversation: RuntimeConversation,
-    parentTurnId: string,
-    descriptor: UnknownRecord = {},
-  ): Promise<UnknownRecord> => {
-    const store = await ensureTurn(conversation, parentTurnId);
-    const parent = store.getState().turnsById[parentTurnId];
-    if (!parent) throw new Error('Unknown parent turn.');
-    const response = record(await options.api.createLane(
-      conversation.id,
-      parentTurnId,
-      {
-        ...descriptor,
-        expectedProjectionRevision: parent.projectionRevision,
-      } as CreateLaneRequest,
-    ));
-    store.dispatch({ type: 'command_response', response });
-    return response;
-  };
-
-  const deleteBranchLane = async (
-    conversation: RuntimeConversation,
-    parentTurnId: string,
-    laneId: string,
-  ): Promise<UnknownRecord> => {
-    const store = await ensureTurn(conversation, parentTurnId);
-    const response = record(await options.api.deleteLane(
-      conversation.id, parentTurnId, laneId,
-    ));
-    store.dispatch({ type: 'command_response', response });
-    return response;
-  };
-
-  const deleteConversationTurns = async (
-    conversation: RuntimeConversation,
-    turnIds: readonly string[],
-  ): Promise<UnknownRecord> => {
-    const store = ensureRuntimeStore(conversation.id);
-    if (!store._snapshotLoaded) await hydrateConversation(conversation);
-    bindConversation(conversation, store);
-    const response = record(await options.api.deleteTurns(
-      conversation.id,
-      { turnIds: [...turnIds] } as DeleteTurnsRequest,
-    ));
-    store.dispatch({ type: 'command_response', response });
-    return response;
-  };
-
-  const cancelQueuedTurn = async (
-    conversation: RuntimeConversation,
-    queueId: string,
-  ): Promise<UnknownRecord> => {
-    const store = ensureRuntimeStore(conversation.id);
-    if (!store._snapshotLoaded) await hydrateConversation(conversation);
-    bindConversation(conversation, store);
-    const response = record(await options.api.cancelQueue(
-      conversation.id, queueId,
-    ));
-    store.dispatch({ type: 'command_response', response });
-    return response;
-  };
+    },
+    hydrateUnbound(conversationId) {
+      const coordinator = coordinators.get(conversationId);
+      if (!coordinator) throw new Error('Conversation coordinator is not initialized.');
+      return coordinator.hydrate(false);
+    },
+    loadCompleteTurn(store, turnId) {
+      const coordinator = coordinators.get(store.getState().conversationId);
+      if (!coordinator) throw new Error('Conversation coordinator is not initialized.');
+      return coordinator.loadCompleteTurn(turnId);
+    },
+  });
 
   return Object.freeze({
     emptyState: createTurnState,
     reducer: reduceTurnState,
     createStore: createTurnStore,
-    submit,
-    runOperation,
+    submit: commands.submit,
+    runOperation: commands.runOperation,
     connect,
     renderInto: renderTurnStateInto,
     finishPresentation: presentTurnFinish,
@@ -1203,12 +558,19 @@ export function createConversationTurnRuntime(
       if (!coordinator) throw new Error('Conversation coordinator is not initialized.');
       return coordinator.loadRoundDirectory(laneId, offset, limit, anchorTurnId);
     },
-    async hydrateConversationRound(conversation: RuntimeConversation, laneId: string, entry: ConversationRoundEntry) {
+    async hydrateConversationRound(
+      conversation: RuntimeConversation, laneId: string,
+      entry: Pick<ConversationRoundEntry, 'turnId' | 'ordinal'>,
+    ) {
+      if (!conversation?.id) throw new Error('Conversation is required.');
+      const store = ensureRuntimeStore(conversation.id);
+      // A just-selected conversation joins its coalesced snapshot first.
+      if (!store._snapshotLoaded) await hydrateConversation(conversation);
       const coordinator = coordinators.get(conversation.id);
       if (!coordinator) throw new Error('Conversation coordinator is not initialized.');
-      const store = ensureRuntimeStore(conversation.id);
       if (!store.getState().turnsById[entry.turnId]) {
-        await coordinator.loadTurnPage(laneId, entry.ordinal + 9, 8, 'detached');
+        // The target and the Turns after it; `beforeOrdinal` is exclusive.
+        await coordinator.loadTurnPage(laneId, entry.ordinal + 8, 8, 'detached');
         if (!store.getState().turnsById[entry.turnId]) {
           await coordinator.loadTurnPage(laneId, entry.ordinal + 1, 1, 'detached');
         }
@@ -1219,103 +581,23 @@ export function createConversationTurnRuntime(
       }
     },
     loadConversationTurnPage,
-    submitConversation,
-    appendSettledConversationTurn,
-    submitBranch,
-    operateConversation,
-    executeConversationPlan,
-    updateConversationTurn,
-    mutateConversationFileChanges,
-    createBranchLane,
-    deleteBranchLane,
-    deleteConversationTurns,
-    cancelQueuedTurn,
-    markCommandPending(
-      conversation: RuntimeConversation,
-      turnId: string,
-      operation: string,
-    ) {
-      if (!conversation?.id || !turnId) return;
-      const store = ensureRuntimeStore(conversation.id);
-      bindConversation(conversation, store);
-      store.dispatch({ type: 'command_pending', turnId, operation });
-    },
-    markCommandFailed(conversation: RuntimeConversation, turnId: string) {
-      if (!conversation?.id || !turnId) return;
-      ensureRuntimeStore(conversation.id).dispatch({
-        type: 'command_failed', turnId,
-      });
-    },
-    abortConversation(conversation: RuntimeConversation) {
-      if (!conversation?.id) return Promise.resolve(null);
-      const state = ensureRuntimeStore(conversation.id).getState();
-      const activeAttemptId = [...(state.laneOrder.main ?? [])].reverse()
-        .map((turnId) => state.turnsById[turnId])
-        .find((turn) => turn && (turn.status === 'pending' || turn.status === 'running')
-          && turn.currentAttemptId)?.currentAttemptId;
-      return activeAttemptId
-        ? options.api.abortAttempt(activeAttemptId, {
-          timeout: ABORT_COMMAND_TIMEOUT_MS,
-        })
-        : Promise.resolve(null);
-    },
-    abortAttempt(attemptId: string) {
-      return attemptId
-        ? options.api.abortAttempt(attemptId, {
-          timeout: ABORT_COMMAND_TIMEOUT_MS,
-        })
-        : Promise.resolve(null);
-    },
+    submitConversation: commands.submitConversation,
+    appendSettledConversationTurn: commands.appendSettledConversationTurn,
+    submitBranch: commands.submitBranch,
+    operateConversation: commands.operateConversation,
+    executeConversationPlan: commands.executeConversationPlan,
+    updateConversationTurn: commands.updateConversationTurn,
+    mutateConversationFileChanges: commands.mutateConversationFileChanges,
+    createBranchLane: commands.createBranchLane,
+    deleteBranchLane: commands.deleteBranchLane,
+    deleteConversationTurns: commands.deleteConversationTurns,
+    cancelQueuedTurn: commands.cancelQueuedTurn,
+    markCommandPending: commands.markCommandPending,
+    markCommandFailed: commands.markCommandFailed,
+    abortConversation: commands.abortConversation,
+    abortAttempt: commands.abortAttempt,
     readRuntimeState,
-    notifyRenderedState(
-      conversationId: string, state: TurnState, mountedTurnIds: readonly string[],
-    ) {
-      const conversation = boundConversationById.get(conversationId);
-      if (!conversation || !options.isActive?.(conversation)
-          || state.conversationId !== conversationId) return;
-      if (renderedConversationId && renderedConversationId !== conversationId) {
-        perceptionRecorder.invalidateRenderedConversation(renderedConversationId);
-      }
-      const mountedIds = new Set(mountedTurnIds.slice(-128));
-      for (const [turnId, previous] of renderedTurns) {
-        if (!mountedIds.has(turnId)
-            || previous.mountToken !== options.getTurnMountToken?.(conversationId, turnId)) {
-          perceptionRecorder.invalidateRenderedTurn(conversationId, previous);
-        }
-      }
-      renderedConversationId = conversationId;
-      renderedTurns.clear();
-
-      renderedHealthSignature = healthSignature(conversationId);
-      const liveAttemptId = perceptionIdentity(conversationId)?.attemptId;
-      for (const turnId of mountedIds) {
-        const turn = state.turnsById[turnId];
-        if (!turn?.currentAttemptId) continue;
-        const identity = {
-          turnId, attemptId: turn.currentAttemptId,
-          projectionRevision: Number(turn.projectionRevision || 0),
-          mountToken: options.getTurnMountToken?.(conversationId, turnId),
-        };
-        renderedTurns.set(turnId, identity);
-        const settled = terminal.has(turn.status || '');
-        const phase = !settled && liveAttemptId === identity.attemptId
-          ? state.livePhase : null;
-        if (!settled && !phase) continue;
-        const received = receivedEvents.get(receiptKey(conversationId, turnId));
-        const matches = received?.attemptId === identity.attemptId
-          && received?.revision === identity.projectionRevision;
-        perceptionRecorder.observeAttemptEvent({
-          conversationId, ...identity,
-          type: settled ? 'terminal_settlement' : 'projection_updated',
-          payload: { phase },
-        }, matches ? received?.receivedAt : undefined,
-        matches ? received?.publishedAt : undefined);
-      }
-      const health = conversationConnectionHealth.get(conversationId);
-      if (health) perceptionRecorder.observeHealth(
-        conversationId, health, perceptionIdentity(conversationId),
-      );
-    },
+    notifyRenderedState: renderObservations.notifyRenderedState,
     hasAuthoritativeCommand(conversationId: string, commandId: string) {
       const state = readRuntimeState(conversationId);
       if (!state || !commandId) return false;
@@ -1332,16 +614,12 @@ export function createConversationTurnRuntime(
         const conversationId = stringValue(candidate);
         if (!conversationId || reconciled.has(conversationId)) continue;
         reconciled.add(conversationId);
-        const conversation = boundConversationById.get(conversationId);
+        const conversation = boundConversations.get(conversationId)?.conversation;
         const store = runtimeStores.get(conversationId);
         if (conversation && store) {
 
           if (!options.isActive?.(conversation)) {
-            perceptionRecorder.invalidateRenderedConversation(conversationId);
-            if (renderedConversationId === conversationId) {
-              renderedTurns.clear();
-              renderedConversationId = '';
-            }
+            renderObservations.invalidateConversation(conversationId);
           } else {
             projectConversation(conversation, store.getState());
           }
@@ -1367,35 +645,40 @@ export function createConversationTurnRuntime(
       coordinators.get(conversationId)?.invalidate(cursorHint);
     },
     disposeConversation(conversationId: string) {
-      const projected = boundConversationById.get(conversationId);
-      if (projected) shellProjection.forget(projected);
-
-      if (renderedConversationId === conversationId) {
-        renderedTurns.clear();
-        renderedConversationId = '';
+      if (disposingConversations.has(conversationId)) return;
+      const store = runtimeStores.get(conversationId);
+      disposingConversations.add(conversationId);
+      hydration.disposeConversation(conversationId);
+      if (store) {
+        const scheduledRead = retainedHistoryReads.get(store);
+        if (scheduledRead !== undefined && typeof scheduledRead !== 'string') {
+          clearTimeout(scheduledRead);
+        }
+        retainedHistoryReads.delete(store);
       }
-      options.disposeRenderedState?.(conversationId);
-      perceptionRecorder.disposeConversation(conversationId);
-
-      for (const key of receivedEvents.keys()) {
-        if (key.startsWith(`${conversationId}\u0000`)) receivedEvents.delete(key);
+      unbindConversation(conversationId);
+      renderObservations.clearRenderedConversation(conversationId);
+      try {
+        // Preserve the final health notification before host cleanup withdraws
+        // any rendering demand it schedules. Reads retain the last Turn state.
+        coordinators.get(conversationId)?.close();
+        // The host still needs the last Turn state to clear per-Turn UI. It
+        // cannot keep subscriptions or skip resource release by throwing.
+        options.disposeRenderedState?.(conversationId);
+      } finally {
+        try {
+          renderObservations.disposeConversation(conversationId);
+        } finally {
+          try {
+            if (store) attemptLifecycles.get(store)?.dispose();
+          } finally {
+            if (store) attemptLifecycles.delete(store);
+            coordinators.delete(conversationId);
+            runtimeStores.delete(conversationId);
+            disposingConversations.delete(conversationId);
+          }
+        }
       }
-      const conversation = options.findConversation?.(conversationId) ?? null;
-      if (conversation) {
-        boundConversations.get(conversation)?.unsubscribe();
-        boundConversations.delete(conversation);
-      }
-      const state = runtimeStores.get(conversationId)?.getState();
-      for (const attemptId of entityRecordKeys(state?.attemptsById ?? {})) {
-        attemptConnectionLeases.get(attemptId)?.close();
-        attemptConnectionLeases.delete(attemptId);
-        attemptHooks.delete(attemptId);
-      }
-      coordinators.get(conversationId)?.close();
-      coordinators.delete(conversationId);
-      runtimeStores.delete(conversationId);
-      hydrateLanes.delete(conversationId);
-      boundConversationById.delete(conversationId);
     },
     hasLiveConnection(conversationId: string) {
       return coordinators.get(conversationId)?.connected ?? false;

@@ -39,7 +39,7 @@ fn gc_capture_same_volume_child() {
             let mut epoch = unmarked_epoch(capture, &collector);
             let stop = AtomicBool::new(false);
             collector.build_marks(&mut epoch, &stop).unwrap();
-            collector.scan(&mut epoch, &stop).unwrap();
+            collector.scan(&database, &mut epoch, &stop).unwrap();
             collector.delete_confirmed(&database, &mut epoch, &stop).unwrap();
             collector.cleanup_epoch(&mut epoch);
         })

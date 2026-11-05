@@ -17,9 +17,11 @@ The unit runs once per run_task invocation, right before Section 1:
        cache warmth). Called UNCONDITIONALLY — an empty convId clears
        any stale affinity from the pooled thread's previous task.
 
-Both are thread-local side effects with one real branch (pin only when
-the id is truthy) — pinned by behavioural tests below (owner directive
-2026-07-31: logic-bearing leaves ship monkeypatch-driven tests).
+Both are execution-context side effects. The pin binds the task's own
+route group; a root without one clears a pin left on its caller's context,
+while a child without one keeps its parent's — pinned by behavioural tests
+below (owner directive 2026-07-31: logic-bearing leaves ship
+monkeypatch-driven tests).
 
 Failing-first: written BEFORE the extraction; the module/signature/
 delegation guards turn RED until the leaf exists and _run.py delegates.
@@ -145,8 +147,9 @@ def test_behaviour_pin_applied_when_id_present(monkeypatch):
         'convId must reach set_conv_affinity')
 
 
-def test_behaviour_pin_skipped_when_absent_affinity_still_set(monkeypatch):
-    """No pin id → set_pinned_provider NOT called; affinity still set
+def test_behaviour_root_without_pin_clears_caller_pin_affinity_still_set(monkeypatch):
+    """A root without a pin id clears any caller pin (a retired route group
+    would otherwise confine its dispatch: no_slot); affinity is still set
     (with '' when no convId — clearing stale pooled-thread affinity)."""
     import lib.llm_dispatch.conv_affinity as ca
     import lib.llm_dispatch.provider_pin as pp
@@ -157,8 +160,27 @@ def test_behaviour_pin_skipped_when_absent_affinity_still_set(monkeypatch):
     monkeypatch.setattr(ca, 'set_conv_affinity',
                         lambda cid: calls['aff'].append(cid))
     leaf.bind_provider_and_affinity({}, 'deadbeef')
-    assert calls['pin'] == [], (
-        'absent pin id must NOT call set_pinned_provider')
+    assert calls['pin'] == [None], (
+        'a root without its own route group must clear the caller pin')
     assert calls['aff'] == [''], (
         'affinity must be set unconditionally (empty string clears the '
         'pooled thread\'s stale conversation binding)')
+
+
+def test_behaviour_child_without_pin_keeps_parent_pin(monkeypatch):
+    """A child without its own group stays inside its parent's route."""
+    import lib.llm_dispatch.conv_affinity as ca
+    import lib.llm_dispatch.provider_pin as pp
+    import lib.tasks_pkg.orchestrator._provider_binding as leaf
+    from lib.tasks_pkg.invocation import InvocationPolicy
+    calls = {'pin': [], 'aff': []}
+    monkeypatch.setattr(pp, 'set_pinned_provider',
+                        lambda pid: calls['pin'].append(pid))
+    monkeypatch.setattr(ca, 'set_conv_affinity',
+                        lambda cid: calls['aff'].append(cid))
+    child = {'id': 'child-task', '_userId': 7,
+             '_invocationPolicy': InvocationPolicy.child('parent-task')}
+    leaf.bind_provider_and_affinity(child, 'deadbeef')
+    assert calls['pin'] == [], (
+        'a child without its own group must keep the parent pin')
+    assert calls['aff'] == ['invocation:7:child-task']

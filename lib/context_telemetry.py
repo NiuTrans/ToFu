@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -377,10 +378,15 @@ def record_compaction_event(task: dict | None, *, trigger: str,
     task.setdefault('_contextCompactionEvents', []).append(event)
 
 
+# Concurrent MCP searches of one round bump the same per-task counts.
+_MCP_SEARCH_COUNTS_LOCK = threading.Lock()
+
+
 def record_mcp_search(task: dict, *, misses: int = 0) -> None:
-    task['_mcpSearchCount'] = int(task.get('_mcpSearchCount') or 0) + 1
-    task['_mcpSearchMissCount'] = (
-        int(task.get('_mcpSearchMissCount') or 0) + max(0, int(misses or 0)))
+    with _MCP_SEARCH_COUNTS_LOCK:
+        task['_mcpSearchCount'] = int(task.get('_mcpSearchCount') or 0) + 1
+        task['_mcpSearchMissCount'] = (
+            int(task.get('_mcpSearchMissCount') or 0) + max(0, int(misses or 0)))
 
 
 __all__ = [

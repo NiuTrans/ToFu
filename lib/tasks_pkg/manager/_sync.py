@@ -21,6 +21,7 @@ import json
 from datetime import datetime
 
 from lib.conversation_sync.attempt_identity import is_conversation_attempt
+from lib.conversation_sync.settled_rows import json_array_text
 from lib.error_envelope import to_json as _error_to_json
 from lib.log import get_logger
 from lib.tasks_pkg.manager._events import snapshot_task_text
@@ -103,9 +104,13 @@ def checkpoint_task_partial(task: dict, force: bool = False, *, wait_for_durabil
     merged_tool_rounds = _merge_tool_rounds(task)
 
     try:
+        from lib.conversation_sync.settled_rows import settle_items
         from lib.tasks_pkg.segments import assemble_segments
 
-        task["segments"] = assemble_segments(task, merged=merged_tool_rounds)
+        # The mirror is replaced wholesale, never edited: share it.
+        task["segments"] = settle_items(
+            assemble_segments(task, merged=merged_tool_rounds),
+            previous=task.get("segments"))
     except Exception:
         logger.warning(
             "[Checkpoint %s] Segment assembly failed",
@@ -118,7 +123,8 @@ def checkpoint_task_partial(task: dict, force: bool = False, *, wait_for_durabil
         tool_rounds_json = (
             None
             if _tool_rounds_have_dedicated_home(task)
-            else json.dumps(merged_tool_rounds, ensure_ascii=False)
+            # Settled rounds keep their text: each checkpoint encodes live rows.
+            else json_array_text(merged_tool_rounds)
         )
         metadata = {"contentEpoch": content_epoch}
         if is_conversation_attempt(task):

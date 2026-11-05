@@ -24,6 +24,7 @@ import subprocess
 import pytest
 
 from tests._runtime_sections import ROOT
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -41,8 +42,8 @@ def _run_node(harness_path, *args):
     return result.stdout
 
 
-@pytest.mark.skipif(not NODE, reason='node not installed')
 def test_pareto_all_zero_pricing_is_excluded_not_free(tmp_path):
+    require_node_modules('vite')
     entry = tmp_path / 'entry.ts'
     output = tmp_path / 'pareto.cjs'
     module = ROOT / 'frontend/src/features/model-catalog/pareto-chart.ts'
@@ -110,8 +111,8 @@ console.log(JSON.stringify({{
     ]
 
 
-@pytest.mark.skipif(not NODE, reason='node not installed')
 def test_pareto_duplicate_registrations_collapse_to_one_point(tmp_path):
+    require_node_modules('vite')
     entry = tmp_path / 'entry.ts'
     output = tmp_path / 'pareto.cjs'
     module = ROOT / 'frontend/src/features/model-catalog/pareto-chart.ts'
@@ -182,3 +183,49 @@ console.log(JSON.stringify({{
     assert values['exclusions'] == [
         'moonshot/llama-4-maverick-17b-128e-instruct',
     ]
+
+
+def test_aa_coverage_counts_published_scores_not_raw_matches(tmp_path):
+    """The AA card once said 238 models had real scores while 22 plotted.
+
+    The count included AA rows matched without a published score (AA serves
+    only its current Intelligence Index version) and Models hidden from the
+    catalog. Coverage now counts catalog rows with a published score only.
+    """
+    require_node_modules('vite')
+    entry = tmp_path / 'entry.ts'
+    output = tmp_path / 'coverage.cjs'
+    model = ROOT / 'frontend/src/features/model-catalog/model.ts'
+    chart = ROOT / 'frontend/src/features/model-catalog/pareto-chart.ts'
+    entry.write_text(f'''
+import {{ countAaScoredModels }} from {json.dumps(model.as_posix())};
+import {{ aaIndexVersionSuffix }} from {json.dumps(chart.as_posix())};
+
+const mk = (modelId: string, aa: object | null) => ({{ modelId, aa }});
+const groups = [{{
+  vendorId: 'openai', label: 'OpenAI', icon: 'openai',
+  models: [
+    mk('gpt-6-astra', {{ intelligence: 56.9 }}),
+    mk('gpt-5.4', {{ intelligence: null }}),
+    mk('gpt-5.6', null),
+  ],
+}}, {{
+  vendorId: 'zhipu', label: 'Zhipu', icon: 'zhipu',
+  models: [mk('glm-5.3', {{ intelligence: 0 }})],
+}}];
+console.log(JSON.stringify({{
+  scored: countAaScoredModels(groups as never),
+  suffixes: [5, 5.1, null, undefined, 0].map((value) => aaIndexVersionSuffix(value)),
+}}));
+''', encoding='utf-8')
+    bundled = subprocess.run(
+        [NODE, str(ROOT / 'scripts/vite_test_bundle.mjs'), str(entry),
+         '--bundle', '--format=cjs', '--platform=node', f'--outfile={output}'],
+        cwd=ROOT, capture_output=True, text=True, timeout=60,
+    )
+    assert bundled.returncode == 0, bundled.stderr
+    values = json.loads(_run_node(output).strip().splitlines()[-1])
+
+    # A published 0 is a score; a matched row without one is not.
+    assert values['scored'] == 2
+    assert values['suffixes'] == [' v5', ' v5.1', '', '', '']

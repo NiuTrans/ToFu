@@ -36,7 +36,11 @@ process tree on Stop. Abort and timeout were always two independent paths.
 DEAD-CODE HONESTY (the MCP degraded breaker)
 --------------------------------------------
 With no global read timeout, a call timeout can only arise for a server that
-declares its OWN ``"timeout"`` in mcp_servers.json. So the
+declares its OWN ``"timeout"`` in mcp_servers.json. That holds only because the
+connect path releases the session-level handshake deadline before publishing
+the session: the MCP SDK otherwise applies it to every un-budgeted request
+(observed 2026-10-30 as ``TIMED OUT after 30.0s (budget=none)``); see
+``tests/mcp_protocol/test_mcp_handshake_deadline_scope.py``. So the
 ``MCP_DEGRADED_TIMEOUT_STREAK`` gate no longer trips for un-budgeted servers.
 That is correct scoping, not rot: the gate exists to stop re-paying a KNOWN
 user-declared budget, and a server without one has nothing to re-pay. The
@@ -82,8 +86,8 @@ def _live_src(rel):
 class TestRunCommandHasNoDefaultTimeout:
     def _resolver_live(self):
         """The timeout-resolution block only, comments stripped."""
-        from lib.project_mod.run_command import tool_run_command
-        src = inspect.getsource(tool_run_command)
+        from lib.project_mod.run_command import _run_command_tool
+        src = inspect.getsource(_run_command_tool)  # tool_run_command's body
         start = src.index('Resolve timeout')
         end = src.index('if _is_dangerous_command')
         return strip_comments(src[start:end], lang='python')
@@ -352,6 +356,10 @@ class TestBackendRatchet:
         offenders = []
         for rel, sites in _scan_read_timeouts().items():
             for lineno, text in sites:
+                # Assigning None RELEASES a read deadline (the handshake
+                # budget once initialize is done); it never imposes one.
+                if re.search(r'read_timeout_seconds\s*=\s*None\b', text):
+                    continue
                 if 'if timeout' not in text and 'if ' not in text:
                     offenders.append(f'{rel}:{lineno}  {text}')
         assert not offenders, (
@@ -378,8 +386,8 @@ class TestBackendRatchet:
         parses unconditionally; a genuine parse failure is now a FAILURE.
         """
         import textwrap
-        from lib.project_mod.run_command import tool_run_command
-        src = inspect.getsource(tool_run_command)
+        from lib.project_mod.run_command import _run_command_tool
+        src = inspect.getsource(_run_command_tool)  # tool_run_command's body
         block = src[src.index('Resolve timeout'):src.index('if _is_dangerous_command')]
         # Drop the leading partial comment line, dedent, and wrap so the
         # if/elif chain is a valid standalone body.

@@ -582,8 +582,10 @@ def test_terminal_payload_cap_rejection_falls_back_to_slim_settlement(
 def test_deterministic_rejection_logs_the_client_request_shape(
         chat_sidecar, monkeypatch, caplog):
     """A database_protocol_error is the daemon's deterministic InvalidPayload
-    verdict whose reason string never crosses the wire; the client-side
-    request shape (kind/terminal/client_rev) must land in the ops log."""
+    verdict. Its fence reason (a literal on classifying engines, the bare code
+    on older ones) and the client-side request shape (kind/terminal/
+    client_rev) must land in one ops-log line; a terminal frame carries no
+    shed-able evidence, so it is sent exactly once."""
     import logging
     import threading
 
@@ -600,12 +602,16 @@ def test_deterministic_rejection_logs_the_client_request_shape(
     real_client = lifecycle._turn_client(write=True)
 
     class AlwaysRejectedClient:
+        calls = 0
+
         def __getattr__(self, name):
             return getattr(real_client, name)
 
         def command(self, operation, payload, command_id, **kwargs):
+            AlwaysRejectedClient.calls += 1
             raise StorageError(
-                'database_protocol_error', 'database_protocol_error',
+                'database_protocol_error',
+                'attempt event exceeds the conversation-sync document bound',
                 operation_id='turn.event.record')
 
     monkeypatch.setattr(
@@ -652,6 +658,146 @@ def test_deterministic_rejection_logs_the_client_request_shape(
     assert 'kind=done' in rejections[0]
     assert 'terminal=True' in rejections[0]
     assert 'client_rev=41' in rejections[0]
+    assert rejections[0].endswith(
+        'reason=attempt event exceeds the conversation-sync document bound')
+    assert AlwaysRejectedClient.calls == 1
+
+
+def test_rejected_snapshot_evidence_is_shed_once_and_the_frame_commits(
+        chat_sidecar, monkeypatch, caplog):
+    """Snapshot evidence never mutates the Turn projection. A deterministic
+    rejection of the frame (e.g. unencodable request content) must cost only
+    that evidence: one retry without the inline copy and with an explicitly
+    degraded carried row commits the projection patch and the sequence, so
+    the run is not killed by a debug frame."""
+    import logging
+    import threading
+
+    import lib.turn_lifecycle as lifecycle
+    from lib.storage.errors import StorageError
+    from lib.turn_lifecycle import bind_task, record_task_event
+
+    conversation_id = _new_conversation_id()
+    created = _create(conversation_id)
+    attempt_id = created['attempt']['attemptId']
+    task_id = f'evidence-task-{uuid.uuid4().hex[:8]}'
+    bind_task(attempt_id, task_id, user_id=1)
+    real_client = lifecycle._turn_client(write=True)
+
+    class EvidenceRejectingClient:
+        def __init__(self):
+            self.calls = []
+
+        def __getattr__(self, name):
+            return getattr(real_client, name)
+
+        def command(self, operation, payload, command_id, **kwargs):
+            carried = payload['task_event']['event']
+            self.calls.append(('event' in payload['event_payload'],
+                               carried.get('degraded') is True))
+            if not carried.get('degraded'):
+                raise StorageError(
+                    'database_protocol_error', 'payload JSON is invalid')
+            return real_client.command(operation, payload, command_id, **kwargs)
+
+    fake = EvidenceRejectingClient()
+    monkeypatch.setattr(lifecycle, '_turn_client', lambda **_kwargs: fake)
+    task = {
+        '_attemptId': attempt_id, '_userId': 1, 'id': task_id,
+        'status': 'running', 'content': '', 'thinking': '', 'toolRounds': [],
+        'segments': [], 'model': 'gpt-4o', 'config': {'model': 'gpt-4o'},
+        'abort_event': threading.Event(),
+    }
+    snapshot = {'type': 'messages_snapshot', 'kind': 'request', 'roundNum': 1,
+                'messages': [{'role': 'user', 'content': 'hello'}]}
+
+    with caplog.at_level(logging.WARNING, logger='lib.turn_lifecycle'):
+        assert record_task_event(task, snapshot, task_event={
+            'task_id': task_id, 'sequence': 1, 'event': snapshot,
+        }) == 'carried'
+
+    assert fake.calls == [(True, False), (False, True)]
+    stored = real_client.query('event.list', {
+        'task_id': task_id, 'after_sequence': 0, 'limit': 1})
+    assert stored[0]['event']['type'] == 'messages_snapshot'
+    assert stored[0]['event']['roundNum'] == 1
+    assert stored[0]['event']['messageCount'] == 1
+    assert stored[0]['event']['degraded'] is True
+    assert 'payload JSON is invalid' in stored[0]['event']['degradedReason']
+    assert 'messages' not in stored[0]['event']
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any('deterministic event-record rejection' in message
+                   for message in messages)
+    shed = [message for message in messages
+            if 'messages_snapshot evidence shed' in message]
+    assert len(shed) == 1
+    assert 'payload JSON is invalid' in shed[0]
+    assert not task.get('aborted')
+
+
+def test_snapshot_rejected_after_shedding_still_fails_closed(
+        chat_sidecar, monkeypatch, caplog):
+    """Shedding is one retry: a rejection that survives it is the authority's
+    verdict on the frame itself and keeps the existing fail-closed path."""
+    import logging
+    import threading
+
+    import lib.turn_lifecycle as lifecycle
+    from lib.storage.errors import StorageError
+    from lib.turn_lifecycle import bind_task, record_task_event
+
+    conversation_id = _new_conversation_id()
+    created = _create(conversation_id)
+    attempt_id = created['attempt']['attemptId']
+    task_id = f'evidence-task-{uuid.uuid4().hex[:8]}'
+    bind_task(attempt_id, task_id, user_id=1)
+    real_client = lifecycle._turn_client(write=True)
+
+    class AlwaysRejectedClient:
+        calls = 0
+
+        def __getattr__(self, name):
+            return getattr(real_client, name)
+
+        def command(self, operation, payload, command_id, **kwargs):
+            AlwaysRejectedClient.calls += 1
+            raise StorageError(
+                'database_protocol_error', 'Turn projection patch is invalid')
+
+    monkeypatch.setattr(
+        lifecycle, '_turn_client', lambda **_kwargs: AlwaysRejectedClient())
+    task = {
+        '_attemptId': attempt_id, '_userId': 1, 'id': task_id,
+        'status': 'running', 'content': '', 'thinking': '', 'toolRounds': [],
+        'segments': [], 'model': 'gpt-4o', 'config': {'model': 'gpt-4o'},
+        'abort_event': threading.Event(),
+    }
+    snapshot = {'type': 'messages_snapshot', 'kind': 'request', 'roundNum': 1,
+                'messages': [{'role': 'user', 'content': 'hello'}]}
+
+    with caplog.at_level(logging.WARNING, logger='lib.turn_lifecycle'):
+        with pytest.raises(StorageError):
+            record_task_event(task, snapshot, task_event={
+                'task_id': task_id, 'sequence': 1, 'event': snapshot})
+
+    assert AlwaysRejectedClient.calls == 2
+    rejections = [record.getMessage() for record in caplog.records
+                  if 'deterministic event-record rejection' in record.getMessage()]
+    assert len(rejections) == 1
+    assert 'kind=messages_snapshot' in rejections[0]
+    assert rejections[0].endswith('reason=Turn projection patch is invalid')
+
+
+def test_attempt_event_budget_matches_the_native_document_bound():
+    import json
+    from pathlib import Path
+
+    import lib.turn_lifecycle as lifecycle
+
+    contract = json.loads((Path(__file__).resolve().parents[2]
+                           / 'contracts' / 'tofudb_ir_v1.json').read_text())
+    assert (lifecycle._ATTEMPT_EVENT_DOCUMENT_MAX_BYTES
+            == contract['bounds']['maximumLegacyDocumentBytes'])
 
 
 def test_unwritable_even_slim_frame_signals_cooperative_abort(
@@ -1223,8 +1369,11 @@ def test_checkpoint_resume_preserves_interrupted_tail_as_rolled_back(
         option['operation']: option
         for option in settled['settlement']['resumeOptions']
     }
-    # Prefill-capable model with a prose tail: lossless continue leads.
-    assert 'continue' in options
+    # A prose tail is never continued as a prefill, whatever the model: the
+    # checkpoint resume leads and rewinds it.
+    assert 'continue' not in options
+    assert settled['settlement']['resumeOptions'][0]['operation'] == (
+        'checkpoint_resume')
     checkpoint = options['checkpoint_resume']['anchor']
     assert checkpoint['content'] == ''
     assert checkpoint['thinking'] == ''
@@ -1307,9 +1456,12 @@ def test_replay_only_continue_preserves_thinking_tail_as_rolled_back(
         'call-1']
 
 
-def test_lossless_continue_keeps_terminal_lanes_seamless(chat_sidecar):
-    """A prefill continue rewrites nothing: no rolledBack lane appears."""
+def test_prose_tail_without_tool_rounds_resumes_from_the_turn_start(
+        chat_sidecar):
+    """No checkpoint round still means no prefill: the tail rolls back and
+    the successor regenerates from the turn input, keeping its accounting."""
     from lib.turn_lifecycle import (
+        LifecycleConflict,
         abort_attempt,
         bind_task,
         create_attempt,
@@ -1317,33 +1469,50 @@ def test_lossless_continue_keeps_terminal_lanes_seamless(chat_sidecar):
         record_task_event,
     )
 
-    conversation_id = _new_conversation_id('seamless')
+    conversation_id = _new_conversation_id('prose-tail')
     created = _create(conversation_id)
     attempt_id = created['attempt']['attemptId']
     turn_id = created['turn']['turnId']
-    task_id = 'seamless-task'
+    task_id = 'prose-tail-task'
     bind_task(attempt_id, task_id, user_id=1)
     task = _running_task(
         attempt_id, task_id,
         content='partial answer',
         thinking='interrupted reasoning tail',
+        toolRounds=[],
     )
     assert record_task_event(task, {'type': 'tool_result'}) is True
     assert abort_attempt(attempt_id, user_id=1)['status'] == 'abort_signaled'
 
     settled = get_turn(conversation_id, turn_id, user_id=1)
+    options = settled['settlement']['resumeOptions']
+    assert [option['operation'] for option in options] == [
+        'checkpoint_resume', 'regenerate']
+    assert options[0]['anchor']['keptToolRounds'] == 0
+    with pytest.raises(LifecycleConflict):
+        create_attempt(
+            conversation_id, turn_id,
+            command_id=f'continue-{conversation_id}', operation='continue',
+            expected_projection_revision=settled['projectionRevision'],
+            user_id=1,
+        )
+
     resumed = create_attempt(
         conversation_id,
         turn_id,
         command_id=f'resume-{conversation_id}',
-        operation='continue',
+        operation='checkpoint_resume',
         expected_projection_revision=settled['projectionRevision'],
+        resume_anchor=options[0]['anchor'],
         user_id=1,
     )
     projection = resumed['turn']['projection']
-    assert projection['content'] == 'partial answer'
-    assert projection['thinking'] == 'interrupted reasoning tail'
-    assert 'rolledBack' not in projection
+    assert projection['content'] == ''
+    assert projection['thinking'] == ''
+    assert projection['toolRounds'] == []
+    entry = projection['rolledBack'][0]
+    assert entry['content'] == 'partial answer'
+    assert entry['thinking'] == 'interrupted reasoning tail'
 
 
 def test_resume_ctx_only_input_update_rebinds_submitted_rail(chat_sidecar):
@@ -1370,7 +1539,7 @@ def test_resume_ctx_only_input_update_rebinds_submitted_rail(chat_sidecar):
     turn_id = created['turn']['turnId']
     task_id = 'resume-ctx-task'
     bind_task(attempt_id, task_id, user_id=1)
-    task = _running_task(attempt_id, task_id, content='partial answer')
+    task = _running_task(attempt_id, task_id)
     assert record_task_event(task, {'type': 'tool_result'}) is True
     assert abort_attempt(attempt_id, user_id=1)['status'] == 'abort_signaled'
 
@@ -1423,7 +1592,7 @@ def test_resume_ctx_only_input_update_rebinds_submitted_rail(chat_sidecar):
     )
 
 
-def _settled_abort(conversation_id, *, content='partial answer'):
+def _settled_abort(conversation_id, *, content=''):
     from lib.turn_lifecycle import (
         abort_attempt,
         bind_task,
@@ -1749,11 +1918,11 @@ def test_checkpoint_resume_retains_display_rows_and_amputates_in_flight_tail(
 def test_checkpoint_resume_bootstrap_event_is_exempt_from_streaming_cap(chat_sidecar):
     """A large retained history must not make checkpoint_resume unwritable.
 
-    The seq=1 bootstrap patch carries the whole rebuilt toolRounds lane; for a
-    turn with megabytes of retained tool output it exceeds the 4 MiB
-    non-terminal transport cap. Like the terminal settlement, this one-shot
-    replay record is exempt — otherwise resume fails with 413 while
-    regenerate keeps working (mtd46qic0iy98e, 2026-08-29).
+    The seq=1 bootstrap patch re-sends every retained round after the first
+    one the rebuild drops; for a turn with megabytes of retained tool output it
+    exceeds the 4 MiB non-terminal transport cap. Like the terminal
+    settlement, this one-shot replay record is exempt — otherwise resume fails
+    with 413 while regenerate keeps working (mtd46qic0iy98e, 2026-08-29).
     """
     import json
 
@@ -1778,7 +1947,7 @@ def test_checkpoint_resume_bootstrap_event_is_exempt_from_streaming_cap(chat_sid
     bind_task(old_attempt_id, 'resume-oversize-task', user_id=1)
     half = _ATTEMPT_EVENT_MAX_NONTERMINAL_BYTES // 2 + 4096
     big_a = 'a' * half
-    big_b = 'b' * half
+    big_b = 'b' * (_ATTEMPT_EVENT_MAX_NONTERMINAL_BYTES + 4096)
 
     def _round(round_num, call_id, content):
         return {
@@ -1798,8 +1967,9 @@ def test_checkpoint_resume_bootstrap_event_is_exempt_from_streaming_cap(chat_sid
         'content': '',
         'thinking': '',
         'toolRounds': [
+            _round(1, 'retained-big-round-a', 'small a'),
             {
-                'roundNum': 1, 'llmRound': 0,
+                'roundNum': 2, 'llmRound': 0,
                 'toolCallId': 'superseded-round',
                 'toolName': 'search_tools',
                 'toolArgs': {'query': 'discarded'},
@@ -1808,7 +1978,6 @@ def test_checkpoint_resume_bootstrap_event_is_exempt_from_streaming_cap(chat_sid
                              'fetchedChars': 0}],
                 SUPERSEDED_PROVIDER_ATTEMPT_FIELD: True,
             },
-            _round(2, 'retained-big-round-a', 'small a'),
             _round(3, 'retained-big-round-b', 'small b'),
         ],
         'model': 'gpt-4o',
@@ -1849,8 +2018,8 @@ def test_checkpoint_resume_bootstrap_event_is_exempt_from_streaming_cap(chat_sid
     )
     grown = get_turn(conversation_id, turn_id, user_id=1)
 
-    # The retained lane differs from the stored one (superseded round
-    # filtered), so the bootstrap patch inlines the full >4 MiB lane.
+    # The superseded round sits between retained rounds, so the bootstrap
+    # patch re-sends the later >4 MiB retained round in place of it.
     resumed = create_attempt(
         conversation_id,
         turn_id,
@@ -2028,34 +2197,23 @@ def test_provider_stream_failure_never_settles_as_completed(finish_reason):
     assert settlement['cause'] == 'provider_stream_error'
     assert settlement['providerFinishReason'] == finish_reason
     assert settlement['error']['kind'] == finish_reason
-    assert any(option['operation'] == 'continue'
-               for option in settlement['resumeOptions'])
+    # The preserved prose is a rewindable tail, never a prefill continuation.
+    assert [option['operation'] for option in settlement['resumeOptions']] == [
+        'checkpoint_resume', 'regenerate']
 
 
-def test_unconfirmed_usage_offers_no_resume_that_the_fence_would_refuse():
-    """A settled unknown-usage Turn must not advertise a dead continuation.
-
-    ``continue``/``checkpoint_resume`` restore the settled projection's
-    ``usageComplete=false``, so the restarted account refuses its very first
-    model dispatch with the same error. Only ``regenerate`` is left; the
-    confirmed usage-recovery command is the supported way to continue and is
-    not a Turn resume operation.
-    """
+def _failed_settlement(kind, source):
     from lib.error_envelope import make_envelope
     from lib.turn_lifecycle import _settlement
 
-    error = make_envelope(
-        'execution_token_usage_unknown',
-        detail='execution_token_usage_unknown',
-        source='execution-budget', retryable=False,
-    )
+    error = make_envelope(kind, detail=kind, source=source, retryable=False)
     task = {
         'status': 'done', 'finishReason': 'error', 'model': 'gpt-4o',
         'config': {'model': 'gpt-4o'}, 'error': error,
         'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15},
         '_executionActualsComplete': False,
     }
-    status, settlement = _settlement(
+    return _settlement(
         task, {'type': 'done', 'finishReason': 'error', 'error': error},
         {'content': 'saved tail', 'toolRounds': [
             {'toolName': 'read_files', 'toolCallId': 'r1', 'status': 'done',
@@ -2063,8 +2221,38 @@ def test_unconfirmed_usage_offers_no_resume_that_the_fence_would_refuse():
         ]},
     )
 
+
+def test_a_conversation_account_refusal_resumes_like_any_failure():
+    """Unknown usage no longer fences any conversation turn's account.
+
+    Chat, Goal Mode and Flow resumes all dispatch with
+    ``_unknownUsagePolicy: continue``, so a refusal recorded by that account
+    (``source: execution-budget``, e.g. under the retired Goal Mode fence)
+    cannot recur: the saved progress is offered exactly the resumes of any
+    other failed turn instead of only ``regenerate``.
+    """
+    status, settlement = _failed_settlement(
+        'execution_token_usage_unknown', 'execution-budget')
+    _, ordinary = _failed_settlement('generic', 'execution-budget')
+
     assert status == 'failed'
     assert settlement['error']['kind'] == 'execution_token_usage_unknown'
+    offered = [option['operation'] for option in settlement['resumeOptions']]
+    assert offered == [option['operation'] for option in ordinary['resumeOptions']]
+    assert offered[0] == 'checkpoint_resume'
+
+
+@pytest.mark.parametrize('source', ['native', 'swarm-recovery'])
+def test_a_policy_independent_refusal_offers_no_resume_it_would_refuse(source):
+    """The native model account and delegated swarm recovery refuse unknown
+    usage regardless of the conversation policy, so ``continue`` or
+    ``checkpoint_resume`` would die on the first call again. Only
+    ``regenerate`` is left; the confirmed usage-recovery command is the
+    supported way to continue and is not a Turn resume operation.
+    """
+    status, settlement = _failed_settlement('execution_token_usage_unknown', source)
+
+    assert status == 'failed'
     assert [option['operation'] for option in settlement['resumeOptions']] == [
         'regenerate']
 

@@ -34,11 +34,12 @@ CREATE TABLE storage_search_chunks(user_id INTEGER,conversation_id TEXT,turn_id 
     connection.close()
 
 
-def seed(db, cid, text, *, updated=1, owner=1, title='', role='user', field='content', turn_id=None):
+def seed(db, cid, text, *, updated=1, owner=1, title='', role='user', field='content', turn_id=None,
+         ordinal=0):
     connection, fts = db
     connection.execute('INSERT OR IGNORE INTO storage_search_conversations(id,user_id,title,updated_at_ms) VALUES(?,?,?,?)', (cid, owner, title, updated))
     cursor = connection.execute('INSERT INTO storage_search_chunks(user_id,conversation_id,turn_id,chunk_index,ordinal,role,match_field,search_text,folded_text) VALUES(?,?,?,?,?,?,?,?,?)',
-                               (owner, cid, turn_id or cid, 0, 0, role, field, text, text.lower()))
+                               (owner, cid, turn_id or cid, 0, ordinal, role, field, text, text.lower()))
     if fts:
         connection.execute('INSERT INTO storage_search_chunks_fts(rowid,folded_text) VALUES(?,?)', (cursor.lastrowid, text.lower()))
 
@@ -120,6 +121,27 @@ def test_literal_unicode_and_user_original_snippet(search_db):
     assert all_items(search_db, 'testXXbang')[0] == []
 
 
+def test_body_hits_address_their_live_turn_and_never_archived_text(search_db):
+    seed(search_db, 'live', 'intro', updated=4, turn_id='turn-a', ordinal=2)
+    seed(search_db, 'live', 'the needle reply', updated=4, turn_id='turn-b', ordinal=7)
+    seed(search_db, 'archived', 'an archived needle', updated=3,
+         turn_id='history:["archive",3]', ordinal=3)
+    seed(search_db, 'titled', 'needle', updated=2, title='needle title')
+    seed(search_db, 'needle-id', 'other', updated=1)
+    items, _ = all_items(search_db, 'needle')
+    assert [(item['id'], item['match_field'], item['turn_id'], item['ordinal'])
+            for item in items] == [
+        ('live', 'content', 'turn-b', 7), ('archived', 'content', None, None),
+        ('titled', 'title', None, None), ('needle-id', 'id', None, None)]
+    assert 'needle' in items[0]['snippet'] and 'needle' in items[1]['snippet']
+    # A cross-turn all-words hit names the Turn holding the first word.
+    seed(search_db, 'cross', 'alpha', updated=9, turn_id='first', ordinal=1)
+    seed(search_db, 'cross', 'gamma', updated=9, turn_id='second', ordinal=2)
+    cross, _ = all_items(search_db, 'alpha gamma')
+    assert [(item['id'], item['turn_id'], item['ordinal']) for item in cross] == [
+        ('cross', 'first', 1)]
+
+
 def test_title_only_empty_conversation_and_short_content_query(search_db):
     seed(search_db, 'title-hit', '', title='ÉTÉ Research', updated=3)
     seed(search_db, 'text-hit', '研究', updated=2)
@@ -169,7 +191,8 @@ def test_http_service_batches_metadata_and_drops_stale_foreign_ids():
         def query(self, operation, payload):
             calls.append((operation, payload))
             if operation == 'conversation.search':
-                return {'items': [{'id': 'unloaded', 'snippet': 'typed needle', 'role': 'user', 'match_field': 'content'}, {'id': 'foreign', 'snippet': 'secret'}],
+                return {'items': [{'id': 'unloaded', 'snippet': 'typed needle', 'role': 'user', 'match_field': 'content',
+                                   'turn_id': 'turn-9', 'ordinal': 17}, {'id': 'foreign', 'snippet': 'secret'}],
                         'next_cursor': 'next', 'coverage': 'partial', 'coverage_reasons': ['oversize_source']}
             assert payload['user_id'] == 42
             assert payload['include_messages'] is False and payload['settings_keys'] == []
@@ -179,7 +202,33 @@ def test_http_service_batches_metadata_and_drops_stale_foreign_ids():
     assert [item['id'] for item in result['items']] == ['unloaded']
     assert result['items'][0]['conversation']['title'] == 'Old chat'
     assert result['items'][0]['matchRole'] == 'user'
+    assert (result['items'][0]['matchTurnId'], result['items'][0]['matchTurnOrdinal']) == ('turn-9', 17)
     assert result['nextCursor'] == 'next' and result['coverage'] == 'partial'
+
+
+@pytest.mark.parametrize('hit, expected', [
+    ({'match_field': 'title', 'turn_id': None, 'ordinal': None}, (None, None)),
+    ({'match_field': 'content'}, (None, None)),
+])
+def test_http_service_hits_without_a_live_turn_name_none(hit, expected):
+    class Client:
+        def query(self, operation, payload):
+            if operation == 'conversation.search':
+                return {'items': [{'id': 'c', 'snippet': '', 'role': None, **hit}],
+                        'next_cursor': None, 'coverage': 'ready', 'coverage_reasons': []}
+            return [{'metadata': {'id': 'c', 'title': 't'}}]
+    item = search_conversation_page(Client(), user_id=1, query='needle')['items'][0]
+    assert (item['matchTurnId'], item['matchTurnOrdinal']) == expected
+
+
+def test_http_service_rejects_a_turn_without_its_ordinal():
+    class Client:
+        def query(self, operation, payload):
+            return {'items': [{'id': 'c', 'turn_id': 'turn-1', 'ordinal': None}],
+                    'next_cursor': None} if operation == 'conversation.search' else [
+                        {'metadata': {'id': 'c', 'title': 't'}}]
+    with pytest.raises(StorageError, match='turn'):
+        search_conversation_page(Client(), user_id=1, query='needle')
 
 
 def test_service_empty_queries_do_not_fetch_storage():

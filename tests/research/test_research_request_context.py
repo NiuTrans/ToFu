@@ -2,14 +2,26 @@
 from copy import deepcopy
 import pytest
 
+from lib.paper.agent_usage import PaperAgentUsageMeter
 from lib.research.request_context import RequestContexts, NAMESPACE, PART_NAMESPACE
 from lib.research.model_accounting import ModelCalls
 from lib.storage.errors import StorageError
-from tests.research.test_research_model_accounting import repository, snapshot
+from tests.research.test_research_model_accounting import repository
 from tests.research.test_research_action_observations import MemoryRecords
 from tests.research.test_research_workspace_evidence_guard import storage as storage
 
 pytestmark = pytest.mark.unit
+
+DECLARED_BUDGET = {'token_budget': 320000, 'dispatch_budget': 10}
+
+
+def snapshot(ordinal=1):
+    # Admission compares the meter envelope with the declared action budget.
+    meter = PaperAgentUsageMeter('research-action', **DECLARED_BUDGET)
+    for _index in range(ordinal):
+        meter.begin_dispatch()
+        meter.observe_agent_round(None, {})
+    return meter.snapshot()
 
 
 def contexts(client):
@@ -83,7 +95,7 @@ def defined_material():
     return {'messages': [], 'tools': [], 'max_output':8000, 'action_definition':{
         'direction':'Frozen basis','lang':'en','action':'experiment','expected_revision':7,
         'confirm_external_writes':True,'model_override':'controlled',
-        'logical_budget':{'token_budget':320000,'dispatch_budget':10},'tool_epoch_hash':'declared-epoch'}}
+        'logical_budget':deepcopy(DECLARED_BUDGET),'tool_epoch_hash':'declared-epoch'}}
 
 
 @pytest.mark.parametrize('field,value', [('action','analyze'),('confirm_external_writes',False),

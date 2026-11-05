@@ -89,12 +89,12 @@
             vfs.crash().unwrap();
             let before = [predecessor, successor].map(|path| {
                 let mut file = vfs.open(&path, crate::vfs::OpenRequest { read: true, ..Default::default() }).unwrap();
-                (path, file.read_all(ACTIVE_LOG_MAX_BYTES as usize).unwrap())
+                (path, file.read_all(ACTIVE_LOG_CHECKPOINT_BYTES as usize).unwrap())
             });
             assert!(Engine::open_with_vfs(Path::new("/data"), vfs.clone()).is_err());
             for (path, bytes) in before {
                 let mut file = vfs.open(&path, crate::vfs::OpenRequest { read: true, ..Default::default() }).unwrap();
-                assert_eq!(file.read_all(ACTIVE_LOG_MAX_BYTES as usize).unwrap(), bytes);
+                assert_eq!(file.read_all(ACTIVE_LOG_CHECKPOINT_BYTES as usize).unwrap(), bytes);
             }
         }
     }
@@ -185,6 +185,7 @@
         armed: std::sync::atomic::AtomicBool,
         released: Mutex<bool>,
         wake: std::sync::Condvar,
+        maximum_pause: Option<std::time::Duration>,
     }
 
     struct GenerationPausedVfs(Arc<GenerationIoGate>, bool);
@@ -204,10 +205,18 @@
         fn sync_all(&mut self) -> io::Result<()> {
             if self.gate.armed.swap(false, std::sync::atomic::Ordering::AcqRel) {
                 self.gate.entered.send(()).map_err(|_| io::Error::other("test gate receiver closed"))?;
-                let (released, _) = self.gate.wake.wait_timeout_while(
-                    self.gate.released.lock().unwrap(), std::time::Duration::from_secs(10), |released| !*released,
-                ).unwrap();
-                if !*released { return Err(io::Error::new(io::ErrorKind::TimedOut, "generation IO gate timed out")); }
+                let released = self.gate.released.lock().unwrap();
+                if let Some(maximum_pause) = self.gate.maximum_pause {
+                    let (released, _) = self.gate.wake.wait_timeout_while(
+                        released, maximum_pause, |released| !*released,
+                    ).unwrap();
+                    if !*released { return Err(io::Error::new(io::ErrorKind::TimedOut, "generation IO gate timed out")); }
+                } else {
+                    // Only a disposable process owned by a parent kill/reap
+                    // guard may hold this gate until process exit. A slow
+                    // writer must not turn a deliberate pause into an I/O fault.
+                    drop(self.gate.wake.wait_while(released, |released| !*released).unwrap());
+                }
             }
             self.inner.sync_all()
         }
@@ -241,7 +250,8 @@
         let directory = tempfile::tempdir().unwrap();
         let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
         let gate = Arc::new(GenerationIoGate { entered: entered_sender,
-            armed: std::sync::atomic::AtomicBool::new(false), released: Mutex::new(false), wake: std::sync::Condvar::new() });
+            armed: std::sync::atomic::AtomicBool::new(false), released: Mutex::new(false), wake: std::sync::Condvar::new(),
+            maximum_pause: Some(std::time::Duration::from_secs(10)) });
         let vfs = Arc::new(GenerationPausedVfs(Arc::clone(&gate), false));
         let engine = Arc::new(Mutex::new(Engine::initialize_with_vfs(directory.path(), vfs.clone()).unwrap()));
         let snapshot = {
@@ -400,7 +410,8 @@
         let directory = PathBuf::from(path);
         let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
         let gate = Arc::new(GenerationIoGate { entered: entered_sender,
-            armed: std::sync::atomic::AtomicBool::new(false), released: Mutex::new(false), wake: std::sync::Condvar::new() });
+            armed: std::sync::atomic::AtomicBool::new(false), released: Mutex::new(false), wake: std::sync::Condvar::new(),
+            maximum_pause: Some(std::time::Duration::from_secs(10)) });
         let vfs = Arc::new(GenerationPausedVfs(Arc::clone(&gate), false));
         let mut engine = Engine::initialize_with_vfs(&directory, vfs).unwrap();
         engine.attach_rotation_driver();

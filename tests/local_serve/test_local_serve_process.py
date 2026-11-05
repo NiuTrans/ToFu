@@ -9,7 +9,9 @@ the api layer's job (covered separately); early exit with an OOM signature
 """
 
 import os
+import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -200,6 +202,31 @@ class TestStopAndStatus:
         monkeypatch.setattr(proc, '_pid_alive', lambda pid: False)
         r = proc.status_instance('ls_vllm_test', http_get=_ready_http)
         assert r['status'] == 'stopped' and r['pid_alive'] is False
+
+    @pytest.mark.skipif(not sys.platform.startswith('linux'),
+                        reason='Linux /proc process state')
+    def test_exited_unreaped_engine_is_stopped_not_alive(self, sandbox):
+        """Start drops its Popen once the engine is ready, so a finished
+        engine stays a zombie until some later Popen reaps it."""
+        engine = subprocess.Popen([sys.executable, '-c', 'pass'],
+                                  start_new_session=True)
+        try:
+            deadline = time.monotonic() + 10
+            while open(f'/proc/{engine.pid}/stat').read().rsplit(')', 1)[1].split()[0] != 'Z':
+                assert time.monotonic() < deadline, 'engine never exited'
+                time.sleep(0.01)
+            _record()
+            store.update_fields('ls_vllm_test', status='running', pid=engine.pid)
+            r = proc.status_instance('ls_vllm_test', http_get=_ready_http)
+            assert r['pid_alive'] is False and r['status'] == 'stopped'
+
+            store.update_fields('ls_vllm_test', status='running', pid=engine.pid)
+            sleeps = []
+            stopped = proc.stop_instance('ls_vllm_test', sleep=sleeps.append)
+            assert stopped['stopped'] is False and sleeps == []
+            assert stopped['status'] == 'stopped'
+        finally:
+            engine.wait(timeout=5)
 
     def test_serving_probe(self, sandbox, monkeypatch):
         _record()

@@ -40,6 +40,7 @@ def owned_sync_command(function):
             except BaseException as error:
                 # Deliver control exceptions to the request owner instead of
                 # allowing a Task callback to stop the serving loop first.
+                logger.debug('owned sync command failure handled: %s', type(error).__name__)
                 return False, error
 
         operation = invoke()

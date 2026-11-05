@@ -153,7 +153,7 @@ class TestLeanGate(unittest.TestCase):
         # whose function name is 'run_command' (CODE_EXEC_TOOL is a copy of
         # PROJECT_TOOL_RUN_COMMAND). The project-ONLY tools stay absent.
         self.assertIn('run_command', names)
-        self.assertNotIn('grep_search', names)
+        self.assertNotIn('search_files', names)
         self.assertNotIn('write_file', names)
 
     def test_legacy_air_gets_full_tool_set(self):
@@ -171,7 +171,7 @@ class TestLeanGate(unittest.TestCase):
         names = _names(tl)
         # Project family present; run_command supersedes code_exec.
         self.assertIn('run_command', names)
-        self.assertIn('grep_search', names)
+        self.assertIn('search_files', names)
         self.assertNotIn('code_exec', names)
         # Everyday capability tools still on in studio.
         self.assertIn('create_memory', names)

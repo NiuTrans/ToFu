@@ -1,6 +1,6 @@
 """Installer artifact admission before environment creation.
 
-Entrypoints: prepare_search_wheel(root, python) and CLI. Dependencies: stdlib;
+Entrypoints: prepare_search_wheel(root, python), build_search_wheel and CLI. Dependencies: stdlib;
 wheel build uses pip in the supplied bootstrap interpreter, never the live env.
 Content-addressed caches live beside the checkout and survive HOME changes.
 """
@@ -98,14 +98,7 @@ def prepare_search_wheel(root: Path, python: str) -> Path:
         if suitable:
             candidate = suitable[-1]
         elif (member / 'pyproject.toml').is_file():
-            uv = shutil.which('uv')
-            command = ([uv, 'build', str(member), '--wheel', '--out-dir', str(staging)] if uv else
-                       [python, '-m', 'pip', 'wheel', '--no-deps', '--wheel-dir', str(staging), str(member)])
-            subprocess.run(command, check=True, timeout=300, stdout=sys.stderr)
-            candidates = list(staging.glob('tofu_search-*.whl'))
-            if len(candidates) != 1:
-                raise ValueError('Search build did not produce exactly one wheel')
-            candidate = candidates[0]
+            candidate = build_search_wheel(member, staging, python)
         else:
             raise ValueError(f'RELEASE CONSISTENCY ERROR: requires tofu-search>={floor}; '
                              'no compatible bundled wheel or retained source. '
@@ -125,6 +118,22 @@ def prepare_search_wheel(root: Path, python: str) -> Path:
         pending.write_text(json.dumps(record, indent=2) + '\n')
         pending.replace(receipt)
     return wheel
+
+
+def build_search_wheel(member: Path, out_dir: Path, python: str) -> Path:
+    """Build exactly one tofu-search wheel from ``member`` into ``out_dir``.
+
+    Shared by installer admission and export bundling so both produce the
+    artifact with the same builder (uv when present, else pip in ``python``).
+    """
+    uv = shutil.which('uv')
+    command = ([uv, 'build', str(member), '--wheel', '--out-dir', str(out_dir)] if uv else
+               [python, '-m', 'pip', 'wheel', '--no-deps', '--wheel-dir', str(out_dir), str(member)])
+    subprocess.run(command, check=True, timeout=300, stdout=sys.stderr)
+    candidates = list(out_dir.glob('tofu_search-*.whl'))
+    if len(candidates) != 1:
+        raise ValueError('Search build did not produce exactly one wheel')
+    return candidates[0]
 
 
 def main() -> None:

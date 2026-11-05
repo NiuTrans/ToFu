@@ -250,6 +250,42 @@ def test_readonly_git_does_not_hide_another_segment_write():
     assert _git_guard_classify('git status && echo overwritten > file') is None
 
 
+# ── Reading plumbing: catalogued by form, never by verb ─────────────
+
+@pytest.mark.parametrize('command', [
+    'git symbolic-ref --short HEAD',
+    'git symbolic-ref -q --short HEAD',
+    'git symbolic-ref --short --quiet refs/remotes/origin/HEAD',
+    'git cherry origin/main',
+    'git cherry -v --abbrev=7 origin/main HEAD',
+    'git hash-object README.md',
+    'git hash-object --no-filters -t blob -- README.md',
+    'git hash-object --stdin --path=README.md',
+])
+def test_reading_plumbing_is_readonly(command):
+    assert _git_guard_classify(command) == 'readonly'
+
+
+@pytest.mark.parametrize('command, expected', [
+    ('git symbolic-ref HEAD refs/heads/other', 'tree_destroying'),
+    ('git symbolic-ref -m reason HEAD refs/heads/other', 'tree_destroying'),
+    ('git symbolic-ref -m reason HEAD', 'tree_destroying'),
+    ('git symbolic-ref -d HEAD', 'tree_destroying'),
+    ('git symbolic-ref --delete -q HEAD', 'tree_destroying'),
+    ('git symbolic-ref -qd HEAD', 'tree_destroying'),
+    ('git symbolic-ref --del HEAD', 'tree_destroying'),   # parse-options abbreviation
+    ('git symbolic-ref --short', 'tree_destroying'),
+    ('git symbolic-ref -- HEAD', 'tree_destroying'),
+    ('git hash-object -w README.md', None),
+    ('git hash-object --stdin -w', None),
+    ('git hash-object -wt blob README.md', None),
+    ('git hash-object --literally README.md', None),
+    ('git hash-object -t', None),
+])
+def test_writing_plumbing_forms_are_never_readonly(command, expected):
+    assert _git_guard_classify(command) == expected
+
+
 @pytest.mark.parametrize('arguments', [
     '--check', '--stat', '--numstat', '--summary',
     '--check --cached', '--check --index', '--stat --summary',
@@ -404,6 +440,16 @@ def test_unknown_apply_options_keep_risk_without_granting_receipt(command):
     ('add -B existing .worktrees/new HEAD', None),
     ('add --force -b new .worktrees/new HEAD', None),
     ('add -b new .worktrees/new HEAD --force', None),
+    # Git's option parser permutes: the path may precede -b/--detach.
+    ('add .worktrees/new -b feature/new HEAD', 'safe_write'),
+    ('add .worktrees/new HEAD -b feature/new', 'safe_write'),
+    ('add .worktrees/new --detach HEAD', 'safe_write'),
+    ('add .worktrees/new -B existing HEAD', None),
+    ('add .worktrees/new -b', None),
+    ('add .worktrees/new HEAD extra -b new', None),
+    ('add -b one -b two .worktrees/new', None),
+    ('add -b new --detach .worktrees/new', None),
+    ('add -b new -- .worktrees/new', None),
     # remove/move on a literal absolute path: Git itself refuses the main
     # worktree and a dirty/locked target, so this is tree_destroying (solo
     # admissible) rather than unknown. Relative/~ operands stay unknown — the
@@ -469,7 +515,7 @@ def test_ordinary_integration_is_not_discard_policy(command):
     assert _git_guard_classify(command, require_known_segments=True) == 'safe_write'
 
 
-@pytest.mark.parametrize('command', ['git merge --abort', 'git merge --autostash feature',
+@pytest.mark.parametrize('command', ['git merge --autostash feature',
                                      'git cherry-pick --abort', 'git revert --abort',
                                      'git cherry-pick -X ours HEAD', 'git merge --strategy=ours feature'])
 def test_forced_or_recovery_integration_keeps_discard_policy(command):
@@ -694,3 +740,47 @@ def test_new_unknown_forms_preserve_chain_risk_and_strict_receipt(prefix):
     for command in (prefix + ' && git merge --abort', 'git merge --abort && ' + prefix):
         assert _git_guard_classify(command) == 'tree_destroying'
         assert _git_guard_classify(command, require_known_segments=True) is None
+
+
+@pytest.mark.parametrize('command', [
+    'git reflog -n 6 --date=iso HEAD',   # `git reflog` defaults to `show`
+    'git reflog --oneline -3',
+    'git reflog main',
+    'git reflog',
+    'git reflog show -3',
+    'git reflog exists HEAD',
+])
+def test_reflog_reads_are_not_reference_mutations(command):
+    """Only `reflog expire|delete|drop` rewrite reflogs.
+
+    Reported 2026-10-23: `git reflog -n 6 --date=iso HEAD` was refused as a
+    reference mutation because any first argument other than a literal
+    `show`/`exists` counted as a mutating verb.
+    """
+    assert _git_guard_classify(command) == 'readonly'
+
+
+@pytest.mark.parametrize('command', [
+    'git reflog delete HEAD@{1}',
+    'git reflog drop main',   # a rewrite on newer git, a ref of `show` on 2.34
+])
+def test_reflog_rewrites_stay_destructive(command):
+    assert _git_guard_classify(command) == 'tree_destroying'
+
+
+def test_any_other_reflog_word_is_a_ref_of_the_default_show():
+    # git dispatches unknown words to `show` as revisions (`git reflog list` on
+    # git 2.34 fails with "unknown revision"), so they never rewrite reflogs.
+    assert _git_guard_classify('git reflog list') == 'readonly'
+    assert _git_guard_classify('git reflog feature/x') == 'readonly'
+
+
+@pytest.mark.parametrize('command', [
+    'if cd wt; then git reset --hard; fi',
+    '{ git reset --hard; }',
+    '! git reset --hard',
+    'while true; do git clean -fdx; break; done',
+])
+def test_reserved_word_prefix_does_not_hide_a_destructive_git_segment(command):
+    """`then git reset --hard` is a reset; the reserved word only introduces it."""
+    assert _git_guard_classify(command) == 'tree_destroying'

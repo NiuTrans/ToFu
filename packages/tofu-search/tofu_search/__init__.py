@@ -68,8 +68,11 @@ from tofu_search.providers import (
     register_site_knowledge_provider,
     register_site_search_provider,
 )
-from tofu_search.search.format import format_search_for_tool_response as format_results
-from tofu_search.search.orchestrator import perform_web_search
+
+# Through the package: a thread already initializing tofu_search.search is
+# waited for as a whole; racing into its children could deadlock with it.
+from tofu_search.search import format_search_for_tool_response as format_results
+from tofu_search.search import perform_web_search
 from tofu_search.search.vertical import (
     describe_domains,
     detect_vertical_intent,
@@ -93,6 +96,9 @@ __all__ = [
     'configure',
     'get_config',
     'SearchConfig',
+    'LocalReranker',
+    'LocalRerankError',
+    'LocalRerankCleanupError',
     'perform_web_search',
     'format_results',
     'fetch_urls',
@@ -132,6 +138,13 @@ __all__ = [
     'SiteReader',
     'register_reader',
 ]
+
+
+def __getattr__(name):
+    if name in ('LocalReranker', 'LocalRerankError', 'LocalRerankCleanupError'):
+        from tofu_search import local_rerank
+        return getattr(local_rerank, name)
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 
 
 def search(query: str, *, max_results: int | None = None,

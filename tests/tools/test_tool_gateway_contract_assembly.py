@@ -98,8 +98,11 @@ def test_execute_contract_remains_available_when_search_is_off():
 
     task = {'_toolContractDocumentsByName': {}}
     attach_gateway_contract_documents(task, 'off')
-    assert set(task['_tool_gateway_names']) == {'execute_tools'}
-    assert set(task['_toolContractDocumentsByName']) == {'execute_tools'}
+    assert set(task['_tool_gateway_names']) == {'execute_tools', 'execute_program'}
+    assert set(task['_toolContractDocumentsByName']) == {'execute_tools', 'execute_program'}
+    off = {'config': {'tools': {'programmaticCalling': 'off'}}, '_toolContractDocumentsByName': {}}
+    attach_gateway_contract_documents(off, 'off')
+    assert set(off['_tool_gateway_names']) == {'execute_tools'}
 
 
 @pytest.mark.parametrize('programmatic', ['off', 'on', 'auto'])
@@ -136,7 +139,7 @@ def test_explicit_tool_assembly_keeps_contracts_and_normalized_gateway_policy(
     assert enabled
     assert 'deliver_probe' in {tool['function']['name'] for tool in tools}
     assert {tool['function']['name'] for tool in task['_executable_tool_catalog']} == {'deliver_probe'}
-    assert ('execute_program' in task['_tool_gateway_names']) == (programmatic == 'on')
+    assert ('execute_program' in task['_tool_gateway_names']) == (programmatic != 'off')
     documents = task['_toolContractDocumentsByName']
     assert validate_tool_arguments_from_documents(documents, 'deliver_probe',
         {'marker': 'HARNESS_READY'}) == {'marker': 'HARNESS_READY'}

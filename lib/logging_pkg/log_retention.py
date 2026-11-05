@@ -16,6 +16,14 @@ files are left to their owning handlers.  Append-only external streams use a
 bounded copy-truncate rotation because their writers retain an open file
 descriptor.  Unregistered files modified in the last day are reported but
 never removed.
+
+Evidence
+--------
+Every deletion leaves a ``logging.retention_removed`` record naming the file
+and its reason (:func:`log_removal`): byte-budget evictions, which remove
+evidence before its declared retention age, at WARNING; age/count expiry at
+INFO.  The aggregate budget evicts rotations closed since the previous local
+midnight only after every older candidate is gone.
 """
 
 from __future__ import annotations
@@ -45,6 +53,7 @@ from lib.logging_pkg.log_policy import (
     stream_max_bytes,
     total_log_budget_bytes,
 )
+from runtime_guards import pid_is_alive
 
 
 SCHEMA_VERSION = 1
@@ -58,6 +67,11 @@ _COPYTRUNCATE_STREAMS = frozenset({
 _PROCESS_LOCK = threading.Lock()
 
 _WINDOWS = os.name == 'nt'
+
+_LOGGER = logging.getLogger(__name__)
+_BUDGET_EVICTION_REASONS = frozenset({
+    'family_budget', 'global_budget', 'fault_family_budget',
+})
 
 
 def _is_link(info: os.stat_result) -> bool:
@@ -249,7 +263,31 @@ def _record_error(result: dict, operation: str, path: Path, exc: BaseException) 
     })
 
 
-def _remove(path: Path, result: dict, *, reason: str, dry_run: bool) -> bool:
+def log_removal(path: str | os.PathLike[str], *, size: int, modified: float,
+                reason: str, **evidence: int) -> None:
+    """Record one deleted log file; the maintenance report alone is overwritten."""
+    modified_at = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(modified))
+    detail = ''.join(' %s=%s' % item for item in sorted(evidence.items()))
+    level = (logging.WARNING if reason in _BUDGET_EVICTION_REASONS
+             else logging.INFO)
+    _LOGGER.log(
+        level,
+        'Log retention removed %s (%d bytes, last modified %s): reason=%s%s',
+        os.fspath(path), size, modified_at, reason, detail,
+        extra={
+            'tofu_event_name': 'logging.retention_removed',
+            # Each eviction names a distinct file; coalescing would hide it.
+            'tofu_no_coalesce': True,
+            'tofu_event_fields': {
+                'path': os.fspath(path), 'bytes': size,
+                'modified_at': modified_at, 'reason': reason, **evidence,
+            },
+        },
+    )
+
+
+def _remove(path: Path, result: dict, *, reason: str, dry_run: bool,
+            **evidence: int) -> bool:
     try:
         info = path.lstat()
         size = info.st_size
@@ -261,10 +299,13 @@ def _remove(path: Path, result: dict, *, reason: str, dry_run: bool) -> bool:
             'path': str(path), 'bytes': size, 'reason': reason,
             'dry_run': bool(dry_run),
         })
-        return True
     except OSError as exc:
         _record_error(result, 'remove', path, exc)
         return False
+    if not dry_run:
+        log_removal(path, size=size, modified=info.st_mtime, reason=reason,
+                    **evidence)
+    return True
 
 
 def _remove_inventory_row(row: tuple, result: dict, *, reason: str,
@@ -688,20 +729,6 @@ def _prune_family(directory: Path, policy: LogStreamPolicy, result: dict,
 _FAULT_PROCESS_RE = re.compile(r'^tofu_faulthandler_(\d+)\.log$')
 
 
-def _process_is_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
 def _fault_process_pid(path: Path) -> int | None:
     match = _FAULT_PROCESS_RE.fullmatch(path.name)
     return int(match.group(1)) if match else None
@@ -723,7 +750,7 @@ def _prune_process_fault_dumps(directory: Path, result: dict, *, now: float,
         if pid is None or info is None:
             continue
         row = (info.st_mtime, path.name, path, info.st_size)
-        (live_rows if _process_is_alive(pid) else dead_rows).append(row)
+        (live_rows if pid_is_alive(pid) else dead_rows).append(row)
 
     cutoff = now - policy.retention_days * 86_400
     retained_dead = []
@@ -784,7 +811,7 @@ def _classify_direct_file(path: Path) -> tuple[int, bool, str]:
     if fnmatch.fnmatch(path.name, 'tofu_faulthandler_*.log'):
         pid = _fault_process_pid(path)
         policy = STREAM_POLICIES['faulthandler_process']
-        return policy.priority, bool(pid and _process_is_alive(pid)), policy.name
+        return policy.priority, bool(pid and pid_is_alive(pid)), policy.name
     return 0, False, 'unmanaged'
 
 
@@ -809,6 +836,14 @@ def _directory_inventory(log_dir: Path, *, now: float) -> list[dict]:
     return rows
 
 
+def _previous_day_start(now: float) -> float:
+    """Return local midnight at the start of the day before ``now``."""
+    today = time.localtime(now)
+    # mktime normalizes day 0 to the previous month's last day and resolves DST.
+    return time.mktime((today.tm_year, today.tm_mon, today.tm_mday - 1,
+                        0, 0, 0, 0, 0, -1))
+
+
 def _enforce_global_budget(log_dir: Path, result: dict, *, now: float,
                            dry_run: bool) -> None:
     rows = _directory_inventory(log_dir, now=now)
@@ -830,18 +865,26 @@ def _enforce_global_budget(log_dir: Path, result: dict, *, now: float,
                     action.get('retained_bytes') or 0)
     total = sum(virtual_sizes[row['path']] for row in rows
                 if row['path'] not in planned_removed)
-    # Remove low-value families before high-value incident/error/audit evidence;
-    # within a priority, oldest evidence goes first.
+    # Rotations closed since the previous local midnight (the daily handlers'
+    # boundary) are the evidence an incident under diagnosis still needs, so
+    # they yield only after every older candidate. Strict priority alone let
+    # five-day-old error/audit rotations outlive yesterday's app.log. Within
+    # each tier, low-value families go before incident/error/audit evidence
+    # and the oldest evidence goes first.
+    recent_floor = _previous_day_start(now)
     candidates = sorted(
         (row for row in rows
          if not row['protected'] and row['path'] not in planned_removed),
-        key=lambda row: (row['priority'], row['mtime'], row['name']),
+        key=lambda row: (
+            row['family'] != 'unmanaged' and row['mtime'] >= recent_floor,
+            row['priority'], row['mtime'], row['name']),
     )
     for row in candidates:
         if total <= budget:
             break
         path = Path(row['path'])
-        if _remove(path, result, reason='global_budget', dry_run=dry_run):
+        if _remove(path, result, reason='global_budget', dry_run=dry_run,
+                   budget_bytes=budget, directory_bytes=total):
             total -= virtual_sizes[row['path']]
     result['budget_bytes'] = budget
     result['after_bytes_estimate'] = total
@@ -1143,6 +1186,6 @@ def stop_log_maintenance(timeout: float = 5.0) -> bool:
 __all__ = [
     'LogMaintenanceRuntime', 'SCHEMA_VERSION', 'append_bytes_locked',
     'copytruncate_if_oversize', 'ensure_private_log_directory',
-    'ensure_private_log_file', 'maintain_logs', 'register_external_log',
-    'start_log_maintenance', 'stop_log_maintenance',
+    'ensure_private_log_file', 'log_removal', 'maintain_logs',
+    'register_external_log', 'start_log_maintenance', 'stop_log_maintenance',
 ]

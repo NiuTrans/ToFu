@@ -159,7 +159,7 @@ class TestOpenBumpRemovedAtSource:
             body = f.read()
         assert '_bumpConvOnOpen' not in body
         assert 'touchUpdatedAt' not in body
-        assert 'ports.activate(id)' in body
+        assert 'ports.activate(id, matchTurn(item))' in body
 
     def test_settings_patch_body_has_no_updated_at_write(self):
         src = self._routes_src()

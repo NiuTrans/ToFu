@@ -84,6 +84,8 @@
     }
   },
   "$defs": {
+    "pagination_page_count": {"type": "integer", "minimum": 1, "default": 1},
+    "search_result_count": {"type": "integer", "minimum": 1, "default": 20},
     "operation": {
       "type": "object",
       "additionalProperties": false,
@@ -95,8 +97,22 @@
         },
         "description": {"type": "string", "minLength": 1, "maxLength": 512},
         "access": {"enum": ["read", "write"], "default": "read"},
-        "input_schema": {"type": "object"},
-        "output_schema": {"type": "object"},
+        "input_schema": {
+          "type": "object",
+          "properties": {"type": {"const": "object"}}
+        },
+        "output_schema": {
+          "type": "object",
+          "anyOf": [
+            {"maxProperties": 0},
+            {
+              "required": ["type"],
+              "properties": {
+                "type": {"enum": ["object", "array", "string", "number", "integer", "boolean"]}
+              }
+            }
+          ]
+        },
         "session": {"enum": ["ephemeral", "persistent"], "default": "ephemeral"},
         "window_mode": {
           "enum": ["background", "active", "current"],
@@ -155,11 +171,11 @@
           "maxLength": 4096,
           "description": "URL template; {param} quotes, {param|raw} interpolates verbatim, {param|floor:N} clamps an integer param to a lower bound N."
         },
-        "max_chars": {"type": "integer", "minimum": 1000, "maximum": 200000},
-        "max_chars_from_param": {"type": "string"},
-        "max_scrolls": {"type": "integer", "minimum": 0, "maximum": 8},
-        "max_pages": {"type": "integer", "minimum": 1, "maximum": 8},
-        "max_pages_from_param": {"type": "string"},
+        "max_chars": {"default": 80000, "type": "integer", "minimum": 1000, "maximum": 200000},
+        "max_chars_from_param": {"minLength": 1, "type": "string"},
+        "max_scrolls": {"default": 4, "type": "integer", "minimum": 0, "maximum": 8},
+        "max_pages": {"default": 1, "type": "integer", "minimum": 1, "maximum": 8},
+        "max_pages_from_param": {"minLength": 1, "type": "string"},
         "pagination": {"enum": ["auto", "none"], "default": "auto"}
       }
     },
@@ -224,7 +240,7 @@
         "do": {"const": "wait"},
         "selector": {"type": "string", "minLength": 1, "maxLength": 512},
         "condition": {"enum": ["visible"], "default": "visible"},
-        "timeout": {"type": "integer", "minimum": 1, "maximum": 60},
+        "timeout": {"type": "integer", "minimum": 1, "maximum": 60, "default": 10},
         "optional": {
           "type": "boolean",
           "default": false,
@@ -239,12 +255,13 @@
       "properties": {
         "do": {"const": "paginate"},
         "mode": {"const": "scroll"},
-        "amount": {"type": "integer", "minimum": 100, "maximum": 5000},
+        "amount": {"default": 1200, "type": "integer", "minimum": 100, "maximum": 5000},
         "times_from_param": {
           "type": "string",
-          "description": "Params field holding the desired page count; scrolls run param-1 extra times, clamped to max_times."
+          "minLength": 1,
+          "description": "Params field holding the desired page count; scrolls run param-1 extra times. Input admission refuses values exceeding max_times+1 before browser effects."
         },
-        "max_times": {"type": "integer", "minimum": 1, "maximum": 8}
+        "max_times": {"default": 1, "type": "integer", "minimum": 1, "maximum": 8}
       }
     },
     "step_extract": {
@@ -274,32 +291,36 @@
       "properties": {
         "do": {"const": "normalize"},
         "kind": {"enum": ["search_records", "detail", "json_payload"]},
-        "query_from_param": {"type": "string"},
-        "limit_from_param": {"type": "string"},
-        "limit_max": {"type": "integer", "minimum": 1, "maximum": 100},
+        "query_from_param": {"minLength": 1, "type": "string"},
+        "limit_from_param": {"minLength": 1, "type": "string"},
+        "limit_max": {"default": 100, "type": "integer", "minimum": 1, "maximum": 100},
         "source_name": {"type": "string", "maxLength": 128},
-        "max_chars_from_param": {"type": "string"},
+        "max_chars_from_param": {"minLength": 1, "type": "string"},
         "max_chars_default": {
+          "default": 60000,
           "type": "integer",
           "minimum": 1000,
           "maximum": 200000,
           "description": "Detail read budget when the params field is absent (legacy default: 60000)."
         },
         "data_field": {
+          "default": "data",
           "type": "string",
           "maxLength": 64,
-          "description": "json_payload: payload key holding the record list (default 'data')."
+          "description": "json_payload: required payload key holding the data (default 'data'). Successful input also requires ok=true, integer 2xx status and the observed document/request/response source receipt defined by lib/browser/content_contract.py:JSON_READ_SOURCE_SCHEMA."
         },
         "coverage_scope": {
+          "default": "requested_attributes",
           "type": "string",
           "maxLength": 128,
           "description": "json_payload: coverage scope label (default 'requested_attributes')."
         },
         "max_output_bytes": {
+          "default": 60000,
           "type": "integer",
           "minimum": 1024,
           "maximum": 262144,
-          "description": "json_payload: serialized result budget; exceeding it fails with output_budget_exhausted (default 60000)."
+          "description": "json_payload: UTF-8 encoded normalized JSON result budget; exceeding it fails with output_budget_exhausted (default 60000)."
         },
         "fields": {
           "type": "object",

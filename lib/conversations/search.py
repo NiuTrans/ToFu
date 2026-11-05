@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from lib.error_envelope import BadRequest
 from lib.storage.errors import StorageError
 
 MAX_QUERY_CHARACTERS = 512
@@ -20,14 +21,14 @@ def search_conversation_page(client: Any, *, user_id: int, query: str,
                              cursor: str | None = None) -> dict[str, Any]:
     if (not isinstance(query, str) or len(query) > MAX_QUERY_CHARACTERS
             or len(query.split()) > MAX_QUERY_TERMS):
-        raise ValueError('Search query is too long')
+        raise BadRequest('Search query is too long', field='q')
     if '\x00' in query:
-        raise ValueError('Search query contains NUL')
+        raise BadRequest('Search query contains NUL', field='q')
     normalized = query.strip().lower()
     if len(normalized) > MAX_QUERY_CHARACTERS:
-        raise ValueError('Search query is too long')
+        raise BadRequest('Search query is too long', field='q')
     if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 8192):
-        raise ValueError('Invalid search cursor')
+        raise BadRequest('Invalid search cursor', field='cursor')
     if len(normalized) < 2:
         return {'items': [], 'nextCursor': None, 'coverage': 'ready', 'coverageReasons': []}
     payload = {'user_id': user_id, 'query': normalized, 'limit': PAGE_RESULTS,
@@ -57,10 +58,18 @@ def search_conversation_page(client: Any, *, user_id: int, query: str,
         if row is None:
             continue
         field = hit.get('match_field') or 'content'
+        turn_id, ordinal = hit.get('turn_id'), hit.get('ordinal')
+        if turn_id is not None and (not isinstance(turn_id, str) or not turn_id
+                                    or isinstance(ordinal, bool) or not isinstance(ordinal, int)):
+            raise StorageError('database_protocol_error', 'Invalid conversation search hit turn')
         items.append({
             'id': str(row['id']), 'matchField': field,
             'matchSnippet': str(hit.get('snippet') or ''),
             'matchRole': hit.get('role'),
+            # The matching live main-lane Turn; null for title/id hits and
+            # retained archive text, which have no Turn to open.
+            'matchTurnId': turn_id,
+            'matchTurnOrdinal': ordinal if turn_id is not None else None,
             'conversation': {
                 'id': str(row['id']), 'title': str(row.get('title') or '')[:200],
                 'createdAt': int(row.get('created_at') or 0),

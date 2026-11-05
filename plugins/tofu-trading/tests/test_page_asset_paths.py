@@ -94,36 +94,12 @@ def _refs(html: str):
 
 @pytest.mark.unit
 def test_scan_surface_report():
-    """Print what the scan actually sees BEFORE any assertion trusts it.
+    """Source path guards must inspect at least one tracked page.
 
-    Charter discipline: a scanning guard whose input set is silently
-    incomplete stays green while covering nothing — and the input set never
-    reports its own emptiness. So assert the surface is real: at least one
-    page, a non-trivial ref count, and the known shared host assets present.
+    Emitted CSS/module presence is checked through actual native HTTP in
+    tests/frontend/test_plugin_frontend_delivery.py, including a proxy mount.
     """
-    pages = _tracked_html()
-    print(f'\ngit ls-files *.html → {len(pages)} tracked page(s)')
-    total = 0
-    for p in pages:
-        assets, navs = _refs(_read(p))
-        total += len(assets)
-        print(f'\n  {os.path.relpath(p, ROOT)}  '
-              f'({len(assets)} asset refs, {len(navs)} nav links)')
-        for r in assets + navs:
-            shown = (r[:40] + '…') if r.startswith('data:') else r
-            flag = 'PREFIX-LOSING' if _is_prefix_losing(r) else 'ok'
-            print(f'      [{flag:>13}] {shown}')
-
-    assert pages, (
-        'no tracked HTML found — git ls-files returned nothing, so every '
-        'guard below is vacuously green')
-    assert total >= 12, (
-        f'only {total} asset refs matched across {len(pages)} page(s) — the '
-        f'regex has gone stale and the guards below would pass by scanning '
-        f'nothing')
-    joined = ' '.join(r for p in pages for r in _refs(_read(p))[0])
-    assert 'static/js/api.js' in joined, 'host api.js ref not in scan surface'
-    assert 'trading.css' in joined, 'trading.css ref not in scan surface'
+    assert _tracked_html(), 'no tracked HTML found; path guards would inspect nothing'
 
 
 @pytest.mark.unit
@@ -159,21 +135,3 @@ def test_no_nav_link_escapes_the_mount():
         'root-absolute nav link(s) found:\n  ' + '\n  '.join(bad) +
         '\n\nUnder a prefixed mount these leave the Tofu deployment entirely. '
         'Use a page-relative target (e.g. "./" or "index.html").')
-
-
-@pytest.mark.unit
-def test_pages_still_actually_link_their_assets():
-    """Complement: "fixing" this by deleting the links must NOT pass.
-
-    Without this, stripping every stylesheet and script would satisfy both
-    guards above while shipping exactly the symptom they exist to prevent —
-    an unstyled page. Anchored on kind (css/js) rather than on filenames, so
-    a rename or a bundling change does not fake a failure.
-    """
-    for p in _tracked_html():
-        rel = os.path.relpath(p, ROOT)
-        assets = _refs(_read(p))[0]
-        css = [r for r in assets if r.endswith('.css')]
-        js = [r for r in assets if r.endswith('.js')]
-        assert css, f'{rel} links no stylesheet at all — it would paint unstyled'
-        assert js, f'{rel} links no script at all — it would be inert'

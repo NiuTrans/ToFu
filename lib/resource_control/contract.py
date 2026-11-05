@@ -47,7 +47,6 @@ class ResourcePort:
     maximum: int
     acquire: Callable | None = None
     automatic: bool = True
-    growth_cost_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -96,5 +95,4 @@ class ResourceState:
     previous_time: float = 0
     completion_rate: float = 0
     trial: tuple[int, float, int, float] | None = None
-    pressure_capacity: int | None = None
     sample: ResourceSample = field(default_factory=lambda: ResourceSample(0))

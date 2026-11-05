@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -211,8 +210,6 @@ def _assert_contract(first: str, second: str) -> None:
     assert proc.stdout.count('PASS') == 12
 
 
-@pytest.mark.skipif(not shutil.which('node') or not os.path.isfile(ESBUILD),
-                    reason='node + vite test bundler dev dependency required')
 def test_native_qa_task_owns_push_poll_contract(tmp_path):
     assert not os.path.exists(CLASSIC_PUSH)
     assert not os.path.exists(CLASSIC_QA)

@@ -24,9 +24,11 @@ client while interoperating across both protocol eras.
 """
 
 import json
+from importlib import import_module
 
-from tofu_search.search.vertical import base
 from tofu_search.search.vertical.base import _FETCH_FAILED, _FETCH_UNAUTHORIZED, logger
+
+base = import_module('tofu_search.search.vertical.base')  # leaf, not via package: base.py
 
 _ACCEPT = 'application/json, text/event-stream'
 _PROTOCOL_VERSION = '2026-07-28'

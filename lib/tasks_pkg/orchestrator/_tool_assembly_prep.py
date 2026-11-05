@@ -64,7 +64,8 @@ def attach_gateway_contract_documents(task, search_mode: str) -> bool:
                        and programmatic_tier(requested=mode) == 'program')
 
     from lib.tasks_pkg.coordinator_policy import coordinator_scope
-    if coordinator_scope(task):
+    from lib.tasks_pkg.delegate_mode import delegate_mode_active
+    if coordinator_scope(task) or delegate_mode_active(task):
         include_program = False
     schemas = gateway_tool_schemas(
         include_search=search_mode != 'off', include_execute=True,
@@ -92,6 +93,80 @@ def attach_gateway_contract_documents(task, search_mode: str) -> bool:
     return True
 
 
+def project_dispatch_file_tools(profile):
+    """Canonical file declarations narrowed to one files-mode dispatch profile."""
+    from lib.tools.registry import project_dispatch_tool_schemas
+    schemas = project_dispatch_tool_schemas(profile['tools'])
+    allowed_fields = {'read_files': {'path', 'start_line', 'end_line', 'reads'},
+                      'write_file': {'path', 'content', 'description', 'append'},
+                      'edit_file': {'description', 'edits'}}
+    for tool in schemas:
+        name = tool['function']['name']
+        parameters = tool['function']['parameters']
+        parameters['properties'] = {key: value for key, value in parameters['properties'].items()
+                                    if key in allowed_fields[name]}
+        parameters['additionalProperties'] = False
+        for key in ('oneOf', 'anyOf', 'allOf'):
+            parameters.pop(key, None)
+        parameters['required'] = (['path', 'content'] if name == 'write_file' else
+                                  ['edits'] if name == 'edit_file' else [])
+        if name == 'read_files':
+            # ARGUMENT_ALTERNATIVES admits at least one of path/reads at the
+            # contract; lib.project_dispatch.scope also refuses both here.
+            tool['function']['description'] += ' Pass exactly one of path or reads.'
+        tool['function']['description'] += (' Only explicit project-relative text files are authorized; '
+            'no aliases, converters, external roots or content refs. Read prefixes: '
+            + ', '.join(profile['readPaths']) + '; write prefixes: ' + ', '.join(profile['writePaths']))
+    return schemas
+
+
+def _child_tool_inputs(task):
+    """A child's frozen tools, documents and policy, told its own delivery.
+
+    A child invocation borrows its parent's conversation without owning a turn
+    there, so no command completion is pushed to it and it may create neither
+    a timer continuation nor a ``current`` schedule
+    (lib.tasks_pkg.conversation_delivery). Its tool surface must say so before
+    any later projection.
+    """
+    from lib.tasks_pkg.conversation_delivery import conversation_delivery_available
+    tools = list(task['_invocationTools'])
+    documents = task.get('_invocationToolContracts')
+    policy = task.get('_invocationConversationToolPolicy')
+    if conversation_delivery_available(task):
+        return tools, documents, policy
+    from lib.scheduler.tool_defs import schedule_tools_without_current_conversation
+    from lib.swarm.routing import is_leaf_worker
+    from lib.tools.background_guidance import (
+        project_leaf_worker_documents, project_leaf_worker_tools,
+        project_pull_only_completion_documents, project_pull_only_completion_tools)
+    # The same catalog the poll/kill handler reads as _executable_tool_catalog.
+    leaf = is_leaf_worker(task, (policy or {}).get('_executableToolCatalog', tools))
+
+    def project_tools(catalog):
+        catalog = schedule_tools_without_current_conversation(
+            project_pull_only_completion_tools(catalog),
+            reason="this agent owns no turn in its parent's conversation")
+        return project_leaf_worker_tools(catalog) if leaf else catalog
+
+    def project_documents(documents_by_name):
+        documents_by_name = project_pull_only_completion_documents(documents_by_name)
+        if leaf:
+            documents_by_name = project_leaf_worker_documents(documents_by_name)
+        if not isinstance(documents_by_name, dict):
+            return documents_by_name
+        return {name: document for name, document in documents_by_name.items()
+                if name != 'timer_create'}
+
+    if policy is not None:
+        policy = dict(policy)
+        for key, project in (('_executableToolCatalog', project_tools),
+                             ('_toolContractDocumentsByName', project_documents)):
+            if key in policy:
+                policy[key] = project(policy[key])
+    return project_tools(tools), project_documents(documents), policy
+
+
 def assemble_round_tools(cfg, task, mcfg):
     """Assemble this turn's tool schema.
 
@@ -101,6 +176,11 @@ def assemble_round_tools(cfg, task, mcfg):
     entire turn. Root MCP authority refreshes before each request within the
     initial capability ceiling, independently of the frozen declarations.
     """
+    from lib.tasks_pkg.execution_profile import is_third_party_text
+    if is_third_party_text(task):
+        # Third-party text is answered by a plain model reply, whatever the config.
+        _disable_tools_for_turn(task)
+        return [], False
     from lib.project_dispatch.admission import is_dispatch_task, validate_task, repository_for, profile_for
     if is_dispatch_task(task):
         binding = validate_task(task)
@@ -109,27 +189,8 @@ def assemble_round_tools(cfg, task, mcfg):
             _disable_tools_for_turn(task)
             if profile['mode'] == 'consult':
                 return [], False
-            from lib.tools.registry import project_dispatch_tool_schemas
             from lib.tools.contracts import compile_execution_contract_documents
-            schemas = project_dispatch_tool_schemas(profile['tools'])
-            allowed_fields = {'read_files': {'path', 'start_line', 'end_line', 'reads'},
-                              'write_file': {'path', 'content', 'description', 'append'},
-                              'edit_file': {'description', 'edits'}}
-            for tool in schemas:
-                name = tool['function']['name']
-                parameters = tool['function']['parameters']
-                parameters['properties'] = {key: value for key, value in parameters['properties'].items()
-                                            if key in allowed_fields[name]}
-                parameters['additionalProperties'] = False
-                for key in ('oneOf', 'anyOf', 'allOf'):
-                    parameters.pop(key, None)
-                parameters['required'] = (['path', 'content'] if name == 'write_file' else
-                                          ['edits'] if name == 'edit_file' else [])
-                if name == 'read_files':
-                    parameters['oneOf'] = [{'required': ['path']}, {'required': ['reads']}]
-                tool['function']['description'] += (' Only explicit project-relative text files are authorized; '
-                    'no aliases, converters, external roots or content refs. Read prefixes: '
-                    + ', '.join(profile['readPaths']) + '; write prefixes: ' + ', '.join(profile['writePaths']))
+            schemas = project_dispatch_file_tools(profile)
             documents = compile_execution_contract_documents(schemas, namespace='project')
             task['_tool_schema'] = schemas
             task['_executable_tool_catalog'] = schemas
@@ -142,16 +203,15 @@ def assemble_round_tools(cfg, task, mcfg):
         # The scheduler already intersected role and parent capabilities.
         # Empty means no authority, never auto-assemble the root inventory.
         from lib.tools.contracts import compile_execution_contract_documents
-        tools = list(task['_invocationTools'])
+        tools, documents, conversation_policy = _child_tool_inputs(task)
         _disable_tools_for_turn(task)
-        conversation_policy = task.get('_invocationConversationToolPolicy')
         if conversation_policy is not None:
             return _apply_assembled_tool_policy(
                 {**cfg, **conversation_policy}, task, tools, bool(tools))
         if not tools:
             return [], False
         contracts = compile_execution_contract_documents(
-            tools, authoritative_documents_by_name=task.get('_invocationToolContracts'),
+            tools, authoritative_documents_by_name=documents,
             namespace='invocation')
         discovery = task.get('_invocationToolDiscoveryPolicy') or {}
         return _apply_assembled_tool_policy({**cfg, **discovery,
@@ -160,7 +220,12 @@ def assemble_round_tools(cfg, task, mcfg):
             '_toolScriptSafeByName': task.get('_invocationToolScriptSafeByName') or {},
         }, task, tools, bool(tools))
 
+    from lib.tasks_pkg.delegate_mode import DELEGATION_VIEW_KEY
+    # Each assembly decides the delegate surface afresh from this config.
+    task.pop(DELEGATION_VIEW_KEY, None)
     try:
+        from lib.tasks_pkg.conversation_delivery import (
+            conversation_delivery_available, has_no_saved_conversation)
         from lib.tasks_pkg.coordinator_policy import coordinator_scope
         coordinator = coordinator_scope(task, mcfg['project_path'])
         tool_list, has_real_tools = _assemble_tool_list(
@@ -178,14 +243,15 @@ def assemble_round_tools(cfg, task, mcfg):
             # selection even when that label happens to name a stored row.
             conv_id=('' if task.get('_inline_messages') or task.get('_transientRuntime')
                      else task.get('convId', '')),
+            no_saved_conversation=has_no_saved_conversation(task),
+            completion_delivery=conversation_delivery_available(task),
         )
         if coordinator:
             from lib.project_dispatch.delegation import capture_worker_policy
             capture_worker_policy(task, cfg, cfg.get('_executableToolCatalog') or tool_list, mcfg['model'])
-            from lib.tasks_pkg.coordinator_policy import prepare_coordinator_tool_surface
-            from lib.context_experiment_flags import normalize_context_experiment_flags
-            cfg['tools'] = {**normalize_context_experiment_flags(cfg)['tools'],
-                            'programmaticCalling': 'off'}
+            from lib.tasks_pkg.coordinator_policy import (
+                coordinator_tool_settings, prepare_coordinator_tool_surface)
+            cfg['tools'] = coordinator_tool_settings(cfg)
             tool_list = prepare_coordinator_tool_surface(task, cfg, tool_list, mcfg['project_path'])
             has_real_tools = bool(tool_list)
     except Exception as error:
@@ -220,6 +286,15 @@ def assemble_round_tools(cfg, task, mcfg):
         cfg['_requiredDirectToolNames'] = [name for name in cfg.get('_requiredDirectToolNames', []) if name in allowed]
         has_real_tools = bool(tool_list)
     result = _apply_assembled_tool_policy(cfg, task, tool_list, has_real_tools)
+    from lib.tasks_pkg.delegate_mode import (
+        delegate_mode_enabled, delegation_tool_catalog, narrow_root_to_delegate_surface,
+    )
+    if (result[1] and not coordinator and not is_dispatch_task(task)
+            and delegate_mode_enabled(cfg)):
+        narrowed = narrow_root_to_delegate_surface(
+            cfg, task, result[0], _apply_assembled_tool_policy)
+        if narrowed is not None:
+            result = narrowed
 
     if not result[1]:
         task.pop('_rootToolAssemblyConfig', None)
@@ -227,10 +302,13 @@ def assemble_round_tools(cfg, task, mcfg):
         return result
     task['_rootToolAssemblyConfig'] = dict(mcfg)
 
+    # Delegate Mode keeps MCP authority only in the delegation view; refresh
+    # follows that view so workers still receive late-connecting servers.
     task['_rootMcpToolNames'] = sorted({
         str((tool.get('function') or {}).get('name') or '')
         for tool in [*(tool_list or []),
-                     *(task.get('_executable_tool_catalog') or [])]
+                     *(task.get('_executable_tool_catalog') or []),
+                     *delegation_tool_catalog(task)]
         if str((tool.get('function') or {}).get('name') or '').startswith('mcp__')})
     return result
 
@@ -251,14 +329,22 @@ def refresh_root_mcp_authority(task):
     def name(tool):
         return str((tool.get('function') or {}).get('name') or '')
 
-    original = task.get('_executable_tool_catalog') or []
     eligible = set(task.get('_rootMcpToolNames') or [])
     if not eligible:
         return
     cfg = dict(task.get('config') or {})
     shadow = dict(task, config=cfg)
     assemble_round_tools(cfg, shadow, mcfg)
-    refreshed = [tool for tool in shadow.get('_executable_tool_catalog', [])
+    from lib.tasks_pkg.delegate_mode import DELEGATION_VIEW_KEY, delegate_mode_active
+    target, source = task, shadow
+    if delegate_mode_active(task):
+        # The narrowed root owns no MCP tools; refresh what workers inherit.
+        target = task[DELEGATION_VIEW_KEY].get('task')
+        source = (shadow.get(DELEGATION_VIEW_KEY) or {}).get('task')
+        if not isinstance(target, dict) or not isinstance(source, dict):
+            return
+    original = target.get('_executable_tool_catalog') or []
+    refreshed = [tool for tool in source.get('_executable_tool_catalog', [])
                  if name(tool) in eligible]
     live_names = {name(tool) for tool in refreshed}
     # Publish the complete catalog + associated policy projection before any
@@ -267,14 +353,14 @@ def refresh_root_mcp_authority(task):
         tool for tool in original if not name(tool).startswith('mcp__')] + refreshed}
     for key in ('_toolContractDocumentsByName', '_executableToolNamespaceByName',
                 '_executableToolSearchTextByName', '_toolScriptSafeByName'):
-        updates[key] = {key_name: value for key_name, value in (task.get(key) or {}).items()
+        updates[key] = {key_name: value for key_name, value in (target.get(key) or {}).items()
                         if not key_name.startswith('mcp__')}
-        updates[key].update({key_name: value for key_name, value in (shadow.get(key) or {}).items()
+        updates[key].update({key_name: value for key_name, value in (source.get(key) or {}).items()
                              if key_name in live_names})
     # Discovery policies/counts belong to the frozen provider surface. Removing
     # an unavailable tool's searchable policy would default it to eager on wire.
     # Search/execution still intersect these hints with the live catalog.
-    task.update(updates)
+    target.update(updates)
 
 
 def _apply_assembled_tool_policy(cfg, task, tool_list, has_real_tools):
@@ -327,6 +413,9 @@ def _apply_assembled_tool_policy(cfg, task, tool_list, has_real_tools):
     task['_toolNamespaceByName'] = dict(
         cfg.get('_toolNamespaceByName') or {})
     tool_list = _prepare_initial_tool_surface(cfg, task, tool_list, _search_mode)
+    telemetry = task.get('_toolExposureTelemetry')
+    if isinstance(telemetry, dict) and isinstance(task.get('_tool_schema'), list):
+        telemetry['exposed'] = len(task['_tool_schema'])
     return tool_list, has_real_tools
 
 

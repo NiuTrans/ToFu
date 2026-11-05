@@ -60,19 +60,16 @@ def _summarize_page(fn_args, runtime):
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-#: Below this extracted-text length the auto mode considers a page "sparse"
-#: (Canvas/SVG/SPA-rendered) and attaches the structural summary so the model
-#: is never asked to diagnose the rendering technology itself.
-_AUTO_SPARSE_CHARS = 400
-
-
 def _handle_read_page(fn_args, runtime):
     """browser_read_page — the ONE perception entry (v2, ).
 
     Merges read_tab / summarize_page / get_interactive_elements /
-    get_app_state. mode='auto' reads the text optimistically and only pays
-    for a structural summary when the text proves sparse — the canvas/SPA
-    routing the old descriptions taught the model to do by hand.
+    get_app_state; mode='media' runs the fixed inventory projection owned by
+    ``lib.browser.media``. mode='auto' reads the text optimistically, consults
+    the page's embedded data islands (``lib.browser.data_islands``) only when
+    the rendered page supplied nothing, and only then pays for a structural
+    summary — the canvas/SPA routing the old descriptions taught the model to
+    do by hand. mode='data' reads captured API data and the islands.
     """
     from lib.browser._resolve import resolve_work_tab
     from ._interact import _read_elements
@@ -93,27 +90,38 @@ def _handle_read_page(fn_args, runtime):
                 'browser_list_tabs / browser_navigate first.')
     mode = str(fn_args.get('mode') or 'auto').lower()
     if mode == 'data':
+        from lib.browser.protocol import (
+            BrowserCapability, BrowserUpgradeRequired, require_capabilities,
+        )
+        api_note = ''
         try:
-            from lib.browser.protocol import (
-                BrowserCapability, BrowserUpgradeRequired,
-                require_capabilities,
-            )
             require_capabilities(
                 runtime.client_id, [BrowserCapability.NETWORK_BODY])
         except BrowserUpgradeRequired as exc:
-            return ('Error: browser extension upgrade required for captured API '
-                    f'data; missing capabilities: {", ".join(exc.missing)}')
+            # Islands need no capture capability; the read continues without
+            # captured bodies and says so.
+            api_note = ('Captured API data unavailable: browser extension upgrade '
+                        'required for captured API data; missing capabilities: '
+                        f'{", ".join(exc.missing)}.')
         result, error = runtime.send('read_tab', {
             'tabId': int(tab_id), 'maxChars': 80_000,
         }, timeout=30)
         if error:
-            return f'Error reading captured API data from tab {tab_id}: {error}'
+            return f'Error reading page data from tab {tab_id}: {error}'
         if not _result_url_allowed(result, runtime):
             return 'Error: browser read result was denied by domain policy'
+        if api_note:
+            result = {key: value for key, value in result.items()
+                      if key not in ('network', 'networkResponses')}
         from lib.browser.content import collect_content, render_content
-        content = collect_content(result, owner_user_id=runtime.owner_user_id,
+        from lib.browser.data_islands import render_islands_report, with_islands
+        islands = _read_islands(tab_id, result, runtime)
+        content = collect_content(with_islands(result, islands),
+                                  owner_user_id=runtime.owner_user_id,
                                   target=target, representation='data')
-        return render_content(content)
+        return '\n\n'.join(part for part in (
+            render_content(content), api_note,
+            render_islands_report(islands, content, target=target)) if part)
     if mode == 'elements':
         return _read_elements({
             'tabId': tab_id,
@@ -123,10 +131,29 @@ def _handle_read_page(fn_args, runtime):
     if mode == 'app_state':
         return _read_app_state(
             {'tabId': tab_id, 'depth': fn_args.get('depth')}, runtime)
+    if mode == 'media':
+        from lib.browser.media import (
+            accept_media_inventory,
+            media_inventory_script,
+            render_media_inventory,
+        )
+        result, error = runtime.send('execute_js', {
+            'tabId': int(tab_id), 'code': media_inventory_script(),
+        })
+        if error:
+            return f'Error reading media from tab {tab_id}: {error}'
+        if isinstance(result, dict) and result.get('__error'):
+            return (f'Error reading media from tab {tab_id}: the inventory '
+                    'script failed on this page.')
+        if not _result_url_allowed(result, runtime):
+            return 'Error: browser read result was denied by domain policy'
+        return render_media_inventory(
+            accept_media_inventory(result, owner_user_id=runtime.owner_user_id),
+            tab_id=tab_id)
     if mode not in ('auto', 'text'):
         return (f"Error: unknown mode '{mode}' — use auto (default), text, "
-                f"data, elements, or app_state.")
-    # ── auto: optimistic text read; diagnose only on sparsity ──
+                f"data, elements, app_state, or media.")
+    # ── auto: optimistic text read; diagnose only when nothing was accepted ──
     result, error = runtime.send('read_tab', {
         'tabId': int(tab_id), 'selector': fn_args.get('selector'),
         'maxChars': 80_000,
@@ -143,25 +170,91 @@ def _handle_read_page(fn_args, runtime):
                       if key not in ('network', 'networkResponses', 'initialStatePayloads')}
         content = collect_content(result, owner_user_id=runtime.owner_user_id,
                                   target=target)
-        if content['status'] in ('ok', 'partial', 'empty', 'blocked'):
+        islands = None
+        if (mode == 'auto' and content['status'] == 'unavailable'
+                and not content['coverage']['stop_reason'].startswith('http_error_')):
+            # Structural trigger: embedded data is consulted only when the
+            # rendered page supplied nothing, so it never replaces DOM content.
+            from lib.browser.data_islands import with_islands
+            islands = _read_islands(tab_id, result, runtime)
+            if islands.payloads:
+                enriched = collect_content(
+                    with_islands(result, islands),
+                    owner_user_id=runtime.owner_user_id, target=target)
+                if enriched['status'] != 'unavailable':
+                    content = enriched
+        if (content['status'] in ('ok', 'partial', 'empty', 'blocked')
+                or content['coverage']['stop_reason'].startswith('http_error_')):
+            # The accepted page URL names this read on its timeline row,
+            # which the answer's Sources footer cites as an opened page.
+            if content['status'] in ('ok', 'partial') and runtime.display_metadata is not None:
+                runtime.display_metadata['url'] = content['url']
             return _render_with_evidence(content)
-        text = content['content']
+        body = render_content(content)
+        islands_report = ''
+        if islands is not None and islands.available and islands.found:
+            from lib.browser.data_islands import render_islands_report
+            islands_report = '\n\n' + render_islands_report(
+                islands, content, target=target)
+        # The same acceptance owner, untargeted, measures the page's own
+        # readable text, so a target that selected nothing is never
+        # misdiagnosed as a Canvas/SPA page.
+        page_text = ''
+        if target != ReadTarget():
+            page_text = collect_content(
+                result, owner_user_id=runtime.owner_user_id)['content']
+        # The receipt leads, so the task layer's page-text filter never
+        # rewrites this diagnosis.
+        if page_text:
+            if target.query:
+                return (
+                    body + '\n\nNo content matched the requested target query '
+                    f'{json.dumps(target.query, ensure_ascii=False)}: the page '
+                    f'has {len(page_text)} chars of accepted text, but the query '
+                    'does not occur verbatim (case-insensitive) in that text or '
+                    'in any record.\n'
+                    'Next step: retry browser_read_page without target.query, '
+                    'or with a shorter or different keyword.' + islands_report)
+            return (
+                body + '\n\nNo content matched the requested target kind '
+                f'"{target.kind}": the page has {len(page_text)} chars of '
+                'accepted text, but none of it is content of that kind.\n'
+                'Next step: retry browser_read_page with target.kind="auto", '
+                'or without target.' + islands_report)
         # Sparse: the page is likely Canvas/SVG/SPA — attach the structural
         # summary (framework, forms, canvas count) so the model gets the
         # diagnosis instead of having to make it.
         summary = _summarize_page({'tabId': tab_id}, runtime)
-        body = render_content(content)
         diagnostic = (
-            f'Text extraction is sparse ({len((text or "").strip())} chars) — '
-            f'the page is likely Canvas/SVG/SPA-rendered.\n'
+            f'Text extraction is sparse ({len(page_text)} chars of page text '
+            f'accepted) — the page is likely Canvas/SVG/SPA-rendered.\n'
             f'Next steps: browser_research_page(url="{result.get("url", "")}") '
             f'for automatic network/state/scroll extraction, browser_screenshot '
             f'to SEE the layout, or mode="app_state" for framework/chart data.\n\n'
             f'--- Structural summary ---\n{summary}\n\n'
             f'--- Extracted text (sparse) ---\n{body}'
         )
-        return diagnostic
+        return diagnostic + islands_report
     return _render_read_result(result, tab_id)
+
+
+def _read_islands(tab_id, page, runtime):
+    """Run the fixed island reader on the tab just read; a failure only
+    loses the islands, never the rest of the read."""
+    from lib.browser.data_islands import IslandRead, data_islands_script, parse_islands
+    from ._tabs import _result_url_allowed
+
+    page_url = str(page.get('finalUrl') or page.get('url') or '')
+    result, error = runtime.send('execute_js', {
+        'tabId': int(tab_id), 'code': data_islands_script(),
+    })
+    if error:
+        return IslandRead.unavailable(page_url, f'reader command failed: {str(error)[:200]}')
+    if not isinstance(result, dict) or result.get('__error') or not result.get('url'):
+        return IslandRead.unavailable(page_url, 'the reader script returned no page result')
+    if not _result_url_allowed(result, runtime):
+        return IslandRead.unavailable(page_url, 'the reader result was denied by domain policy')
+    return parse_islands(result, page_url=page_url)
 
 
 def _render_with_evidence(content):

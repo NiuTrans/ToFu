@@ -35,6 +35,7 @@ const LEGACY_ALLOWLIST = new Set([
   // Byte-moved splits of allowlisted legacy sheets (2026-09, 100 KiB
   // composition budget): same pre-design-system bytes, new filename — this
   // is a rename-following entry, not new allowlist surface.
+  'application/01-message-surfaces.css',
   'application/27-evolution-research.css',
   'application/03-paper-reader-streaming.css',
   'application/03-paper-reader-responsive.css',
@@ -45,10 +46,11 @@ const LEGACY_ALLOWLIST = new Set([
   'application/11-tofu-theme-foundation.css',
   'application/12-tofu-theme-project-controls.css',
   'application/13-tofu-theme-composer-tools.css',
-  'application/14-bridges-memory-branches.css',
   'application/15-queue-mobile-my-day.css',
   'application/16-my-day-context-indicators.css',
-  'application/17-compaction-context-rail.css',
+  // Renamed when the context rail moved to the gated 23-reading-context-rail.css;
+  // the remaining compaction/background-activity rules are unchanged legacy.
+  'application/17-compaction-background-activity.css',
   'application/18-artifacts-knowledge-library.css',
   'application/19-project-brain.css',
   'application/21-local-knowledge-plan-mode.css',

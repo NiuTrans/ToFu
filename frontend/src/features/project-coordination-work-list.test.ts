@@ -77,7 +77,7 @@ it('preserves native reference disclosures, focused actions and list scroll afte
 
 it('does not let a selected graph node overwrite the same task reference in the work list', () => {
   const host = document.createElement('div'); document.body.replaceChildren(host);
-  const build = () => createCoordinationBoard({ active: [{ id: 'a', status: 'active', conversationId: 'worker' }], recent: [] }, vi.fn(), 0, {},
+  const build = () => createCoordinationBoard({ active: [{ id: 'a', status: 'active', conversationId: 'worker' }], recent: [] }, vi.fn(), {},
     { viewState: { graphOpen: true, selectedId: 'work:a' } });
   host.append(build());
   const listReference = () => host.querySelector<HTMLDetailsElement>('[data-coordination-disclosure="reference:work:a"]')!;

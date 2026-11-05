@@ -11,11 +11,10 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
-from tests._runtime_sections import runtime_sections_dir
+from tests._runtime_sections import runtime_section, runtime_sections_dir
 
 pytestmark = pytest.mark.unit
 
@@ -212,8 +211,7 @@ def test_signal_badge_reflects_sse_and_proxy_jitter():
 
 
 def test_badge_source_has_no_competing_liveness_clock():
-    source = Path(os.path.join(JS_DIR, 'net-latency.js')).read_text(
-        encoding='utf-8')
+    source = runtime_section('net-latency.js', scope_prelude=False)
     assert 'setInterval' not in source
     assert '_watchdogTimer' not in source
     assert '_STALE_MS' not in source

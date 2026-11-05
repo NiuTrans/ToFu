@@ -369,6 +369,21 @@ quality or native-storage throughput.
 Tests: `tests/goals/test_goal_execution_journal.py` and the real child-invocation
 replay case in `tests/goals/test_goal_worker_context.py`.
 
+Goal's derived lane-context publication also detaches the settled worker's
+messages/checklist before a reviewer or next invocation can mutate them.
+Problem: removing the pending snapshot before storage I/O lost retry evidence;
+borrowing its message list could bind later review text to an earlier phase.
+Decision: retain one pending snapshot and its original owner/attempt/Turn
+binding until acknowledgement or definitive refusal. A failed write retries
+the identical settled witness through ModelContinuationStore; a newer phase
+cannot relabel it, and a newer snapshot survives an older write's ACK.
+Alternatives: re-reading a new frontier after a lost ACK grants stale messages
+new authority; a separate recovery log duplicates the existing journal/store.
+This remains a replace-in-place derived cache, never effect replay authority
+or a condition for committing visible history. There are no new durable rows;
+pending state references one detached working set and retires with that task.
+Fault specifications: `tests/goals/test_worker_context_publication.py`.
+
 ### D4a — Committed handoffs and read-only reviews resume *(running contract)*
 
 `lib/evolution/stage_launch.py` archives the exact next-stage request before
@@ -516,8 +531,9 @@ bounded 500 ms point read. Unstarted rejection closes the ordinary task owners;
 its unbound callback cannot advance a committed preparing request.
 
 The task keeps inline model context while existing event/checkpoint owners
-persist progress. Running checkpoints retain their existing best-effort 500 ms
-policy; terminal original-output archives remain mandatory progression evidence.
+persist progress. Running checkpoints keep their best-effort budget (observed
+service time inside fixed bounds, `docs/STORAGE.md`); terminal original-output
+archives remain mandatory progression evidence.
 A controlled native 16-round fixture serialized its retained task-result row
 to 52,446 bytes; complete cold stage admission took 0.85 seconds including
 planning/setup, with no provider invocation. This is not a total heap/WAL
@@ -1072,7 +1088,10 @@ on; they are restated here so the continuity target names one place:
 - Terminal result delivery requires acknowledgement; failed handoffs retry
   behind the maintenance fence; reconciliation sweeps re-drive lost
   transitions idempotently.
-- ProgressBeacon liveness and the stuck-task reaper bound wedged execution.
+- One liveness judge (`lib/tasks_pkg/liveness.py`) bounds wedged execution for
+  root and child agents alike: the stuck-task reaper applies it, the Swarm
+  beacon reports and backstops with it, and explained waits (including a stale
+  filesystem mount) and silence before their end never count.
 - Event logs stay bounded: recovery replays pages, validates journal segments
   by hash/count, and never copies result bodies across generations.
 - The launch probe sizes every pool/queue introduced above; probe failure
@@ -1245,8 +1264,9 @@ The swarm owner stamps unsettled children cancelled by parent Stop with
 child checkpoints and never individually cancelled, completed or failed work.
 Messages, tool receipts, rounds, usage, timeout accounting, launch workspace and
 completed delivery acknowledgements follow the existing restore path. Pending
-specs without a checkpoint remain fresh. Unknown tool outcomes still require
-reconciliation and block dependent work; no external effect is blindly replayed.
+specs without a checkpoint remain fresh. An interrupted tool round resumes its
+own agent with recovery notices (next section); no external effect is blindly
+replayed.
 Retained assignments already settled as cancelled remain terminal under their
 own assignment CAS; this path does not reset that authority. Legacy cancelled
 checkpoints without parent-Stop provenance also remain terminal.
@@ -1258,3 +1278,73 @@ part of this owner change.
 
 Executable specifications: `tests/swarm/test_swarm_restart_continue.py` and
 `tests/swarm/test_swarm_invocation.py::test_parent_stop_checkpoint_continue_does_not_repeat_committed_tool`. <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->
+
+## Interrupted tool rounds resume their own agent
+
+**Problem:** a restart, crash or parent Stop kills in-flight commands, leaving a
+child checkpoint at `tools_in_flight`. Recovery turned every such child into a
+permanent `restart_tool_outcome_unknown` failure and failed its unfinished
+dependents. That bought no safety: the killed call's outcome is just as unknown
+after a timeout, where the agent continues and reconciles it. The failure only
+discarded progress, and the coordinator then started fresh workers that knew
+nothing about the interrupted call.
+
+**Decision:** `lib/swarm/restart_recovery.py` treats an open tool round as
+resumable evidence. `checkpoint_recovery_error` refuses only transcripts that
+cannot show what was in flight: malformed call/result pairs, or a
+`tools_in_flight` phase without tool calls. `settle_interrupted_tool_round`
+closes the newest round without re-running anything. Each recorded result keeps
+its content plus a recovery notice naming the cause (restart, Stop, or restart
+or crash when unknown) and stating that the call may not have run, or may have
+run partially or completely. A call without a recorded result gets an explicit
+unknown-outcome result. The resumed agent, which issued the calls, reconciles
+them as after a timeout. Its round counter moves past the closed round, and
+dependents wait for it as usual. Resume is refused with
+`restart_command_still_running`, which also fences the unfinished dependency
+closure, only while a foreground command record of that round survives the
+boot sweep or the records cannot be read. Terminal agents keep their receipts.
+An open round in a terminal transcript no longer fences dependents, which
+matches behavior without a restart. Rows already failed with
+`restart_tool_outcome_unknown` keep fencing their unfinished descendants.
+
+`lib/project_mod/foreground_command_records.py` writes one record per
+foreground `run_command` spawn under `data/foreground_commands/`. It holds the
+owner's host, OS boot, PID namespace, PID and start time plus the per-exec
+`BOOT_ID`, the leader PID and start time, and the conversation and tool-call
+ids. The runner removes the record once the group has retired or exited; a
+failed retirement keeps it. Background commands keep their own reattachable
+records and are never recorded here. The `orphaned command retirement` boot
+step runs before task and turn recovery. It retires the records of a dead
+owner, including this process before an `execv` restart (same PID and start
+time, different instance id), through `process_group`. A live leader must match
+its recorded start time. With the leader gone, surviving members can only
+belong to the recorded group, because Linux keeps a group id allocated while
+any member lives. Records from an earlier OS boot are dropped; live, foreign
+and unknown owners are left alone. Growth is one small file per concurrently
+running foreground command plus any failed retirements, which every boot
+sweep revisits. Measured on the DolphinFS data root: record plus release cost
+5.5 ms per command (median, p90 5.9 ms); an empty boot sweep takes 0.6 ms.
+
+**Alternatives rejected:**
+- Keep the permanent failure: it loses hours of progress for no safety gain.
+- Re-run the interrupted call automatically: a silent replay of an unknown
+  effect.
+- Mark aborted rounds `ready` in the shared root loop: it changes Evolution's
+  settled-round semantics and hides the interruption from the model.
+- Drain in-flight tool rounds before shutdown: the 30-second hard deadline,
+  half of it reserved for storage, cannot cover multi-minute builds and test
+  runs, the commands a restart most often interrupts. A short drain only
+  saves commands that are cheap to repeat.
+- Durable foreground output with reattach after restart: the structural fix
+  for long commands, but it replaces `run_command`'s pipe-based I/O and
+  belongs in a separate change.
+
+**Verification:** `tests/swarm/test_swarm_restart_continue.py`,
+`tests/swarm/test_swarm_restart_dependencies.py`,
+`tests/swarm/test_swarm_invocation.py::test_shutdown_during_tool_resumes_with_notice_and_never_reruns_the_tool`
+(the real pipeline from a shutdown mid-tool to the persisted checkpoint and the
+resumed model request; the tool is not executed again) and
+`tests/project_mod/test_foreground_command_records.py` (real Linux process
+groups: `execv` incarnation, crashed owner, exited leader with a surviving
+member, live and foreign owners, previous boot, PID reuse, runner record
+lifecycle and failed retirement).

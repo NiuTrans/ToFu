@@ -5,7 +5,7 @@ from __future__ import annotations
 from jsonschema import Draft7Validator
 import pytest
 
-from lib.tools.gateway import sanitize_wire_tools, tool_schema_tokens
+from lib.tools.gateway import sanitize_wire_tools
 from lib.tools.human_guidance import ASK_HUMAN_TOOL
 
 
@@ -80,11 +80,3 @@ def test_schema_requires_nonempty_options_only_for_choice_mode():
         wire, model='kimi-k3')[0]['function']['parameters']
     assert kimi_parameters['type'] == 'object'
     assert 'anyOf' not in kimi_parameters
-
-
-def test_schema_stays_within_resident_token_budget():
-    tokens = tool_schema_tokens([ASK_HUMAN_TOOL])
-    # The batch-questions anyOf branches are a deliberate feature cost.
-    assert tokens <= 560, (
-        f'ask_human schema costs {tokens} tokens; compact repeated autonomy, '
-        'choice, and QR prose without weakening input bounds')

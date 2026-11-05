@@ -306,8 +306,8 @@ def test_timeout_except_catches_the_futures_class_too():
     on the 3.10 CI leg (2026-08-06, rounds 3-5). Pin the dual-catch so the
     lane is version-proof; the behavioral face above proves it on 3.10."""
     from lib.tasks_pkg import streaming_tool_executor as ste
-    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
-    for mod in (_pipeline, ste):
+    import lib.tasks_pkg.tool_dispatch._execution as _execution
+    for mod in (_execution, ste):
         src = inspect.getsource(mod)
         assert '_FuturesTimeoutError' in src, (
             f'{mod.__name__} lost the futures-TimeoutError dual-catch — on '

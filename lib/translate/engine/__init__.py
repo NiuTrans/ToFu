@@ -1,22 +1,23 @@
-"""lib.translate.engine — single-chunk translation engine (facade).
+"""Translation entry points and compatibility exports.
 
-Decomposed from the original 634-line ``lib/translate/engine.py`` into focused,
-acyclic submodules. This package facade re-exports every symbol so
-``from lib.translate.engine import X`` keeps working byte-identically —
-including the private ``_translate_freetext`` that ``lib/translate/incremental.py``
-imports directly.
+General text and paper translation share this engine. The whole-document
+``_translate_freetext`` wrapper keeps one provider call per attempt; paper
+source slicing and artifact publication belong to ``lib.paper``.
 
 Submodules
 ----------
 * ``_split``  — sentence-completeness primitives (``_SENTENCE_END_CHARS`` +
   ``_ends_midsentence``) the truncation detector relies on. Pure, no I/O.
-* ``_engine`` — the engine proper: the cache/MT/LLM routing, the aggressive
-  retry loop with truncation / no-op / wrong-language detection, plus the
-  ``_translate_freetext`` whole-document wrapper and the ``_build_trace``
-  provenance helper.
+* ``_quality_checks`` — pure normalization primitives and ordered content
+  verdicts; no dispatch, cache mutation or retry state.
+* ``_candidate`` — normalize one provider result, assess it, record quality
+  feedback and apply the typed refusal policy. Returns explicit retry state.
+* ``_engine`` — cache/identity/MT routing, physical dispatch, deadlines,
+  cancellation, retry budgets, accepted-result commit and provenance.
 
-Import direction is acyclic: ``_engine`` depends on ``_split``; nothing
-depends on ``_engine`` within the package.
+Import direction is acyclic: ``_engine`` → ``_candidate`` → ``_quality_checks``
+→ ``_split``. The engine passes its over-generation predicate explicitly to
+retain the existing threshold fault-injection seam.
 """
 
 # Re-exported so ``engine.translate_cache`` resolves exactly as it did when

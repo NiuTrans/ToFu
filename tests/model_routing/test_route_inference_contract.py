@@ -91,6 +91,24 @@ def test_resolution_is_detached_and_unsupported_clears_details():
     assert resolve_inference_profile(model={'model_id': 'unknown'}) == {}
 
 
+def test_route_features_resolve_per_feature_across_entities():
+    """A face's gateway binding must not erase what the offering declared."""
+    offering = {'inference_profile': {'features': {
+        'anthropic_tool_search': 'supported', 'anthropic_compaction': 'supported'}}}
+    connection = {'inference_profile': {'features': {
+        'cache_affinity_mt_session_id': 'supported'}}}
+    deployment = {'inference_profile': {'features': {
+        'anthropic_compaction': 'unsupported'}}}
+    resolved = resolve_inference_profile(
+        offering=offering, connection=connection, deployment=deployment)
+    assert resolved['features'] == {
+        'anthropic_tool_search': 'supported',
+        'anthropic_compaction': 'unsupported',
+        'cache_affinity_mt_session_id': 'supported',
+    }
+    assert offering['inference_profile']['features']['anthropic_compaction'] == 'supported'
+
+
 @pytest.mark.parametrize('profile', [
     {'secret': 'no'}, {'reasoning': {'default_budget_tokens': True}},
     {'reasoning': {'max_budget_tokens': 1000001}},
@@ -290,3 +308,34 @@ def test_contract_recipe_overrides_use_section_precedence(override):
             'supported_efforts': ['low', 'high'], 'default_effort': 'low', 'can_disable': True}
     raw['offering_recipes'][0].pop('inference_profile')
     assert normalize_provider_template(raw)['offering_recipes'][0]['inference_profile']['reasoning']['can_disable'] is False
+
+
+def test_schema_verdict_reuse_keeps_every_post_schema_check():
+    """A remembered schema pass never skips finite/bound checks or detachment."""
+    valid = {'reasoning': {'support': 'supported', 'min_budget_tokens': 1, 'max_budget_tokens': 8}}
+    first = validate_inference_profile(copy.deepcopy(valid))
+    second = validate_inference_profile(valid)
+    assert first == second == valid
+    assert second is not valid and second['reasoning'] is not valid['reasoning']
+    second['reasoning']['support'] = 'mutated'
+    assert validate_inference_profile(valid) == first
+
+    reversed_bounds = {'reasoning': {'support': 'supported', 'min_budget_tokens': 9, 'max_budget_tokens': 8}}
+    for _ in range(2):
+        with pytest.raises(ModelRoutingError, match='bounds are reversed'):
+            validate_inference_profile(copy.deepcopy(reversed_bounds))
+
+
+@pytest.mark.parametrize('lookalike', [
+    {'reasoning': {'supported_efforts': ('low',)}},
+    {'reasoning': {'support': True}},
+    {'sampling': {'temperature': True}},
+])
+def test_schema_verdict_reuse_never_admits_type_lookalikes(lookalike):
+    plain = json.loads(json.dumps(lookalike))
+    try:
+        validate_inference_profile(plain)
+    except ModelRoutingError:
+        pass
+    with pytest.raises(ModelRoutingError, match='invalid inference profile'):
+        validate_inference_profile(lookalike)

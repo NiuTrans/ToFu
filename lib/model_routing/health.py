@@ -1,4 +1,10 @@
-"""Bounded runtime health with failure scope matching model-routing entities."""
+"""Bounded runtime health with failure scope matching model-routing entities.
+
+``owner_health_registry`` returns the process-local table of one explicit
+routing owner and tenant. Tables are reconstructible evidence, never
+configuration: they are LRU-bounded by owner count and never shared across
+owners or tenants.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +13,12 @@ from dataclasses import dataclass
 import threading
 import time
 from typing import Callable
+
+# A subscription login source (for example a missing Codex home) cannot issue
+# a token before provider ingress. Every route that resolves through the same
+# credential fails identically until the source is repaired.
+CREDENTIAL_SOURCE_UNAVAILABLE = "credential_source_unavailable"
+MAX_OWNER_HEALTH_REGISTRIES = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +48,7 @@ def classify_failure(
         return "deployment"
     if status_code in {401, 402} or normalized in {
         "credential_rejected", "payment_required", "invalid_api_key",
+        CREDENTIAL_SOURCE_UNAVAILABLE,
     }:
         return "credential"
     if status_code == 403 or normalized in {
@@ -104,10 +117,21 @@ class RouteHealthRegistry:
         reason: str,
         cooldown_seconds: float | None = None,
     ) -> None:
+        """Learn one failure episode; only a repeat after its cooldown backs off.
+
+        Observations while the target still cools (credential-recovery retries,
+        a demoted route re-admitted because nothing else qualifies, concurrent
+        requests) are the same outage: they neither escalate nor extend it.
+        """
         now = self._clock()
         with self._lock:
             self._prune_locked(now)
-            previous = self._entries.pop(target, None)
+            previous = self._entries.get(target)
+            if (previous is not None and cooldown_seconds is None
+                    and previous.unavailable_until > now):
+                self._entries.move_to_end(target)
+                return
+            self._entries.pop(target, None)
             failures = 1 if previous is None else min(previous.failures + 1, 16)
             base = {
                 "deployment": 60.0,
@@ -162,6 +186,18 @@ class RouteHealthRegistry:
             for target in targets:
                 self._entries.pop(target, None)
 
+    def clear_target(self, target: HealthTarget) -> None:
+        """Forget one entity after it was proven healthy again."""
+        with self._lock:
+            self._entries.pop(target, None)
+
+    def target_unavailable(self, target: HealthTarget) -> bool:
+        """Whether one entity is still inside its learned cooldown."""
+        now = self._clock()
+        with self._lock:
+            entry = self._entries.get(target)
+            return entry is not None and entry.unavailable_until > now
+
     def candidate_state(self, candidate) -> tuple[bool, float, list[str]]:
         now = self._clock()
         targets = (
@@ -215,8 +251,69 @@ class RouteHealthRegistry:
             }
 
 
+_owner_registries: OrderedDict[tuple[int, str], RouteHealthRegistry] = OrderedDict()
+_owner_registries_lock = threading.Lock()
+
+
+def _owner_registry_key(owner_user_id: int, tenant_id: str | None) -> tuple[int, str]:
+    from lib.identity import require_user_id
+    return (
+        require_user_id(owner_user_id, context="route health owner"),
+        str(tenant_id or "").strip(),
+    )
+
+
+def owner_health_registry(
+    owner_user_id: int, tenant_id: str | None = "",
+) -> RouteHealthRegistry:
+    """Return one owner's process-local route health, creating it on demand.
+
+    The least recently used owner table is dropped beyond
+    ``MAX_OWNER_HEALTH_REGISTRIES``; losing it only forgets cooldowns.
+    """
+    key = _owner_registry_key(owner_user_id, tenant_id)
+    with _owner_registries_lock:
+        registry = _owner_registries.get(key)
+        if registry is None:
+            registry = _owner_registries[key] = RouteHealthRegistry()
+            while len(_owner_registries) > MAX_OWNER_HEALTH_REGISTRIES:
+                _owner_registries.popitem(last=False)
+        else:
+            _owner_registries.move_to_end(key)
+        return registry
+
+
+def existing_owner_health_registry(
+    owner_user_id: int, tenant_id: str | None = "",
+) -> RouteHealthRegistry | None:
+    """Read-only lookup: probing health never allocates an owner table."""
+    key = _owner_registry_key(owner_user_id, tenant_id)
+    with _owner_registries_lock:
+        registry = _owner_registries.get(key)
+        if registry is not None:
+            _owner_registries.move_to_end(key)
+        return registry
+
+
+def owner_health_learned() -> bool:
+    """Cheap hot-path guard: False until any owner recorded route health."""
+    return bool(_owner_registries)
+
+
+def reset_owner_health_registries() -> None:
+    """Forget every learned owner table (process restart equivalent)."""
+    with _owner_registries_lock:
+        _owner_registries.clear()
+
+
 __all__ = [
+    "CREDENTIAL_SOURCE_UNAVAILABLE",
     "HealthTarget",
+    "MAX_OWNER_HEALTH_REGISTRIES",
     "RouteHealthRegistry",
     "classify_failure",
+    "existing_owner_health_registry",
+    "owner_health_learned",
+    "owner_health_registry",
+    "reset_owner_health_registries",
 ]

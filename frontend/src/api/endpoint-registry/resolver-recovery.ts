@@ -7,23 +7,30 @@ function canRecover(error: unknown): boolean {
   return status === 0 ? code === 'network' || code === 'timeout'
     : RETRYABLE.has(status) && !detail.serverRequestId;
 }
-export async function resolveAcrossWorkerRecovery<T>(operation: (timeout: number) => Promise<T>, label: string): Promise<T> {
+/* The caller's signal ends recovery: an abandoned send must not keep
+ * retrying in the background after its owner gave up. */
+export async function resolveAcrossWorkerRecovery<T>(
+  operation: (timeout: number, signal?: AbortSignal) => Promise<T>, label: string, signal?: AbortSignal,
+): Promise<T> {
   const deadline = Date.now() + 75000;
+  const cancelled = () => signal?.reason ?? new DOMException(`${label} cancelled`, 'AbortError');
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 20; attempt++) {
+    if (signal?.aborted) throw cancelled();
     const remaining = deadline - Date.now();
     if (attempt > 0 && remaining <= 0) throw lastError;
     try {
-      const result = await operation(Math.max(1, Math.min(10000, remaining)));
+      const result = await operation(Math.max(1, Math.min(10000, remaining)), signal);
       if (attempt > 0) console.info('[Api] %s recovered after %d retry attempt(s)', label, attempt);
       return result;
     } catch (error) {
+      if (signal?.aborted) throw error;
       lastError = error;
       if (!canRecover(error) || attempt + 1 >= 20) throw error;
       const delay = Math.min(Math.min(5000, 250 * Math.pow(2, attempt)), deadline - Date.now());
       if (delay <= 0) throw error;
       if (attempt === 0) console.warn('[Api] %s interrupted outside the backend; waiting for worker recovery', label);
-      if (!await waitForRetry(delay)) throw error;
+      if (!await waitForRetry(delay, signal)) throw cancelled();
     }
   }
   throw lastError;

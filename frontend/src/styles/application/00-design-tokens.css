@@ -29,6 +29,7 @@
   --chat-primary-ink:var(--text-primary);
   --chat-primary-border:var(--border);
   --chat-primary-shadow:none;
+  --composer-background:var(--bg-secondary);
   --space-1:4px;
   --space-2:8px;
   --space-3:12px;
@@ -47,6 +48,8 @@
   --font-size-sm:12px;
   --font-size-md:13px;
   --font-size-lg:14px;
+  /* Conversation prose only: one step under xl keeps long answers dense. */
+  --font-size-base:15px;
   --font-size-xl:16px;
   --font-size-2xl:18px;
   --font-size-3xl:22px;
@@ -55,35 +58,53 @@
   --leading-title:1.4;
   --leading-body:1.7;
   /* Conversation typography API: content roles, independent of component/theme.
-     Prose remains comfortable; operational content uses a compact shared ramp. */
-  --conversation-font-size-body:var(--font-size-xl);
+     Prose reads at 15px and tables at 14px; every operational row and evidence
+     body shares the compact 13/12px ramp so one screen holds a run of calls. */
+  --conversation-font-size-body:var(--font-size-base);
   --conversation-font-size-content:var(--font-size-md);
   --conversation-font-size-meta:var(--font-size-sm);
   --conversation-font-size-caption:var(--font-size-xs);
   --conversation-font-size-table:var(--font-size-lg);
-  --conversation-font-size-heading-1:var(--font-size-4xl);
-  --conversation-font-size-heading-2:var(--font-size-3xl);
-  --conversation-font-size-heading-3:var(--font-size-2xl);
-  /* Includes the hanging icon inset; the prose itself keeps about 720px. */
-  --conversation-reading-measure:760px;
+  --conversation-font-size-heading-1:var(--font-size-3xl);
+  --conversation-font-size-heading-2:var(--font-size-2xl);
+  --conversation-font-size-heading-3:var(--font-size-xl);
+  --conversation-leading-prose:1.65;
+  --conversation-leading-compact:1.5;
+  /* Shared measure for shell, composer, prose and rails; the reading contract
+     keeps it within 700–800px (tests/visual/test_visual_conversation_reading.py). */
+  --conversation-reading-measure:800px;
   /* Mixed chronology: shared process row, label column and evidence inset.
      Content order stays in the Surface; these tokens only set reading geometry. */
-  --conversation-process-font-size:var(--font-size-lg);
-  --conversation-process-row-height:var(--control-h-md);
-  --conversation-process-inset:var(--space-1);
+  --conversation-process-font-size:var(--font-size-md);
+  --conversation-process-row-height:var(--control-h-sm);
+  --conversation-process-inset:var(--space-0);
   --conversation-process-marker:var(--space-4);
   /* One line box for a whole activity row: the leading glyph is centered
      against this height, so it can never drift off its own label. */
   --conversation-activity-line-height:calc(var(--conversation-font-size-meta) * 1.45);
   --conversation-process-gap:var(--space-2);
-  --conversation-process-indent:calc(var(--conversation-process-inset) + var(--conversation-process-marker) + var(--conversation-process-gap));
-  --conversation-flow-gap:var(--space-1);
-  --conversation-prose-gap:var(--space-4);
+  --conversation-process-indent:var(--space-0);
+  --conversation-flow-gap:var(--space-0);
+  --conversation-prose-gap:var(--space-3);
   --conversation-process-radius:12px;
-  --conversation-process-shell-inset:var(--space-1);
-  --conversation-reading-inset:calc(var(--conversation-process-shell-inset) + var(--conversation-process-indent) + var(--control-edge-inset));
+  --conversation-process-shell-inset:var(--space-0);
+  --conversation-reading-inset:var(--space-0);
   --conversation-inspector-width:440px;
-  --conversation-answer-gap:var(--space-8);
+  /* Tool rows: ONE role vocabulary for every tool family's call row.
+     23-reading-tool-summary.css draws each row from these roles and
+     23-reading-tool-panel.css only adds the card, so a retune here reaches
+     every family in every theme. The accent marks liveness only (a running
+     step's glyph); exact identity, telemetry and routine outcomes share one
+     quiet ink at text contrast; chip chrome is reserved for an outcome that
+     needs the reader (--chip-err/--chip-warn). */
+  --tool-row-intent-ink:var(--text-secondary);
+  --tool-row-intent-ink-live:var(--text-primary);
+  --tool-row-meta-ink:var(--text-secondary);
+  --tool-row-ok-ink:var(--chip-ok-color);
+  --tool-row-glyph-ink:var(--text-tertiary);
+  --tool-row-glyph-ink-live:var(--accent);
+  --tool-row-glyph-ink-attention:var(--warning-text);
+  --conversation-answer-gap:var(--space-5);
   --inspector-reading-measure:860px;
   --weight-regular:400;
   --weight-medium:500;
@@ -161,8 +182,95 @@
 
   /* ── Shared chrome ── */
   --backdrop:rgba(0,0,0,0.55);
+  /* Full-screen attachment viewer: an opaque stage so a white page render
+     does not bleed through, plus controls that read against any bitmap in
+     every theme. */
+  --preview-scrim:rgba(0,0,0,0.92);
+  --preview-control-surface:rgba(255,255,255,0.12);
+  --preview-control-surface-hover:rgba(255,255,255,0.25);
+  --preview-control-ink:#fff;
+  --preview-image-shadow:0 8px 32px rgba(0,0,0,0.5);
   --focus-ring:0 0 0 3px rgba(110,86,207,0.35);
   --knob-shadow:0 1px 2px rgba(0,0,0,0.30);
+  /* Theme picker swatches depict each theme, so they are fixed in every theme. */
+  --theme-swatch-dark:linear-gradient(135deg,#0a0a0c 0%,#1a1a21 40%,#6e56cf 100%);
+  --theme-swatch-light:linear-gradient(135deg,#ffffff 0%,#f0f2f5 40%,#6366f1 100%);
+  --theme-swatch-tofu:linear-gradient(135deg,#F5F3ED 0%,#E9E5DC 40%,#BB9572 100%);
+
+  /* ── Studio game palette ──
+     Theme-invariant art direction for the Evolution studio's pixel office:
+     walnut HUD chrome with brass trim over the painted scene, parchment
+     journal windows with ink text. The scene art never changes with the app
+     theme, so neither does the chrome drawn over it. */
+  --studio-walnut:#22170f;
+  --studio-walnut-raised:#33241a;
+  --studio-walnut-glass:rgba(30,20,13,0.86);
+  --studio-brass:#d9b25f;
+  --studio-brass-bright:#f3d488;
+  --studio-cream:#fbf1da;
+  --studio-cream-muted:#d2c09c;
+  --studio-parchment:#f7ecd4;
+  --studio-parchment-deep:#ecdcb9;
+  --studio-ink:#3a2a1c;
+  --studio-ink-muted:#735e47;
+  --studio-good:#86d896;
+  --studio-warn:#f2bf55;
+  --studio-bad:#ef7a68;
+  --studio-info:#8ec2f2;
+  --studio-ask:#f6d36b;
+  --studio-good-ink:#2c7440;
+  --studio-warn-ink:#87590f;
+  --studio-bad-ink:#a63b2b;
+  --studio-info-ink:#2a679c;
+  --studio-shadow:0 12px 32px rgba(10,6,3,0.5);
+  --studio-bevel:inset 0 1px 0 rgba(251,241,218,0.12),inset 0 -1px 0 rgba(0,0,0,0.35);
+}
+
+/* Warm charcoal and tofu cream. Light palettes remain independently selectable. */
+:root:not([data-theme]), :root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-primary:#24221f;
+  --bg-secondary:#1c1b18;
+  --bg-tertiary:#302d28;
+  --bg-hover:#38342e;
+  --bg-active:#403b33;
+  --border:#484239;
+  --border-light:#595146;
+  --text-primary:#f0e7d8;
+  --text-secondary:#b9ae9c;
+  --text-tertiary:#a39887;
+  --accent:#d9c3a1;
+  --accent-hover:#eed7b5;
+  --accent-subtle:color-mix(in srgb, var(--accent) 10%, transparent);
+  --text-on-accent:#24221f;
+  --user-bubble:#302d28;
+  --composer-background:var(--bg-tertiary);
+  --thinking-bg:transparent;
+  --thinking-border:var(--border);
+  --thinking-text:var(--text-secondary);
+  --error-text:#e4a193;
+  --error-bg:color-mix(in srgb, var(--error-text) 8%, transparent);
+  --error-border:color-mix(in srgb, var(--error-text) 30%, transparent);
+  --success-text:var(--text-secondary);
+  --success-bg:transparent;
+  --success-border:var(--border);
+  --warning-text:#e2c18b;
+  --warning-bg:color-mix(in srgb, var(--warning-text) 8%, transparent);
+  --warning-border:color-mix(in srgb, var(--warning-text) 30%, transparent);
+  --info-text:var(--accent);
+  --info-bg:var(--accent-subtle);
+  --info-border:var(--border);
+  --chip-ok-color:var(--text-secondary);
+  --chip-ok-bg:transparent;
+  --chip-ok-border:transparent;
+  --chip-info-color:var(--accent);
+  --chip-info-bg:transparent;
+  --chip-info-border:transparent;
+  --chip-warn-color:var(--warning-text);
+  --chip-warn-bg:var(--warning-bg);
+  --chip-warn-border:var(--warning-border);
+  --focus-ring:0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+  --md-sans:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',var(--cjk-fallback),sans-serif;
 }
 
 [data-theme="light"]{

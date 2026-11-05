@@ -69,7 +69,7 @@ def test_network_skip_and_heuristic_fallback_share_one_scan(monkeypatch):
     network = _Counter('network', 99, needs_network=True)
     estimates = []
 
-    def estimate(messages, *, system=None, tools=None):
+    def estimate(messages, *, system=None, tools=None, estimate_text=None):
         estimates.append((messages, system, tools))
         return 40
 
@@ -107,6 +107,34 @@ def test_network_dispatch_computes_prefilter_once(monkeypatch):
     assert result['method'] == 'network'
     assert network.calls == 1
     assert len(estimates) == 1
+
+
+def test_network_prefilter_reuses_remembered_request_text_estimates(monkeypatch):
+    """Each round's prefilter rescanned the whole history with regexes."""
+    import lib.token_counter.tiktoken_counter as tiktoken_counter
+    from lib.token_counter.heuristic import cheap_estimate
+
+    tiktoken_counter._reset_text_count_cache_for_tests()
+    scanned = []
+    original = tiktoken_counter._cheap_estimate_text
+    monkeypatch.setattr(tiktoken_counter, '_cheap_estimate_text',
+                        lambda text: scanned.append(text) or original(text))
+    network = _Counter('network', 99, needs_network=True)
+    monkeypatch.setattr(token_api, 'resolve',
+                        lambda _model: [network, HeuristicCounter()])
+    monkeypatch.setattr(token_api, 'API_THRESHOLD', 0.5)
+    stable = 'stable tool output 上下文 ' * 60
+    history = [{'role': 'tool', 'content': stable},
+               {'role': 'user', 'content': 'short question'}]
+
+    results = [token_api.count_tokens(history, model='claude-test',
+                                      context_limit=10_000_000)
+               for _round in range(2)]
+    tiktoken_counter._reset_text_count_cache_for_tests()
+
+    assert [result['tokens'] for result in results] == [cheap_estimate(history)] * 2
+    assert network.calls == 0
+    assert scanned.count(stable) == 1
 
 
 def test_usage_cache_verifies_only_bounded_prefix_tail():

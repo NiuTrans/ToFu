@@ -1,15 +1,9 @@
 """Public synchronous/asynchronous SDK methods preserve the pre-cutover shape."""
 import asyncio
 from copy import deepcopy
-from pathlib import Path
 import pytest
 
 pytestmark = pytest.mark.unit
-
-
-@pytest.fixture(autouse=True)
-def sdk_source(monkeypatch):
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / 'clients/python'))
 
 
 @pytest.mark.parametrize('data,expected', [

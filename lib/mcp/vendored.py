@@ -72,4 +72,8 @@ VENDORED_LAUNCHERS: dict[str, SourceLauncher] = {
         'extra_sources': ['packages/tofu-mtsso-auth'],
         'sources': ['../xuecheng-mcp', 'vendor/xuecheng-mcp', 'tools/xuecheng-mcp'],
     },
+    # Operator checkout (tools/) on the dev box; vendor/ on internal exports.
+    'github-batch-mcp': {
+        'sources': ['tools/github-batch-mcp', 'vendor/github-batch-mcp'],
+    },
 }

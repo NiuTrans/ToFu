@@ -129,6 +129,27 @@ def test_maintenance_includes_shutdown_and_first_read():
     assert dimension(charter.assess(rows, current_sources=SOURCES), 'maintenance')['status'] == 'FAIL'
 
 
+def test_failed_maintenance_is_a_failure_even_without_success_scope_fields():
+    rows = reports()
+    for row in rows:
+        row['workloads']['maintenance_reopen']['tofudb'] = {'error': 'recovery read failed'}
+    result = dimension(charter.assess(rows, current_sources=SOURCES), 'maintenance')
+    assert result['status'] == 'FAIL'
+    assert all(item['observed_status'] == 'FAIL' for item in result['cells'])
+
+
+@pytest.mark.parametrize('family', ['record.get', 'credential.list'])
+def test_maintenance_cannot_pass_with_a_reported_boot_read_gap(family):
+    rows = reports()
+    for row in rows:
+        row['workloads']['maintenance_reopen']['tofudb']['cold_read_unsupported'] = {
+            family: 'historical missing or failed cold read',
+        }
+    result = dimension(charter.assess(rows, current_sources=SOURCES), 'maintenance')
+    assert result['status'] == 'INSUFFICIENT'
+    assert any('cold-read' in reason for item in result['cells'] for reason in item['reasons'])
+
+
 def test_empty_evidence_generates_actionable_missing_dimensions():
     result = charter.assess([], current_sources=SOURCES)
     assert len(result['dimensions']) == len(charter.POLICY['dimensions'])

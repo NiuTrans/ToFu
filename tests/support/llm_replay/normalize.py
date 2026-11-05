@@ -2,10 +2,11 @@
 
 The recorder and the replayer MUST compute request identity through this one
 module so environment differences (checkout path, tmp root, home directory,
-the current date) never break replay matching.  Normalization is deliberately
-small and stable: when a legitimate product change alters the request itself
-the rule is **fix fixtures, not normalizers** — re-record the scenario and
-review the diff instead of teaching this module a new special case.
+host OS release, the current date) never break replay matching.
+Normalization is deliberately small and stable: when a legitimate product
+change alters the request itself the rule is **fix fixtures, not
+normalizers** — re-record the scenario and review the diff instead of
+teaching this module a new special case.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
 import tempfile
 
@@ -33,8 +35,20 @@ _DATE_PATTERNS = (
 )
 
 
-def _path_replacements(cwd: str) -> list[tuple[str, str]]:
-    """Ordered (needle, placeholder) path rewrites, longest first."""
+def _host_os_names() -> list[str]:
+    """This host's OS as a composed prompt prints it (``Linux 4.18.0``).
+
+    Anchored on the system name so a bare release such as Windows ``10``
+    never rewrites unrelated numbers.
+    """
+    system, release = platform.system(), platform.release()
+    if not system or not release:
+        return []
+    return [f'{system} {release}', f'{system} {release.split("-", 1)[0]}']
+
+
+def _environment_replacements(cwd: str) -> list[tuple[str, str]]:
+    """Ordered (needle, placeholder) host-fact rewrites, longest first."""
     pairs: list[tuple[str, str]] = []
     if cwd:
         pairs.append((os.path.normpath(str(cwd)), '{{CWD}}'))
@@ -43,6 +57,7 @@ def _path_replacements(cwd: str) -> list[tuple[str, str]]:
     home = os.path.normpath(os.path.expanduser('~'))
     if home and home != os.sep:
         pairs.append((home, '{{HOME}}'))
+    pairs.extend((name, '{{OS}}') for name in _host_os_names())
     # Longest first so a nested cwd wins over its tmp/home parent.
     pairs.sort(key=lambda pair: len(pair[0]), reverse=True)
     # Drop duplicates (cwd may BE the tmp dir) while preserving order.
@@ -68,10 +83,11 @@ def normalize_value(value, *, cwd: str):
     """Deep-normalize one JSON-ish value for environment-stable digests.
 
     Strings are rewritten: absolute ``cwd``/tmp paths become ``{{CWD}}``, the
-    user's home directory becomes ``{{HOME}}``, and calendar dates become
-    ``{{DATE}}``.  Dicts and lists are recursed; scalars pass through.
+    user's home directory becomes ``{{HOME}}``, this host's OS name and
+    release become ``{{OS}}``, and calendar dates become ``{{DATE}}``.  Dicts
+    and lists are recursed; scalars pass through.
     """
-    replacements = _path_replacements(cwd)
+    replacements = _environment_replacements(cwd)
     return _normalize(value, replacements)
 
 
@@ -89,7 +105,8 @@ def _normalize(value, replacements: list[tuple[str, str]]):
     return value
 
 
-def _digest_value(value) -> str:
+def json_digest(value) -> str:
+    """sha256 of the canonical JSON encoding: the one identity function."""
     payload = json.dumps(
         value, ensure_ascii=False, sort_keys=True,
         separators=(',', ':'), allow_nan=False).encode('utf-8')
@@ -99,7 +116,7 @@ def _digest_value(value) -> str:
 _DIGEST_FIELDS = ('model', 'messages', 'system', 'tools')
 
 
-def _normalized_projection(body, *, cwd: str) -> dict:
+def normalized_projection(body, *, cwd: str) -> dict:
     """Project the semantic request fields, stripped and normalized.
 
     ``body`` may be a plain dict or an ``AdmittedRequest`` mapping; internal
@@ -111,15 +128,19 @@ def _normalized_projection(body, *, cwd: str) -> dict:
     return normalize_value(projection, cwd=cwd)
 
 
+def projection_field_digests(projection: dict) -> dict[str, str]:
+    """Per-top-level-field digests of one normalized projection."""
+    return {key: json_digest(value) for key, value in projection.items()}
+
+
 def normalized_request_digest(body, *, cwd: str) -> str:
     """Content identity of one provider request, environment-independent."""
-    return _digest_value(_normalized_projection(body, cwd=cwd))
+    return json_digest(normalized_projection(body, cwd=cwd))
 
 
 def normalized_field_digests(body, *, cwd: str) -> dict[str, str]:
-    """Per-top-level-field digests, for one-line drift diagnostics."""
-    projection = _normalized_projection(body, cwd=cwd)
-    return {key: _digest_value(value) for key, value in projection.items()}
+    """Per-top-level-field digests; they address the recorded request store."""
+    return projection_field_digests(normalized_projection(body, cwd=cwd))
 
 
 def chat_request_proxy(messages, model, extra=None) -> dict:

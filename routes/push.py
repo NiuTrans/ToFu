@@ -23,15 +23,19 @@ Protocol:
 
 import asyncio
 import os
+from typing import TYPE_CHECKING
 
 from quart import Blueprint, websocket
 
-from lib.quart_sync import request_json
+from lib.quart_sync import owned_sync_command, request_json
 
 from lib.api_response import api_error, api_ok
 from lib.log import get_logger, resolve_inbound_rid, set_principal
 from lib.agent_core.push import PushClient, hub
 from lib.control_rpc import ControlRpcSession
+
+if TYPE_CHECKING:
+    from lib.api_keys import AuthContext
 
 # Browser proof-of-life normally arrives every 4s (20s in hidden tabs).
 # Three minutes tolerates background timer clamping while ensuring a proxy
@@ -72,27 +76,7 @@ def _push_ws_peer():
         return ''
 
 
-def _push_ws_token(headers, cookies) -> str:
-    """Extract a WebSocket credential in the HTTP gate's priority order."""
-    auth = (headers.get('Authorization') or '') if headers is not None else ''
-    parts = auth.split(None, 1)
-    if len(parts) == 2 and parts[0].lower() == 'bearer':
-        token = parts[1].strip()
-        if token:
-            return token
-    x_api_key = ((headers.get('x-api-key') or '').strip()
-                 if headers is not None else '')
-    if x_api_key.startswith(('tofu_live_', 'tofu_admin_')):
-        return x_api_key
-    from routes.api_v1.auth import SESSION_COOKIE
-    cookie_token = ((cookies.get(SESSION_COOKIE) or '').strip()
-                    if cookies is not None else '')
-    if cookie_token.startswith(('tofu_live_', 'tofu_admin_')):
-        return cookie_token
-    return ''
-
-
-def _resolve_push_ws_auth(headers, cookies, peer):
+def _resolve_push_ws_auth(headers, cookies, peer) -> 'tuple[AuthContext | None, str]':
     """Resolve or reject a push socket using the HTTP gate's policy.
 
     Returns ``(AuthContext | None, reason)``.  This is deliberately a pure
@@ -100,10 +84,12 @@ def _resolve_push_ws_auth(headers, cookies, peer):
     handler can be tested without accepting a connection first.
     """
     from lib.api_keys import local_admin_context, validate_token
+    from lib.api_keys.transport import select_credential
     from lib.auth_mode import requires_credential
-    from routes.api_v1.auth import open_mode_peer_allowed
+    from routes.api_v1.auth import (
+        browser_request_is_cross_site, open_mode_peer_allowed)
 
-    token = _push_ws_token(headers, cookies)
+    token = select_credential(headers, cookies).token
     invalid_token = False
     if token:
         try:
@@ -120,14 +106,33 @@ def _resolve_push_ws_auth(headers, cookies, peer):
             return None, 'invalid_token'
         invalid_token = True
 
+    # Browsers apply no CORS to sockets: another site's page could otherwise
+    # read the owner's push stream and call control RPCs.
+    cross_site = headers is not None and browser_request_is_cross_site(
+        headers, headers.get('Host'))
     if invalid_token:
+        if cross_site:
+            return None, 'cross_site'
         if open_mode_peer_allowed(peer):
             return local_admin_context(), 'open_local'
         return None, 'invalid_token'
 
     if not requires_credential() and open_mode_peer_allowed(peer):
+        if cross_site:
+            return None, 'cross_site'
         return local_admin_context(), 'open_local'
     return None, 'credential_required'
+
+
+@owned_sync_command
+def _resolve_push_ws_auth_offloop(headers, cookies, peer):
+    """Join finite auth work on the serving loop's existing demand executor.
+
+    The shared boundary copies context into the worker and waits out physical
+    validation (including audit touch) before propagating disconnect/cancel.
+    Only supplied transport snapshots reach the worker, never WS globals.
+    """
+    return _resolve_push_ws_auth(headers, cookies, peer)
 
 
 @push_bp.route('/api/push/debug/presence', methods=['POST'])
@@ -257,8 +262,15 @@ async def push_ws():
 
     # ── Resolve WS handshake auth (HTTP before_request does not run) ────
     try:
-        _ctx, _auth_reason = _resolve_push_ws_auth(
-            websocket.headers, websocket.cookies, _push_ws_peer())
+        # Snapshot transport data before dispatch; preserve case-insensitive
+        # header lookup and do not let a worker touch connection-owned values.
+        _headers = websocket.headers.copy()
+        _cookies = dict(websocket.cookies)
+        _peer = _push_ws_peer()
+        if isinstance(_peer, (tuple, list)):
+            _peer = tuple(_peer)
+        _ctx, _auth_reason = await _resolve_push_ws_auth_offloop(
+            _headers, _cookies, _peer)
     except Exception as _e:
         logger.warning('[Push] WS auth resolve failed closed (rid=%s): %s',
                        _rid, _e)

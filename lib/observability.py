@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import re
 import threading
 import time
 import weakref
+from bisect import bisect_left
 from collections import defaultdict
 from contextlib import contextmanager
 from contextvars import ContextVar
+from itertools import accumulate, groupby
 
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
@@ -54,8 +57,13 @@ _EXECUTION_OUTCOMES = frozenset({
     'completed', 'failed', 'cancelled', 'timed_out',
 })
 _TASK_STARTUP_STAGES = frozenset({
+    'input_build', 'turn_persist', 'executor_start', 'acknowledgement',
     'context', 'registration', 'preparation', 'binding', 'submission',
-    'worker_entry', 'cleanup', 'workspace_binding',
+    'registration_route', 'registration_mint', 'registration_checkpoint',
+    'worker_entry', 'cleanup', 'workspace_binding', 'input_translation',
+    'startup_config', 'startup_resume', 'startup_project', 'startup_tools',
+    'startup_memory', 'startup_context', 'startup_history',
+    'memory_list', 'memory_rank', 'memory_hydrate',
     'workspace_provision', 'workspace_roots', 'workspace_identity',
     'workspace_root_binding', 'workspace_persist',
     'workspace_snapshot', 'workspace_materialize', 'workspace_registration',
@@ -64,6 +72,8 @@ _TASK_STARTUP_STAGES = frozenset({
     'workspace_snapshot_commit', 'workspace_index_validate',
     'workspace_metadata', 'workspace_checkout',
 })
+# Content-free completion details a startup stage may add to its anchor.
+_TASK_STARTUP_DETAILS = frozenset({'listing', 'listingMs'})
 _TASK_COMPLETION_STAGES = frozenset({
     'persistence', 'workspace_delivery', 'workspace_evidence', 'terminal_listeners',
 })
@@ -113,6 +123,42 @@ def route_template_for_request(req: Any) -> str:
     return '/static/<path>' if path.startswith('/static/') else 'unmatched'
 
 
+class _Histogram:
+    """Record one disjoint bucket; derive inclusive counts when scraping.
+
+    The first observation owns the exposed boundaries and their order. Sorted
+    distinct non-NaN bounds support lookup even for repeated/unordered bounds;
+    NaN bounds retain their original never-matching comparison behavior.
+    The containing store owns synchronization.
+    """
+
+    __slots__ = ('buckets', 'bounds', 'counts', 'sum', 'count')
+
+    def __init__(self, buckets: tuple[float, ...]) -> None:
+        self.buckets = buckets
+        self.bounds = tuple(sorted({
+            upper for upper in buckets if not math.isnan(upper)}))
+        self.counts = [0] * len(self.bounds)
+        self.sum = 0.0
+        self.count = 0
+
+    def observe(self, number: float) -> None:
+        self.sum += number
+        self.count += 1
+        index = bisect_left(self.bounds, number)
+        if index < len(self.bounds):
+            self.counts[index] += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        cumulative = dict(zip(self.bounds, accumulate(self.counts)))
+        return {
+            'buckets': self.buckets,
+            'counts': [cumulative.get(upper, 0) for upper in self.buckets],
+            'sum': self.sum,
+            'count': self.count,
+        }
+
+
 class _Store:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -120,7 +166,7 @@ class _Store:
         self.gauges: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
         self.label_values: dict[tuple[str, str], set[str]] = defaultdict(set)
         self.histograms: dict[
-            tuple[str, tuple[tuple[str, str], ...]], dict[str, Any]
+            tuple[str, tuple[tuple[str, str], ...]], _Histogram
         ] = {}
         # The normalized value for a (name, axis, raw-text) triple is stable:
         # once a value has been admitted or folded to 'other', re-presenting
@@ -188,31 +234,16 @@ class _Store:
             key = (name, self._labels(name, labels))
             state = self.histograms.get(key)
             if state is None:
-                state = {
-                    'buckets': bucket_tuple,
-                    'counts': [0] * len(bucket_tuple),
-                    'sum': 0.0,
-                    'count': 0,
-                }
+                state = _Histogram(bucket_tuple)
                 self.histograms[key] = state
-            number = max(0.0, float(value))
-            state['sum'] += number
-            state['count'] += 1
-            for index, upper in enumerate(state['buckets']):
-                if number <= upper:
-                    state['counts'][index] += 1
+            state.observe(max(0.0, float(value)))
 
     def snapshot(self) -> tuple[dict, dict, dict]:
         with self.lock:
             counters = dict(self.counters)
             gauges = dict(self.gauges)
             histograms = {
-                key: {
-                    'buckets': tuple(value['buckets']),
-                    'counts': list(value['counts']),
-                    'sum': value['sum'],
-                    'count': value['count'],
-                }
+                key: value.snapshot()
                 for key, value in self.histograms.items()
             }
         return counters, gauges, histograms
@@ -312,33 +343,64 @@ def record_task_queue_wait(kind: Any, seconds: float) -> None:
 _STARTUP_IDENTITY: ContextVar[dict | None] = ContextVar('startup_identity', default=None)
 
 
-@contextmanager
-def _measure_task_phase(stage: str, *, identity, metric_name: str, log_tag: str):
-    """Paired content-free spans; callers own closed stage/metric families."""
-    fields = dict(_STARTUP_IDENTITY.get() or {})
+def _admit_phase_identity(fields: dict, identity) -> None:
+    """Copy bounded identifiers that exist; a blank one stays absent."""
     for key in ('conversation_id', 'turn_id', 'attempt_id', 'task_id', 'user_id'):
         value = (identity or {}).get(key)
         if isinstance(value, (str, int)) and not isinstance(value, bool):
-            fields[key] = _bounded(value, limit=128)
+            text = str(value).strip()
+            if text:
+                fields[key] = _bounded(text, limit=128)
+
+
+def _admit_phase_details(details) -> dict:
+    """Closed detail keys only: short labels and finite durations."""
+    admitted = {}
+    for key, value in (details or {}).items():
+        if key not in _TASK_STARTUP_DETAILS or isinstance(value, bool):
+            continue
+        if isinstance(value, str):
+            admitted[key] = _bounded(value, limit=32)
+        elif isinstance(value, (int, float)) and math.isfinite(value):
+            admitted[key] = round(float(value), 3)
+    return admitted
+
+
+@contextmanager
+def _measure_task_phase(stage: str, *, identity, metric_name: str, log_format: str,
+                        details=None):
+    """Paired content-free spans; callers own closed stage/metric families.
+
+    Yields ``(state, bind_identity)``. Identity created inside the span (the
+    Turn a stage persisted) joins its completion and spans opened after it;
+    the start keeps the identity known at entry. ``details`` is read at
+    completion, so the stage may fill it while it runs.
+    """
+    fields = dict(_STARTUP_IDENTITY.get() or {})
+    _admit_phase_identity(fields, identity)
+    paired = bool(fields)
     started = time.monotonic()
 
     def anchor(boundary, **values):
-        if not fields:
+        if not paired:
             return
         try:
             import json
-            logger.info(f'[{log_tag}] %s', json.dumps({
+            logger.info(log_format, json.dumps({
                 'stage': stage, 'boundary': boundary,
                 'observedAtMs': int(time.time() * 1000),
                 **fields, **values}, separators=(',', ':')))
         except Exception:
             pass  # Diagnostics must not replace the execution verdict.
 
+    def bind_identity(created) -> None:
+        _admit_phase_identity(fields, created)
+
     anchor('start')
     state = {'outcome': 'success'}
     token = _STARTUP_IDENTITY.set(fields)
     try:
-        yield state
+        yield state, bind_identity
     except BaseException:
         state['outcome'] = 'error'
         raise
@@ -347,22 +409,30 @@ def _measure_task_phase(stage: str, *, identity, metric_name: str, log_tag: str)
         elapsed = max(0.0, time.monotonic() - started)
         outcome = state.get('outcome')
         outcome = outcome if outcome in _TASK_PHASE_OUTCOMES else 'error'
-        anchor('complete', outcome=outcome, durationMs=round(elapsed * 1000, 3))
+        anchor('complete', outcome=outcome, durationMs=round(elapsed * 1000, 3),
+               **_admit_phase_details(details))
         try:
             _STORE.observe(metric_name, elapsed, _HTTP_BUCKETS,
                            stage=stage, outcome=outcome)
-        except Exception:
-            pass  # An unavailable diagnostic sink cannot change settlement.
+        except Exception as error:
+            # An unavailable diagnostic sink cannot change settlement.
+            logger.debug('%s observation failed: %s', metric_name, error)
 
 
 @contextmanager
-def measure_task_startup(stage: str, *, identity=None):
-    """Measure dispatch with paired anchors; IDs are logs, never metric labels."""
+def measure_task_startup(stage: str, *, identity=None, details=None):
+    """Measure dispatch with paired anchors; IDs are logs, never metric labels.
+
+    Yields ``bind_identity(mapping)`` for identity the stage itself creates.
+    ``details`` is a caller-filled mapping whose ``_TASK_STARTUP_DETAILS``
+    entries join the completion anchor (docs/LOGGING.md).
+    """
     stage = stage if stage in _TASK_STARTUP_STAGES else 'other'
     with _measure_task_phase(stage, identity=identity,
                              metric_name='tofu_task_startup_stage_seconds',
-                             log_tag='TaskStartupTiming'):
-        yield
+                             log_format='[TaskStartupTiming] %s',
+                             details=details) as (_state, bind_identity):
+        yield bind_identity
 
 
 @contextmanager
@@ -371,7 +441,7 @@ def measure_task_completion(stage: str, *, identity=None):
     stage = stage if stage in _TASK_COMPLETION_STAGES else 'other'
     with _measure_task_phase(stage, identity=identity,
                              metric_name='tofu_task_completion_stage_seconds',
-                             log_tag='TaskCompletionTiming') as state:
+                             log_format='[TaskCompletionTiming] %s') as (state, _bind_identity):
         yield state
 
 
@@ -411,6 +481,22 @@ def record_storage_rpc(
     }
     _STORE.observe('tofu_storage_rpc_seconds', seconds, _STORAGE_BUCKETS,
                    **labels)
+
+
+_ROUTE_SELECTION_SCOPES = frozenset({'pinned', 'shared'})
+_ROUTE_SELECTION_OUTCOMES = frozenset({'selected', 'none'})
+
+
+def record_route_selection(seconds: float, *, scope: str, outcome: str) -> None:
+    """Record one dispatcher pick, including its wait for the dispatcher lock.
+
+    ``scope`` is ``pinned`` (a provider-pinned route group) or ``shared``
+    (the configured pool); ``outcome`` is ``selected`` or ``none``.
+    """
+    _STORE.observe(
+        'tofu_llm_route_selection_seconds', seconds, _WAIT_BUCKETS,
+        scope=scope if scope in _ROUTE_SELECTION_SCOPES else 'other',
+        outcome=outcome if outcome in _ROUTE_SELECTION_OUTCOMES else 'other')
 
 
 def record_llm_first_token(model: Any, seconds: float, provider: Any = '') -> None:
@@ -652,43 +738,81 @@ async def instrument_sse(generator: Any, channel: str = 'task') -> AsyncIterator
                 await result
 
 
+_EXECUTOR_GAUGES = ('workers', 'queued', 'active', 'resident_threads', 'abandoned')
 _EXECUTOR_OBSERVATION_LOCK = threading.Lock()
+# Observation -> weak reference to the executor it reads at scrape time.
 _EXECUTOR_OBSERVATIONS = weakref.WeakKeyDictionary()
+# Every observed pool name: one whose owners are all gone reports zeros.
+_EXECUTOR_POOL_NAMES: set[str] = set()
+# One refresh at a time, so an older read never overwrites a newer one.
+_EXECUTOR_SCRAPE_LOCK = threading.Lock()
+
+
+def _executor_idle(snapshot: dict[str, int]) -> bool:
+    return not any(snapshot[key] for key in ('resident_threads', 'queued', 'active'))
 
 
 class ExecutorObservation:
-    def __init__(self, name, *, publisher=None):
+    """One executor owner's gauges, summed per pool name when scraped.
+
+    Scrapes read the attached executor's exact ``metric_snapshot()``, so
+    accepted jobs never publish metrics or take these process-wide locks.
+    Peers sharing a pool name skip idle owners, as a retired generation
+    publishes nothing; a sole owner (``include_idle``) keeps reporting its
+    idle capacity hint until it stops. A retired owner leaves once its
+    carriers have exited.
+    """
+
+    def __init__(self, name, *, include_idle=False):
         self.name = name
-        self.publisher = publisher
+        self.include_idle = include_idle
         self.closing = False
 
-    def publish(self, _pool, **snapshot):
+    def attach(self, executor) -> None:
         with _EXECUTOR_OBSERVATION_LOCK:
-            if not any(snapshot[key] for key in (
-                    'resident_threads', 'queued', 'active')):
-                _EXECUTOR_OBSERVATIONS.pop(self, None)
-            else:
-                _EXECUTOR_OBSERVATIONS[self] = snapshot
-            self._publish_total()
+            _EXECUTOR_POOL_NAMES.add(self.name)
+            if not self.closing:
+                _EXECUTOR_OBSERVATIONS[self] = weakref.ref(executor)
 
-    def _publish_total(self):
-        peers = [values for owner, values in _EXECUTOR_OBSERVATIONS.items()
-                 if owner.name == self.name]
-        total = {key: sum(peer[key] for peer in peers) for key in (
-            'workers', 'queued', 'active', 'resident_threads', 'abandoned')}
-        try:
-            publisher = publish_executor_state if self.publisher is None else self.publisher
-            publisher(self.name, **total)
-        except Exception:
-            logger.debug('Executor observation failed', exc_info=True)
-
-    def retire(self):
+    def retire(self) -> None:
         with _EXECUTOR_OBSERVATION_LOCK:
             self.closing = True
-            snapshot = _EXECUTOR_OBSERVATIONS.get(self, {})
-            if not any(snapshot.get(key, 0) for key in ('resident_threads', 'queued', 'active')):
+            reference = _EXECUTOR_OBSERVATIONS.get(self)
+        executor = None if reference is None else reference()
+        # An interrupted join keeps its live carriers observed; the first
+        # scrape after they exit removes this owner.
+        if executor is None or _executor_idle(executor.metric_snapshot()):
+            with _EXECUTOR_OBSERVATION_LOCK:
                 _EXECUTOR_OBSERVATIONS.pop(self, None)
-            self._publish_total()
+
+
+def _publish_executor_observations() -> None:
+    """Set every observed pool's gauges from its owners' current state."""
+    with _EXECUTOR_OBSERVATION_LOCK:
+        owners = list(_EXECUTOR_OBSERVATIONS.items())
+        names = set(_EXECUTOR_POOL_NAMES)
+    totals = {name: dict.fromkeys(_EXECUTOR_GAUGES, 0) for name in names}
+    departed = []
+    for observation, reference in owners:
+        executor = reference()
+        snapshot = None if executor is None else executor.metric_snapshot()
+        if snapshot is None or (observation.closing and _executor_idle(snapshot)):
+            departed.append(observation)
+            continue
+        if not observation.include_idle and _executor_idle(snapshot):
+            continue
+        total = totals.setdefault(observation.name, dict.fromkeys(_EXECUTOR_GAUGES, 0))
+        for key in _EXECUTOR_GAUGES:
+            total[key] += snapshot[key]
+    if departed:
+        with _EXECUTOR_OBSERVATION_LOCK:
+            for observation in departed:
+                _EXECUTOR_OBSERVATIONS.pop(observation, None)
+    for name, total in totals.items():
+        try:
+            publish_executor_state(name, **total)
+        except Exception:
+            logger.debug('Executor observation failed', exc_info=True)
 
 
 # ThreadPoolExecutor is required by asyncio.set_default_executor. The facade
@@ -704,6 +828,10 @@ def _shutdown_sync_compat_pools() -> None:
     with _SYNC_COMPAT_LOCK:
         _SYNC_COMPAT_EXITING = True
         pools = tuple(_SYNC_COMPAT_POOLS)
+    # Event pumps use these carriers. Their existing close deadline releases
+    # transient persistence waits before CPython's non-daemon thread joins.
+    from lib.tasks_pkg.event_delivery import shutdown_event_delivery
+    shutdown_event_delivery()
     for pool in pools:
         pool.shutdown(wait=False)
     for pool in pools:
@@ -717,10 +845,13 @@ class InstrumentedThreadPoolExecutor(ThreadPoolExecutor):
     remain. The stdlib carrier queue is unused: the shared recoverable executor
     is the sole scheduling/accounting owner. Idle replacement stays loop-owned.
     """
-    def __init__(self, *args: Any, metric_pool: str,
-                 idle_retain_threads: int = 0, **kwargs: Any) -> None:
+    def __init__(self, max_workers: int | None = None, thread_name_prefix: str = '',
+                 initializer: Any = None, initargs: tuple = (), *, metric_pool: str,
+                 idle_retain_threads: int = 0) -> None:
         global _SYNC_EXIT_REGISTERED
-        super().__init__(*args, **kwargs)
+        # CPython 3.14 removed ThreadPoolExecutor._initializer/_initargs, so
+        # the facade keeps its own constructor arguments.
+        super().__init__(max_workers, thread_name_prefix, initializer, initargs)
         from lib.agent_core.worker_executor import RecoverableAgentExecutor
         self.metric_pool = _bounded(metric_pool, limit=32)
         self._observation = ExecutorObservation(self.metric_pool)
@@ -730,8 +861,8 @@ class InstrumentedThreadPoolExecutor(ThreadPoolExecutor):
                 max_abandoned_workers=self._max_workers,
                 thread_name_prefix=self._thread_name_prefix,
                 metric_pool=self.metric_pool, idle_retain_threads=idle_retain_threads,
-                initializer=self._initializer, initargs=self._initargs,
-                daemon_workers=False, state_publisher=self._observation.publish)
+                initializer=initializer, initargs=initargs,
+                daemon_workers=False, observation=self._observation)
             with _SYNC_COMPAT_LOCK:
                 if _SYNC_COMPAT_EXITING:
                     self._demand.shutdown(wait=False, cancel_futures=True)
@@ -763,10 +894,7 @@ class InstrumentedThreadPoolExecutor(ThreadPoolExecutor):
 
     def shutdown(self, wait=True, *, cancel_futures=False):
         self._shutdown = True
-        try:
-            return self._demand.shutdown(wait=wait, cancel_futures=cancel_futures)
-        finally:
-            self._observation.retire()
+        return self._demand.shutdown(wait=wait, cancel_futures=cancel_futures)
 
     def idle_retirement_snapshot(self, idle_seconds, *, now=None):
         return self._demand.idle_retirement_snapshot(idle_seconds, now=now)
@@ -786,10 +914,9 @@ def publish_executor_state(
 ) -> None:
     """Publish one internally-consistent executor scheduling snapshot.
 
-    The ordinary sync pool updates these gauges incrementally above.  The
-    recoverable agent executor owns a logical worker set that may temporarily
-    include a quarantined, physically-stuck thread, so it publishes the full
-    bounded snapshot after each state transition instead.
+    Demand executors are read when metrics are scraped (``ExecutorObservation``);
+    lanes that own their own scheduler publish their full bounded snapshot
+    after each state transition.
     """
     metric_pool = _bounded(pool, limit=32)
     _STORE.set('tofu_executor_workers', max(0, int(workers)), pool=metric_pool)
@@ -877,6 +1004,7 @@ _HELP = {
     'tofu_task_queue_wait_seconds': 'Task queue wait before a worker starts.',
     'tofu_task_startup_stage_seconds': 'Conversation executor startup stage duration.',
     'tofu_llm_first_token_seconds': 'LLM time to first token.',
+    'tofu_llm_route_selection_seconds': 'Dispatcher slot selection, including dispatcher-lock wait.',
     'tofu_llm_tasks_total': 'Terminal LLM tasks by bounded outcome.',
     'tofu_llm_total_duration_seconds': 'End-to-end LLM task duration.',
     'tofu_llm_api_rounds': 'Model API rounds per terminal task.',
@@ -922,42 +1050,44 @@ def _escape(value: str) -> str:
     return value.replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
 
 
-def _label_text(labels: tuple[tuple[str, str], ...], extra: tuple | None = None) -> str:
-    pairs = list(labels)
-    if extra:
-        pairs.append(extra)
-    if not pairs:
+def _label_text(labels: tuple[tuple[str, str], ...]) -> str:
+    if not labels:
         return ''
-    return '{' + ','.join(f'{key}="{_escape(value)}"' for key, value in pairs) + '}'
+    return '{' + ','.join(f'{key}="{_escape(value)}"' for key, value in labels) + '}'
 
 
 def prometheus_lines() -> list[str]:
     """Render a consistent snapshot in Prometheus text format."""
-    counters, gauges, histograms = _STORE.snapshot()
+    with _EXECUTOR_SCRAPE_LOCK:
+        _publish_executor_observations()
+        counters, gauges, histograms = _STORE.snapshot()
     lines: list[str] = []
-    names = sorted({key[0] for key in counters} | {key[0] for key in gauges})
-    for name in names:
-        metric_type = 'counter' if any(key[0] == name for key in counters) else 'gauge'
+    counter_names = {key[0] for key in counters}
+    scalar_values = {key: value for key, value in gauges.items()
+                     if key[0] not in counter_names}
+    scalar_values.update(counters)
+    for name, samples in groupby(
+            sorted(scalar_values.items()), key=lambda item: item[0][0]):
+        metric_type = 'counter' if name in counter_names else 'gauge'
         lines.extend((f'# HELP {name} {_HELP.get(name, name)}',
                       f'# TYPE {name} {metric_type}'))
-        source = counters if metric_type == 'counter' else gauges
-        for (metric_name, labels), value in sorted(source.items()):
-            if metric_name == name:
-                lines.append(f'{name}{_label_text(labels)} {value}')
+        for (_, labels), value in samples:
+            lines.append(f'{name}{_label_text(labels)} {value}')
 
-    for name in sorted({key[0] for key in histograms}):
+    for name, samples in groupby(
+            sorted(histograms.items()), key=lambda item: item[0][0]):
         lines.extend((f'# HELP {name} {_HELP.get(name, name)}',
                       f'# TYPE {name} histogram'))
-        for (metric_name, labels), state in sorted(histograms.items()):
-            if metric_name != name:
-                continue
+        for (_, labels), state in samples:
+            label_text = _label_text(labels)
+            bucket_prefix = label_text[:-1] + ',' if labels else '{'
             for upper, count in zip(state['buckets'], state['counts']):
                 lines.append(
-                    f'{name}_bucket{_label_text(labels, ("le", str(upper)))} {count}')
-            lines.append(f'{name}_bucket{_label_text(labels, ("le", "+Inf"))} '
+                    f'{name}_bucket{bucket_prefix}le="{upper}"}} {count}')
+            lines.append(f'{name}_bucket{bucket_prefix}le="+Inf"}} '
                          f'{state["count"]}')
-            lines.append(f'{name}_sum{_label_text(labels)} {state["sum"]}')
-            lines.append(f'{name}_count{_label_text(labels)} {state["count"]}')
+            lines.append(f'{name}_sum{label_text} {state["sum"]}')
+            lines.append(f'{name}_count{label_text} {state["count"]}')
     return lines
 
 
@@ -967,6 +1097,9 @@ def reset_for_tests() -> None:
         _STORE.gauges.clear()
         _STORE.histograms.clear()
         _STORE.label_values.clear()
+        _STORE._label_memo.clear()
+    with _EXECUTOR_OBSERVATION_LOCK:
+        _EXECUTOR_POOL_NAMES.clear()
 
 
 __all__ = [

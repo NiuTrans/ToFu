@@ -43,13 +43,9 @@ def _clean_xhs_source():
     """Ensure xiaohongshu.com is reset (disabled, no cookies) around each test,
     and the tofu_search auth-source provider is registered for the duration."""
     import tofu_search
-    from tofu_search.search.engines import xhs as _xhs_engine
 
     A.delete_source('xiaohongshu.com')
-    # The engine's risk guard (pacing / cache / backoff) is process-global —
-    # reset it too, or one test's page load paces the NEXT test's call into a
-    # throttle-skip and the suite turns order-dependent.
-    _xhs_engine._GUARD.reset()
+    # A registration owns its pacing/cache/backoff lifetime.
     tofu_search.register_auth_source_provider(_AuthSourceProviderForTests())
     yield
     tofu_search.register_auth_source_provider(None)
@@ -402,13 +398,16 @@ class TestOrchestratorWiring:
     def test_xhs_imported_and_gated(self):
         import inspect
 
-        from tofu_search.search import orchestrator as o
+        from tofu_search.search import engine_selection, orchestrator as o
         # ``perform_web_search`` may be wrapped by the host's provider bridge;
-        # the engine census and availability gate live in the retained pipeline.
+        # the retained pipeline lends its availability gate to engine
+        # selection, which owns the engine census.
         src = inspect.getsource(o._perform_web_search_impl)
-        # Conditionally wired on availability, not unconditionally.
         assert 'xhs_search_available' in src
-        assert 'Xiaohongshu' in src
+        census = inspect.getsource(engine_selection.select_engines)
+        # Conditionally wired on availability, not unconditionally.
+        assert 'native_search_available()' in census
+        assert 'Xiaohongshu' in census
 
     def test_engine_available_helper(self):
         from tofu_search.search.engines.xhs import xhs_search_available

@@ -38,6 +38,29 @@ def test_request_normalizes_identity_and_rejects_unbounded_seed_lists():
         normalize_research_request('bounded', model='m' * 257)
 
 
+@pytest.mark.parametrize(('arguments', 'field'), [
+    ({'direction': 7}, 'direction'),
+    ({'direction': '  '}, 'direction'),
+    ({'lang': 'fr'}, 'lang'),
+    ({'lang': 3}, 'lang'),
+    ({'model': 5}, 'model'),
+    ({'n_ideas': True}, 'n_ideas'),
+    ({'n_ideas': 'many'}, 'n_ideas'),
+    ({'seed_arxiv_ids': '2312.00752'}, 'seed_arxiv_ids'),
+    ({'seed_arxiv_ids': 9}, 'seed_arxiv_ids'),
+    ({'seed_arxiv_ids': ['not-a-paper']}, 'seed_arxiv_ids'),
+])
+def test_caller_faults_are_typed_bad_requests_naming_their_field(arguments, field):
+    """HTTP entries answer only the typed client fault with 400."""
+    from lib.error_envelope import BadRequest
+    from lib.research.contracts import normalize_research_request
+
+    arguments = {'direction': 'bounded', **arguments}
+    with pytest.raises(BadRequest) as rejected:
+        normalize_research_request(arguments.pop('direction'), **arguments)
+    assert rejected.value.field == field
+
+
 def test_engine_claim_uses_complete_normalized_identity_and_atomic_fields(
         monkeypatch, tmp_path):
     import lib.research.engine as engine

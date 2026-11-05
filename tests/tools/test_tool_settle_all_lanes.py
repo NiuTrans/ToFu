@@ -909,7 +909,7 @@ def test_approval_card_is_answerable_during_publication(rec, slow_tools, monkeyp
     from lib.tasks_pkg import approval
     from lib.tasks_pkg.human_gate_registry import OwnedHumanGateRegistry
     from lib.tasks_pkg.tool_dispatch import _approval as gate
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(approval, 'human_gate_registry', registry)
     published = []
     def emit(task, event):
@@ -949,3 +949,35 @@ def test_settled_generic_tool_without_cards_survives_terminal_sweep(monkeypatch,
         assert complete['status'] == verdict
     else:
         assert 'status' not in complete
+
+
+@pytest.mark.parametrize('batch', [False, True])
+def test_unanswerable_guidance_keeps_its_verdict_while_a_dangling_round_is_aborted(
+        monkeypatch, batch):
+    """An unattended ``ask_human`` settles 'unanswerable' with its result. The
+    task-end sweep keeps that verdict and publishes nothing for it; a round
+    that was announced but never ran is still finalized as 'aborted'."""
+    import copy
+    from lib.tasks_pkg.executor import _finalize as executor_finalize
+    from lib.tasks_pkg.handlers.misc import _human
+    from lib.tasks_pkg.orchestrator import _finalize
+    task = _mk_task(_transientRuntime=True)
+    asked = _mk_tc('guidance-unattended', 'ask_human', 1)
+    dangling = _mk_tc('read-never-ran', 'read_files', 2)
+    task['toolRounds'] = [asked[5], dangling[5]]
+    events = []
+    for module in (_human, executor_finalize):
+        monkeypatch.setattr(module, 'append_event', lambda task, event: events.append(event))
+    arguments = ({'questions': [{'question': 'Proceed?'}, {'question': 'Which scope?'}]}
+                 if batch else {'question': 'Proceed?'})
+    _, content, _ = _human._handle_ask_human(
+        task, asked[0], 'ask_human', asked[2], arguments, asked[4], asked[5], {}, '', False)
+    assert 'no interactive session' in content
+    assert asked[5]['status'] == 'unanswerable' and asked[5]['results']
+    settled = copy.deepcopy(asked[5])
+    del events[:]
+    assert _finalize._finalize_dangling_tool_rounds(task) == 1
+    assert asked[5] == settled
+    assert dangling[5]['status'] == 'aborted'
+    assert [(event['type'], event['toolCallId'], event['status']) for event in events] == [
+        ('tool_result', 'read-never-ran', 'aborted')]

@@ -25,6 +25,16 @@ permissions:
   contents: read
 
 jobs:
+  core-linux:
+    runs-on: ubuntu-22.04
+    container: swift:6.0.3-jammy
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system SQLite headers
+        run: apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev python3
+      - name: Run the portable core against real Foundation and SQLite
+        run: swift test --package-path ios
+
   test-and-build:
     runs-on: macos-14
     defaults:

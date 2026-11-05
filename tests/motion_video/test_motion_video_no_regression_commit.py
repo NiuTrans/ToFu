@@ -237,20 +237,19 @@ def test_a_STALE_composition_is_never_preserved(tmp_path):
         'length is worse than a lower grade')
 
 
-def test_the_engine_commits_through_the_guarded_seam():
-    """The compose loop must not write index.html directly.
-
-    A second write path is how this guarantee gets lost: the guard only holds
-    if there is exactly ONE place a composition reaches disk.
-    """
-    import inspect
-
-    from tests._source_scan import strip_comments
+def test_the_engine_commits_through_the_guarded_seam(tmp_path, monkeypatch):
+    """A refused scene commit stops the real workflow before render/delivery."""
     from lib.motion_video import engine
+    from tests.motion_video.test_motion_video_workflow import _film
 
-    src = inspect.getsource(engine.run_motion_task)
-    live = strip_comments(src, lang='python')
-    assert '_commit_scene_html(' in live, (
-        'the compose loop must commit through the no-regression seam')
-    assert '_write(index_path' not in live, (
-        'a direct write to index.html bypasses the no-regression guarantee')
+    task, final = _film(tmp_path, monkeypatch)
+
+    def refuse(*args, **kwargs):
+        raise ValueError('injected no-regression refusal')
+
+    monkeypatch.setattr(engine, '_commit_scene_html', refuse)
+    engine.run_motion_task(task)
+    assert task['status'] == 'error'
+    assert 'injected no-regression refusal' in str(task['error'])
+    assert final.read_bytes() == b'previous-published-film'
+    assert not any(event['type'] in ('scene_done', 'final') for event in task['events'])

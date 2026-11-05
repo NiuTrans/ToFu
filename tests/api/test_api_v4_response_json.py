@@ -1,7 +1,6 @@
 """Every browser JSON consumption mode normalizes only the addressed v4 wire."""
 import json
 from pathlib import Path
-import shutil
 import subprocess
 import pytest
 from tests._runtime_sections import _require_frontend_bundler
@@ -10,7 +9,6 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node unavailable')
 def test_v4_raw_response_json_preserves_http_stream_and_clone_contracts(tmp_path):
     built = tmp_path / 'transport.cjs'
     # Shared dep guard: skip on dep-less lanes, fail under

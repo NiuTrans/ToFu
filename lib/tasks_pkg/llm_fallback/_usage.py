@@ -7,7 +7,7 @@ original mapping. Public events and the task's ``apiRounds`` ledger use
 round for the rest of the task lifetime.
 """
 
-from lib.cost import normalize_usage, split_input_tokens
+from lib.cost import accumulate_usage_into, normalize_usage, split_input_tokens
 from lib.log import get_logger
 from lib.tasks_pkg.manager._events import append_event
 
@@ -16,6 +16,104 @@ logger = get_logger(__name__)
 
 _EXTRA_BILLING_ROUNDS_KEY = '_extra_billing_rounds'
 _COMPACT_PREFIX_FINGERPRINT_KEY = '_wire_static'
+
+
+def _record_charge(
+    usage, model, round_id, accumulated_usage, api_rounds, *, tag, response_authoring
+):
+    """Append one paid response without retaining attempt-local wire evidence."""
+    accumulate_usage_into(accumulated_usage, usage)
+    record = {
+        'round': round_id,
+        'model': model,
+        'usage': project_usage_for_round_record(usage),
+        'tag': tag,
+    }
+    if not response_authoring:
+        record['responseAuthoring'] = False
+    api_rounds.append(record)
+
+
+def record_attempt_usage(
+    task,
+    usage,
+    model,
+    round_id,
+    accumulated_usage,
+    api_rounds,
+    *,
+    tag,
+    response_authoring=True,
+):
+    """Bill the response and each discarded resend exactly once.
+
+    Primary, configured fallback, pool rescue, reactive retry and refusal
+    retirement share this accounting owner. Only the adopted response updates
+    the context/serving projection; discarded attempts retain their own route.
+    The round identity is the public one-based number or post-loop label.
+    The raw usage mapping remains available to cache and retry consumers.
+    """
+    if not usage:
+        return
+    _record_charge(
+        usage,
+        model,
+        round_id,
+        accumulated_usage,
+        api_rounds,
+        tag=tag,
+        response_authoring=response_authoring,
+    )
+    _emit_round_usage(
+        task, round_id, model, usage, tag=tag, response_authoring=response_authoring
+    )
+    for bill in usage.get('_extra_billing_rounds') or []:
+        charge = bill.get('usage') or {}
+        charge_model = bill.get('model') or model
+        charge_tag = bill.get('tag') or f'{tag}-DISCARDED'
+        _record_charge(
+            charge,
+            charge_model,
+            round_id,
+            accumulated_usage,
+            api_rounds,
+            tag=charge_tag,
+            response_authoring=False,
+        )
+        _emit_round_usage(
+            task,
+            round_id,
+            charge_model,
+            charge,
+            tag=charge_tag,
+            response_authoring=False,
+        )
+
+
+def record_scope_denied_usage(usage, model, round_num, accumulated_usage, api_rounds):
+    """Bill known work after input scope is revoked, without emitting events.
+
+    Scope denial cannot publish serving/context state or authorize another
+    model. Its discarded charges retain the model of the denied invocation.
+    """
+    if not isinstance(usage, dict):
+        return
+    tag = f'R{round_num + 1}-SCOPE-DISCARDED'
+    charges = [(usage, tag)]
+    charges.extend(
+        (bill.get('usage') or {}, bill.get('tag') or tag)
+        for bill in usage.get('_extra_billing_rounds') or []
+    )
+    for charge, charge_tag in charges:
+        _record_charge(
+            charge,
+            model,
+            round_num + 1,
+            accumulated_usage,
+            api_rounds,
+            tag=charge_tag,
+            response_authoring=False,
+        )
 
 
 def project_usage_for_round_record(usage):
@@ -40,8 +138,11 @@ def project_usage_for_round_record(usage):
         if key == _EXTRA_BILLING_ROUNDS_KEY:
             continue
         if isinstance(key, str) and key.startswith('_wire_'):
-            if (key == _COMPACT_PREFIX_FINGERPRINT_KEY
-                    and isinstance(value, str) and len(value) <= 128):
+            if (
+                key == _COMPACT_PREFIX_FINGERPRINT_KEY
+                and isinstance(value, str)
+                and len(value) <= 128
+            ):
                 projected[key] = value
             continue
         projected[key] = value
@@ -80,7 +181,15 @@ def _response_route_projection(model, usage):
 
 
 def _emit_round_usage(
-        task, round_num, model, usage, *, tag='', response_authoring=True):
+    task,
+    round_num,
+    model,
+    usage,
+    *,
+    tag='',
+    response_authoring=True,
+    request_message_count=None,
+):
     """Emit a per-round usage SSE event so the frontend context-health
     gauge can reflect the size of the prompt JUST sent to the model,
     without waiting for the final ``done`` event to land ``apiRounds``.
@@ -113,6 +222,11 @@ def _emit_round_usage(
         Billed-but-discarded retries still emit their accounting event, but
         must not replace the projection used for context and serving-route
         presentation.
+    request_message_count : int | None
+        Number of messages in the request that produced ``usage``. Recorded
+        with the provider measurement so the compaction gate can bound a
+        later, longer prompt from it. Optional: without it the measurement
+        still feeds ratio learning.
     """
     if not usage:
         return
@@ -120,10 +234,10 @@ def _emit_round_usage(
         # One convention authority for native Anthropic residual input and
         # OpenAI/hybrid inclusive totals, including exactly fully cached input.
         _, tokens_in = split_input_tokens(usage)
-        cr = normalize_usage(usage)['cache_read']
+        normalized = normalize_usage(usage)
+        cr = normalized['cache_read']
         try:
-            effective_prompt = max(
-                0, int(usage.get('effective_prompt_tokens') or 0))
+            effective_prompt = max(0, int(usage.get('effective_prompt_tokens') or 0))
         except (TypeError, ValueError, OverflowError):
             effective_prompt = 0
         if effective_prompt > 0:
@@ -142,13 +256,27 @@ def _emit_round_usage(
         #   are GiB-class bloat on durable rows (2026-08-20 measurement).
         if response_authoring:
             from lib.tasks_pkg.compaction._calibration import note_stream_ground_truth
-            note_stream_ground_truth(task, model=model, prompt_tokens=tokens_in)
+
+            # The request's message count positions this measurement inside the
+            # next prompt, so the gate can bound appended growth (provider
+            # evidence outranks a local estimate; see provider_prompt_anchor).
+            note_stream_ground_truth(
+                task,
+                model=model,
+                prompt_tokens=tokens_in,
+                message_count=request_message_count,
+            )
             route = _response_route_projection(model, usage)
-            task['_compactionCacheObservation'] = {
-                'taskId': task.get('id'), 'model': model,
-                'providerId': route.get('providerId', ''),
-                'cacheReadTokens': max(0, int(cr)),
-            }
+            from lib.tasks_pkg.compaction._cache_evidence import next_cache_observation
+
+            task['_compactionCacheObservation'] = next_cache_observation(
+                task.get('_compactionCacheObservation'),
+                task_id=task.get('id'),
+                model=model,
+                provider_id=route.get('providerId', ''),
+                cache_read=cr,
+                cache_write=normalized['cache_write'],
+            )
             task['_lastRoundUsage'] = {
                 'round': round_num,
                 **_response_route_projection(model, usage),
@@ -160,22 +288,34 @@ def _emit_round_usage(
         if response_authoring and isinstance(resolution, dict):
             task['_lastRoundUsage']['reasoningResolution'] = {
                 key: _bounded_text(resolution[key], 160)
-                for key in ('requested', 'effective', 'reason', 'source',
-                            'requestedValue', 'actualMode', 'actualValue')
+                for key in (
+                    'requested',
+                    'effective',
+                    'reason',
+                    'source',
+                    'requestedValue',
+                    'actualMode',
+                    'actualValue',
+                )
                 if isinstance(resolution.get(key), str)
             }
         from lib.tasks_pkg.round_evidence import round_evidence_turn
-        append_event(task, {
-            'type': 'round_usage',
-            'roundNum': round_num,
-            'model': model,
-            'tag': tag,
-            # Share the snapshot's invocation identity, including restarts.
-            'turn': round_evidence_turn(task, round_num),
-            'tokensIn': int(tokens_in or 0),
-            'tokensOut': int(out or 0),
-            'usage': project_usage_for_round_record(usage),
-        })
+
+        append_event(
+            task,
+            {
+                'type': 'round_usage',
+                'roundNum': round_num,
+                'model': model,
+                'tag': tag,
+                # Share the snapshot's invocation identity, including restarts.
+                'turn': round_evidence_turn(task, round_num),
+                'tokensIn': int(tokens_in or 0),
+                'tokensOut': int(out or 0),
+                'usage': project_usage_for_round_record(usage),
+            },
+        )
     except Exception as e:
-        logger.debug('[round_usage] emit failed (round=%s tag=%s): %s',
-                     round_num, tag, e)
+        logger.debug(
+            '[round_usage] emit failed (round=%s tag=%s): %s', round_num, tag, e
+        )

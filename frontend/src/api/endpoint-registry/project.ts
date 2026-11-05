@@ -4,12 +4,17 @@ import { createProjectPathWrite } from './project-path-singleflight';
 
 import { buildProjectContinuityEndpoints } from './project-continuity';
 
-import type { CoordinatorConversationPage, CoordinatorReportState, CoordinatorReportReadRequest, CoordinationBinding, ProjectMessagePage } from '../project-coordination.generated';
+import type { CoordinatorConversationPage, CoordinatorReportState, CoordinatorReportReadRequest, CoordinationBinding, CoordinatorProgressState, ProjectMessagePage } from '../project-coordination.generated';
+import type { RouterInstruction, RouterInstructionPage, RouterState, RouterWatchdogReviewRequest,
+  RouterWatchdogState } from '../router.generated';
 
 import type { ProjectDispatchRequest, ProjectDispatchRetry, ProjectDispatchRevoke,
   ProjectDispatchReviewRequest, ProjectDispatchPublishRequest, ProjectDispatchView,
   ProjectDispatchPage, ProjectDispatchListQuery,
-  CoordinatorBudgetState, CoordinatorBudgetUpdate } from '../project-dispatch.generated';
+  CoordinatorUsageState } from '../project-dispatch.generated';
+// Bound read-only navigation demand; writes keep their own acknowledgement policy.
+const COORDINATION_READ_TIMEOUT_MS = 12_000;
+
 export function createProjectEndpoints(ports: EndpointPorts) {
   const { request, get, post, patch, _idempotentResponseWrite } = ports;
   const setPaths = createProjectPathWrite(request);
@@ -30,6 +35,7 @@ export function createProjectEndpoints(ports: EndpointPorts) {
     recentList:    ()         => get('/api/v4/project/recent', {
       onError: 'null', coalesce: true
     }),
+    recentAdd: (path: string) => post('/api/v4/project/recent', { path }),
     recentClear:   ()         =>
       _idempotentResponseWrite('/api/v4/project/recent',
                                { method: 'DELETE' }),
@@ -86,19 +92,19 @@ export function createProjectEndpoints(ports: EndpointPorts) {
     // happen through checker-backed human decision promotion below.
     charter:       (path: string) =>
       get('/api/v4/project/charter', { query: { path }, onError: 'null' }),
-    board:         (path: string) =>
-      get('/api/v4/project/board', { query: { path }, onError: 'null' }),
-    coordination: (path: string) =>
-      get<CoordinationBinding>('/api/v4/project/coordination', { query: { path }, onError: 'throw' }),
-    workerConversations: (path: string, cursor?: string) =>
+    board:         (path: string, signal?: AbortSignal) =>
+      get('/api/v4/project/board', { query: { path }, signal, timeout: COORDINATION_READ_TIMEOUT_MS, onError: 'null' }),
+    coordination: (path: string, signal?: AbortSignal) =>
+      get<CoordinationBinding>('/api/v4/project/coordination', { query: { path }, signal, timeout: COORDINATION_READ_TIMEOUT_MS, onError: 'throw' }),
+    workerConversations: (path: string, cursor?: string, signal?: AbortSignal) =>
       get<CoordinatorConversationPage>('/api/v4/project/coordination/conversations',
-        { query: { path, ...(cursor ? { cursor } : {}) }, onError: 'throw' }),
-    coordinatorReports: (path: string) =>
-      get<CoordinatorReportState>('/api/v4/project/coordination/reports', { query: { path }, onError: 'throw' }),
-    coordinatorBudget: (path: string) =>
-      get<CoordinatorBudgetState>('/api/v4/project/coordination/budget', { query: { path }, onError: 'throw' }),
-    updateCoordinatorBudget: (body: CoordinatorBudgetUpdate) =>
-      post<CoordinatorBudgetState>('/api/v4/project/coordination/budget', body, { onError: 'throw' }),
+        { query: { path, ...(cursor ? { cursor } : {}) }, signal, timeout: COORDINATION_READ_TIMEOUT_MS, onError: 'throw' }),
+    coordinatorReports: (path: string, signal?: AbortSignal) =>
+      get<CoordinatorReportState>('/api/v4/project/coordination/reports', { query: { path }, signal, timeout: COORDINATION_READ_TIMEOUT_MS, onError: 'throw' }),
+    coordinatorBudget: (path: string, signal?: AbortSignal) =>
+      get<CoordinatorUsageState>('/api/v4/project/coordination/budget', { query: { path }, signal, timeout: COORDINATION_READ_TIMEOUT_MS, onError: 'throw' }),
+    coordinatorProgress: (path: string, signal?: AbortSignal) =>
+      get<CoordinatorProgressState>('/api/v4/project/coordination/progress', { query: { path }, signal, timeout: COORDINATION_READ_TIMEOUT_MS, onError: 'throw' }),
     markCoordinatorReportRead: (body: CoordinatorReportReadRequest) =>
       post<CoordinatorReportState>('/api/v4/project/coordination/reports/read', body, { onError: 'throw' }),
     coordinationMessages: (path: string, conversationId: string, beforeId = '') =>
@@ -110,10 +116,43 @@ export function createProjectEndpoints(ports: EndpointPorts) {
     createCoordinator: (path: string, folderId: string, expectedRevision: number) =>
       post<CoordinationBinding>('/api/v4/project/coordination/create', { path, folderId, expectedRevision },
         { headers: { 'Idempotency-Key': ports.newIdempotencyKey() }, onError: 'throw' }),
+    // The Global Router is the bound Coordinator of the owner's router home (docs/ROUTER.md).
+    globalRouter: (signal?: AbortSignal) =>
+      get<RouterState>('/api/v4/router', { signal, timeout: COORDINATION_READ_TIMEOUT_MS, onError: 'throw' }),
+    ensureGlobalRouter: () =>
+      post<RouterState>('/api/v4/router', {},
+        { headers: { 'Idempotency-Key': ports.newIdempotencyKey() }, onError: 'throw' }),
+    // Worker model of any bound Router (Global or Project); null returns to the owner default.
+    routerWorkerModel: (path: string, signal?: AbortSignal) =>
+      get<RouterState>('/api/v4/router/worker-model', { query: { path }, signal, timeout: COORDINATION_READ_TIMEOUT_MS, onError: 'throw' }),
+    setRouterWorkerModel: (path: string, workerModel: string | null) =>
+      post<RouterState>('/api/v4/router/worker-model', { path, workerModel },
+        { headers: { 'Idempotency-Key': ports.newIdempotencyKey() }, onError: 'throw' }),
+    routerInstructions: (cursor?: string, signal?: AbortSignal) =>
+      get<RouterInstructionPage>('/api/v4/router/instructions',
+        { query: cursor ? { cursor } : {}, signal, timeout: COORDINATION_READ_TIMEOUT_MS, onError: 'throw' }),
+    pauseRouterInstruction: (instructionId: string) =>
+      post<RouterInstruction>('/api/v4/router/instructions/pause', { instructionId },
+        { headers: { 'Idempotency-Key': ports.newIdempotencyKey() }, onError: 'throw' }),
+    resumeRouterInstruction: (instructionId: string) =>
+      post<RouterInstruction>('/api/v4/router/instructions/resume', { instructionId },
+        { headers: { 'Idempotency-Key': ports.newIdempotencyKey() }, onError: 'throw' }),
+    cancelRouterInstruction: (instructionId: string) =>
+      post<RouterInstruction>('/api/v4/router/instructions/cancel', { instructionId },
+        { headers: { 'Idempotency-Key': ports.newIdempotencyKey() }, onError: 'throw' }),
+    // The Router Watchdog is the bound Coordinator of the owner's watchdog path (docs/ROUTER.md R7).
+    routerWatchdog: (signal?: AbortSignal) =>
+      get<RouterWatchdogState>('/api/v4/router/watchdog', { signal, timeout: COORDINATION_READ_TIMEOUT_MS, onError: 'throw' }),
+    ensureRouterWatchdog: () =>
+      post<RouterWatchdogState>('/api/v4/router/watchdog', {},
+        { headers: { 'Idempotency-Key': ports.newIdempotencyKey() }, onError: 'throw' }),
+    configureRouterWatchdogReview: (body: RouterWatchdogReviewRequest) =>
+      post<RouterWatchdogState>('/api/v4/router/watchdog/review', body,
+        { headers: { 'Idempotency-Key': ports.newIdempotencyKey() }, onError: 'throw' }),
     newAssignmentCommandId: () => ports.newIdempotencyKey(),
-    coordinationAssignments: (path: string, commandId?: string, options?: Pick<ProjectDispatchListQuery, 'cursor' | 'assignmentId'>) =>
+    coordinationAssignments: (path: string, commandId?: string, options?: Pick<ProjectDispatchListQuery, 'cursor' | 'assignmentId'>, signal?: AbortSignal) =>
       get<ProjectDispatchPage>('/api/v4/project/coordination/assignments',
-        { query: { path, ...(commandId ? { commandId } : {}), ...options }, onError: 'throw' }),
+        { query: { path, ...(commandId ? { commandId } : {}), ...options }, signal, timeout: COORDINATION_READ_TIMEOUT_MS, onError: 'throw' }),
     grantAssignment: (body: ProjectDispatchRequest, commandId: string) =>
       post<ProjectDispatchView>('/api/v4/project/coordination/assignments', body,
         { headers: { 'Idempotency-Key': commandId }, onError: 'throw' }),

@@ -132,6 +132,10 @@ MODEL_TIERS: dict[str, str] = _TierProxy()  # type: ignore[assignment]
 #  Agent Role Definitions
 # ═══════════════════════════════════════════════════════════
 
+# A role that holds run_command also holds poll and kill: a worker that can
+# start a background command must be able to collect and stop it. Their
+# handler confines a leaf worker to the bg_* commands it started
+# (lib.swarm.routing.is_leaf_worker).
 AGENT_ROLES: dict[str, dict[str, Any]] = {
     'researcher': {
         'when_to_use': (
@@ -160,11 +164,12 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
         'system_prompt_suffix': (
             'You are a coding specialist. Focus on reading, writing, '
             'and modifying code. Use project tools (read_files, write_file, '
-            'grep_search, run_command, edit_file) effectively. '
+            'search_files, run_command, edit_file) effectively. '
             'Follow existing code conventions. Test your changes.'
         ),
         'tools_hint': ['read_files', 'write_file', 'edit_file',
-                       'grep_search', 'find_files', 'run_command'],
+                       'search_files', 'find_files', 'run_command',
+                       'poll', 'kill'],
         'model_hint': 'heavy',      # code generation benefits from strong models
     },
 
@@ -180,7 +185,8 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
             'When given data, provide quantitative analysis with numbers. '
             'Summarize findings concisely with key takeaways.'
         ),
-        'tools_hint': ['read_files', 'grep_search', 'run_command'],
+        'tools_hint': ['read_files', 'search_files', 'run_command',
+                       'poll', 'kill'],
         'model_hint': 'standard',
     },
 
@@ -225,7 +231,8 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
             'code or content for bugs, style issues, security concerns, '
             'and improvement opportunities. Be specific and actionable.'
         ),
-        'tools_hint': ['read_files', 'grep_search', 'find_files', 'run_command'],
+        'tools_hint': ['read_files', 'search_files', 'find_files', 'run_command',
+                       'poll', 'kill'],
         'model_hint': 'heavy',      # review needs deep understanding
     },
 
@@ -240,7 +247,7 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
             'well-structured documentation, summaries, and explanations. '
             'Use markdown formatting. Be concise but comprehensive.'
         ),
-        'tools_hint': ['read_files', 'write_file', 'grep_search'],
+        'tools_hint': ['read_files', 'write_file', 'search_files'],
         'model_hint': 'light',      # writing is less computation-heavy
     },
 
@@ -304,7 +311,8 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
             'going, or [PLAN_DEFECT: <reason>] + [VERDICT: CONTINUE_PLANNER] '
             'only for a genuine structural plan flaw (not worker execution).'
         ),
-        'tools_hint': ['read_files', 'grep_search', 'find_files', 'run_command'],
+        'tools_hint': ['read_files', 'search_files', 'find_files', 'run_command',
+                       'poll', 'kill'],
         'model_hint': 'heavy',
     },
 
@@ -450,6 +458,14 @@ def scope_tools_for_spec(spec, all_tools: list) -> list:
     }
     if not explicit:
         return scoped
+    # A renamed tool (``grep_search``) keeps selecting its successor.
+    from lib.tool_input_repair import RENAMED_TOOL_NAMES
+    explicit = {RENAMED_TOOL_NAMES.get(name, name) for name in explicit}
+    if 'run_command' in explicit:
+        # A command the worker backgrounds stays collectable and stoppable;
+        # the role scope above still decides whether poll/kill exist at all.
+        from lib.tools.poll import BACKGROUND_TOOL_NAMES
+        explicit |= BACKGROUND_TOOL_NAMES
     return [
         tool for tool in scoped
         if isinstance(tool, dict)

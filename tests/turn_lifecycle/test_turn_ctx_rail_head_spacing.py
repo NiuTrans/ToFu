@@ -26,7 +26,8 @@ def test_model_and_depth_remain_a_compact_group(page):
         page.wait_for_function(
             "() => { const group = document.querySelector('.message.__probe .tctx-model-group');"
             " if (!group) return false; const style = getComputedStyle(group);"
-            " return style.display.endsWith('flex') && style.columnGap === '6px'; }")
+            " return style.display.endsWith('flex') && style.columnGap === getComputedStyle("
+            "document.documentElement).getPropertyValue('--space-2').trim(); }")
     except PlaywrightTimeoutError:
         # A late conversation render may replace the planted probe; a missing
         # stylesheet instead leaves the group unstyled. Keep both observable.

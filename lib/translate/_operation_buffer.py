@@ -2,6 +2,8 @@
 
 One lazy anonymous file carries pending UTF-8 text; the ordered in-memory index
 contains only keys and byte ranges. Repeated keys coalesce before consumption.
+The oldest pending narration segment is handed out before any reasoning
+segment; each kind stays FIFO, and a terminal item follows every segment.
 Terminal replacement preserves pending segments; explicit cancellation may
 withdraw them. Idle retirement, terminal consumption and close stop producers
 atomically. Reconstructible bytes retire with this buffer, never durable state.
@@ -18,13 +20,28 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+NARRATION = 'narration'
+REASONING = 'reasoning'
+# The reader follows narration while the turn runs; a backlog of (typically
+# longer) reasoning blocks must never delay it.
+_HANDOUT_ORDER = (NARRATION, REASONING)
+_NO_TERMINAL = object()
+
+
+def segment_kind(key: int | str) -> str:
+    """Reasoning keys are ``thinking:`` block ids; ``text:`` ids and legacy
+    integer rounds are narration."""
+    return REASONING if str(key).startswith('thinking:') else NARRATION
+
 
 class IncrementalOperationBuffer:
     def __init__(self, capacity: int | None = None) -> None:
         # Retain the private constructor's old argument for existing adapters;
         # it no longer imposes a count quota or changes accepted work.
         self._condition = threading.Condition()
-        self._items: deque[Any] = deque()
+        self._pending: dict[str, deque[int | str]] = {
+            kind: deque() for kind in _HANDOUT_ORDER}
+        self._terminal_item: Any = _NO_TERMINAL
         self._segments: dict[int | str, tuple[int, int]] = {}
         self._spool = None
         self._live_bytes = 0
@@ -106,8 +123,8 @@ class IncrementalOperationBuffer:
             self._segments[key] = (offset, length)
             self._live_bytes += length - (previous[1] if previous else 0)
             if previous is None:
-                self._items.append(('segment', key))
-            self._peak_depth = max(self._peak_depth, len(self._items))
+                self._pending[segment_kind(key)].append(key)
+            self._peak_depth = max(self._peak_depth, self._depth())
             self._try_reclaim()
             self._condition.notify()
             return 0
@@ -120,30 +137,34 @@ class IncrementalOperationBuffer:
             if self._closed or (self._terminal_queued and not replace):
                 return -1
             dropped = 0
-            if replace:
-                retained = deque()
-                for queued in self._items:
-                    if not (isinstance(queued, tuple) and queued[0] == 'segment'):
-                        continue
-                    key = queued[1]
-                    if discard_segments and key not in preserve_segment_keys:
+            if replace and discard_segments:
+                for kind, pending in self._pending.items():
+                    retained = deque()
+                    for key in pending:
+                        if key in preserve_segment_keys:
+                            retained.append(key)
+                            continue
                         _, length = self._segments.pop(key)
                         self._live_bytes -= length
                         dropped += 1
-                    else:
-                        retained.append(queued)
-                self._items = retained
+                    self._pending[kind] = retained
                 self._try_reclaim()
             self._dropped_segments += dropped
-            self._items.append(item)
+            self._terminal_item = item
             self._terminal_queued = True
-            self._peak_depth = max(self._peak_depth, len(self._items))
+            self._peak_depth = max(self._peak_depth, self._depth())
             self._condition.notify()
             return dropped
 
+    def _depth(self) -> int:
+        return (sum(len(pending) for pending in self._pending.values())
+                + (self._terminal_item is not _NO_TERMINAL))
+
     def _close_locked(self) -> None:
         self._closed = True
-        self._items.clear()
+        for pending in self._pending.values():
+            pending.clear()
+        self._terminal_item = _NO_TERMINAL
         self._segments.clear()
         self._live_bytes = self._stored_bytes = 0
         if self._spool is not None:
@@ -158,27 +179,29 @@ class IncrementalOperationBuffer:
     def get(self, timeout: float) -> Any:
         with self._condition:
             ready = self._condition.wait_for(
-                lambda: bool(self._items) or self._closed, timeout=max(0.0, float(timeout)))
-            if not ready or not self._items:
+                lambda: bool(self._depth()) or self._closed, timeout=max(0.0, float(timeout)))
+            if not ready or not self._depth():
                 if not self._closed:
                     self._idle_retired = True
                 self._close_locked()
                 raise queue.Empty
-            item = self._items[0]
-            if isinstance(item, tuple) and item[0] == 'segment':
-                key = item[1]
+            for kind in _HANDOUT_ORDER:
+                pending = self._pending[kind]
+                if not pending:
+                    continue
+                key = pending[0]
                 offset, length = self._segments[key]
                 self._spool.seek(offset)
                 raw = self._spool.read(length)
                 if len(raw) != length:
                     raise OSError('translation spool ended before its owned range')
                 text = raw.decode('utf-8')
-                self._items.popleft()
+                pending.popleft()
                 del self._segments[key]
                 self._live_bytes -= length
                 self._try_reclaim()
                 return ('segment', key, text)
-            self._items.popleft()
+            item = self._terminal_item
             self._close_locked()
             return item
 
@@ -188,7 +211,7 @@ class IncrementalOperationBuffer:
 
     def snapshot(self) -> dict[str, int | bool]:
         with self._condition:
-            return {'depth': len(self._items), 'peakDepth': self._peak_depth,
+            return {'depth': self._depth(), 'peakDepth': self._peak_depth,
                     'droppedSegments': self._dropped_segments,
                     'terminalQueued': self._terminal_queued,
                     'pendingTextBytes': self._live_bytes, 'spoolBytes': self._stored_bytes,

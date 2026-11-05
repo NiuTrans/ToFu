@@ -347,12 +347,26 @@ def test_reference_snapshot_content_addresses_repeated_large_tool_documents():
         **full,
         "turns": [{**turn, "status": "running"} for turn in full["turns"]],
     }
-    running_reference = snapshot_with_reference_tool_segments(running)
-    assert "sharedToolDocuments" not in running_reference
-    assert all(
-        "toolContent" in turn["projection"]["toolRounds"][0]
-        for turn in running_reference["turns"]
-    )
+    for status in ("pending", "running"):
+        active = {**running, "turns": [
+            {**turn, "status": status} for turn in running["turns"]
+        ]}
+        active_before = orjson.dumps(active)
+        active_reference = snapshot_with_reference_tool_segments(active)
+        assert len(active_reference["sharedToolDocuments"]) == 2
+        for original, reference in zip(active["turns"], active_reference["turns"]):
+            reference_projection = reference["projection"]
+            restored_rounds = []
+            for round_record in reference_projection["toolRounds"]:
+                restored = dict(round_record)
+                for field, key in restored.pop("_snapshotDocumentRefs").items():
+                    restored[field] = active_reference["sharedToolDocuments"][key]
+                restored_rounds.append(restored)
+            assert {**reference_projection, "toolRounds": restored_rounds} == original["projection"]
+            assert reference["projectionRevision"] == original["projectionRevision"]
+        assert "snapshotProjectionRefs" not in active_reference
+        assert orjson.dumps(active) == active_before
+        assert decode("ConversationSyncSnapshot", active_reference) == active_reference
 
     interrupted = {
         **full,

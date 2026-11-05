@@ -15,10 +15,24 @@ root-input and manifest-read tests before measuring startup/recovery costs.
 Source hashing streams the existing length-prefixed protocol with bounded reads;
 file growth, truncation or changed metadata refuses identity. Verify
 `tests/server/test_native_engine_streamed_identity.py` and compiled identity parity.
+Compiler snapshots preserve optional watched roots and a stable release profile;
+`local_placement.py` selects their reconstructible local cache. Verify real Cargo
+freshness, transitive edits, private-cache ownership and fallback with
+`test_native_engine_identity.py` and `test_restart_build_cache.py`.
 
 `application_restart.py` runs artifact preparation and deferred manager handoff
 from current disk code in bounded child interpreters; the application retains
 approval and task-interruption policy.
+`restart_budget.py` composes all nested preparation deadlines. Frontend and
+manager preparation share native_engine's subprocess cleanup owner; verify
+real descendant cancellation and manager/CLI roundtrips when changing it.
+
+`native_storage_service.py` is the manager's process/lease controller;
+`native_storage_host.py` owns the existing native `StorageRuntime` across Web
+restarts. Preserve configured data roots, v2 identity admission, manager exec
+retention, terminal crash budgets and drained upgrades. The full contract and
+real-process verification are in `docs/NATIVE_STORAGE_LIFECYCLE.md` and
+`tests/server/test_native_storage_service.py`.
 
 ## Editing rules
 

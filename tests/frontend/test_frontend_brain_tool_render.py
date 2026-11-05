@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -30,12 +30,6 @@ _TR_SRC = runtime_section_path('ui/tool_rounds.js')
 # Rich dispatch supplies explicit ports to the typed receipt graph.
 _TR_RICH_SRC = runtime_section_path('ui/tool_rounds_rich.js')
 _TR_ALL_SRCS = [_TR_SRC, _TR_RICH_SRC]
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -446,6 +440,7 @@ def _run(src_paths):
     # Full unit gates execute this module in several worker processes. A fixed
     # repository-local filename lets them overwrite one another between the
     # write and Node startup, yielding impossible mixtures of assertions.
+    require_node_modules('jsdom')
     with tempfile.TemporaryDirectory(prefix='tofu-brain-tool-render-') as tmp:
         harness = os.path.join(tmp, 'harness.js')
         with open(harness, 'w', encoding='utf-8') as f:
@@ -458,8 +453,6 @@ def _run(src_paths):
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_structured_brain_tool_renderers():
     output = _run(_TR_ALL_SRCS)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -531,8 +524,6 @@ def _nc(anchor, replacement, must_fail, must_still_pass):
             assert ('PASS ' + name) in output, f'NC: control {name} must PASS:\n{output}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_board_snapshot_renderer_is_load_bearing():
     """Disable the boardSnapshot branch → board_read falls back to the MD dump →
     board_mini_class FAILS while the peer card (separate branch) still renders."""
@@ -544,8 +535,6 @@ def test_NC_board_snapshot_renderer_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_failed_transition_branch_is_load_bearing():
     """Force `failed` to always be false in renderBoardTransition → a failed
     mutation reverts to the OLD look (no failed badge / error row) → the failed
@@ -560,8 +549,6 @@ def test_NC_failed_transition_branch_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_peer_status_renderer_is_load_bearing():
     """Disable the peerStatus branch → peer_status falls back to the MD dump →
     peer_list_class FAILS while the board mini-kanban still renders."""
@@ -573,8 +560,6 @@ def test_NC_peer_status_renderer_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_charter_proposal_renderer_is_load_bearing():
     """Disable the charterProposal branch → propose falls back to the MD dump →
     proposal_class FAILS while board + peer renderers still work."""
@@ -586,8 +571,6 @@ def test_NC_charter_proposal_renderer_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_feed_activity_renderer_is_load_bearing():
     """Disable the feedActivity branch → project_feed_read falls back to the MD
     dump → feed_list_class FAILS while board + peer renderers still work."""
@@ -599,8 +582,6 @@ def test_NC_feed_activity_renderer_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_peer_delivery_renderer_is_load_bearing():
     """Disable the peerDelivery branch → project_message falls back to the MD
     dump → peermsg_class FAILS while board + peer-status renderers still work."""
@@ -612,8 +593,6 @@ def test_NC_peer_delivery_renderer_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_commit_result_renderer_is_load_bearing():
     """Disable the commitResult branch → project_commit falls back to the MD
     dump → commit_class FAILS while board + peer renderers still work."""
@@ -625,8 +604,6 @@ def test_NC_commit_result_renderer_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_delivery_card_title_resolution_is_load_bearing():
     """Neuter the convTitleById branch in renderPeerDelivery → the target
     reverts to the raw `conv cdef1234` id, so peermsg_target (title) and
@@ -639,8 +616,6 @@ def test_NC_delivery_card_title_resolution_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_purpose_caption_is_load_bearing():
     """Neuter projectReceiptPurpose to always return '' → every conv-meta card loses
     its explanatory caption (peer/board/feed/message why-captions all FAIL)
@@ -655,8 +630,6 @@ def test_NC_purpose_caption_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_localized_header_is_load_bearing():
     """Neuter projectReceiptLabel to always return the raw display string → the
     friendly localized headers FAIL while the structured bodies still render."""
@@ -668,8 +641,6 @@ def test_NC_localized_header_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_default_collapse_policy_is_load_bearing():
     """Force projectReceiptDefaultOpen to always return true (the OLD always-open
     behaviour) → the routine reads stop collapsing (peer/board/feed/charter
@@ -684,8 +655,6 @@ def test_NC_default_collapse_policy_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_summary_count_chip_is_load_bearing():
     """Neuter projectReceiptSummaryChip to always return '' → the collapsed reads
     lose their at-a-glance count chip (peer/board/feed count checks FAIL) while

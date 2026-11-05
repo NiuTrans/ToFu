@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """Wire-parity for pt_03f4cdf1 slice 10 — Resume-state hydration.
 
-Scope: run_task's Content-Prefix + Resume-Prefill + Checkpoint-stash block
-(~80 lines, between the Section 3.5 eligibility-drift guard and the
-`await_memory_prefetch(task)` join). All three sub-blocks operate on
-``cfg``'s continue-checkpoint keys and hydrate ``task[]`` / ``messages``:
+Scope: run_task's Content-Prefix + Checkpoint-stash block (between the
+Section 3.5 eligibility-drift guard and the `await_memory_prefetch(task)`
+join). Both sub-blocks operate on ``cfg``'s continue-checkpoint keys and
+hydrate ``task[]`` / ``messages``:
 
   1. ``cfg['contentPrefix']`` → ``task['content']`` (under content_lock)
-     — bookkeeping seed so a resumed response displays [preserved text] +
-     [freshly generated continuation]. NEVER re-injected into ``messages``
-     as a trailing assistant turn (Anthropic Messages API rejects it).
-  2. ``cfg['resumePrefill']`` → append ``{role:'assistant', content:...}``
-     to ``messages`` **iff** ``model_supports_assistant_prefill(model)``
-     is truthy (Claude → False, so Claude never reaches the append). Also
-     stashes ``task['_resumePrefill']`` for merge-into-done accounting.
-  3. ``checkpointToolRounds`` are canonically replayed onto the model wire,
+     — a display-only seed. NEVER injected into ``messages`` as a trailing
+     assistant turn: no provider continues one, so the wire always ends at a
+     complete message.
+  2. ``checkpointToolRounds`` are canonically replayed onto the model wire,
      then all checkpoint authorities are stashed (``checkpointToolRounds`` /
      ``checkpointUsage`` / ``checkpointApiRounds`` / ``checkpointModifiedFiles``
      / ``checkpointModifiedFileList``) copied verbatim from cfg onto the task,
@@ -27,13 +23,13 @@ apply_resume_state``.
 Contract:
 
   apply_resume_state(
-      *, task, cfg, messages, model, tid,
+      *, task, cfg, messages, tid,
   ) -> None
 
-  Mutates ``task`` (``content`` under lock, ``_resumePrefill``,
+  Mutates ``task`` (``content`` under lock,
   ``_checkpointToolRounds`` / ``_checkpointUsage`` / ``_checkpointApiRounds``
   / ``_checkpointModifiedFiles`` / ``_checkpointModifiedFileList``) and,
-  ``messages`` (checkpoint replay, followed by a supported resume prefill).
+  ``messages`` (checkpoint replay).
   ``tid`` is the 8-char task-id prefix used in log lines
   — carried in so the extracted logs stay grep-identical to the pre-slice
   form. Never raises.
@@ -146,7 +142,7 @@ def test_apply_resume_state_signature_matches_seam():
     sig = inspect.signature(mod.apply_resume_state)
     params = set(sig.parameters.keys())
     required = {
-        'task', 'cfg', 'messages', 'model', 'tid',
+        'task', 'cfg', 'messages', 'tid',
     }
     missing = required - params
     assert not missing, (

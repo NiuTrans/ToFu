@@ -4,6 +4,7 @@ Reads one owned graph for the selected bindings. Stored text is the admitted
 snapshot, while live dependency status comes only from the working-fact owner.
 No acceptance, retry, or task execution is performed here.
 """
+from lib.error_envelope import BadRequest
 from lib.memory.working_facts.dependencies import assess_dependency
 
 
@@ -29,7 +30,7 @@ def project_dependencies(bindings, facts):
 def capture_bindings(conversation_id, principal, bindings):
     from .review import ReviewConflict
     if len({item['id'] for item in bindings}) != len(bindings):
-        raise ValueError('Review evidence requires unique fact IDs')
+        raise BadRequest('Review evidence requires unique fact IDs', field='factBindings')
     facts = current_facts(conversation_id, principal, bindings)
     if any(row['status'] != 'current' for row in project_dependencies(bindings, facts)):
         raise ReviewConflict('Supporting facts changed or need review; reload before deciding')

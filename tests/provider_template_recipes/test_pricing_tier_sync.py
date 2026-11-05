@@ -47,7 +47,7 @@ UNPRICED_CHEAP_ALLOWLIST = frozenset(
         # minimax M3.1-Flash-Preview (2026-10): M Plan / MiniMax Code only at
         # launch — no pay-as-you-go price card published yet.
         ("minimax", "MiniMax-M3.1-Flash-Preview"),
-        ("meituan", "MiniMax-M3.1-Flash-Preview"),
+        ("yourprovider", "MiniMax-M3.1-Flash-Preview"),
         ("openbmb", "MiniCPM-V-4.6-1B"),
         ("stepfun", "step-3.5-flash"),
         ("upstage", "solar-mini"),

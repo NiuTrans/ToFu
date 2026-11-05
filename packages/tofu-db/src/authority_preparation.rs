@@ -50,6 +50,14 @@ impl PreparedBlobStore {
             .reserve_transaction_bytes(bytes)
     }
 
+    fn staged_bytes(&self) -> io::Result<usize> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("prepared blob store is poisoned"))?;
+        Ok(state.payloads.values().map(crate::block::PreparedBlockPayload::byte_len).sum())
+    }
+
     pub(super) fn publish(&self, engine: &Engine) -> io::Result<()> {
         self.check_live()?;
         let _publish = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_PREPARED_BLOB_PUBLISH);
@@ -140,6 +148,33 @@ impl AuthorityDatabase {
 
     pub(crate) fn is_preparing_transaction(&self) -> bool {
         self.preparation.is_some()
+    }
+
+    /// Whether `transaction` still commits as one ordinary overlay delta whose
+    /// new blocks ride in its WAL record: neither the structural tree path,
+    /// which first drains the authority-wide overlay, nor the oversized spill,
+    /// which synchronizes every referenced loose block under the authority.
+    /// Measured on the transaction's own staged blobs and stream bytes with
+    /// the composition headroom; commit remains authoritative.
+    pub(crate) fn commits_as_one_ordinary_delta(
+        &self,
+        transaction: &AuthorityTransaction,
+    ) -> io::Result<bool> {
+        let staged_blob_bytes = match &transaction.prepared_blobs {
+            Some(blobs) => blobs.staged_bytes()?,
+            None => {
+                let blocks = self.entities.block_store_shared();
+                let mut total = 0_usize;
+                for id in &transaction.staged_blob_block_ids {
+                    total = total.saturating_add(blocks.pending_payload(*id)?.map_or(0, |payload| payload.len()));
+                }
+                total
+            }
+        };
+        let carried_bytes = staged_blob_bytes.saturating_add(transaction.stream_bytes);
+        Ok(self.entities.commits_without_overlay_drain(&transaction.entity)
+            && carried_bytes <= crate::transaction::MAX_CARRIED_PAYLOAD_BYTES
+                - crate::transaction::CARRIED_TRANSACTION_HEADROOM_BYTES)
     }
 
     pub(crate) fn defer_index_update(

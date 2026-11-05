@@ -4,7 +4,7 @@
 Drives the shipped classic renderers together with the compiled native
 Podcast/Video runtimes under jsdom with stubbed Api seams and probes
 the progress-perception / anti-stuck behaviors
-(docs/PAPER_MEDIA_UX_DESIGN.md §3.4):
+(docs/modules/ingest_media.md §3.4):
 
   * P-UX1: 5 consecutive poll failures → honest `lost` terminal state
     (recheck + regenerate buttons wired); server-reaped worker_lost maps
@@ -70,6 +70,17 @@ const dom = new JSDOM(
   { url: 'http://localhost/' });
 const win = dom.window;
 global.window = global;
+const nativeTimeout = global.setTimeout;
+const nativeInterval = global.setInterval;
+const nativeClearInterval = global.clearInterval;
+const activityTimers = new Set();
+global.setTimeout = (callback, delay, ...args) => nativeTimeout(callback,
+  delay === 1200 || delay === 1500 ? 1 : delay, ...args);
+global.setInterval = (callback, delay, ...args) => {
+  const timer = nativeInterval(callback, delay, ...args);
+  activityTimers.add(timer); return timer;
+};
+global.clearInterval = (timer) => { activityTimers.delete(timer); nativeClearInterval(timer); };
 global.document = win.document;
 global.AbortController = win.AbortController;
 const T_MAP = {
@@ -118,10 +129,8 @@ global.Api = win.Api = { paper: {
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/podcast.js (real)
 Object.assign(global, { _podcast, _pcRender, _pcRenderProgress,
-  _pcRenderActivity, _pcT, _pcEsc, _pcSeedOptions, _pcPersistOptions,
-  _PODCAST_POLL_MS: 1, _PC_POLL_FAIL_LIMIT });
-eval(fs.readFileSync(process.argv[4], 'utf8'));  // native push transport
-eval(fs.readFileSync(process.argv[5], 'utf8'));  // native podcast runtime
+  _pcRenderActivity, _pcT, _pcEsc, _pcSeedOptions, _pcPersistOptions });
+eval(fs.readFileSync(process.argv[4], 'utf8'));  // native podcast runtime
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -144,7 +153,7 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
     .find(b => (b.getAttribute('data-tofu-action') || '').includes('_podcastGenerate(true)'));
   check('lost_regen_wired', !!regenBtn);
   // spinner has a lifetime: no poll timer survives the lost state
-  check('lost_stops_polling', _podcast.pollTimer === null && _podcast.taskId === '');
+  check('lost_stops_polling', activityTimers.size === 0 && _podcast.taskId === '');
 
   // ── Case B: server-reaped worker_lost → same lost state ──
   apiState.pollNull = false;
@@ -183,7 +192,7 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
   check('progress_counts', html.includes('2/4'));
   // ETA: fake an old first tick so the wall-clock rate is visible
   _podcast._segFirstTick = Date.now() - 60000;
-  _pcConsumeEvent({ type: 'segment_done', done: 3, total: 4 });
+  consumePodcastEvent({ type: 'segment_done', done: 3, total: 4 });
   _pcRenderProgress();
   check('eta_shown', host().innerHTML.includes('≈'));
   // sub-step label rendered while in script phase
@@ -198,7 +207,7 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
   const act = document.getElementById('podcastActivityLine');
   check('activity_stale_tint', act.classList.contains('is-stale')
     && act.textContent.includes('STILL_RUNNING'));
-  _pcStopPoll();
+  podcastTaskObserver.stop();
 
   // ── Case D: interrupted lookup → honest interrupted card (P-UX4) ──
   apiState.lookupResp = { ok: true, found: true, interrupted: true,
@@ -221,29 +230,29 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
   await _initPodcastTab(true);
   apiState.pollQueue = [];          // silent worker: polls succeed, no events
   await _podcastGenerate(true);
-  await new Promise(r => setTimeout(r, 1200));   // real time: 1s tick must fire
+  await new Promise(r => nativeTimeout(r, 1200));   // real time: 1s tick must fire
   check('liveness_ticker_survives_polling',
-    _podcast.tickTimer !== null && _podcast.tickTimer !== 0);
+    activityTimers.size === 1);
   const liveLine = document.getElementById('podcastActivityLine');
   check('liveness_elapsed_advances',
     !!liveLine && /0:0[1-9]|0:[1-9]\d/.test(liveLine.textContent));
   // Empty polls must not masquerade as worker activity.
   _podcast.lastEventAt = Date.now() - 31000;
-  await _pcPollOnce();
+  await podcastTaskObserver.poll();
   check('liveness_empty_poll_keeps_quiet_clock',
     Date.now() - _podcast.lastEventAt > 30000);
   _pcRenderActivity();
   check('liveness_stale_tint_reachable_while_polling',
     liveLine.classList.contains('is-stale'));
   // A real event DOES reset it.
-  _pcConsumeEvent({ type: 'heartbeat', phase: 'script', elapsed_s: 10 });
+  consumePodcastEvent({ type: 'heartbeat', phase: 'script', elapsed_s: 10 });
   apiState.pollQueue = [{ ok: true, done: false, cursor: 7,
     events: [{ type: 'heartbeat', phase: 'script', elapsed_s: 20 }] }];
-  await _pcPollOnce();
+  await podcastTaskObserver.poll();
   check('liveness_real_event_resets_clock',
     Date.now() - _podcast.lastEventAt < 5000);
-  _pcStopPolling();
-  check('liveness_terminal_stops_ticker', _podcast.tickTimer === null);
+  podcastTaskObserver.stop();
+  check('liveness_terminal_stops_ticker', activityTimers.size === 0);
 
   console.log(out.join('\n'));
   process.exit(0);
@@ -261,6 +270,17 @@ const dom = new JSDOM(
   { url: 'http://localhost/' });
 const win = dom.window;
 global.window = global;
+const nativeTimeout = global.setTimeout;
+const nativeInterval = global.setInterval;
+const nativeClearInterval = global.clearInterval;
+const activityTimers = new Set();
+global.setTimeout = (callback, delay, ...args) => nativeTimeout(callback,
+  delay === 1200 || delay === 1500 ? 1 : delay, ...args);
+global.setInterval = (callback, delay, ...args) => {
+  const timer = nativeInterval(callback, delay, ...args);
+  activityTimers.add(timer); return timer;
+};
+global.clearInterval = (timer) => { activityTimers.delete(timer); nativeClearInterval(timer); };
 global.document = win.document;
 global.AbortController = win.AbortController;
 const T_MAP = {
@@ -326,10 +346,8 @@ global.Api = win.Api = {
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/video.js (real)
 Object.assign(global, { _pvideo, _pvRender, _pvRenderProgress,
-  _pvRenderActivity, _pvRenderSceneGrid, _pvT, _pvEsc,
-  _PVIDEO_POLL_MS: 1, _PV_POLL_FAIL_LIMIT });
-eval(fs.readFileSync(process.argv[4], 'utf8'));  // native push transport
-eval(fs.readFileSync(process.argv[5], 'utf8'));  // native video runtime
+  _pvRenderActivity, _pvRenderSceneGrid, _pvT, _pvEsc });
+eval(fs.readFileSync(process.argv[4], 'utf8'));  // native video runtime
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -379,7 +397,7 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
   // ETA in render phase (fake an old rate tick so the rate is visible)
   _pvideo._rateFirstTick = Date.now() - 60000;
   _pvideo._rateFirstDone = 1;
-  _pvConsumeEvent({ type: 'scene_done', scene_id: 'scene-002', ok: true,
+  consumeVideoEvent({ type: 'scene_done', scene_id: 'scene-002', ok: true,
                     done: 2, total: 3 });
   _pvRenderProgress();
   check('eta_shown_in_render', host().innerHTML.includes('≈'));
@@ -390,7 +408,7 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
   const act2 = document.getElementById('videoActivityLine');
   check('activity_stale_tint', act2.classList.contains('is-stale')
     && act2.textContent.includes('STILL_RUNNING'));
-  _pvStopPoll();
+  videoTaskObserver.stop();
 
   // ── Case B: 5 consecutive poll failures → lost (P-UX1) ──
   apiState.pollNull = true;
@@ -398,7 +416,7 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
   await settle(25);
   check('lost_after_5_fails', _pvideo.status === 'lost');
   check('lost_render_text', host().innerHTML.includes('LOST_TEXT'));
-  check('lost_stops_polling', _pvideo.pollTimer === null && _pvideo.taskId === '');
+  check('lost_stops_polling', activityTimers.size === 0 && _pvideo.taskId === '');
 
   // ── Case C: server-reaped worker_lost → lost ──
   apiState.pollNull = false;
@@ -430,14 +448,14 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
   await _initVideoTab(true);
   apiState.pollQueue = [];          // silent worker: polls succeed, no events
   await _videoGenerate(true);
-  await new Promise(r => setTimeout(r, 1200));   // real time: 1s tick must fire
+  await new Promise(r => nativeTimeout(r, 1200));   // real time: 1s tick must fire
   check('liveness_ticker_survives_polling',
-    _pvideo.tickTimer !== null && _pvideo.tickTimer !== 0);
+    activityTimers.size === 1);
   const liveLine = document.getElementById('videoActivityLine');
   check('liveness_elapsed_advances',
     !!liveLine && /0:0[1-9]|0:[1-9]\d/.test(liveLine.textContent));
   _pvideo.lastEventAt = Date.now() - 31000;
-  await _pvPollOnce();
+  await videoTaskObserver.poll();
   check('liveness_empty_poll_keeps_quiet_clock',
     Date.now() - _pvideo.lastEventAt > 30000);
   _pvRenderActivity();
@@ -445,11 +463,11 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
     liveLine.classList.contains('is-stale'));
   apiState.pollQueue = [{ ok: true, done: false, next_cursor: 7,
     events: [{ type: 'heartbeat', phase: 'render', elapsed_s: 20 }] }];
-  await _pvPollOnce();
+  await videoTaskObserver.poll();
   check('liveness_real_event_resets_clock',
     Date.now() - _pvideo.lastEventAt < 5000);
-  _pvStopPolling();
-  check('liveness_terminal_stops_ticker', _pvideo.tickTimer === null);
+  videoTaskObserver.stop();
+  check('liveness_terminal_stops_ticker', activityTimers.size === 0);
 
   console.log(out.join('\n'));
   process.exit(0);
@@ -464,12 +482,10 @@ def _run_harness(harness_src: str, renderer_path: str,
     # consume the entire old 60-second budget before Node reached assertions.
     with tempfile.TemporaryDirectory(prefix=f'tofu-{name}-') as temp_dir:
         harness = os.path.join(temp_dir, f'{name}_harness.js')
-        push_built = os.path.join(temp_dir, 'push-transport.js')
         runtime_built = os.path.join(temp_dir, 'media-runtime.js')
         with open(harness, 'w', encoding='utf-8') as f:
             f.write(harness_src)
-        for source, output in ((PUSH_TRANSPORT_TS, push_built),
-                               (runtime_path, runtime_built)):
+        for source, output in ((runtime_path, runtime_built),):
             # Native owners register their legacy globals on the module-private
             # featureRegistry, so bundle through an entry that publishes both
             # the owner's exports and the registry onto globalThis — bare
@@ -489,23 +505,41 @@ def _run_harness(harness_src: str, renderer_path: str,
                 capture_output=True, text=True, timeout=60)
             assert compiled.returncode == 0, compiled.stderr
         proc = subprocess.run(
-            ['node', harness, renderer_path, ROOT, push_built, runtime_built],
+            ['node', harness, renderer_path, ROOT, runtime_built],
             capture_output=True, text=True, timeout=_NODE_HARNESS_TIMEOUT_S)
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{proc.stdout}'
     return proc.stdout.strip()
 
 
-def _portable_runtime_source(source: str) -> str:
+def _portable_runtime_source(source: str, observer_path: str = PUSH_TRANSPORT_TS) -> str:
     """Keep a mutated runtime's real dependencies resolvable outside src/."""
     return source.replace(
+        "'./push-transport'", repr(observer_path), 1).replace(
         "'./video-artifact'", repr(os.path.join(ROOT, 'frontend', 'src', 'features', 'paper', 'video-artifact.ts')), 1).replace(
         "'./podcast-artifact'", repr(os.path.join(ROOT, 'frontend', 'src', 'features', 'paper', 'podcast-artifact.ts')), 1).replace(
         "'./media-model-ui'", repr(MEDIA_MODEL_TS), 1).replace(
         "'../../feature-registry'", repr(FEATURE_REGISTRY_TS), 1)
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
+def _observer_source_with_mutation(old: str, new: str, directory: str) -> str:
+    prepare = os.path.join(directory, 'prepare-observer.mjs')
+    observer = os.path.join(directory, 'push-transport.ts')
+    with open(prepare, 'w', encoding='utf-8') as file:
+        file.write(
+            'import fs from "node:fs";\n'
+            f'const path = {PUSH_TRANSPORT_TS!r};\n'
+            f'const registry = {FEATURE_REGISTRY_TS!r};\n'
+            f'const oldText = {old!r};\n'
+            f'const newText = {new!r};\n'
+            'const source = fs.readFileSync(path, "utf8");\n'
+            'if (!source.includes(oldText)) throw new Error("shared observation mutation anchor is stale");\n'
+            f'fs.writeFileSync({observer!r}, source.replace(oldText, newText).replace("\'../../feature-registry\'", JSON.stringify(registry)));\n')
+    result = subprocess.run(
+        ['node', prepare], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    return observer
+
+
 def test_podcast_ux_state_machine():
     out = _run_harness(
         _PODCAST_HARNESS, PODCAST_JS, PODCAST_RUNTIME_TS, 'pux_podcast')
@@ -514,8 +548,6 @@ def test_podcast_ux_state_machine():
     assert out.count('PASS') >= 21, f'expected >=21 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_video_ux_state_machine():
     out = _run_harness(
         _VIDEO_HARNESS, VIDEO_JS, VIDEO_RUNTIME_TS, 'pux_video')
@@ -524,132 +556,30 @@ def test_video_ux_state_machine():
     assert out.count('PASS') >= 22, f'expected >=22 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_NEUTER_podcast_fail_limit_loadbearing():
-    """NEUTER: amputate the 5-strike branch from a COPY of the runtime →
-    polls reschedule forever, `lost_after_5_fails` flips to FAIL — the
-    backstop is what stands between a 404 and an infinite spinner."""
-    src = open(PODCAST_RUNTIME_TS, encoding='utf-8').read()
-    marker = 'if (state.pollFails >= limit) {'
-    assert marker in src, 'fail-limit marker not found — test is stale'
-    broken = src.replace(marker, 'if (false) {', 1)
-    assert broken != src
-
-    with tempfile.TemporaryDirectory(prefix='tofu-podcast-neuter-') as temp_dir:
-        tmp = os.path.join(temp_dir, 'podcast-runtime.ts')
-        with open(tmp, 'w', encoding='utf-8') as f:
-            f.write(_portable_runtime_source(broken))
-        out = _run_harness(
-            _PODCAST_HARNESS, PODCAST_JS, tmp, 'pux_podcast_neuter')
-        assert 'FAIL lost_after_5_fails' in out, \
-            'amputating the fail limit did NOT flip the probe:\n' + out
-    assert open(PODCAST_RUNTIME_TS, encoding='utf-8').read() == src, \
-        'shipped file modified!'
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_NEUTER_video_fail_limit_loadbearing():
-    """NEUTER: same amputation on the Video runtime."""
-    src = open(VIDEO_RUNTIME_TS, encoding='utf-8').read()
-    marker = 'if (state.pollFails >= limit) {'
-    assert marker in src, 'fail-limit marker not found — test is stale'
-    broken = src.replace(marker, 'if (false) {', 1)
-    assert broken != src
-
-    with tempfile.TemporaryDirectory(prefix='tofu-video-neuter-') as temp_dir:
-        tmp = os.path.join(temp_dir, 'video-runtime.ts')
-        with open(tmp, 'w', encoding='utf-8') as f:
-            f.write(_portable_runtime_source(broken))
-        out = _run_harness(
-            _VIDEO_HARNESS, VIDEO_JS, tmp, 'pux_video_neuter')
-        assert 'FAIL lost_after_5_fails' in out, \
-            'amputating the fail limit did NOT flip the probe:\n' + out
-    assert open(VIDEO_RUNTIME_TS, encoding='utf-8').read() == src, \
-        'shipped file modified!'
-
-
-@pytest.mark.parametrize('module,name,stop_call', [
-    ('podcast', 'pux_pc_tickneuter', 'stopPodcastTick();'),
-    ('video', 'pux_pv_tickneuter', 'stopVideoTick();'),
+@pytest.mark.parametrize('module', ['podcast', 'video'])
+@pytest.mark.parametrize('old,new,failed_probe', [
+    ('if (failures >= MEDIA_POLL_FAILURE_LIMIT)', 'if (false)',
+     'lost_after_5_fails'),
+    ('    pollTimer = null;',
+     '    pollTimer = null;\n    if (activityTimer != null) window.clearInterval(activityTimer);\n    activityTimer = null;',
+     'liveness_ticker_survives_polling'),
+    ('if (page.accepted) ports.state().lastEventAt = Date.now();',
+     'ports.state().lastEventAt = Date.now();',
+     'liveness_empty_poll_keeps_quiet_clock'),
 ])
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_NEUTER_liveness_ticker_survives_polling(module, name, stop_call):
-    """NEUTER: fold the ticker teardown back into the POLL-path stop (the
-    pre-fix shape) → the 1s stopwatch dies on the first poll.
-
-    Probe choice (updated 2026-07-27): this asserted ``FAIL
-    liveness_elapsed_advances``, because a dead ticker used to leave the
-    elapsed line frozen. The poll path now repaints the liveness line itself
-    (so a clockless disk-fallback re-attach cannot sit at 0:00 until the next
-    tick), which means a dead ticker no longer freezes the TEXT — it degrades
-    it from 1s granularity to once-per-poll. That old assertion is therefore
-    asserting something FALSE, and the honest probe for the damage this neuter
-    does is the ticker liveness itself, which still flips.
-
-    The split remains load-bearing: without it the stopwatch only moves when a
-    poll happens to land, so between polls a silent-but-healthy worker shows a
-    stalled clock — the reported "stuck" symptom in slower form.
-    """
+def test_NEUTER_shared_observation_contract(module, old, new, failed_probe):
+    """Fault injection keeps the shared failure, ticker and activity policies load-bearing."""
     renderer_path = PODCAST_JS if module == 'podcast' else VIDEO_JS
-    runtime_path = (PODCAST_RUNTIME_TS if module == 'podcast'
-                    else VIDEO_RUNTIME_TS)
-    harness_src = _PODCAST_HARNESS if module == 'podcast' else _VIDEO_HARNESS
-    src = open(runtime_path, encoding='utf-8').read()
-    anchor = ('  if (state.pollTimer) window.clearTimeout(state.pollTimer);\n'
-              '  state.pollTimer = null;\n}')
-    assert anchor in src, 'poll-stop marker not found — test is stale'
-    broken = src.replace(
-        anchor,
-        '  if (state.pollTimer) window.clearTimeout(state.pollTimer);\n'
-        '  state.pollTimer = null;\n'
-        f'  {stop_call}\n}}', 1)
-    assert broken != src
-
-    with tempfile.TemporaryDirectory(prefix=f'tofu-{name}-') as temp_dir:
-        tmp = os.path.join(temp_dir, f'{module}-runtime.ts')
-        with open(tmp, 'w', encoding='utf-8') as f:
-            f.write(_portable_runtime_source(broken))
-        out = _run_harness(harness_src, renderer_path, tmp, name)
-        assert 'FAIL liveness_ticker_survives_polling' in out, \
-            'restoring the ticker-in-poll-stop did NOT flip the probe:\n' + out
-    assert open(runtime_path, encoding='utf-8').read() == src, \
-        'shipped file modified!'
-
-
-@pytest.mark.parametrize('module,name,state', [
-    ('podcast', 'pux_pc_clockneuter', '_podcast'),
-    ('video', 'pux_pv_clockneuter', '_pvideo'),
-])
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_NEUTER_empty_poll_must_not_fake_activity(module, name, state):
-    """NEUTER: let an empty-but-successful poll bump lastEventAt again (the
-    pre-fix shape) → "last activity" resets every poll, the >30s stale tint
-    becomes unreachable, and the quiet-clock probe flips FAIL. Proves the
-    event-gated reset is what distinguishes "server answers" from "worker is
-    actually doing something"."""
-    renderer_path = PODCAST_JS if module == 'podcast' else VIDEO_JS
-    runtime_path = (PODCAST_RUNTIME_TS if module == 'podcast'
-                    else VIDEO_RUNTIME_TS)
-    harness_src = _PODCAST_HARNESS if module == 'podcast' else _VIDEO_HARNESS
-    src = open(runtime_path, encoding='utf-8').read()
-    anchor = 'if (replay.accepted) state.lastEventAt = Date.now();'
-    assert anchor in src, 'event-gated liveness marker not found — test is stale'
-    broken = src.replace(anchor, 'state.lastEventAt = Date.now();', 1)
-    assert broken != src
-
-    with tempfile.TemporaryDirectory(prefix=f'tofu-{name}-') as temp_dir:
-        tmp = os.path.join(temp_dir, f'{module}-runtime.ts')
-        with open(tmp, 'w', encoding='utf-8') as f:
-            f.write(_portable_runtime_source(broken))
-        out = _run_harness(harness_src, renderer_path, tmp, name)
-        assert 'FAIL liveness_empty_poll_keeps_quiet_clock' in out, \
-            'un-gating the liveness clock did NOT flip the probe:\n' + out
-    assert open(runtime_path, encoding='utf-8').read() == src, \
-        'shipped file modified!'
+    runtime_path = PODCAST_RUNTIME_TS if module == 'podcast' else VIDEO_RUNTIME_TS
+    harness = _PODCAST_HARNESS if module == 'podcast' else _VIDEO_HARNESS
+    with tempfile.TemporaryDirectory(prefix='tofu-media-observer-neuter-') as temp_dir:
+        observer = _observer_source_with_mutation(old, new, temp_dir)
+        runtime = os.path.join(temp_dir, f'{module}-runtime.ts')
+        with open(runtime, 'w', encoding='utf-8') as file:
+            file.write(_portable_runtime_source(
+                open(runtime_path, encoding='utf-8').read(), observer))
+        out = _run_harness(harness, renderer_path, runtime, 'pux_' + module + '_neuter')
+        assert 'FAIL ' + failed_probe in out, out
 
 
 # ═══ Static guards (no node required) ═══
@@ -704,8 +634,6 @@ if __name__ == '__main__':
         test_static_js_syntax()
         test_podcast_ux_state_machine()
         test_video_ux_state_machine()
-        test_NEUTER_podcast_fail_limit_loadbearing()
-        test_NEUTER_video_fail_limit_loadbearing()
     else:
         print('SKIP jsdom cases — node + jsdom not available')
     print('ALL PASSED')

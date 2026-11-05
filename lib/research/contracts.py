@@ -6,7 +6,9 @@ request normalization, so a caller cannot bypass API-cost bounds by choosing a
 lower-level entry point and semantically identical work shares one dedup key.
 
 Dependencies are deliberately light: arXiv normalization is imported lazily
-only when a caller supplies seed papers.
+only when a caller supplies seed papers. Every rejection of a caller-supplied
+value is the typed ``BadRequest`` naming its field, so each HTTP entry answers
+it as a client fault rather than a server error.
 """
 
 from __future__ import annotations
@@ -14,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import islice
 from typing import Iterable
+
+from lib.error_envelope import BadRequest
 
 DEFAULT_RESEARCH_IDEAS = 6
 MIN_RESEARCH_IDEAS = 3
@@ -49,11 +53,11 @@ def _bounded_integer(value, *, default: int, minimum: int, maximum: int,
     if value is None:
         return default
     if isinstance(value, bool):
-        raise TypeError(f'{label} must be an integer, not a boolean')
+        raise BadRequest(f'{label} must be an integer, not a boolean', field=label)
     try:
         parsed = int(value)
     except (TypeError, ValueError, OverflowError) as exc:
-        raise TypeError(f'{label} must be an integer') from exc
+        raise BadRequest(f'{label} must be an integer', field=label) from exc
     return max(minimum, min(parsed, maximum))
 
 
@@ -74,14 +78,17 @@ def normalize_research_harvest_count(value) -> int:
 
 def _seed_candidates(values: Iterable) -> list:
     if isinstance(values, (str, bytes, bytearray, dict)):
-        raise TypeError('seed_arxiv_ids must be an array of arXiv ids')
+        raise BadRequest('seed_arxiv_ids must be an array of arXiv ids',
+                         field='seed_arxiv_ids')
     try:
         candidates = list(islice(iter(values), MAX_RESEARCH_SEED_PAPERS + 1))
     except TypeError as exc:
-        raise TypeError('seed_arxiv_ids must be an array of arXiv ids') from exc
+        raise BadRequest('seed_arxiv_ids must be an array of arXiv ids',
+                         field='seed_arxiv_ids') from exc
     if len(candidates) > MAX_RESEARCH_SEED_PAPERS:
-        raise ValueError(
-            f'seed_arxiv_ids accepts at most {MAX_RESEARCH_SEED_PAPERS} papers')
+        raise BadRequest(
+            f'seed_arxiv_ids accepts at most {MAX_RESEARCH_SEED_PAPERS} papers',
+            field='seed_arxiv_ids')
     return candidates
 
 
@@ -99,8 +106,9 @@ def normalize_research_seed_arxiv_ids(values) -> tuple[str, ...]:
     for index, value in enumerate(candidates):
         arxiv_id = normalize_arxiv_id(value)
         if not arxiv_id:
-            raise ValueError(
-                f'seed_arxiv_ids[{index}] is not a valid arXiv id')
+            raise BadRequest(
+                f'seed_arxiv_ids[{index}] is not a valid arXiv id',
+                field='seed_arxiv_ids')
         if arxiv_id not in seen:
             seen.add(arxiv_id)
             normalized.append(arxiv_id)
@@ -125,32 +133,34 @@ def normalize_research_request(direction, *, lang='en', n_ideas=None,
                                seed_arxiv_ids=None, model=None) -> ResearchRequest:
     """Return the one canonical request used for execution and deduplication."""
     if not isinstance(direction, str):
-        raise TypeError('direction must be a string')
+        raise BadRequest('direction must be a string', field='direction')
     normalized_direction = direction.strip()
     if not normalized_direction:
-        raise ValueError('direction is required')
+        raise BadRequest('direction is required', field='direction')
     if len(normalized_direction) > MAX_RESEARCH_DIRECTION_CHARS:
-        raise ValueError(
-            f'direction exceeds {MAX_RESEARCH_DIRECTION_CHARS} characters')
+        raise BadRequest(
+            f'direction exceeds {MAX_RESEARCH_DIRECTION_CHARS} characters',
+            field='direction')
 
     if lang is None:
         normalized_lang = 'en'
     elif isinstance(lang, str):
         normalized_lang = lang.strip().lower() or 'en'
     else:
-        raise TypeError('lang must be a string')
+        raise BadRequest('lang must be a string', field='lang')
     if normalized_lang not in ('en', 'zh'):
-        raise ValueError("lang must be 'en' or 'zh'")
+        raise BadRequest("lang must be 'en' or 'zh'", field='lang')
 
     if model is None:
         normalized_model = ''
     elif isinstance(model, str):
         normalized_model = model.strip()
     else:
-        raise TypeError('model must be a string')
+        raise BadRequest('model must be a string', field='model')
     if len(normalized_model) > MAX_RESEARCH_MODEL_CHARS:
-        raise ValueError(
-            f'model exceeds {MAX_RESEARCH_MODEL_CHARS} characters')
+        raise BadRequest(
+            f'model exceeds {MAX_RESEARCH_MODEL_CHARS} characters',
+            field='model')
 
     return ResearchRequest(
         direction=normalized_direction,

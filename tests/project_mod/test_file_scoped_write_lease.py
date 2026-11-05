@@ -1,4 +1,10 @@
-"""File admission cooperates with whole-checkout protection, not opaque writers."""
+"""File leases of internal callers, and the write tools' per-file edit mutex.
+
+Write tools take no workspace lease (docs/runbooks/GIT_WORKSPACE_GUARD.md,
+"Tool calls take no workspace leases"): they hold only the in-process mutex of
+each resolved target for one call's read-modify-write. The file lease API
+itself remains for Tofu's own publication.
+"""
 from contextlib import contextmanager
 import hashlib
 import os
@@ -390,13 +396,15 @@ def test_registry_and_descriptor_growth_only_tracks_active_holders(repo):
 
 
 @pytest.mark.parametrize('route', ['write', 'append', 'diff', 'diffs', 'insert', 'inserts', 'upload'])
-def test_file_tools_overlap_different_target_and_hold_both_fds_through_publish(repo, monkeypatch, route):
+def test_file_tools_hold_only_the_edit_mutex_through_publish(repo, monkeypatch, route):
+    from lib.project_mod.file_edit_mutex import _entries
     monkeypatch.setattr(_ops, '_should_record_modification', lambda *a, **kw: False)
     original = _ops._atomic_write_bytes
     observed = []
 
     def publish(target, data, **kwargs):
-        assert len(leases.workspace_lease_fds()) >= 2
+        assert leases.workspace_lease_fds() == ()
+        assert os.path.realpath(target) in _entries
         observed.append(os.path.realpath(target))
         return original(target, data, **kwargs)
 
@@ -423,59 +431,15 @@ def test_file_tools_overlap_different_target_and_hold_both_fds_through_publish(r
         else:
             assert '1/1' in result, result
 
+    # An internal whole-checkout writer in another process never delays a tool.
     with _process_holder(repo / 'a.txt', 'workspace_write_lease'):
-        # Old whole-checkout writers still prevent file tools before preimages.
-        result = _ops.tool_write_file(base, 'b.txt', 'blocked')
-        assert result['error_kind'] == 'workspace-busy'
-        assert not observed
-    with _process_holder(repo / 'a.txt'):
         write_b()
     assert observed == [str(repo / 'b.txt')]
+    assert _entries == {}
     _clean()
 
 
-def test_batch_busy_preflight_applies_nothing_and_closes_other_targets(repo, monkeypatch):
-    def forbidden(*args, **kwargs):
-        pytest.fail('busy batch reached preimage or publication')
-
-    monkeypatch.setattr(_ops, '_read_original_text', forbidden)
-    edits = [{'path': name, 'search': name[0], 'replace': 'changed'}
-             for name in ('a.txt', 'b.txt')]
-    with _process_holder(repo / 'b.txt'):
-        result = _ops.tool_apply_diffs(str(repo), edits)
-        assert '[workspace-busy]' in result
-        assert 'No edits applied' in result
-        assert (repo / 'a.txt').read_text() == 'a\n'
-        assert (repo / 'b.txt').read_text() == 'b\n'
-        _clean()
-
-
-def test_upload_rename_keeps_discovered_destination_protected(repo, monkeypatch):
-    monkeypatch.setattr(_ops, '_should_record_modification', lambda *a, **kw: False)
-    with _process_holder(repo / 'b (1).txt'):
-        result = _ops.save_uploaded_file(str(repo), 'b.txt', b'new\n')
-        assert result['ok'] is False
-        assert result['error_kind'] == 'workspace-busy'
-        assert not (repo / 'b (1).txt').exists()
-    _clean()
-
-
-def test_write_tool_uses_file_admission_without_checkout_holder(repo, monkeypatch):
-    monkeypatch.setattr(_ops, '_should_record_modification', lambda *a, **kw: False)
-    original = _ops._atomic_write_bytes
-
-    def publish(target, data, **kwargs):
-        assert len(leases.workspace_lease_fds()) >= 2
-        return original(target, data, **kwargs)
-
-    monkeypatch.setattr(_ops, '_atomic_write_bytes', publish)
-    result = _ops.tool_write_file(str(repo), 'b.txt', 'changed\n')
-    assert result['ok'], result
-    _clean()
-
-
-@pytest.mark.parametrize('route', ['api', 'tool'])
-def test_alias_retarget_during_admission_applies_nothing(repo, monkeypatch, route):
+def test_alias_retarget_during_file_lease_admission_applies_nothing(repo, monkeypatch):
     alias = repo / 'link.txt'
     alias.symlink_to(repo / 'a.txt')
     acquire = leases._acquire_process_lock
@@ -488,17 +452,11 @@ def test_alias_retarget_during_admission_applies_nothing(repo, monkeypatch, rout
         return fd
 
     monkeypatch.setattr(leases, '_acquire_process_lock', retarget)
-    if route == 'api':
-        with pytest.raises(leases.WorkspaceBusyError, match='target changed'):
-            with _file_lease(alias):
-                pytest.fail('retargeted alias admitted')
-    else:
-        result = _ops.tool_write_file(str(repo), 'link.txt', 'changed\n')
-        assert result['error_kind'] == 'workspace-target-changed'
-        assert result['mutationApplied'] is False
+    with pytest.raises(leases.WorkspaceBusyError, match='target changed'):
+        with _file_lease(alias):
+            pytest.fail('retargeted alias admitted')
     assert (repo / 'a.txt').read_text() == 'a\n'
     assert (repo / 'b.txt').read_text() == 'b\n'
-    _clean()
 
 
 @pytest.mark.parametrize('kind', ['directory', 'fifo'])
@@ -581,13 +539,14 @@ def test_second_file_holder_keeps_live_barrier_after_first_exits(repo):
     _clean()
 
 
-def test_file_admission_retains_freshness_refusal_before_preimage(repo, monkeypatch):
+def test_edit_mutex_retains_freshness_refusal_before_preimage(repo, monkeypatch):
     from lib import write_freshness
+    from lib.project_mod.file_edit_mutex import _entries
     observed = []
 
     def stale(conv_id, target):
         observed.append((conv_id, target))
-        assert len(leases.workspace_lease_fds()) >= 2
+        assert target in _entries
         return True
 
     monkeypatch.setattr(write_freshness, 'is_stale', stale)
@@ -915,20 +874,22 @@ def test_stale_read_without_holder_requires_reread_not_lock_wait(repo, monkeypat
     _clean()
 
 
-def test_changed_target_is_not_reported_as_an_active_writer(repo, monkeypatch):
-    from lib.project_mod import workspace_lease as admission
-    original = admission.workspace_file_write_lease
+def test_target_changed_while_waiting_for_the_edit_mutex_applies_nothing(repo, monkeypatch):
+    from lib.project_mod import file_edit_mutex as edit_mutex
+    original = edit_mutex.file_edit_mutex
     observed = []
 
     @contextmanager
-    def retarget(path, **kwargs):
-        observed.append(path)
-        with original(path, **kwargs):
+    def retarget(paths):
+        paths = list(paths)
+        observed.extend(paths)
+        with original(paths):
             (repo / 'b.txt').unlink()
             (repo / 'b.txt').symlink_to(repo / 'a.txt')
             yield
 
-    monkeypatch.setattr(admission, 'workspace_file_write_lease', retarget)
+    monkeypatch.setattr(edit_mutex, 'file_edit_mutex', retarget)
+
     @_ops._with_workspace_writer
     def mutation(base, rel_path):
         pytest.fail('changed target reached mutation body')

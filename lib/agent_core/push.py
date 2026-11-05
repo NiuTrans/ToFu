@@ -13,6 +13,10 @@ Architecture:
     register a callback via ``hub.add_listener(fn)`` — each event is
     invoked with ``(channel, task_id, payload)``. Used by the webhooks
     delivery worker to fan events out to external HTTP subscribers.
+  - A cumulative publication may name a ``latest_value_key``: on each socket
+    a newer value of that key in the same channel/task stream replaces an
+    older value still queued there, so superseded values are never
+    deep-copied, encoded or sent. Publication listeners still observe every value.
 
 Channels in use:
   - ``paper``      — report generation events (progress, section, done)
@@ -28,12 +32,14 @@ Channels in use:
 import asyncio
 import threading
 from collections import defaultdict, deque
+from concurrent.futures import Future
 from dataclasses import dataclass
+from typing import Any, cast
 from weakref import WeakSet
 
 from lib.log import get_logger
 
-from lib.agent_core.push_frames import PushFrameStore
+from lib.agent_core.push_frames import PushFrameStore, StoredJsonFrame
 
 logger = get_logger(__name__)
 
@@ -41,7 +47,7 @@ logger = get_logger(__name__)
 @dataclass(frozen=True, slots=True)
 class _QueuedPushEvent:
     store: PushFrameStore
-    prepared: object
+    prepared: Future[StoredJsonFrame]
 
     @property
     def retained_bytes(self) -> int:
@@ -54,6 +60,48 @@ class _QueuedPushEvent:
     async def decode(self, *, encoded: bool = False) -> dict | str:
         stored = await asyncio.shield(asyncio.wrap_future(self.prepared))
         return await asyncio.shield(asyncio.wrap_future(self.store.read(stored, encoded=encoded)))
+
+
+_INTERNAL_FRAME_KEYS = frozenset({'_ownerUserId', '_latestValueKey'})
+
+
+class _LatestFrame:
+    """One latest-value publication, shared by every socket it reaches.
+
+    The hub owns ``frame`` from publication on, so it is never deep-copied. Text is
+    encoded on a demand worker when the first socket sends this value.
+    """
+
+    __slots__ = ('store', 'frame', '_text')
+
+    def __init__(self, store: PushFrameStore, frame: dict):
+        self.store = store
+        self.frame = frame
+        self._text: Future | None = None
+
+    def text(self) -> Future:
+        # Sockets claim values on the serving loop, one at a time.
+        if self._text is None:
+            self._text = self.store.encode(self.frame)
+        return self._text
+
+
+class _LatestPushEvent:
+    """A socket's queued position for the newest unsent value of one key."""
+
+    __slots__ = ('stream', 'key', 'value')
+
+    def __init__(self, stream: tuple[str, str], key: str, value: _LatestFrame):
+        self.stream = stream
+        self.key = key
+        self.value = value
+
+    async def decode(self, *, encoded: bool = False) -> dict | str:
+        value = self.value
+        if encoded:
+            return await asyncio.shield(asyncio.wrap_future(value.text()))
+        return await asyncio.shield(asyncio.wrap_future(
+            value.store.encode(value.frame, encoded=False)))
 
 
 class PushHub:
@@ -152,7 +200,7 @@ class PushHub:
                       'subscriber_available': True, 'reconnect_in_s': 0.0}
         else:
             health = getattr(bus, 'health', None)
-            result = (health() if callable(health) else {
+            result = (cast(dict, health()) if callable(health) else {
                 'backend': 'inproc', 'publisher_available': True,
                 'subscriber_available': True, 'reconnect_in_s': 0.0})
         with self._lock:
@@ -309,7 +357,7 @@ class PushHub:
             # ``defaultdict`` indexing an unknown unsubscribe used to CREATE a
             # permanent empty tombstone. Read with .get(), and eagerly prune
             # both levels when the last real subscriber leaves.
-            channel_subs = self._subscriptions.get(channel)
+            channel_subs: dict[str, set] | None = self._subscriptions.get(channel)
             task_clients = channel_subs.get(task_id) if channel_subs else None
             if task_clients is None:
                 emptied = False
@@ -330,6 +378,7 @@ class PushHub:
         payload: dict,
         *,
         user_id: int | str,
+        latest_value_key: str | None = None,
     ):
         """Publish an event to every subscriber of this channel+task across
         the FLEET, and fire in-process listeners exactly once.
@@ -347,6 +396,10 @@ class PushHub:
         copy only: task sinks/replay retain the producer's execution identity.
         Publication listeners keep their payload-only API, but any supplied
         routing fields agree with the bus envelope.
+
+        ``latest_value_key`` marks a cumulative value: each value contains
+        every earlier value of the key, so a socket may skip an older one
+        that it has not sent yet. The hub takes ownership of the payload.
         """
         owner_user_id = _require_owner_user_id(user_id)
         payload = {**payload, '_ownerUserId': owner_user_id}
@@ -358,6 +411,9 @@ class PushHub:
         if 'channel' in payload:
             payload['channel'] = channel
         frame = {**payload, 'channel': channel, 'taskId': task_id}
+        frame.pop('_latestValueKey', None)
+        if latest_value_key is not None:
+            frame['_latestValueKey'] = str(latest_value_key)
         with self._lock:
             listeners = list(self._listeners)
         for fn in listeners:
@@ -411,31 +467,42 @@ class PushHub:
                 fn(dict(frame))
             except Exception as e:
                 logger.warning('[Push] delivery listener %r failed: %s', fn, e)
+        latest_key = frame.get('_latestValueKey')
         # Never ship internal routing markers to the client.
-        if '_ownerUserId' in frame:
+        if not _INTERNAL_FRAME_KEYS.isdisjoint(frame):
             frame = {
                 key: value
                 for key, value in frame.items()
-                if key != '_ownerUserId'
+                if key not in _INTERNAL_FRAME_KEYS
             }
         if not targets:
             logger.debug('[Push] no local subscriber for channel=%s task=%s type=%s',
                          channel, task_id, frame.get('type'))
             return
-        prepared = None
-        if any(callable(getattr(client, 'enqueue_prepared', None)) for client in targets):
+        stream = (channel, task_id)
+        prepared = latest = None
+        if isinstance(latest_key, str) and latest_key:
+            # Encoding waits for a socket to send the value: a newer value
+            # replaces this one first whenever the socket is behind.
+            if any(callable(getattr(client, 'enqueue_latest', None)) for client in targets):
+                latest = (latest_key, _LatestFrame(self._frame_store, frame))
+        elif any(callable(getattr(client, 'enqueue_prepared', None)) for client in targets):
             prepared = _QueuedPushEvent(self._frame_store, self._frame_store.prepare(frame))
         loop = self._loop
         if loop and loop.is_running():
-            loop.call_soon_threadsafe(self._deliver, targets, frame, prepared)
+            loop.call_soon_threadsafe(self._deliver, targets, frame, stream, prepared, latest)
         else:
-            self._deliver(targets, frame, prepared)
+            self._deliver(targets, frame, stream, prepared, latest)
 
-    def _deliver(self, targets: set, frame: dict, prepared=None):
+    def _deliver(self, targets: set, frame: dict, stream: tuple[str, str],
+                 prepared=None, latest=None):
         for client in targets:
+            enqueue_latest = getattr(client, 'enqueue_latest', None)
             enqueue_prepared = getattr(client, 'enqueue_prepared', None)
-            if prepared is not None and callable(enqueue_prepared):
-                enqueue_prepared(prepared)
+            if latest is not None and callable(enqueue_latest):
+                enqueue_latest(stream, *latest)
+            elif prepared is not None and callable(enqueue_prepared):
+                enqueue_prepared(prepared, stream=stream)
             else:
                 # Plugin/test clients retain their enqueue(frame) protocol.
                 client.enqueue(frame)
@@ -471,30 +538,56 @@ class PushClient:
         # this probe-derived backlog is disconnected so it reconciles from
         # durable state instead of accumulating unbounded memory.
         from lib.agent_core.push_policy import resolve_push_event_queue_capacity
-        self._queue: asyncio.Queue = asyncio.Queue(
+        self._queue: asyncio.Queue[Any] = asyncio.Queue(
             maxsize=resolve_push_event_queue_capacity())
-        self._active_event = None
-        self._frame_store = None
+        self._active_event: _QueuedPushEvent | _LatestPushEvent | None = None
+        self._frame_store: PushFrameStore | None = None
         # Liveness and correlated responses jump event data through the sole
         # sender. Preserve every correlated pong instead of evicting at 64.
         self._ctl: deque = deque()
         self._rpc: deque = deque()
         self._ctl_waiter: asyncio.Future | None = None
+        # (channel, taskId) -> its newest latest-value position still queued.
+        self._latest_open: dict[tuple[str, str], _LatestPushEvent] = {}
         self._connected = True
         self.user_id = _require_owner_user_id(user_id)
         self.req_id: str = str(req_id or '')
 
     @property
     def event_retained_bytes(self) -> int:
-        events = list(self._queue._queue)
+        events = list(cast(Any, self._queue)._queue)
         if self._active_event is not None:
             events.append(self._active_event)
         return sum(event.retained_bytes for event in events
                    if isinstance(event, _QueuedPushEvent))
 
-    def enqueue_prepared(self, event: _QueuedPushEvent) -> None:
+    def enqueue_prepared(self, event: _QueuedPushEvent, *,
+                         stream: tuple[str, str] | None = None) -> None:
         if not self._connected:
             return
+        if stream is not None:
+            # A later frame of the stream fences its queued latest value:
+            # newer values queue behind this frame instead of overtaking it.
+            self._latest_open.pop(stream, None)
+        self._put(event)
+
+    def enqueue_latest(self, stream: tuple[str, str], key: str,
+                       value: _LatestFrame) -> None:
+        """Queue ``value`` unless an unsent value of ``key`` holds the position.
+
+        Called in publication order on the serving loop, like every enqueue.
+        """
+        if not self._connected:
+            return
+        queued = self._latest_open.get(stream)
+        if queued is not None and queued.key == key:
+            queued.value = value
+            return
+        queued = _LatestPushEvent(stream, key, value)
+        self._latest_open[stream] = queued
+        self._put(queued)
+
+    def _put(self, event) -> None:
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
@@ -559,9 +652,10 @@ class PushClient:
                 return self._rpc.popleft()
             waiter = asyncio.get_running_loop().create_future()
             self._ctl_waiter = waiter
-            reading = self._active_event is not None
+            active_event = self._active_event
+            reading = active_event is not None
             operation = asyncio.create_task(
-                self._active_event.decode(encoded=encoded) if reading else self._queue.get())
+                active_event.decode(encoded=encoded) if active_event is not None else self._next_event())
             try:
                 done, _ = await asyncio.wait(
                     (operation, waiter), timeout=30,
@@ -570,10 +664,10 @@ class PushClient:
                     result = operation.result()
                     if reading:
                         self._active_event = None
-                        return result if self._connected else None
+                        return cast(dict | str, result) if self._connected else None
                     # A simultaneous control wake cannot discard a dequeued
                     # event. Own it before any control priority check.
-                    self._active_event = result
+                    self._active_event = cast(_QueuedPushEvent | _LatestPushEvent, result)
                 elif not done:
                     return {'channel': 'system', 'type': 'ping'}
             except asyncio.CancelledError:
@@ -587,7 +681,8 @@ class PushClient:
                 if (not reading and self._connected and self._active_event is None
                         and operation.done() and not operation.cancelled()
                         and operation.exception() is None):
-                    self._active_event = operation.result()
+                    self._active_event = cast(
+                        _QueuedPushEvent | _LatestPushEvent, operation.result())
                 if not operation.done():
                     operation.cancel()
                 try:
@@ -599,11 +694,20 @@ class PushClient:
                     waiter.cancel()
         return None
 
+    async def _next_event(self) -> _QueuedPushEvent | _LatestPushEvent:
+        event = await self._queue.get()
+        if (isinstance(event, _LatestPushEvent)
+                and self._latest_open.get(event.stream) is event):
+            # Dequeued means sending: this value is final for this socket.
+            del self._latest_open[event.stream]
+        return event
+
     def disconnect(self):
         self._connected = False
         self._active_event = None
         while not self._queue.empty():
             self._queue.get_nowait()
+        self._latest_open.clear()
         self._ctl.clear()
         self._rpc.clear()
         if self._frame_store is not None:
@@ -653,6 +757,8 @@ def push_event(
     payload: dict,
     *,
     user_id: int | str,
+    latest_value_key: str | None = None,
 ):
     """Convenience function — push an event via the global hub."""
-    hub.push_event(channel, task_id, payload, user_id=user_id)
+    hub.push_event(channel, task_id, payload, user_id=user_id,
+                   latest_value_key=latest_value_key)

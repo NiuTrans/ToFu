@@ -180,5 +180,8 @@ SWE/TB launch/export paths do not supply the still-missing 900 custom tasks or
 their simulator launch adapters, do not claim that a paid trial ran, and do not
 infer that Tofu leads Codex. That claim
 still requires both complete stores and a report whose full-matrix quality,
-family, judge, safety, cost, P90, infrastructure, and actual-orchestration gates
-all pass.
+family, judge, safety, P90, infrastructure, and actual-orchestration gates all
+pass. Report v2 names `tofu-long-agent-quality-first/v1`: the owner's
+2026-10-26 decision makes cost diagnostic without an acceptance ceiling, while
+complete priced usage and failed-attempt accounting remain mandatory. See the
+[acceptance authority](../../docs/LLM_COST_OPTIMIZATION.md#quality-first-release-policy-owner-decision-2026-10-26).

@@ -22,7 +22,7 @@
      resolve against the origin, drop the prefix and 404 — for the stylesheets
      that means a page painted with no CSS at all. Guarded by
      tests/test_page_asset_paths.py. -->
-<link rel="stylesheet" href="static/vendor/google-fonts-local.css">
+{{ tofu_plugin_assets() }}
 <link rel="stylesheet" href="trading-static/trading.css">
 <!-- Loaded AFTER trading.css: the page's 3-theme palette (dark/light/tofu),
      giving it light-theme support and mobile layouts. Self-sufficient: the
@@ -30,10 +30,9 @@
      tokens. See static/theme-bridge.css. -->
 <link rel="stylesheet" href="trading-static/theme-bridge.css">
 <link rel="stylesheet" href="trading-static/reconcile.css">
-<script defer src="static/vendor/marked.min.js"></script>
-<script defer src="static/vendor/purify.min.js"></script>
 </head>
-<body>
+<body data-tofu-plugin-module="trading-static/js/trading/entry.js">
+<div hidden role="alert" data-tofu-plugin-error>页面组件加载失败，请刷新重试。</div>
 
 <!-- ═══ Top Nav Bar ═══ -->
 <header class="top-bar">
@@ -907,14 +906,5 @@
 <div class="toast-container" id="toastContainer"></div>
 
 <!-- Fund modules (order matters: state first, then features, init last) -->
-<script defer src="static/js/api.js"></script>
-<script defer src="trading-static/js/trading/state.js"></script>
-<script defer src="trading-static/js/trading/dashboard.js"></script>
-<script defer src="trading-static/js/trading/simulator.js"></script>
-<script defer src="trading-static/js/trading/tasks.js"></script>
-<script defer src="trading-static/js/trading/overview.js"></script>
-<script defer src="trading-static/js/trading/brain.js"></script>
-<script defer src="trading-static/js/trading/reconcile.js"></script>
-<script defer src="trading-static/js/trading/init.js"></script>
 </body>
 </html>

@@ -59,9 +59,6 @@ fn invalid_data(message: &str) -> io::Error {
 fn conflict(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, message)
 }
-fn exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
 fn valid_text(value: &str, maximum: usize) -> bool {
     !value.is_empty() && value.chars().count() <= maximum
 }
@@ -105,7 +102,7 @@ fn decode<T: for<'de> Deserialize<'de>>(raw: &[u8], name: &str) -> io::Result<T>
 fn bounded_response(value: &Value) -> io::Result<Option<Vec<u8>>> {
     let bytes = encode(value, "orchestration response")?;
     if bytes.len() > MAX_ORCHESTRATION_RESPONSE_BYTES {
-        return Err(exhausted("orchestration response exceeds 8 MiB"));
+        return Err(crate::resource_exhaustion::domain_bound("orchestration response exceeds 8 MiB"));
     }
     Ok(Some(bytes))
 }
@@ -738,7 +735,7 @@ fn append_event(
     now_ms: u64,
 ) -> io::Result<bool> {
     if sequence >= MAX_ORCHESTRATION_EVENTS_PER_RUN as u64 {
-        return Err(exhausted("orchestration event history exceeds its bound"));
+        return Err(crate::resource_exhaustion::domain_bound("orchestration event history exceeds its bound"));
     }
     let key = event_key(tx, &core.id, sequence)?;
     if let Some(existing) = get_global_document::<EventDocument>(
@@ -862,7 +859,7 @@ pub(crate) fn execute(
             let count_key = definition_count_key(tx)?;
             let count = read_count(database, tx, count_key.clone())?;
             if count >= MAX_ORCHESTRATION_DEFINITIONS_PER_OWNER as u64 {
-                return Err(exhausted("orchestration definition capacity reached"));
+                return Err(crate::resource_exhaustion::capacity_quota("orchestration definition capacity reached"));
             }
             let document = Definition {
                 id: id.to_owned(),
@@ -1152,7 +1149,7 @@ fn create_run(
     let count_key = run_count_key(tx)?;
     let count = read_count(database, tx, count_key.clone())?;
     if count >= MAX_ORCHESTRATION_RUNS_PER_OWNER as u64 {
-        return Err(exhausted("orchestration run capacity reached"));
+        return Err(crate::resource_exhaustion::capacity_quota("orchestration run capacity reached"));
     }
     put_global_document(
         database,
@@ -1426,7 +1423,7 @@ fn retire_owner(
         MAX_ORCHESTRATION_MAINTENANCE_ROWS + 1,
     )?;
     if rows.len() > MAX_ORCHESTRATION_MAINTENANCE_ROWS {
-        return Err(exhausted("owner run retirement exceeds its bound"));
+        return Err(crate::resource_exhaustion::domain_bound("owner run retirement exceeds its bound"));
     }
     let mut targets = Vec::new();
     for (_, raw) in rows {
@@ -1440,7 +1437,7 @@ fn retire_owner(
         if !is_terminal(&s.status) && !durable_human_wait(database, tx, &c, &s)? {
             targets.push((c, s));
             if targets.len() > MAX_ORCHESTRATION_MAINTENANCE_ROWS {
-                return Err(exhausted("owner run retirement exceeds its bound"));
+                return Err(crate::resource_exhaustion::domain_bound("owner run retirement exceeds its bound"));
             }
         }
     }
@@ -1477,7 +1474,7 @@ fn retire_all(
         MAX_ORCHESTRATION_MAINTENANCE_ROWS + 1,
     )?;
     if rows.len() > MAX_ORCHESTRATION_MAINTENANCE_ROWS {
-        return Err(exhausted("global run retirement exceeds its bound"));
+        return Err(crate::resource_exhaustion::domain_bound("global run retirement exceeds its bound"));
     }
     let error = error_value(&request.payload);
     let mut retired = 0;

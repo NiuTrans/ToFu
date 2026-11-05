@@ -32,6 +32,7 @@ function fixture() {
   const ports = { window: w, document: d, initializeFolders() {},
     sidebar: { activate: id => calls.push(['activate', id]), copy: async id => calls.push(['copy', id]),
       duplicate: id => calls.push(['duplicate', id]), delete: id => calls.push(['delete', id]),
+      exportTranscript: id => calls.push(['export', id]),
       rename: id => calls.push(['rename', id]), reference: (id, title) => calls.push(['reference', id, title]),
       assignFolder: id => calls.push(['folder', id]), reportFailure: e => errors.push(e) },
     composer: { contextIdentity: () => context, pendingCleanOriginalText: () => null,
@@ -86,6 +87,24 @@ test('mouse press activates through a row rebuild; click is deduplicated and tou
   assert.equal(f.calls.filter(c => c[0] === 'activate').length, 5);
   dispose(); f.fire(list.firstChild, 'click'); assert.equal(f.calls.filter(c => c[0] === 'activate').length, 5);
   f.dom.window.close();
+});
+
+test('a search body hit row opens its matching Turn; rows without a valid Turn open plainly', () => {
+  const f = fixture(), list = f.d.getElementById('convList'), opened = [];
+  f.ports.sidebar.activate = (id, turn) => opened.push([id, turn]);
+  const dispose = installApplicationInteractions(f.ports);
+  list.innerHTML = '<div class="conv-item" data-conv-id="a" data-match-turn-id="turn-9" data-match-turn-ordinal="17"><span>Hit</span></div>'
+    + '<div class="conv-item" data-conv-id="b" data-match-turn-id="turn-1" data-match-turn-ordinal="x"><span>Bad</span></div>'
+    + '<div class="conv-item" data-conv-id="c"><span>Title hit</span></div>';
+  const [hit, bad, plain] = list.children;
+  f.fire(hit.firstChild, 'pointerdown', { pointerType: 'mouse', button: 0 });
+  f.fire(hit.firstChild, 'click');
+  f.fire(hit.firstChild, 'pointerdown', { pointerType: 'touch', button: 0 });
+  f.fire(hit.firstChild, 'click');
+  f.fire(bad.firstChild, 'click'); f.fire(plain.firstChild, 'click');
+  assert.deepEqual(opened, [['a', { turnId: 'turn-9', ordinal: 17 }], ['a', { turnId: 'turn-9', ordinal: 17 }],
+    ['b', undefined], ['c', undefined]]);
+  dispose(); f.dom.window.close();
 });
 
 test('row actions never navigate; clipboard remains in the gesture and only one feedback timer is retained', async () => {
@@ -179,6 +198,22 @@ test('Escape uses one winning shell target; settings backdrop ignores inner cont
   const settings = f.d.getElementById('settingsModal'); settings.innerHTML = '<button>inside</button>';
   const before = f.calls.length; f.fire(settings.firstChild, 'click'); assert.equal(f.calls.length, before);
   f.fire(settings, 'click'); assert.equal(f.calls.at(-1)[0], 'closeSettings'); dispose(); f.dom.window.close();
+});
+
+test('an open native dialog owns Escape: the shell neither closes the overlay under it nor cancels its close request', () => {
+  const f = fixture(), dispose = installApplicationInteractions(f.ports);
+  f.d.getElementById('settingsModal').classList.add('open');
+  f.d.getElementById('sidebarSearchWrapper').style.display = '';
+  const dialog = f.d.createElement('dialog'); dialog.setAttribute('open', ''); dialog.innerHTML = '<button>cancel</button>';
+  f.d.body.append(dialog);
+  const before = f.calls.length;
+  for (const target of [dialog.firstChild, f.d.body]) {
+    assert.equal(f.fire(target, 'keydown', { key: 'Escape' }).defaultPrevented, false);
+  }
+  assert.equal(f.calls.length, before);
+  dialog.remove(); f.d.getElementById('sidebarSearchWrapper').style.display = 'none';
+  assert.equal(f.fire(f.d, 'keydown', { key: 'Escape' }).defaultPrevented, true);
+  assert.equal(f.calls.at(-1)[0], 'closeSettings'); dispose(); f.dom.window.close();
 });
 
 test('viewport resize bursts and orientation retries are bounded; invalid metrics cannot collapse the page', () => {

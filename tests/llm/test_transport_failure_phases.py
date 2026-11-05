@@ -2,6 +2,8 @@
 
 import asyncio
 import contextlib
+import importlib
+import logging
 import ssl
 from unittest.mock import Mock
 
@@ -207,3 +209,56 @@ def test_async_stream_reports_upload_failure_without_transport_retry(monkeypatch
         asyncio.run(stream.async_stream_chat(BODY, base_url='https://model.example/v1', api_key='test-key'))
     assert caught.value.failure_stage == 'upload'
     assert calls == [1]
+
+
+def _nonstream_exhaustion_records(caplog):
+    return [record for record in caplog.records
+            if record.name == 'lib.llm.chat' and '\u2716' in record.getMessage()]
+
+
+@pytest.mark.parametrize('caller_budget, expected_level', [
+    (1.5, logging.WARNING),
+    (None, logging.ERROR),
+])
+def test_nonstream_read_budget_expiry_belongs_to_the_caller(
+        monkeypatch, caplog, caller_budget, expected_level):
+    """Only an explicit caller budget turns read expiry into a caller outcome."""
+    chat_module = importlib.import_module('lib.llm.chat')
+    from lib.llm.llm_errors import ResponseReadTimeoutError
+
+    def expire(*args, **kwargs):
+        raise requests.exceptions.ReadTimeout('read timed out')
+
+    monkeypatch.setattr(chat_module, 'http_post', expire)
+    with caplog.at_level(logging.DEBUG, logger='lib.llm.chat'), \
+            pytest.raises(ResponseReadTimeoutError):
+        chat_module.chat(BODY['messages'], model='test-model', api_key='test-only',
+                         base_url='https://public.example/v1',
+                         timeout=caller_budget, max_retries=0)
+    exhausted = _nonstream_exhaustion_records(caplog)
+    assert [record.levelno for record in exhausted] == [expected_level]
+    assert bool(exhausted[0].exc_info) is (expected_level == logging.ERROR)
+
+
+def test_nonstream_server_failure_stays_error_under_a_caller_budget(
+        monkeypatch, caplog):
+    chat_module = importlib.import_module('lib.llm.chat')
+    from lib.llm.llm_errors import RetryableAPIError
+
+    class ServerFailure:
+        status_code = 500
+        headers = {}
+        text = '{"error": {"message": "internal server error"}}'
+        content = text.encode()
+
+        def json(self):
+            return {'error': {'message': 'internal server error'}}
+
+    monkeypatch.setattr(chat_module, 'http_post', lambda *args, **kwargs: ServerFailure())
+    with caplog.at_level(logging.DEBUG, logger='lib.llm.chat'), \
+            pytest.raises(RetryableAPIError):
+        chat_module.chat(BODY['messages'], model='test-model', api_key='test-only',
+                         base_url='https://public.example/v1', timeout=1.5,
+                         max_retries=0)
+    assert [record.levelno for record in _nonstream_exhaustion_records(caplog)] == [
+        logging.ERROR]

@@ -21,6 +21,7 @@ fix, then restore byte-identically):
 """
 
 import os
+import time
 
 import pytest
 
@@ -99,6 +100,35 @@ class TestPruneStaleFaultDumps:
         assert live.exists()              # live pid kept
         assert selfsink.exists()          # our own sink kept (keep_basename)
         assert foreign.exists()           # non-matching name untouched
+
+    @pytest.mark.skipif(not os.path.isdir('/proc/self/task'),
+                        reason='Linux zombie state')
+    def test_default_probe_prunes_the_dump_of_an_unreaped_zombie(self, tmp_path):
+        # Signal 0 reaches a zombie, but a zombie never writes its dump again.
+        zombie = os.fork()
+        if zombie == 0:
+            os._exit(0)
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                with open('/proc/%d/stat' % zombie, 'rb') as stat:
+                    raw = stat.read()
+                if raw[raw.rfind(b')') + 2:].split()[0] == b'Z':
+                    break
+                assert time.monotonic() < deadline, 'child never exited'
+                time.sleep(0.01)
+            dead = tmp_path / ('tofu_faulthandler_%d.log' % zombie)
+            live = tmp_path / ('tofu_faulthandler_%d.log' % os.getpid())
+            for path in (dead, live):
+                path.write_text('x')
+
+            removed = server._prune_stale_fault_dumps(directory=str(tmp_path))
+
+            assert removed == 1
+            assert not dead.exists()
+            assert live.exists()
+        finally:
+            os.waitpid(zombie, 0)
 
     def test_prune_no_matches_is_zero(self, tmp_path):
         (tmp_path / 'readme.txt').write_text('x')

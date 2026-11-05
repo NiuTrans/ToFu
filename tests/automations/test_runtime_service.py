@@ -10,11 +10,13 @@ from lib.identity import PrincipalContext
 pytestmark = pytest.mark.unit
 
 
-def test_runtime_contract_uses_launch_capacity_without_storage_or_thread_work():
+def test_runtime_contract_uses_idle_hint_without_storage_or_thread_work():
     def forbidden(**kwargs):
         raise AssertionError('Composition opened storage before startup')
     service = create_service(client_factory=forbidden, environ={'TOFU_AGENT_WORKERS': '97'})
-    assert service.snapshot() == {'state': 'new', 'capacity': 97, 'inflight': 0, 'highWater': 0}
+    assert service.snapshot() == {'state': 'new', 'idleWorkers': 97, 'inflight': 0, 'highWater': 0}
+    huge = create_service(client_factory=forbidden, environ={'TOFU_AGENT_WORKERS': '100000'})
+    assert huge.snapshot()['idleWorkers'] == 100000
     policy = runtime_policy()
     assert policy['heartbeatIntervalMilliseconds'] < policy['workerLeaseMilliseconds']
     assert policy['queueReceipts'] == 'no-idle-claim-receipts'
@@ -22,6 +24,29 @@ def test_runtime_contract_uses_launch_capacity_without_storage_or_thread_work():
     assert service.snapshot()['state'] == 'stopped'
     with pytest.raises(RuntimeError):
         service.start()
+
+
+def test_claim_wake_contract_names_every_producer_and_one_calendar_minute():
+    import json
+    from pathlib import Path
+    from lib.automations.contract import RESERVED_WORKER_TASK_KINDS, SCHEDULE
+    policy = runtime_policy()
+    assert 'idlePollMilliseconds' not in policy
+    catalog = json.loads((Path(__file__).resolve().parents[2]
+                          / 'contracts/storage_operations_v1.json').read_text())
+    kinds = {operation['name']: operation['kind'] for operation in catalog['operations']}
+    wakes = set(policy['claimWakeOperations'])
+    # Every typed producer of a claimable automation job must wake the coordinator.
+    assert set(RESERVED_WORKER_TASK_KINDS.values()) <= wakes
+    assert {'automation.run.approve', 'automation.run.cancel', 'worker_job.defer',
+            'worker_job.enqueue', 'worker_job.request_cancel'} <= wakes
+    assert {kinds.get(name) for name in wakes} == {'command'}
+    assert kinds['worker_job.claim_horizon'] == 'query'
+    # Re-anchoring is defined by the calendar: skip mode admits a slot only
+    # inside its current UTC minute, so a far horizon is re-read every minute.
+    assert SCHEDULE['precision'].startswith('local calendar minute')
+    assert SCHEDULE['catchUpSkip'] == 'only a slot in the current UTC minute'
+    assert policy['horizonReanchorMilliseconds'] == 60_000
 
 
 @pytest.mark.parametrize('principal', [
@@ -64,14 +89,15 @@ def test_application_installs_once_and_keeps_its_shutdown_owner(monkeypatch):
 @pytest.mark.parametrize('role,expected', [('all', True), ('worker', True), ('api', False), ('scheduler', False)])
 def test_process_role_limits_worker_startup(monkeypatch, role, expected):
     from lib.automations import runtime
-    from lib.server.server_background_services import start_background_services
+    from lib.server import server_background_services
     import lib.integration_control as integration
-    import routes
     calls = []
     monkeypatch.setattr(runtime, 'ensure_workers_started', lambda *_, **__: calls.append('automation') or True)
     monkeypatch.setattr(integration, 'ensure_worker_started', lambda: False)
-    monkeypatch.setattr(routes, 'start_registered_background_services', lambda *_, **__: None)
-    start_background_services(SimpleNamespace(extensions={}), process_role=role,
+    monkeypatch.setattr(server_background_services,
+                        'start_registered_background_services', lambda *_, **__: None)
+    server_background_services.start_background_services(
+        SimpleNamespace(extensions={}), process_role=role,
         load_saved_proxy_config=lambda: None, bootstrap_personal_key=lambda: None,
         environ={'TOFU_AGENT_WORKERS': '2'})
     assert bool(calls) is expected

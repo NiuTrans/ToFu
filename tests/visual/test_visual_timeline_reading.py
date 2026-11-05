@@ -65,11 +65,11 @@ def test_answer_title_waits_for_turn_settlement(frontend_visual_page, timeline_b
     page.evaluate("()=>stage('completed',answerSegments)")
     expect(page.locator('.conversation-answer-title')).to_have_text('答复')
     expect(page.locator('[data-block-id="text:terminal"] > .md-content')).to_have_text('The file is correct.')
-    process = page.locator('.conversation-history-process > summary')
-    process.focus()
+    panel = page.locator('.conversation-tool-panel__toggle')
+    panel.focus()
     page.evaluate("""()=>stage('completed',answerSegments,{translatedContent:'文件没有问题。',
       translation:{status:'completed',model:'translator'}})""")
-    expect(process).to_be_focused()
+    expect(panel).to_be_focused()
     expect(page.locator('.conversation-answer-title')).to_have_count(1)
     expect(page.locator('[data-block-id="text:terminal"] > .md-content')).to_have_text('文件没有问题。')
     expect(page.locator('.bilingual-block')).to_have_count(1)
@@ -178,25 +178,51 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     # virtualized painting otherwise clips the tail to the original viewport.
     page.screenshot(path=str(tmp_path / f'timeline-{theme}-{width}.png'), full_page=True)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
-    # Visual runs follow exact adjacency and never absorb authored narration.
-    assert page.locator('[data-block-id="thinking-0"]').get_attribute('data-process-edge') == 'start'
-    assert page.locator('[data-block-id="read"]').get_attribute('data-process-edge') == 'end'
-    assert page.locator('[data-block-id="thinking-1"]').get_attribute('data-process-edge') == 'start'
+    # Grouped reply: one reasoning disclosure, the live (open) tool panel with
+    # every call and note in authored order, then the prose.
+    assert page.evaluate("""()=>[...document.querySelectorAll('[data-turn-id="turn"] .conversation-turn-blocks > [data-block-id]')]
+      .map(n=>n.dataset.blockId).filter(id=>id!=='live-status')""") == [
+        'thinking-0', 'layout:tool-panel', 'read', 'command', 'note', 'checklist', 'program',
+        'intro', 'narration', 'answer']
+    assert page.locator('[data-block-id="thinking-1"]').count() == 0
+    assert page.locator('[data-block-id="read"]').get_attribute('data-process-edge') == 'start'
     assert page.locator('[data-block-id="program"]').get_attribute('data-process-edge') == 'end'
     assert page.locator('[data-block-id="narration"]').get_attribute('data-process-edge') is None
+    assert page.locator('.conversation-tool-panel__toggle').get_attribute('aria-expanded') == 'true'
     assert not page.locator('.conversation-answer-label').count()
     assert not page.locator('.user-msg .conversation-answer-label').count()
-    # Role, narration, process labels and the answer share an actual text edge.
-    alignment = page.evaluate("""()=>['.conversation-turn:not(.user-msg) .message-role',
-      '[data-block-id="intro"] .md-content', '.thinking-label',
-      '[data-block-id="answer"] > .md-content > h3']
-      .map(s=>({selector:s,x:document.querySelector(s).getBoundingClientRect().left}))""")
-    assert max(x['x'] for x in alignment)-min(x['x'] for x in alignment) <= 1, alignment
+    # Role, prose and the answer share an actual text edge. Reasoning and
+    # tools form one activity card there, with labels after their glyph tiles.
+    alignment = page.evaluate("""()=>{
+      const box=s=>document.querySelector(s).getBoundingClientRect();
+      return {edges:['.conversation-turn:not(.user-msg) .message-role','[data-block-id="intro"] .md-content',
+          '.thinking-header','.conversation-tool-panel','[data-block-id="answer"] > .md-content > h3']
+          .map(s=>({selector:s,x:box(s).left})),
+        card:box('.conversation-tool-panel').left,tile:box('.conversation-tool-panel__glyph').right,
+        label:box('.conversation-tool-panel__label').left};}""")
+    edges = alignment['edges']
+    assert max(x['x'] for x in edges) - min(x['x'] for x in edges) <= 1, alignment
+    assert alignment['card'] < alignment['tile'] <= alignment['label'], alignment
     # Native keyboard access and mounted reader choices survive a revision.
     summary = page.locator('.thinking-header').first
     summary.focus()
     summary.press('Enter')
     expect(page.locator('.thinking-text').first).to_be_visible()
+    thinking_alignment = page.evaluate("""()=>{
+      const panel=document.querySelector('.conversation-tool-panel').getBoundingClientRect();
+      const label=document.querySelector('.conversation-tool-panel__label').getBoundingClientRect();
+      const body=document.querySelector('.thinking-text');
+      return {panelLeft:panel.left,panelRight:panel.right,labelLeft:label.left,
+        bodyLeft:body.getBoundingClientRect().left,
+        paragraphLeft:body.querySelector('p').getBoundingClientRect().left,
+        cardInset:parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--space-3')),
+        borderWidth:parseFloat(getComputedStyle(document.querySelector('.conversation-tool-panel')).borderLeftWidth)};
+    }""")
+    assert abs(thinking_alignment['bodyLeft'] - thinking_alignment['panelLeft']) <= 1, thinking_alignment
+    # Reasoning starts at the normal card inset, not the header label column.
+    expected_text_left = (thinking_alignment['panelLeft'] + thinking_alignment['borderWidth']
+                          + thinking_alignment['cardInset'])
+    assert abs(thinking_alignment['paragraphLeft'] - expected_text_left) <= 1, thinking_alignment
     page.evaluate("""()=>{
       window.readingSummary=document.querySelector('.thinking-header');
       const turn=state.turnsById.turn;
@@ -205,10 +231,11 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     expect(summary).to_be_focused()
     assert summary.evaluate('node=>node===readingSummary')
     assert page.evaluate("JSON.stringify(initialOrder)===JSON.stringify([...document.querySelectorAll('.conversation-block[data-block-id]')].map(n=>n.dataset.blockId))")
-    # A process row has one shared inset and readable type; details do not add
-    # arbitrary layers of card borders. Compare actual labels, not CSS text.
+    # Calls inside the card share one text column after their glyphs, with
+    # readable type; details do not add arbitrary layers of card borders.
+    # Compare actual labels, not CSS text.
     measurements = page.evaluate(r"""()=>{
-      const selectors=['.thinking-label','.ptool-result-header .ptool-text','.ptool-cmd-desc-inline','.ptool-todo-header .ptool-text','.ptc-title'];
+      const selectors=['.ptool-result-header .ptool-text','.ptool-cmd-desc-inline','.ptool-todo-header .ptool-text','.ptc-title'];
       const ctx=document.createElement('canvas').getContext('2d');
       const rgb=value=>{ctx.clearRect(0,0,1,1);ctx.fillStyle=value;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data];};
       const luminance=value=>rgb(value).slice(0,3).map(n=>{n/=255;return n<=.04045?n/12.92:((n+.055)/1.055)**2.4;})
@@ -217,11 +244,13 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
         const block=n.closest('.conversation-block'),s=getComputedStyle(n),ink=luminance(s.color);
         let backdrop=n;while(backdrop.parentElement&&rgb(getComputedStyle(backdrop).backgroundColor)[3]<255)backdrop=backdrop.parentElement;
         const canvas=luminance(getComputedStyle(backdrop).backgroundColor);
-        return {selector,inset:n.getBoundingClientRect().left-block.getBoundingClientRect().left,size:parseFloat(s.fontSize),visible:n.getBoundingClientRect().width>0,
+        return {selector,inset:n.getBoundingClientRect().left-document.querySelector('.conversation-tool-panel').getBoundingClientRect().left,
+          size:parseFloat(s.fontSize),visible:n.getBoundingClientRect().width>0,
           contrast:(Math.max(canvas,ink)+.05)/(Math.min(canvas,ink)+.05)};});
     }""")
     assert all(not row.get('missing') and row['visible'] for row in measurements), measurements
     assert max(row['inset'] for row in measurements) - min(row['inset'] for row in measurements) <= 2, measurements
+    assert min(row['inset'] for row in measurements) >= 24, measurements
     assert all(row['size'] >= 13 for row in measurements), measurements
     assert all(row['contrast'] >= 4.5 for row in measurements), measurements
     (tmp_path / f'timeline-{theme}-{width}.json').write_text(json.dumps(measurements, indent=2))
@@ -240,9 +269,11 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     page.locator('.ptool-cmd-desc-inline').evaluate("n=>n.textContent='检查前端组件与主题的一致性，并保留完整的操作说明。'.repeat(5)")
     assert page.locator('.ptool-cmd-desc-inline').evaluate('n=>n.scrollWidth<=n.clientWidth+1')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
-    # Settlement uses the existing final-answer/process owner, preserving the
-    # real order when reopened rather than regrouping by content kind.
+    # Settlement keeps the grouped order. The reader opened calls above, so the
+    # panel stays open instead of folding like an untouched one.
     page.evaluate("""()=>{const turn=state.turnsById.turn;state={...state,turnsById:{...state.turnsById,turn:{...turn,status:'completed',projectionRevision:3}}};render();}""")
+    toggle = page.locator('.conversation-tool-panel__toggle')
+    expect(toggle).to_have_attribute('aria-expanded', 'true')
     expect(page.locator('[data-block-id="answer"]')).to_be_visible()
     assert page.locator('.conversation-answer-title').inner_text() == '答复'
     answer_edges = page.evaluate("""()=>['.conversation-turn:not(.user-msg) .message-role',
@@ -255,21 +286,28 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     outline.get_by_role('button', name='留住豆腐的温度').click()
     expect(page.locator('[data-block-id="answer"] h3').last).to_be_focused()
     expect(outline.locator('nav')).not_to_be_visible()
-    process = page.locator('.conversation-history-process > summary')
-    answer_y = page.locator('[data-block-id="answer"] > .md-content').bounding_box()['y']
-    process.focus(); process.press('Enter')
+    # The header is a native button: closing unmounts the calls (document
+    # coordinates, so scroll clamping on a shorter page cannot fake a shift),
+    # keeps focus, and reopening remounts them between header and prose.
+    answer_top = ('()=>document.querySelector(\'[data-block-id="answer"] > .md-content\')'
+                  '.getBoundingClientRect().top+scrollY')
+    answer_y = page.evaluate(answer_top)
+    toggle.focus(); toggle.press('Enter')
+    expect(toggle).to_have_attribute('aria-expanded', 'false')
+    expect(toggle).to_be_focused()
+    expect(page.locator('[data-turn-zone="process"]')).to_have_count(0)
+    closed_y = page.evaluate(answer_top)
+    assert closed_y < answer_y
+    toggle.press('Space')
     expect(page.locator('[data-block-id="read"]')).to_be_visible()
-    expect(page.locator('.conversation-history-process__controls')).not_to_be_visible()
-    pane = page.locator('.conversation-history-process__body')
-    expect(pane).to_have_attribute('popover', 'manual')
-    expect(pane.get_by_role('button', name='回到答复')).to_be_focused()
-    assert abs(page.locator('[data-block-id="answer"] > .md-content').bounding_box()['y']-answer_y) <= 1
-    assert pane.evaluate('n=>n.scrollWidth<=n.clientWidth+1')
-    pane.get_by_role('button', name='回到答复').press('Escape')
-    expect(process).to_be_focused()
-    expect(pane).to_have_count(0)
-    process.press('Enter')
-    expect(page.locator('.conversation-history-process__body:popover-open')).to_be_visible()
+    assert page.evaluate(answer_top) > closed_y
+    assert page.evaluate("""()=>{
+      const rows=[...document.querySelectorAll('[data-turn-zone="process"]')];
+      const toggle=document.querySelector('.conversation-tool-panel').getBoundingClientRect();
+      const prose=document.querySelector('[data-block-id="intro"]').getBoundingClientRect();
+      return rows.every(row=>{const box=row.getBoundingClientRect();
+        return box.top>=toggle.bottom-1 && box.bottom<=prose.top+1;});
+    }""")
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
     page.screenshot(path=str(tmp_path / f'timeline-history-{theme}-{width}.png'), full_page=True)
     # A failure stays in its original slot with visible summary evidence even
@@ -287,7 +325,7 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     # are deliberately absent: this is geometry, not an app/backend boot test.
     # The same mounted Surface moves into chatInner; no screenshot-only cards.
     failure.evaluate('n=>n.remove()')
-    process.press('Enter')
+    toggle.press('Enter')
     host_style.evaluate('n=>n.remove()')
     page.evaluate(r"""html=>{
       const surface=document.getElementById('surface');
@@ -304,37 +342,44 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
     page.screenshot(path=str(tmp_path / f'timeline-shell-{theme}-{width}.png'))
     primary_fill = page.locator('.new-chat-btn').evaluate('n=>getComputedStyle(n).backgroundImage')
-    assert primary_fill == 'none'
     if theme == 'tofu':
-        paper = page.evaluate('getComputedStyle(document.documentElement).getPropertyValue("--bg-primary").trim().toUpperCase()')
-        assert paper == '#F8FAFC'
+        # The paper theme's 2026-10-20 identity contract permits a quiet warm
+        # CTA wash. This geometry fixture must not freeze the retired blue-grey
+        # #F8FAFC palette or mistake the maintained paper gradient for a failure.
+        paper = page.evaluate('getComputedStyle(document.documentElement).getPropertyValue("--bg-primary").trim()')
+        red, green, blue = (int(paper[i:i+2], 16) for i in (1, 3, 5))
+        assert red >= green >= blue >= 180, paper
+    else:
+        assert primary_fill == 'none'
     assert page.locator('.conversation-turn-actions button').evaluate_all(
         'nodes=>nodes.every(n=>n.getAttribute("aria-label") && n.title)')
     page.locator('#userInput').focus()
     expect(page.locator('#userInput')).to_be_focused()
-    # One Surface has one active inspector, even when several answers expose
-    # Process. Opening another releases the previous lazy body immediately.
+    # Each reply owns its panel choice: opening one never folds another.
     page.evaluate("""()=>{
       const second={...state.turnsById.turn,turnId:'second',ordinal:2};
       state={...state,turnsById:{...state.turnsById,second},laneOrder:{main:['request','turn','second']}};render();
     }""")
-    first_process = page.locator('[data-turn-id="turn"] .conversation-history-process')
-    second_process = page.locator('[data-turn-id="second"] .conversation-history-process')
-    first_process.locator(':scope > summary').press('Enter')
-    expect(first_process.locator('.conversation-history-process__body:popover-open')).to_be_visible()
-    second_process.locator(':scope > summary').press('Enter')
-    expect(second_process.locator('.conversation-history-process__body:popover-open')).to_be_visible()
-    expect(first_process.locator('.conversation-history-process__body')).to_have_count(0)
-    assert not first_process.evaluate('n=>n.open')
-    expect(page.locator(':popover-open')).to_have_count(1)
+    first_panel = page.locator('[data-turn-id="turn"] .conversation-tool-panel__toggle')
+    second_panel = page.locator('[data-turn-id="second"] .conversation-tool-panel__toggle')
+    expect(first_panel).to_have_attribute('aria-expanded', 'false')
+    expect(second_panel).to_have_attribute('aria-expanded', 'false')
+    second_panel.press('Enter')
+    expect(second_panel).to_have_attribute('aria-expanded', 'true')
+    expect(first_panel).to_have_attribute('aria-expanded', 'false')
+    expect(page.locator('[data-turn-id="second"] [data-block-id="read"]')).to_be_visible()
+    expect(page.locator('[data-turn-id="turn"] [data-block-id="read"]')).to_have_count(0)
     page.evaluate('surface.dispose()')
-    expect(page.locator(':popover-open')).to_have_count(0)
 
 
 @pytest.mark.parametrize('theme', ['light', 'dark', 'tofu'])
 @pytest.mark.parametrize('width', [1180, 390, 320])
-def test_tool_svg_slots_are_transparent(frontend_visual_page, reading_tools, timeline_bundle, theme, width):
-    """Live and historical tool identities have no opaque tile or shadow halo."""
+def test_panel_calls_lead_with_plain_tool_glyphs_and_exact_identity(
+        frontend_visual_page, reading_tools, timeline_bundle, theme, width):
+    """Inside the tool-panel card every call leads with its own plain line glyph
+    (no tile, wash or shadow), live and after settlement, and exact tool names
+    stay exposed. Owner decision 2026-10-31 restored the glyphs that the
+    earlier glyph-less rows had removed."""
     from playwright.sync_api import expect
 
     page = frontend_visual_page
@@ -359,7 +404,7 @@ def test_tool_svg_slots_are_transparent(frontend_visual_page, reading_tools, tim
       window.renderIcons=()=>iconSurface.render(selectConversationViewModel(iconState));renderIcons();
     }""", reading_tools)
 
-    def assert_unpainted():
+    def assert_glyphs():
         for selector in ['[data-block-id="read"] .ptool-icon',
                          '[data-block-id="command"] .ptool-cmd-icon']:
             icon = page.locator(selector).first
@@ -368,13 +413,109 @@ def test_tool_svg_slots_are_transparent(frontend_visual_page, reading_tools, tim
             expect(icon).to_have_css('background-color', 'rgba(0, 0, 0, 0)')
             expect(icon).to_have_css('background-image', 'none')
             expect(icon).to_have_css('box-shadow', 'none')
+        expect(page.locator('[data-block-id="read"] .conversation-tool-identity')).to_contain_text('read_files')
+        expect(page.locator('[data-block-id="command"] .conversation-tool-identity')).to_contain_text('run_command')
 
     expect(page.locator('[data-block-id="read"]')).to_have_attribute('data-process-edge', 'start')
     expect(page.locator('[data-block-id="command"]')).to_have_attribute('data-process-edge', 'end')
-    assert_unpainted()
+    assert_glyphs()
     page.evaluate("""()=>{const turn=iconState.turnsById.turn;
       iconState={...iconState,turnsById:{turn:{...turn,status:'completed',projectionRevision:2}}};renderIcons();}""")
-    page.locator('.conversation-history-process > summary').click()
-    expect(page.locator('.conversation-history-process__body:popover-open')).to_be_visible()
-    assert_unpainted()
+    panel = page.locator('.conversation-tool-panel__toggle')
+    expect(panel).to_have_attribute('aria-expanded', 'false')
+    panel.click()
+    expect(page.locator('[data-block-id="read"]')).to_be_visible()
+    assert_glyphs()
     page.evaluate('iconSurface.dispose()')
+
+
+@pytest.mark.parametrize('theme', ['tofu', 'dark'])
+@pytest.mark.parametrize('width', [1180, 390])
+def test_quiet_steps_merge_reasoning_and_reveal_detail_on_demand(frontend_visual_page, reading_tools, timeline_bundle, theme, width):
+    """A routine step is one quiet line inside the tool panel, and the reasoning
+    between steps joins the reply's single reasoning disclosure. Identity, step
+    controls and carets wait for hover, focus or an open step; nothing is
+    unmounted or reordered."""
+    from playwright.sync_api import expect
+
+    page = frontend_visual_page
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.emulate_media(reduced_motion='reduce')
+    page.set_content(f'<!doctype html><html data-theme="{theme}"><head><link rel="stylesheet" href="/static/styles.css">'
+                     '</head><body class="cv-off"><main id="surface"></main></body></html>')
+    page.add_style_tag(path=str(ROOT / 'frontend/src/conversation/ui/conversation-surface.css'))
+    page.add_script_tag(path=timeline_bundle)
+    page.evaluate("""tools=>{
+      const scope={taskId:'quiet-task',attemptId:'quiet-attempt'};
+      const thinking=(blockId,llmRound)=>({type:'thinking',blockId,llmRound,...scope,text:'Reasoning '+blockId});
+      const tool=(blockId,name,llmRound)=>({type:'tool_use',blockId,id:blockId,name,llmRound,...scope,
+        _round:{toolName:name,toolCallId:blockId,roundNum:llmRound+1,llmRound,...scope,status:'done',results:[{text:'Evidence retained.'}]}});
+      const segments=[
+        {type:'text',blockId:'intro',text:'I will read the contract, then run the style check.',llmRound:0,...scope},
+        thinking('lead',0),tool('read','read_files',0),
+        thinking('after-read',1),tool('command','run_command',1),
+        thinking('after-command',2),
+        {type:'text',blockId:'answer',text:'Verified.',llmRound:3,...scope,deliverable:true,terminal:true}];
+      const turn={turnId:'turn',conversationId:'quiet',actor:'assistant',role:'assistant',laneId:'main',ordinal:0,
+        status:'running',projectionRevision:1,projection:{segments}};
+      window.quietState={...createTurnState('quiet'),turnsById:{turn},laneOrder:{main:['turn']}};
+      window.quietSurface=createConversationSurface(document.getElementById('surface'),createClassicConversationRenderers({
+        renderSafeMarkdownHtml:text=>{const p=document.createElement('p');p.textContent=text;return p.outerHTML;},
+        renderToolBlockHtml:block=>tools[block.blockId]||''}));
+      quietSurface.render(selectConversationViewModel(quietState));
+      window.quietOrder=()=>[...document.querySelectorAll('.conversation-block[data-block-id]')].map(n=>n.dataset.blockId);
+      window.initialQuietOrder=quietOrder();
+    }""", reading_tools)
+    lead = page.locator('[data-block-id="lead"]')
+    read = page.locator('[data-block-id="read"]')
+    summary = read.locator('summary').first
+    identity = read.locator('.conversation-tool-identity')
+    command = page.locator('[data-block-id="command"]')
+    fold = command.locator('.ptool-cmd-fold-output')
+
+    # Every round's reasoning reads as one disclosure ahead of the panel.
+    expect(lead).to_be_visible()
+    expect(page.locator('[data-block-id="after-read"], [data-block-id="after-command"]')).to_have_count(0)
+    expect(page.locator('.thinking-block')).to_have_count(1)
+    lead.locator('.thinking-header').click()
+    for text in ('Reasoning lead', 'Reasoning after-read', 'Reasoning after-command'):
+        expect(lead.locator('.thinking-text')).to_contain_text(text)
+    lead.locator('.thinking-header').click()
+    expect(lead.locator('.thinking-text')).to_be_hidden()
+    # One quiet line: secondary ink; the tooltip carries the full intent and
+    # the exact identity, which waits for an open step.
+    intent = summary.locator('.ptool-text').first
+    assert intent.evaluate("n=>n.title===n.textContent.trim()+'\\n'+n.closest('[data-action-summary]').querySelector('.conversation-tool-identity').textContent")
+    assert 'read_files' in intent.get_attribute('title')
+    assert intent.evaluate("""n=>{const probe=document.createElement('span');probe.style.color='var(--text-secondary)';
+      document.body.append(probe);const same=getComputedStyle(probe).color===getComputedStyle(n).color;probe.remove();return same;}""")
+    expect(identity).to_be_hidden()
+    expect(identity).to_have_text('read_files')
+    expect(fold).to_have_count(1)
+    expect(fold).to_have_css('opacity', '0')
+    if width > 600:
+        heights = page.evaluate("""()=>[...document.querySelectorAll('#surface [data-action-summary]')]
+          .filter(n=>n.getClientRects().length).map(n=>Math.round(n.getBoundingClientRect().height))""")
+        assert heights and max(heights) <= 36, heights
+    # Hover changes opacity only: identity stays in the tooltip and the intent
+    # never reflows under the pointer (it would break drag-selection).
+    before = intent.bounding_box()
+    summary.hover()
+    expect(identity).to_be_hidden()
+    after = intent.bounding_box()
+    assert all(abs(after[key] - before[key]) <= 0.5 for key in before), (before, after)
+    command.locator('[data-action-summary]').hover()
+    expect(fold).to_have_css('opacity', '1')
+
+    # Opening the step shows its exact identity; closing it hides it again.
+    summary.click()
+    expect(read.locator('details').first).to_have_attribute('open', '')
+    expect(identity).to_be_visible()
+    summary.click()
+    expect(identity).to_be_hidden()
+    # An expanded command fold stays visible as its own close control.
+    fold.evaluate("n=>n.setAttribute('aria-expanded','true')")
+    expect(fold).to_have_css('opacity', '1')
+    assert page.evaluate('JSON.stringify(initialQuietOrder)===JSON.stringify(quietOrder())')
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
+    page.evaluate('quietSurface.dispose()')

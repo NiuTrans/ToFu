@@ -84,7 +84,10 @@ def test_no_frontend_module_calls_a_bare_free_t():
         "it defensively (globalThis.t / runtimeScope.t / pass-through). In a "
         "native ES module chunk that is a ReferenceError at evaluation — the "
         "2026-08-20 infinite-reload incident that broke the welcome-screen "
-        "icons. Offenders: " + ", ".join(bad)
+        "icons. Offenders: " + ", ".join(bad) + ". A TypeScript method "
+        "signature such as `t(key: K): string;` in a ports interface matches "
+        "too; declare an injected translator as a property instead: "
+        "`t: (key: K) => string`."
     )
 
 

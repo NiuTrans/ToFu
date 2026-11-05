@@ -1,14 +1,14 @@
 /** Canonical projection for conversation-level agent interaction modes.
  *
- * The product presents Standard, Plan, and Autopilot as one radio choice.
- * The transport keeps the two current boolean fields so conversations and
- * headless clients share one representation. This module is the single
- * frontend boundary that resolves them when stale snapshots contain
- * conflicting current modes.
+ * The product presents Standard, Delegate, Plan, and Autopilot as one radio
+ * choice. The transport keeps one boolean per non-default mode so
+ * conversations and headless clients share one representation. This module
+ * is the single frontend boundary that resolves them when stale snapshots
+ * contain conflicting current modes.
  */
 
 export const AGENT_MODES = [
-  'standard', 'plan', 'autopilot',
+  'standard', 'delegate', 'plan', 'autopilot',
 ] as const;
 
 export type AgentMode = typeof AGENT_MODES[number];
@@ -16,11 +16,13 @@ export type AgentMode = typeof AGENT_MODES[number];
 export interface AgentModeFlags {
   planMode: boolean;
   autopilotEnabled: boolean;
+  delegateMode: boolean;
 }
 
 export interface ConversationInteractionSnapshot {
   planMode?: unknown;
   autopilotEnabled?: unknown;
+  delegateMode?: unknown;
   activeFlow?: unknown;
 }
 
@@ -39,23 +41,27 @@ export function agentModeFlags(value: unknown): AgentModeFlags {
   return {
     planMode: mode === 'plan',
     autopilotEnabled: mode === 'autopilot',
+    delegateMode: mode === 'delegate',
   };
 }
 
 export function resolveAgentMode(
   planMode: unknown,
   autopilotEnabled: unknown,
+  delegateMode: unknown = false,
 ): AgentMode {
   if (planMode === true) return 'plan';
   if (autopilotEnabled === true) return 'autopilot';
+  if (delegateMode === true) return 'delegate';
   return 'standard';
 }
 
 /** Normalize all loop owners using the backend's established precedence.
  *
  * Plan is the fail-closed authority. Otherwise an explicit orchestration flow
- * wins, then Autopilot. Valid UI transitions never create a clash; this
- * ordering only heals cross-tab or partially-written snapshots.
+ * wins, then Autopilot, then Delegate (a policy of the standard loop). Valid
+ * UI transitions never create a clash; this ordering only heals cross-tab or
+ * partially-written snapshots.
  */
 export function normalizeConversationInteractionModes(
   snapshot: ConversationInteractionSnapshot,
@@ -70,7 +76,8 @@ export function normalizeConversationInteractionModes(
     agentMode = 'standard';
     normalizedFlow = activeFlow;
   } else {
-    agentMode = resolveAgentMode(false, snapshot.autopilotEnabled);
+    agentMode = resolveAgentMode(
+      false, snapshot.autopilotEnabled, snapshot.delegateMode);
   }
   return {
     agentMode,

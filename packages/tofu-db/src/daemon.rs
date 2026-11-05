@@ -52,8 +52,14 @@ pub struct DaemonConfig {
     pub(crate) at_rest_key: Option<crate::at_rest::AtRestKey>,
     pub(crate) backup_dir: Option<std::path::PathBuf>,
     pub(crate) fastpath: Option<crate::fastpath::FastpathConfig>,
+    pub(crate) fastpath_admission: crate::fastpath::FastpathAdmission,
     pub(crate) wal_durability: crate::wal::WalDurability,
     pub(crate) wal_flush_interval: std::time::Duration,
+    /// An explicit `--durability` survives an automatic fastpath decline; an
+    /// implied one re-derives the source volume's automatic tier.
+    pub(crate) wal_durability_explicit: bool,
+    /// The typed refusal an `Auto` admission declined, for readiness.
+    pub(crate) fastpath_declined: Option<serde_json::Value>,
 }
 
 impl std::fmt::Debug for DaemonConfig {
@@ -113,9 +119,25 @@ impl DaemonConfig {
             at_rest_key: None,
             backup_dir: None,
             fastpath: None,
+            fastpath_admission: crate::fastpath::FastpathAdmission::Required,
             wal_durability: crate::wal::WalDurability::default(),
             wal_flush_interval: DEFAULT_WAL_FLUSH_INTERVAL,
+            wal_durability_explicit: false,
+            fastpath_declined: None,
         })
+    }
+
+    /// Records whether the operator chose the durability tier explicitly.
+    pub fn with_explicit_wal_durability(mut self, explicit: bool) -> Self {
+        self.wal_durability_explicit = explicit;
+        self
+    }
+
+    /// `Auto` serves the classic authority when first activation is refused
+    /// before any relocation state exists (see `fastpath::AdmissionRefusal`).
+    pub fn with_fastpath_admission(mut self, admission: crate::fastpath::FastpathAdmission) -> Self {
+        self.fastpath_admission = admission;
+        self
     }
 
     /// Selects the active-log durability policy. `strict` (the default) keeps
@@ -279,9 +301,9 @@ pub(crate) fn run_rotation_driver(
         let prepared = {
             // Blocking acquisition: a try_lock poll starves under writer
             // convoys (freshly arriving writers always beat the sleeping
-            // driver), delaying rotation start until the hard ceiling turns
-            // into client-visible backpressure. The probe itself is a quick
-            // in-memory take, and no mutex holder ever waits on this driver.
+            // driver), allowing the durable backlog to grow without catchup.
+            // The driver owns generation preparation as well as encoding;
+            // no foreground append waits for its maintenance completion.
             let waiting = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_ROTATION_PREPARE_WAIT);
             let mut guard = match database.lock() {
                 Ok(guard) => guard,
@@ -570,8 +592,37 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
             validate_projection_path(&fastpath.local_authority, projection)?;
         }
     }
-    let fastpath_lease = config.fastpath.as_ref()
-        .map(|fastpath| fastpath.prepare(config.at_rest_key.clone())).transpose()?;
+    let fastpath_lease = match config.fastpath.as_ref() {
+        None => None,
+        Some(fastpath) => match fastpath.prepare(config.at_rest_key.clone()) {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                let declined = config.fastpath_admission == crate::fastpath::FastpathAdmission::Auto
+                    && !crate::fastpath::relocation_is_fenced(&config.data_dir)
+                    && crate::fastpath::admission_refusal(&error).is_some();
+                if !declined {
+                    return Err(error);
+                }
+                let refusal = crate::fastpath::admission_refusal(&error).unwrap();
+                // Bounded: the whole readiness line must stay within its cap.
+                let declined = serde_json::json!({
+                    "reason": refusal.reason,
+                    "detail": refusal.detail.chars().take(480).collect::<String>(),
+                });
+                eprintln!("{}", serde_json::json!({
+                    "event": "native_fastpath_auto_declined",
+                    "declined": declined,
+                }));
+                config.fastpath_declined = Some(declined);
+                config.fastpath = None;
+                if !config.wal_durability_explicit {
+                    config.wal_durability =
+                        crate::resource_probe::automatic_wal_durability(&config.data_dir);
+                }
+                None
+            }
+        },
+    };
     if let Some(lease) = fastpath_lease.as_ref() {
         if let Some(fastpath) = config.fastpath.as_mut() {
             fastpath.sync_interval_ms = Some(lease.interval.as_millis() as u64);
@@ -886,7 +937,7 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
         .transpose();
     if std::env::var_os("TOFU_DB_FSYNC_STATS").is_some() {
         eprintln!("fsync_stats: {}", crate::fsync_stats::report());
-        eprintln!("resource_exhaustion_reasons: {:?}", crate::fsync_stats::resource_exhaustion_snapshot());
+        eprintln!("resource_exhaustion_reasons: {:?}", crate::resource_exhaustion::resource_exhaustion_snapshot());
         eprintln!("stage_stats:\n{}", crate::fsync_stats::stage_report());
         eprintln!(
             "component_stage_stats:\n{}",
@@ -996,6 +1047,7 @@ fn write_readiness(
         "walFlushIntervalMilliseconds": config.wal_flush_interval.as_millis(),
         "resourceBudget": resource_budget_json(config, search_projection_available),
         "nativeFastpath": config.fastpath,
+        "nativeFastpathDeclined": config.fastpath_declined,
     }))
     .map_err(|error| io::Error::other(format!("encode tofu-db readiness: {error}")))?;
     if encoded.len() + 1 > MAX_READINESS_BYTES {

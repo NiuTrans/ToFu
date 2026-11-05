@@ -1,0 +1,414 @@
+[
+  {
+    "name": "delta metadata and both tool protocols",
+    "event": {
+      "type": "messages_snapshot",
+      "roundNum": 2,
+      "kind": "request",
+      "turn": "root",
+      "model": "test",
+      "params": {
+        "temperature": 0
+      },
+      "prefixLen": 1,
+      "messageCount": 4,
+      "toolsCount": 2,
+      "contextManifest": {
+        "private": "full context"
+      },
+      "toolsDict": [
+        {
+          "name": "read_file",
+          "description": "full schema"
+        }
+      ],
+      "newMessages": [
+        {
+          "role": "tool",
+          "content": "large private result"
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "read_file",
+                "arguments": "private arguments"
+              }
+            },
+            {
+              "name": "search",
+              "input": {
+                "private": true
+              }
+            }
+          ],
+          "content": [
+            {
+              "type": "text",
+              "text": "private thought"
+            },
+            {
+              "type": "tool_use",
+              "name": "inspect",
+              "input": {
+                "private": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "type": "messages_snapshot",
+      "roundNum": 2,
+      "kind": "request",
+      "turn": "root",
+      "model": "test",
+      "params": {
+        "temperature": 0
+      },
+      "prefixLen": 1,
+      "messageCount": 4,
+      "toolsCount": 2,
+      "newMessages": [
+        {
+          "tool_calls": [
+            {
+              "name": "read_file"
+            },
+            {
+              "name": "search"
+            }
+          ],
+          "content": [
+            {
+              "type": "tool_use",
+              "name": "inspect"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "legacy complete",
+    "event": {
+      "type": "messages_snapshot",
+      "roundNum": 1,
+      "messages": [
+        {
+          "role": "user",
+          "content": "legacy"
+        }
+      ],
+      "tools": [
+        {
+          "name": "read_file"
+        }
+      ]
+    },
+    "expected": {
+      "type": "messages_snapshot",
+      "roundNum": 1,
+      "messages": [
+        {
+          "role": "user",
+          "content": "legacy"
+        }
+      ],
+      "tools": [
+        {
+          "name": "read_file"
+        }
+      ]
+    }
+  },
+  {
+    "name": "other event",
+    "event": {
+      "type": "round_usage",
+      "usage": {
+        "tokens": 3
+      }
+    },
+    "expected": {
+      "type": "round_usage",
+      "usage": {
+        "tokens": 3
+      }
+    }
+  },
+  {
+    "name": "boolean count",
+    "event": {
+      "type": "messages_snapshot",
+      "roundNum": 2,
+      "kind": "request",
+      "turn": "root",
+      "model": "test",
+      "params": {
+        "temperature": 0
+      },
+      "prefixLen": 1,
+      "messageCount": true,
+      "toolsCount": 2,
+      "contextManifest": {
+        "private": "full context"
+      },
+      "toolsDict": [
+        {
+          "name": "read_file",
+          "description": "full schema"
+        }
+      ],
+      "newMessages": [
+        {
+          "role": "tool",
+          "content": "large private result"
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "read_file",
+                "arguments": "private arguments"
+              }
+            },
+            {
+              "name": "search",
+              "input": {
+                "private": true
+              }
+            }
+          ],
+          "content": [
+            {
+              "type": "text",
+              "text": "private thought"
+            },
+            {
+              "type": "tool_use",
+              "name": "inspect",
+              "input": {
+                "private": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "type": "messages_snapshot",
+      "roundNum": 2,
+      "kind": "request",
+      "turn": "root",
+      "model": "test",
+      "params": {
+        "temperature": 0
+      },
+      "prefixLen": 1,
+      "messageCount": true,
+      "toolsCount": 2,
+      "contextManifest": {
+        "private": "full context"
+      },
+      "toolsDict": [
+        {
+          "name": "read_file",
+          "description": "full schema"
+        }
+      ],
+      "newMessages": [
+        {
+          "role": "tool",
+          "content": "large private result"
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "read_file",
+                "arguments": "private arguments"
+              }
+            },
+            {
+              "name": "search",
+              "input": {
+                "private": true
+              }
+            }
+          ],
+          "content": [
+            {
+              "type": "text",
+              "text": "private thought"
+            },
+            {
+              "type": "tool_use",
+              "name": "inspect",
+              "input": {
+                "private": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "invalid tail",
+    "event": {
+      "type": "messages_snapshot",
+      "roundNum": 2,
+      "kind": "request",
+      "turn": "root",
+      "model": "test",
+      "params": {
+        "temperature": 0
+      },
+      "prefixLen": 1,
+      "messageCount": 4,
+      "toolsCount": 2,
+      "contextManifest": {
+        "private": "full context"
+      },
+      "toolsDict": [
+        {
+          "name": "read_file",
+          "description": "full schema"
+        }
+      ],
+      "newMessages": {
+        "broken": true
+      }
+    },
+    "expected": {
+      "type": "messages_snapshot",
+      "roundNum": 2,
+      "kind": "request",
+      "turn": "root",
+      "model": "test",
+      "params": {
+        "temperature": 0
+      },
+      "prefixLen": 1,
+      "messageCount": 4,
+      "toolsCount": 2,
+      "contextManifest": {
+        "private": "full context"
+      },
+      "toolsDict": [
+        {
+          "name": "read_file",
+          "description": "full schema"
+        }
+      ],
+      "newMessages": {
+        "broken": true
+      }
+    }
+  },
+  {
+    "name": "invalid calls",
+    "event": {
+      "type": "messages_snapshot",
+      "roundNum": 2,
+      "kind": "request",
+      "turn": "root",
+      "model": "test",
+      "params": {
+        "temperature": 0
+      },
+      "prefixLen": 1,
+      "messageCount": 4,
+      "toolsCount": 2,
+      "contextManifest": {
+        "private": "full context"
+      },
+      "toolsDict": [
+        {
+          "name": "read_file",
+          "description": "full schema"
+        }
+      ],
+      "newMessages": [
+        {
+          "tool_calls": 17
+        }
+      ]
+    },
+    "expected": {
+      "type": "messages_snapshot",
+      "roundNum": 2,
+      "kind": "request",
+      "turn": "root",
+      "model": "test",
+      "params": {
+        "temperature": 0
+      },
+      "prefixLen": 1,
+      "messageCount": 4,
+      "toolsCount": 2,
+      "contextManifest": {
+        "private": "full context"
+      },
+      "toolsDict": [
+        {
+          "name": "read_file",
+          "description": "full schema"
+        }
+      ],
+      "newMessages": [
+        {
+          "tool_calls": 17
+        }
+      ]
+    }
+  },
+  {
+    "name": "false tail",
+    "event": {
+      "type": "messages_snapshot",
+      "roundNum": 2,
+      "kind": "request",
+      "turn": "root",
+      "model": "test",
+      "params": {
+        "temperature": 0
+      },
+      "prefixLen": 1,
+      "messageCount": 4,
+      "toolsCount": 2,
+      "contextManifest": {
+        "private": "full context"
+      },
+      "toolsDict": [
+        {
+          "name": "read_file",
+          "description": "full schema"
+        }
+      ],
+      "newMessages": false
+    },
+    "expected": {
+      "type": "messages_snapshot",
+      "roundNum": 2,
+      "kind": "request",
+      "turn": "root",
+      "model": "test",
+      "params": {
+        "temperature": 0
+      },
+      "prefixLen": 1,
+      "messageCount": 4,
+      "toolsCount": 2,
+      "newMessages": []
+    }
+  }
+]

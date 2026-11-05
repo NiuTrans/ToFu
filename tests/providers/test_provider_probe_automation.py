@@ -154,10 +154,12 @@ def test_daily_schedule_defaults_and_async_dispatch(monkeypatch):
     assert captured['enabled'] is True
     assert captured['reconcile_enabled'] is False
     assert captured['max_runtime'] == service.DAILY_PROBE_MAX_RUNTIME
-    called = []
-    monkeypatch.setattr(manager, '_dispatch_maintenance_task', lambda task: called.append(task))
-    manager._dispatch_claimed_task({'id': 'daily', 'task_type': 'provider_probe_daily'})
-    assert len(called) == 1
+    import threading
+    runs = []
+    monkeypatch.setattr(manager, '_run_and_record', lambda task: runs.append(threading.current_thread()))
+    assert manager._dispatch_claimed_task({'id': 'daily', 'task_type': 'provider_probe_daily'}) is True
+    assert manager.stop(timeout=5)
+    assert len(runs) == 1 and runs[0] is not threading.current_thread()
 
 
 def test_cancelled_run_never_starts_probe(monkeypatch):

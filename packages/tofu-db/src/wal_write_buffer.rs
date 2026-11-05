@@ -36,8 +36,7 @@ impl WriteBuffer {
             .iter()
             .try_fold(0usize, |n, p| n.checked_add(p.len()))
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                crate::resource_exhaustion::accounting_overflow(
                     "WAL write buffer accounting overflow",
                 )
             })?;

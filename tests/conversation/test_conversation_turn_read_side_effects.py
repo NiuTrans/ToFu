@@ -10,6 +10,7 @@ import subprocess
 import pytest
 
 from tests._runtime_sections import runtime_section_path
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -19,11 +20,8 @@ ENTRY = os.path.join(ROOT, 'frontend/src/core/turn-runtime.ts')
 RUNTIME_BRIDGE = runtime_section_path('main/conversation_turn_store.js')
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD),
-    reason='node + vite test bundler unavailable',
-)
 def test_five_hundred_catalog_reads_create_no_store_or_health_reentry(tmp_path):
+    require_node_modules('vite')
     built = tmp_path / 'turn-runtime.js'
     compiled = subprocess.run(
         [ESBUILD, ENTRY, '--bundle', '--format=cjs', '--platform=node',
@@ -59,12 +57,9 @@ console.log(JSON.stringify({ healthPublishes }));
     }
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD),
-    reason='node + vite test bundler unavailable',
-)
 def test_hydration_claims_lane_before_connecting_health_reentry(tmp_path):
     """A connecting repaint must share, never recursively relaunch, snapshot."""
+    require_node_modules('vite')
     built = tmp_path / 'turn-runtime.js'
     compiled = subprocess.run(
         [ESBUILD, ENTRY, '--bundle', '--format=cjs', '--platform=node',
@@ -100,7 +95,6 @@ runtime = createConversationTurnRuntime({
       snapshotCalls += 1;
       return snapshot;
     },
-    eventsUrl() { return '/events'; },
   },
   onHealth(_conversationId, health) {
     if (health.state !== 'connecting' || connectingReentries >= 50) return;
@@ -136,12 +130,9 @@ main().catch(error => {
     }
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD),
-    reason='node + vite test bundler unavailable',
-)
 def test_push_invalidations_do_not_reload_a_live_conversation_snapshot(tmp_path):
     """Wake hints leave projection ownership with the ordered SSE cursor."""
+    require_node_modules('vite')
     built = tmp_path / 'turn-runtime.js'
     compiled = subprocess.run(
         [ESBUILD, ENTRY, '--bundle', '--format=cjs', '--platform=node',
@@ -155,8 +146,8 @@ global.window = globalThis;
 const { createConversationTurnRuntime } = require(BUILT);
 
 class FakeEventSource {
-  constructor(url) {
-    this.url = url;
+  constructor(request) {
+    this.request = request;
     this.closed = false;
     this.listeners = new Map();
     this.onopen = null;
@@ -203,12 +194,11 @@ async function main() {
         );
         return snapshotFor(conversationId);
       },
-      eventsUrl(conversationId) { return `/events/${conversationId}`; },
     },
     findConversation(id) { return conversations.get(id) || null; },
     isActive(candidate) { return candidate.id === activeId; },
-    eventSourceFactory(url) {
-      const source = new FakeEventSource(url);
+    eventSourceFactory(request) {
+      const source = new FakeEventSource(request);
       sources.push(source);
       return source;
     },
@@ -300,6 +290,7 @@ global.addEventListener = () => {};
 global.requiredApiTransport = { pageRequestId() { return 'page-test'; } };
 global.conversationSyncApi = {};
 global.renderContextProvenanceHtml = () => '';
+global.contextProvenanceFacts = () => [];
 global.createAutomationManagementClient = () => ({});
 global.conversations = [];
 global.createBranchComposerSession = () => ({

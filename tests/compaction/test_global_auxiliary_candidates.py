@@ -26,7 +26,7 @@ def _alternate(native, model, kind='subscription'):
     doc['credentials'][1]['kind'] = kind
     if kind != 'api_key':
         doc['offerings'][1].pop('actual_pricing', None)
-    doc['providers'][1]['brand'] = 'meituan'
+    doc['providers'][1]['brand'] = 'yourprovider'
     return doc['offerings'][1]
 
 
@@ -36,8 +36,9 @@ def test_all_admitted_families_participate_without_aa_or_name_allowlist(native, 
     offering = _alternate(native, model)
     if main_paid:
         native.parent.oauth = ''
-        # Neither missing main pricing nor oversized parent output can block
-        # an authorized subscription auxiliary with its own sufficient capacity.
+        # A paid main that cannot fit the summary output may borrow an
+        # authorized subscription auxiliary with its own sufficient capacity;
+        # missing main pricing does not block it.
         native.parent.max_output_tokens = 1024
     before = deepcopy(native.task)
     plan = select_summary_route(native.task, 1000, 2048, capacity_output_tokens=65536)
@@ -58,7 +59,10 @@ def test_all_admitted_families_participate_without_aa_or_name_allowlist(native, 
 
 
 @pytest.mark.parametrize('model', ['glm-5.3-flash', 'new-admitted-text-model'])
-def test_paid_alternate_needs_price_not_aa_coverage(native, model):
+def test_paid_alternate_needs_a_known_price_not_aa_coverage(native, model):
+    """A request-name rate card wins; without one the model's maintained price
+    applies (owner decision 2026-11-02); with neither the route is unknown."""
+    from lib.pricing._tables import pricing_for_model
     offering = _alternate(native, model, 'api_key')
     native.parent.oauth = ''
     native.state.document['offerings'][0]['actual_pricing'] = {
@@ -66,11 +70,16 @@ def test_paid_alternate_needs_price_not_aa_coverage(native, model):
     offering['actual_pricing'] = {'input': .1, 'output': .5, 'currency': 'USD'}
     plan = select_summary_route(native.task, 1000, 2048, capacity_output_tokens=65536)
     assert plan['requestOwned'] and plan['modelId'] == model, plan
-    assert plan['maximumCostUsd'] < .05
+    assert plan['costBasis']['source'] == 'declared_offering_pricing'
     assert plan['selectionBasis']['source'] != 'Artificial Analysis'
     offering.pop('actual_pricing')
-    refused = select_summary_route(native.task, 1000, 2048, capacity_output_tokens=65536)
-    assert not refused.get('requestOwned')
+    fallback = select_summary_route(native.task, 1000, 2048, capacity_output_tokens=65536)
+    if pricing_for_model(model):
+        assert fallback['requestOwned'] and fallback['modelId'] == model, fallback
+        assert fallback['costBasis']['source'] == 'model_table'
+        assert fallback['declaredPricing'] is None
+    else:
+        assert not fallback.get('requestOwned')
 
 
 @pytest.mark.parametrize('failure', ['success', 'error', 'incomplete', 'cancel', 'base_exception'])
@@ -195,12 +204,35 @@ def test_paid_price_unknown_invalid_and_explicit_zero_are_distinct(native, price
         offering.pop('actual_pricing', None)
     else:
         offering['actual_pricing'] = {**prices, 'currency': 'USD'}
+    # Retired by owner decision 2026-11-02: a legacy zero ceiling is ignored.
     native.task['config']['compaction']['summaryMaxCostUsd'] = 0
     plan = select_summary_route(native.task, 1000, 2048, capacity_output_tokens=65536)
-    free = prices is not None and prices['input'] == prices['output'] == 0
-    assert bool(plan.get('requestOwned')) is free, plan
-    if free:
+    # GEM5.3Flash has no maintained model price: no rate card means unknown,
+    # and an explicit invalid card never falls back to a guess.
+    known = prices is not None and prices['input'] >= 0
+    assert bool(plan.get('requestOwned')) is known, plan
+    if known and prices['input'] == 0:
         assert plan['maximumCostUsd'] == plan['projectedCostUsd'] == 0
+
+
+@pytest.mark.parametrize('legacy_ceiling', [None, 0, -1, True, 'invalid'])
+def test_retired_cost_ceiling_never_blocks_a_long_context_paid_summary(native, legacy_ceiling):
+    """Owner decision 2026-11-02: no summary cost ceiling. A 2M-token summary
+    input costs more than any small fixed bound, yet must still reach the
+    organization-billed route that fits it; summaryMaxCostUsd is ignored."""
+    offering = _alternate(native, 'GEM5.3Flash', 'api_key')
+    offering.update(context_window=2_200_000, actual_pricing={
+        'input': .1, 'output': .5, 'currency': 'USD'})
+    for model in native.state.document['models']:
+        if model['model_id'] == 'GEM5.3Flash':
+            model['context_window'] = 2_200_000
+    if legacy_ceiling is not None:
+        native.task['config']['compaction']['summaryMaxCostUsd'] = legacy_ceiling
+    plan = select_summary_route(native.task, 2_000_000, 2048, capacity_output_tokens=65536)
+    assert plan.get('requestOwned') and plan['modelId'] == 'GEM5.3Flash', plan
+    assert plan['projectedCostUsd'] > .2
+    assert plan['maximumCostUsd'] > plan['projectedCostUsd']
+    assert not native.state.resolved
 
 
 def _bind_parent(slot, suffix):
@@ -217,16 +249,20 @@ def test_parent_billing_uses_full_native_credential_not_oauth_transport(native, 
     native.state.document['credentials'][0].update(kind=parent_kind, secret_reference='fixture-api')
 
     native.parent.max_output_tokens = 128000
-    native.state.document['offerings'][0].pop('actual_pricing', None)
+    # A known main price cheaper than the alternate: a paid parent requires
+    # strict savings, a subscription parent only an affordable maximum quote.
+    native.state.document['offerings'][0]['actual_pricing'] = {
+        'input': .01, 'output': .01, 'currency': 'USD'}
     native.state.document['offerings'][1]['actual_pricing'] = {
         'input': .1, 'output': .5, 'currency': 'USD'}
     before = deepcopy(native.task)
     plan = select_summary_route(native.task, 1000, 2048, capacity_output_tokens=65536)
     assert bool(plan.get('requestOwned')) is (parent_kind == 'subscription'), plan
     if parent_kind == 'subscription':
-        assert plan['modelId'] == 'GEM5.3Flash' and plan['maximumCostUsd'] < .05
+        assert plan['modelId'] == 'GEM5.3Flash'
     else:
-        assert plan['reason'] == 'main_price_unknown'
+        assert plan['modelId'] == 'gpt-6.1-sol'
+        assert plan['reason'] == 'no_eligible_cheaper_aa_route'
     assert native.task == before and not native.state.resolved
 
 

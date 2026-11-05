@@ -22,8 +22,11 @@ def native_publication_store(request, tmp_path, monkeypatch):
     request.getfixturevalue('flask_app')
     from lib.knowledge import store
     from lib.knowledge.repository import KnowledgeRepository
-    from lib.storage import storage_status
+    from lib.storage import start_storage, storage_status
 
+    # The session app may have started a module-scoped Sidecar that was
+    # uninstalled with its module; start the configured authority again.
+    start_storage()
     assert storage_status()['ready'] and storage_status()['backend'] == 'tofudb'
     repository = KnowledgeRepository(1)
     # Distinct per-test roots and receipts; no live application data is opened.

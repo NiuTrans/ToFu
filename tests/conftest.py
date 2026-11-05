@@ -20,6 +20,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 
 import pytest
 
@@ -27,6 +28,11 @@ _conftest_logger = logging.getLogger('tests.conftest')
 
 # Never borrow the developer's real Codex login during tests.
 os.environ['TOFU_CODEX_SHARED_LOGIN'] = '0'
+# Manager spawns in tests must neither probe nor populate the developer's
+# local runtime-replica cache; replica tests pass explicit environments.
+os.environ['TOFU_RUNTIME_REPLICA'] = 'off'
+os.environ.pop('TOFU_LOCAL_WORKSPACES', None)
+os.environ.pop('TOFU_LOCAL_DIR', None)
 
 
 # Pytest is frequently launched from a terminal created by the running Tofu
@@ -61,8 +67,8 @@ _INHERITED_LIFECYCLE_ENV_NAMES = (
     # child it spawns. A pytest process launched from a tofu shell inherits a
     # stale policy marker that makes install_process_resource_defaults discard
     # explicit test/project overrides (TOFU_MALLOC_ARENA_MAX,
-    # TOFU_PROCESS_RSS_RECYCLE_MB, TOFU_STORAGE_RPC_CAPACITY, ...) and re-probe
-    # host-dependent defaults. Scrub it so tests start hermetic, exactly like
+    # TOFU_STORAGE_RPC_CAPACITY, ...) and re-probe retention defaults.
+    # Scrub it so tests start hermetic, exactly like
     # the other lifecycle authority knobs above.
     'TOFU_RESOURCE_BUDGET_POLICY_VERSION',
     'TOFU_RESOURCE_BUDGET_AUTOMATIC_DEFAULTS',
@@ -92,13 +98,54 @@ def _clear_inherited_lifecycle_environment(environment) -> tuple[str, ...]:
 _CLEARED_INHERITED_LIFECYCLE_ENV_NAMES = (
     _clear_inherited_lifecycle_environment(os.environ))
 
+
+# Git also selects its repository and configuration from the environment. Every
+# model command the Tofu server runs carries GIT_CONFIG_PARAMETERS
+# (lib/git_runtime.py), and Git hooks export GIT_DIR and GIT_INDEX_FILE. Git
+# admission treats any configuration injection as a possible helper and widens
+# every claim, so an inherited value flipped the lease-precision specs
+# depending on how pytest was launched. Tests that need one of these values set
+# it themselves.
+_INHERITED_GIT_ENV_NAMES = (
+    # `git rev-parse --local-env-vars` (Git 2.34): repository-local state.
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT', 'GIT_OBJECT_DIRECTORY', 'GIT_DIR', 'GIT_WORK_TREE',
+    'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE', 'GIT_INDEX_FILE',
+    'GIT_NO_REPLACE_OBJECTS', 'GIT_REPLACE_REF_BASE', 'GIT_PREFIX',
+    'GIT_INTERNAL_SUPER_PREFIX', 'GIT_SHALLOW_FILE', 'GIT_COMMON_DIR',
+    # Configuration files, and the discovery ceiling Tofu sets for commands in
+    # managed conversation workspaces.
+    'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CEILING_DIRECTORIES',
+    # Read callbacks and trace sinks also widen command effects. Terminal
+    # harnesses commonly inject `cat` pagers; no test may inherit that policy.
+    'GIT_PAGER', 'PAGER', 'GIT_EXTERNAL_DIFF', 'GIT_EXEC_PATH',
+)
+_INHERITED_GIT_CONFIG_ENTRY = re.compile(r'GIT_CONFIG_(?:KEY|VALUE)_[0-9]+')
+
+
+def _clear_inherited_git_environment(environment) -> tuple[str, ...]:
+    """Remove ambient Git repository and configuration selection."""
+    removed = tuple(name for name in tuple(environment)
+                    if name in _INHERITED_GIT_ENV_NAMES
+                    or name.startswith('GIT_TRACE')
+                    or _INHERITED_GIT_CONFIG_ENTRY.fullmatch(name))
+    for name in removed:
+        environment.pop(name, None)
+    return removed
+
+
+_CLEARED_INHERITED_GIT_ENV_NAMES = (
+    _clear_inherited_git_environment(os.environ))
+
 # A normal session fixture removes its roots below. SIGKILL/OOM cannot run
 # Python finalizers, so every new-format root also carries its creating PID and
 # the next pytest process reclaims only exact-format roots whose owner is dead.
+# A root that can still hold processes or host resources (a PostgreSQL cluster)
+# is first retired by its owning module, which may keep it for a later pass.
 # Both traversal and deletion are bounded: a hostile/shared /tmp must never
 # turn test startup into an unbounded filesystem sweep.
 _PYTEST_ROOT_PATTERN = re.compile(
-    r'^tofu-test-(?:data|storage)(?:-[A-Za-z0-9_-]+)?-pid-'
+    r'^tofu-test-(?P<kind>data|storage|host-scratch|postgres)(?:-[A-Za-z0-9_-]+)?-pid-'
     r'(?P<pid>[1-9][0-9]*)-[A-Za-z0-9_]+$')
 _PYTEST_ROOT_SCAN_LIMIT = 4096
 _PYTEST_ROOT_RECLAIM_LIMIT = 128
@@ -136,6 +183,14 @@ def _pytest_root_owner_is_alive(pid: int) -> bool:
         # disposable directory is safer than deleting another user's live run.
         return True
     return True
+
+
+def _retire_pytest_root(kind: str, root: Path) -> bool:
+    """Release what a dead owner's root still holds; True once it may be removed."""
+    if kind != 'postgres':
+        return True
+    from tests.support.postgres_cluster import retire_cluster_root
+    return retire_cluster_root(root)
 
 
 def _reclaim_stale_pytest_roots(
@@ -176,6 +231,8 @@ def _reclaim_stale_pytest_roots(
             try:
                 if not entry.is_dir(follow_symlinks=False):
                     continue
+                if not _retire_pytest_root(match.group('kind'), Path(entry.path)):
+                    continue
                 shutil.rmtree(entry.path)
                 removed.append(entry.name)
             except FileNotFoundError:
@@ -192,6 +249,9 @@ def _reclaim_stale_pytest_roots(
     }
 
 
+# Retiring a PostgreSQL root imports that pytest plugin before pytest itself
+# registers it; mark it first so its assertions are still rewritten.
+pytest.register_assert_rewrite('tests.support.postgres_cluster')
 _startup_root_reclaim = _reclaim_stale_pytest_roots()
 if _startup_root_reclaim['removed']:
     _conftest_logger.info(
@@ -287,6 +347,7 @@ os.environ.setdefault('TOFU_AUTH_MODE', 'open')
 # SDK/plugin is not installed. An editable finder can precede PathFinder, so
 # sys.path precedence alone cannot prove which first-party sources we tested.
 _FIRST_PARTY_TEST_MEMBERS = {
+    'tofu_sdk': ('clients', 'python'),
     'tofu_search': ('packages', 'tofu-search'),
     'tofu_trading': ('plugins', 'tofu-trading'),
     'tofu_environments': ('packages', 'tofu-environments'),
@@ -380,6 +441,10 @@ def _configure_explicit_test_engine(environment) -> None:
         raise pytest.UsageError(f'Explicit test engine refused: {exc}') from exc
     environment['TOFUDB_BIN'] = str(candidate)
     environment['TOFUDB_EXPECTED_SHA256'] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    # Without an override the differential daemon fixtures cargo-build the
+    # checkout in-tree; an explicitly supplied differential binary still wins.
+    if not environment.get('TOFUDB_DIFFERENTIAL_BIN', '').strip():
+        environment['TOFUDB_DIFFERENTIAL_BIN'] = str(candidate)
 
 
 _configure_explicit_test_engine(os.environ)
@@ -572,6 +637,42 @@ def _reset_global_config():
         _config._global_config = saved
 
 
+# ─── Learned route-health isolation ────────────────────────────────────
+@pytest.fixture(autouse=True)
+def _isolate_owner_route_health():
+    """Learned credential outages are process-local; never leak across tests.
+
+    Only touches the registry when some test already imported it, so suites
+    that never route pay no import cost.
+    """
+    def _reset():
+        health = sys.modules.get('lib.model_routing.health')
+        if health is not None:
+            health.reset_owner_health_registries()
+
+    _reset()
+    try:
+        yield
+    finally:
+        _reset()
+
+
+# ─── Configured-slot switch isolation ──────────────────────────────────
+@pytest.fixture(autouse=True)
+def _isolate_configured_slot_switch(monkeypatch):
+    """Every test starts with the configured v2 slot pool enabled.
+
+    ``tofu-agent run`` turns ``TOFU_DISABLE_CONFIGURED_SLOTS`` on for its own
+    one-shot process by writing ``os.environ`` directly, so an in-process CLI
+    test would leave every later dispatch on its worker without configured
+    slots (``no_slot``). ``setenv`` records the pre-test state, absent
+    included, so monkeypatch's undo restores it after that direct write;
+    ``delenv`` alone records nothing for an absent name.
+    """
+    monkeypatch.setenv('TOFU_DISABLE_CONFIGURED_SLOTS', '0')
+    monkeypatch.delenv('TOFU_DISABLE_CONFIGURED_SLOTS')
+
+
 # ─── Foreign running-loop shield ────────────────────────────────────────
 @pytest.fixture(autouse=True)
 def _shield_private_loop_helpers(request):
@@ -649,8 +750,24 @@ _NC_GUARDED_SOURCES = (
 )
 _ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _nc_source_snapshots: dict = {}
-_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_nc_source_snapshots: dict = {}
+# Per-test full reads of the guarded sources cost ~16 ms per test (the 1.4 MB
+# styles.css decode dominates) — minutes of serial wall time across the suite.
+# A path whose stat signature is unchanged since a read proved it equal to its
+# snapshot is skipped. Racy-git rule: a verification is only trusted when it
+# happened well after the file's mtime, because this FUSE mount reports
+# whole-second mtimes and a same-second, same-size rewrite would otherwise
+# keep a stale signature. Both mtime and ctime must be outside the window:
+# os.utime can rewind mtime after a same-size rewrite, but not ctime. Entries
+# are bound to the snapshot object they verified, so replacing a snapshot
+# always forces a fresh read.
+_NC_STAT_RACY_WINDOW_NS = 2_000_000_000
+_nc_verified_clean: dict = {}
+_nc_clock_ns = time.time_ns
+
+
+def _nc_stat_signature(path):
+    st = os.stat(path)
+    return (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 # NC poison signature: every on-disk NC patch embeds an ``NC-WORD`` marker in
 # its replacement text (project convention — ``# NC-STORM``,
@@ -691,10 +808,20 @@ def restore_drifted_nc_sources() -> list:
     healed = []
     for p, original in _nc_source_snapshots.items():
         try:
+            signature = _nc_stat_signature(p)
+            cached = _nc_verified_clean.get(p)
+            if (cached is not None and cached[0] is original
+                    and cached[1] == signature):
+                continue
+            verified_at_ns = _nc_clock_ns()
             with open(p, encoding='utf-8') as f:
                 current = f.read()
             if current == original:
+                if (verified_at_ns - max(signature[2], signature[3])
+                        > _NC_STAT_RACY_WINDOW_NS):
+                    _nc_verified_clean[p] = (original, signature)
                 continue
+            _nc_verified_clean.pop(p, None)
             if not _NC_POISON_RE.search(current):
                 # Legit mid-run work (a commit / sibling WIP), not NC poison —
                 # the belt has no mandate to touch it.
@@ -734,6 +861,18 @@ def warn_on_nc_source_poison_at_session_start() -> list:
     green/red result". Returns the drifted relpaths (also emitted as a warning).
     Best-effort: silent no-op when git is unavailable (nothing to compare to)."""
     import subprocess
+    try:
+        repository = subprocess.run(['git', 'rev-parse', '--show-toplevel'],
+                                    cwd=_ROOT_DIR, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as e:
+        _conftest_logger.debug('[nc-guard] repository probe skip: %s', e)
+        return []
+    if (repository.returncode != 0
+            or Path(repository.stdout.strip()).resolve() != Path(_ROOT_DIR).resolve()):
+        # git diff outside a checkout may select no-index mode and return 1
+        # for "Could not access HEAD". An exported tree has no Git baseline;
+        # a surrounding repository's HEAD is not its baseline either.
+        return []
     drifted = []
     for rel in _NC_GUARDED_SOURCES:
         try:
@@ -784,25 +923,61 @@ def _isolate_open_mode_rate_limit(monkeypatch):
     monkeypatch.setenv('TOFU_OPEN_MODE_RPM', '0')
 
 
+# Per-test owners for checkouts without a valid default host scratch. Not
+# XDG_CACHE_HOME: it may point into a checkout.
+_HOST_SCRATCH_OWNER_PARENT = Path.home() / '.cache' / 'tofu-pytest-host-scratch'
+
+
+def _host_scratch_needs_test_owner() -> bool:
+    """True when no explicit setting exists and the checkout default is refused.
+
+    The default scratch lives in the checkout, so a checkout below shared
+    temporary storage (the isolated worktrees under /tmp) has none by design.
+    """
+    from rootless_vm import host_paths
+    if ('ROOTLESS_VM_TMPDIR' in os.environ or 'TOFU_EVAL_ROOT' in os.environ
+            or host_paths._local_storage_opt_in()):
+        return False
+    try:
+        host_paths.validate_host_path(Path(host_paths.__file__).absolute().parent.parent)
+    except (ValueError, PermissionError):
+        return True
+    return False
+
+
 @pytest.fixture()
-def host_tmp_path():
-    """Per-test scratch inside the checkout's private .eval-runs runtime root.
+def host_tmp_path(monkeypatch):
+    """Per-test scratch the host-scratch policy accepts for this checkout.
 
     The host-scratch policy (rootless_vm/host_paths.py) fails closed on any
     path below shared /tmp and requires scratch under the checkout's DolphinFS
     volume, so APIs guarded by it cannot take pytest's tmpfs tmp_path. Use
     this fixture ONLY for those guarded APIs; everything else keeps tmp_path
     (full POSIX semantics — no FUSE readdir/hard-link degradation).
+
+    Scratch sits in the checkout's private .eval-runs runtime root, or where an
+    explicit ROOTLESS_VM_TMPDIR, TOFU_EVAL_ROOT or local-root opt-in puts it.
+    A checkout below shared temporary storage has no valid default; there the
+    fixture acts as the operator and points ROOTLESS_VM_TMPDIR at a per-test
+    private root in the user's home cache, so guarded code resolves it too.
     """
     from rootless_vm.host_paths import private_temporary_root
-    # Honor the same explicit private scratch override as guarded operations,
-    # including isolated source checkouts placed on a different volume.
-    root = private_temporary_root()
-    path = Path(tempfile.mkdtemp(prefix='host-', dir=str(root)))
+    owner = path = None
     try:
+        if _host_scratch_needs_test_owner():
+            _HOST_SCRATCH_OWNER_PARENT.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _reclaim_stale_pytest_roots(_HOST_SCRATCH_OWNER_PARENT)
+            owner = Path(tempfile.mkdtemp(
+                prefix=f'tofu-test-host-scratch-pid-{os.getpid()}-',
+                dir=str(_HOST_SCRATCH_OWNER_PARENT)))
+            monkeypatch.setenv(
+                'ROOTLESS_VM_TMPDIR', str(private_temporary_root(owner_root=owner)))
+        path = Path(tempfile.mkdtemp(prefix='host-', dir=str(private_temporary_root())))
         yield path
     finally:
-        shutil.rmtree(path, ignore_errors=True)
+        for directory in (owner, path):
+            if directory is not None:
+                shutil.rmtree(directory, ignore_errors=True)
 
 
 # ─── Verified Node toolchain for every spawned node process ──────────
@@ -855,16 +1030,52 @@ def _configure_test_env():
         _cleanup_owned_pytest_roots(_PYTEST_OWNED_ROOTS)
 
 
+def _start_test_storage() -> None:
+    """Start the shared test authority, or skip when the native engine this
+    session inherited from its deployment was not built from this checkout.
+
+    An explicitly selected ``TOFU_TEST_TOFUDB_BIN`` lane keeps the refusal
+    fatal (docs/STORAGE_OPERATIONS.md, "Isolated native test preparation").
+    """
+    from lib.storage import start_storage
+    from tests.support.native_engine_prerequisite import inherited_engine_refusal_skips
+
+    with inherited_engine_refusal_skips():
+        start_storage()
+
+
+# Per-file native parameters start their own authorities in fixtures and test
+# bodies; the same typed refusal skips there with the same remedy.
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_setup(item):
+    from tests.support.native_engine_prerequisite import inherited_engine_refusal_skips
+
+    # A browser on the live app needs the built graph, with or without the
+    # shared ``page`` fixture; check before the server and browser start.
+    if {'browser', 'live_server'} <= set(getattr(item, 'fixturenames', ())):
+        from tests._jsdom import require_shipped_graph
+        require_shipped_graph()
+    with inherited_engine_refusal_skips():
+        return (yield)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    from tests.support.native_engine_prerequisite import inherited_engine_refusal_skips
+
+    with inherited_engine_refusal_skips():
+        return (yield)
+
+
 @pytest.fixture(scope="session")
 def flask_app(_configure_test_env):
     """Return the native Quart app over the supervised test Sidecar."""
     _assert_isolated_storage('flask_app fixture')
     import server
-    from lib.storage import start_storage
 
     # The shared test app mirrors production: API major 4 (v4 projection
     # only). Domain blueprints stay importable for handler-wiring tests.
-    start_storage()
+    _start_test_storage()
     server.app.config.update(TESTING=True)
     return server.app
 
@@ -909,13 +1120,14 @@ def _selected_test_file_count(config) -> int | None:
 
 @pytest.hookimpl(optionalhook=True)
 def pytest_xdist_auto_num_workers(config):
-    """Derive ``-n auto`` from the shared personal-computer resource probe.
+    """Derive ``-n auto`` from the shared launch resource probe.
 
-    The runtime's useful-parallelism budget already accounts for affinity,
-    cgroup CPU, memory capacity, and current memory headroom. Tests add a hard
-    four-worker default ceiling because every worker imports the application
-    graph and may spawn Node/browser children. Explicit ``-n N`` / ``JOBS=N``
-    remains the dedicated-host override.
+    This sizes the test harness, not runtime work: the runtime never derives
+    a work limit from the probe, and ``TOFU_MAX_INFLIGHT_TASKS`` is unlimited.
+    Every worker imports the application graph and may spawn Node/browser
+    children, so each needs one effective CPU and 1 GiB of current memory
+    headroom, under a hard four-worker default ceiling. Explicit ``-n N`` /
+    ``JOBS=N`` remains the dedicated-host override.
     """
     explicit_auto_workers = os.environ.get('PYTEST_XDIST_AUTO_NUM_WORKERS', '')
     if explicit_auto_workers.strip():
@@ -927,12 +1139,16 @@ def pytest_xdist_auto_num_workers(config):
                 explicit_auto_workers,
             )
     try:
-        from runtime_guards import deployment_resource_default
+        from runtime_guards import probe_system_resources
 
-        useful_parallelism = deployment_resource_default(
-            'TOFU_MAX_INFLIGHT_TASKS')
-        worker_count = max(
-            1, min(_PYTEST_XDIST_DEFAULT_CEILING, useful_parallelism))
+        snapshot = probe_system_resources()
+        available_mb = snapshot.effective_memory_available_mb
+        memory_workers = 1 if available_mb is None else available_mb // 1024
+        worker_count = max(1, min(
+            _PYTEST_XDIST_DEFAULT_CEILING,
+            snapshot.effective_cpu_count,
+            memory_workers,
+        ))
     except Exception as exc:
         _conftest_logger.warning(
             'pytest worker resource probe failed; falling back to one worker: %s',
@@ -1412,29 +1628,29 @@ def browser():
             pw.stop()
 
 
-def _conv_ids_in_page(pg):
-    """Best-effort snapshot through the rendered ESM-owned sidebar."""
-    try:
-        ids = pg.evaluate(
-            "[...document.querySelectorAll('.conv-item[data-conv-id]')]"
-            ".map(item => item.dataset.convId).filter(Boolean)")
-        return set(ids or [])
-    except Exception:
-        return set()
+def _server_conversation_ids(pg, origin):
+    """Every conversation id the live server holds, or None when unreadable.
 
-
-def _conv_global_ready(pg):
-    """True iff the Vite app and its conversation rail are ready RIGHT NOW.
-
-    Distinguishes a genuinely-empty sidebar (global present, length 0) from
-    the not-yet-loaded race (global undefined) — the latter makes an empty
-    ``_conv_ids_in_page`` baseline UNtrustworthy. See the ``page`` fixture
-    cleanup for why this matters (2026-06-28 mass-deletion guard)."""
-    try:
-        return bool(pg.evaluate(
-            "window.TofuModules?.version === 3 && !!document.querySelector('#convList')"))
-    except Exception:
-        return False
+    The rendered sidebar is not an inventory: Coordinator, router and
+    Coordinator-started chats never render as list rows, so a row diff leaks
+    them into later tests on the same session server."""
+    ids, params = set(), {'meta': '1'}
+    while True:
+        try:
+            response = pg.request.get(origin + '/api/v4/conversations', params=params)
+        except Exception as e:
+            _conftest_logger.warning('page cleanup: conversation inventory read failed: %s', e)
+            return None
+        if not response.ok:
+            _conftest_logger.warning('page cleanup: conversation inventory answered HTTP %s',
+                                     response.status)
+            return None
+        body = response.json()['data']
+        ids.update(item['id'] for item in body['items'])
+        if not body['page']['hasMore']:
+            return ids
+        params = {'meta': '1', 'before': str(body['page']['nextBefore']),
+                  'before_id': body['page']['nextBeforeId']}
 
 
 #: Console-error substrings that are KNOWN, app-authored degradation notices
@@ -1516,69 +1732,39 @@ def _attach_js_error_capture(pg):
 
 
 def _dismiss_onboarding_modals(pg):
-    """Close the first-run settings modal so it can't swallow clicks.
+    """Dismiss first-run UI through its native action before test interaction.
 
-    NOT a test hack — it reproduces what a real user does. `_maybeAutoOpenSettings`
-    (static/js/main/main_toolbar_ui.js) deliberately auto-opens Settings when the
-    server has **zero API keys**, which is always true of the ephemeral test
-    server. The modal is a full-viewport `.modal-overlay`, so every subsequent
-    `click()` lands on the overlay instead of the target and times out after 30s.
-
-    Measured 2026-07-28: this single seam accounted for **12 of the 12** visual
-    failures across test_e2e_smoke.py and test_visual_e2e.py. Those had been
-    invisible because the whole ring skipped on "chromium unavailable" until
-    ff0a94f3 made the browser work.
-
-    Deliberately does NOT use ``click(force=True)`` at the call sites: that
-    would paper over the interception, leave the modal open, and let the next
-    obscured element repeat the failure somewhere less obvious.
-
-    WHY IT POLLS INSTEAD OF CLOSING ONCE (measured, after my first attempt
-    failed): the open is not synchronous with load. The chain is
-    ``_loadServerConfigAndPopulate`` (async fetch of the server config)
-    ``→ _maybeAutoOpenSettings → setTimeout(..., 500)``. A single close right
-    after ``domcontentloaded`` therefore runs BEFORE the timer fires and the
-    modal opens again a moment later — which is exactly what happened: the
-    first version of this helper changed nothing and the same 12 tests kept
-    failing with the identical interception message. So we wait for the
-    overlay to be reliably ABSENT rather than closing once and hoping.
+    Startup may fetch the owner model catalog after the page becomes readable.
+    A quiet 700ms interval does not prove its later onboarding timer has run.
+    The registered close action records the same durable preference as Skip,
+    so a delayed non-forced startup trigger cannot reopen the wizard. Existing
+    Settings overlays still close through their own action. Failure is explicit
+    here instead of surfacing later as an unrelated intercepted click.
     """
     import time
     deadline = time.monotonic() + 12.0
-    closed_any = False
-    try:
-        while time.monotonic() < deadline:
-            has_overlay = pg.evaluate(
-                "() => !!document.querySelector('.modal-overlay.open')")
-            if has_overlay:
-                pg.evaluate("""async () => {
-                  const close = window.TofuModules?.resolveAction?.('closeSettings');
-                  if (typeof close === 'function') await close();
-                  // The onboarding close action records the durable dismissal;
-                  // merely stripping `.open` makes it reappear after reload.
-                  document.getElementById('obCloseX')?.click();
-                  document.querySelectorAll('.modal-overlay.open')
-                    .forEach((element) => element.classList.remove('open'));
-                }""")
-                closed_any = True
-                pg.wait_for_timeout(120)
-                continue
-            # Absent right now — but the 500ms auto-open timer may still be
-            # pending. Settle past it before declaring the page usable.
-            pg.wait_for_timeout(700)
-            if not pg.evaluate(
-                    "() => !!document.querySelector('.modal-overlay.open')"):
-                if closed_any:
-                    _conftest_logger.debug(
-                        'onboarding modal dismissed (auto-open on a keyless '
-                        'test server is expected product behaviour)')
-                return
-        _conftest_logger.warning(
-            'onboarding overlay still reopening after 12s — clicks will be '
-            'intercepted; check _maybeAutoOpenSettings')
-    except Exception as e:
-        _conftest_logger.warning(
-            'onboarding modal dismiss failed (%s) — clicks may be intercepted', e)
+    pg.wait_for_function(
+        "typeof window.TofuModules?.resolveAction?.('_obClose') === 'function'",
+        timeout=10000,
+    )
+    pg.evaluate("() => window.TofuModules.resolveAction('_obClose')()")
+    while time.monotonic() < deadline:
+        if pg.evaluate("() => !!document.querySelector('.modal-overlay.open')"):
+            pg.evaluate("""async () => {
+              const close = window.TofuModules?.resolveAction?.('closeSettings');
+              if (typeof close === 'function') await close();
+              document.getElementById('obCloseX')?.click();
+              document.querySelectorAll('.modal-overlay.open')
+                .forEach((element) => element.classList.remove('open'));
+            }""")
+            pg.wait_for_timeout(120)
+            continue
+        # Close any overlay already opening during setup. Durable dismissal
+        # is the authority for ordinary first-run startup, not this interval.
+        pg.wait_for_timeout(700)
+        if not pg.evaluate("() => !!document.querySelector('.modal-overlay.open')"):
+            return
+    raise AssertionError('onboarding overlay still reopening after dismissal')
 
 
 @pytest.fixture()
@@ -1607,9 +1793,16 @@ def assert_no_js_errors(page):
 @pytest.fixture()
 def page(browser, live_server):
     """A fresh page navigated to the live app, with automatic cleanup of any
-    conversation created during the test (snapshot-diff → browser-side
-    ``deleteConversation`` + a server-side pattern purge as a safety net).
+    conversation created during the test: the diff of the server's conversation
+    inventory before and after, moved to trash through the server DELETE.
     """
+    from urllib.parse import quote
+
+    from tests._jsdom import require_shipped_graph
+
+    # Without the built graph the index answers 503 and each test would only
+    # report its own selector timeout.
+    require_shipped_graph()
     ctx = browser.new_context()
     pg = ctx.new_page()
     _attach_js_error_capture(pg)
@@ -1623,46 +1816,22 @@ def page(browser, live_server):
 
     _dismiss_onboarding_modals(pg)
 
-    ids_before = _conv_ids_in_page(pg)
-    # Did we get a TRUSTWORTHY baseline? ``_conv_ids_in_page`` returns an empty
-    # set BOTH when the sidebar is genuinely empty AND when the
-    # ``conversations`` global wasn't ready yet (the race). If the baseline is
-    # empty we CANNOT distinguish "test created N convs" from "the whole
-    # sidebar is N convs" — and deleting the diff in the latter case wipes real
-    # data (the 2026-06-28 incident). So we only trust a baseline when the
-    # global was actually present at snapshot time.
-    baseline_trusted = _conv_global_ready(pg)
+    origin = live_server.rstrip('/')
+    # Mass-deletion guard (2026-06-28): without an exact baseline the diff could
+    # be the whole store, so an unreadable baseline disables the delete.
+    ids_before = _server_conversation_ids(pg, origin)
     try:
         yield pg
     finally:
-        # Delete from inside the browser so the frontend drops them from
-        # memory too (a server-only DELETE is re-synced back by the cached
-        # conversation list — see test_visual_e2e._cleanup_test_convs).
-        created = _conv_ids_in_page(pg) - ids_before
-        if not baseline_trusted and created:
-            # Untrusted baseline → the "created" diff may be the entire
-            # sidebar. NEVER bulk-delete here; fall back to the pattern-gated
-            # server purge only. This is the belt that would have stopped the
-            # incident even if the DB guard were bypassed.
-            _conftest_logger.warning(
-                'page cleanup: baseline untrusted (conversations global not '
-                'ready at snapshot); SKIPPING snapshot-diff delete of %d id(s) '
-                'to avoid mass-deletion — relying on pattern purge only',
-                len(created))
-            created = set()
+        created = set()
+        if ids_before is not None:
+            created = (_server_conversation_ids(pg, origin) or set()) - ids_before
         for cid in created:
+            # The server DELETE also aborts the conversation's running tasks and waits.
             try:
-                pg.evaluate("""async (conversationId) => {
-                  const remove = window.TofuModules?.resolveAction?.('deleteConversation');
-                  if (typeof remove === 'function') await remove(conversationId);
-                }""", cid)
+                pg.request.delete(f'{origin}/api/v4/conversations/{quote(cid, safe="")}')
             except Exception as e:
-                _conftest_logger.debug('page cleanup deleteConversation(%s) '
-                                       'failed: %s', cid, e)
-        try:
-            pg.wait_for_timeout(200)
-        except Exception:
-            pass
+                _conftest_logger.debug('page cleanup DELETE %s failed: %s', cid, e)
         try:
             pg.close()
         finally:

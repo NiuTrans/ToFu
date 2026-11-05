@@ -417,14 +417,14 @@ length. A 128 MiB serialized-frame ceiling therefore refused a 1000-conversation
 This overload happened before transaction dispatch; it is distinct from loss of
 an acknowledged write and from the original 8 KiB latency acceptance gate.
 
-Decision: separate embedded parser admission from socket frame
-admission. Its allowance is observed launch memory headroom divided by 32,
+Decision: separate embedded parser accounting from socket frame admission.
+`embeddedRequestMemoryBytes` is observed launch memory headroom divided by 32,
 floored at the existing frame allowance; missing observations preserve the lean
-allowance. No RAM is preallocated. Queued/running request reservations retain
-8x input charging, overflow rejection, cancellation lifetime and worker-release
-accounting. The same immutable launch budget exposes
-`embeddedRequestMemoryBytes` in aggregate resource metrics. Socket framing,
-per-request envelope bounds and active job limits retain their contracts.
+value. It is an observation-only hint in aggregate resource metrics: it reserves
+no RAM and, under [Hardware never limits work](RESOURCE_CONTROL.md#hardware-never-limits-work),
+rejects no requests and caps no active jobs. Cancellation lifetime and
+worker-release accounting are unchanged. Socket framing and per-request
+envelope bounds retain their contracts.
 
 Alternatives considered: shrinking the client pool reduces admitted parallelism
 and previously harmed settlement latency; reducing the parser charge weakens

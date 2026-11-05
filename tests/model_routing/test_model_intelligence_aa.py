@@ -196,6 +196,7 @@ def test_fetch_follows_bounded_api_pagination():
         assert kwargs["headers"]["x-api-key"] == "owner-key"
         if url == aa.AA_API_URL:
             return Response({
+                "intelligence_index_version": 5,
                 "data": [_AA_ROW],
                 "pagination": {"page": 1, "total_pages": 2, "has_more": True},
             })
@@ -205,10 +206,77 @@ def test_fetch_follows_bounded_api_pagination():
             "pagination": {"page": 2, "total_pages": 2, "has_more": False},
         })
 
-    rows = aa._fetch_dataset("owner-key", fetch)
+    fetched = aa._fetch_dataset("owner-key", fetch)
 
     assert requested_urls == [aa.AA_API_URL, f"{aa.AA_API_URL}?page=2"]
-    assert [row["aa_slug"] for row in rows] == ["deepseek-v4-flash", "qwen-max"]
+    assert [row["aa_slug"] for row in fetched["models"]] == ["deepseek-v4-flash", "qwen-max"]
+    assert fetched["index_version"] == 5
+
+
+def test_listed_but_unscored_rows_are_not_scores_yet_keep_identity_ambiguous():
+    """After an index-version bump AA lists models it has not re-scored."""
+    unscored = {
+        **_AA_ROW,
+        "name": "GPT-5.4 (Xhigh)",
+        "slug": "gpt-5-4",
+        "model_creator": {"name": "OpenAI"},
+        "evaluations": {
+            "artificial_analysis_intelligence_index": None,
+            "artificial_analysis_coding_index": None,
+            "artificial_analysis_agentic_index": None,
+        },
+    }
+    # Qwen3.8 Max shape: the dated row owns the bare slug while the older
+    # unscored snapshot owns the bare display name.
+    dated = {
+        **_AA_ROW,
+        "name": "Qwen3.8 Max (0902)",
+        "slug": "qwen3-8-max",
+        "model_creator": {"name": "Alibaba"},
+        "evaluations": {"artificial_analysis_intelligence_index": 33.6},
+    }
+    older = {
+        **unscored,
+        "name": "Qwen3.8 Max",
+        "slug": "qwen3-8-max-0803",
+        "model_creator": {"name": "Alibaba"},
+    }
+    parsed = aa._parse_dataset({"data": [unscored, dated, older, _AA_ROW]})
+    models = [
+        {"creator_id": "openai", "model_id": "gpt-5.4", "display_name": "GPT-5.4"},
+        {"creator_id": "alibaba", "model_id": "qwen3.8-max", "display_name": "Qwen3.8 Max"},
+        *_models(),
+    ]
+
+    block = aa._block(
+        models,
+        {"status": "ok", "fetched_at": 1000.0, "models": parsed, "index_version": 5},
+        key_source="settings",
+        key_hint="•••-key",
+    )
+
+    assert list(block["scores"]) == ["deepseek::deepseek-v4-flash"]
+    assert block["index_version"] == 5
+
+
+def test_index_version_survives_the_disk_cache():
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"intelligence_index_version": 5, "data": [_AA_ROW]}
+
+    aa._dataset("owner-key", force=True, fetcher=lambda _url, **_kw: Response(), now=1000.0)
+    aa._memo = None
+
+    block = aa._block(
+        _models(), aa._dataset("owner-key", now=1001.0),
+        key_source="settings", key_hint="•••-key")
+
+    assert block["status"] == "ok"
+    assert block["index_version"] == 5
+    assert block["scores"]["deepseek::deepseek-v4-flash"]["intelligence"] == 78.4
 
 
 def test_route_encrypts_owner_key_and_never_returns_plaintext(monkeypatch):

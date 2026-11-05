@@ -30,7 +30,10 @@ def _make_task(**overrides):
 
 
 @pytest.fixture(autouse=True)
-def _clean_registry():
+def _clean_registry(monkeypatch, tmp_path):
+    # Durable records belong to this test, never the host's data root.
+    monkeypatch.setattr('lib.tasks_pkg.background_commands._records_root',
+                        lambda: str(tmp_path / 'background_commands'))
     with _lock:
         _registry.clear()
     yield
@@ -255,6 +258,23 @@ class TestListBackgroundCommands:
         assert statuses[cid1] == 'completed'
         assert statuses[cid2] == 'running'
         blocker.set()
+
+    def test_command_text_shares_completion_display_bound(self):
+        from lib.conversation_sync.generated_contract import OPENAPI_SCHEMAS
+        limit = OPENAPI_SCHEMAS['BackgroundCommandCompletion']['properties']['command']['maxLength']
+        task = _make_task()
+        blocker = threading.Event()
+        commands = {
+            start_background_command(
+                task=task, command=command,
+                execute=lambda t, _ctx: blocker.wait(10) or 'done'): command
+            for command in ('echo ' + 'm' * 400, 'x' * (limit + 500))
+        }
+        try:
+            listed = {c['command_id']: c['command'] for c in list_background_commands()}
+            assert listed == {cid: command[:limit] for cid, command in commands.items()}
+        finally:
+            blocker.set()
 
 
 class TestHistoryAndAdmission:

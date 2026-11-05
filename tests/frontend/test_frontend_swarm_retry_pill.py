@@ -12,9 +12,10 @@ with a stub ``t()`` carrying the zh ``swarm.phase.*`` strings, drives the
 REAL ``_buildSwarmPanelHTML`` on a round containing a retrying agent, and
 asserts the pill renders the localized label — never the raw token.
 
-NEUTER (scratch copy, shipped file byte-identical after): drop the
-``retrying:`` phaseMap line → the raw English 'retrying' pill leaks back,
-proving the line is load-bearing.
+The phase words now live in
+``frontend/src/conversation/presentation/swarm-agent-presentation.ts``; its
+vitest spec pins the ``retrying`` word to ``swarm.phase.retrying``, the
+load-bearing proof a scratch-copy NEUTER of the old panel line used to give.
 """
 
 from __future__ import annotations
@@ -107,65 +108,6 @@ def test_swarm_retry_pill_localized():
     )
 
 
-# NEUTER body: with the phaseMap 'retrying:' line dropped, the pill MUST fall
-# back to the raw English token — expressed as PASSes (run_harness treats any
-# FAIL line as a hard error).
-_NEUTER_BODY = r"""
-const { setup } = require(process.env.JSDOM_HARNESS);
-const { check, report } = setup({
-  root: process.argv[3],
-  html: '<!DOCTYPE html><body></body>',
-  targets: [process.argv[2]],
-  globals: {
-    t: (k) => ({ 'swarm.phase.retrying': '重试中…', 'swarm.phase.complete': '完成' })[k] || k,
-    escapeHtml: (s) => String(s == null ? '' : s),
-    conversations: [],
-    activeConvId: null,
-  },
-});
-const round = {
-  _swarm: true, _swarmActive: true, _swarmStartTime: Date.now(),
-  _swarmAgents: [
-    { id: 'a1', role: 'coder', model: 'kimi-k3', objective: 'do x',
-      status: 'running', phase: 'retrying', preview: '', tools: [] },
-  ],
-};
-const html = _buildSwarmPanelHTML(round, [round]);
-// Under NEUTER the phaseMap entry is gone → raw English leaks back …
-check('NC_raw_english_leaks', html.includes('>retrying<'), html.slice(0, 400));
-// … and the localized label is GONE.
-check('NC_zh_label_absent', !html.includes('重试中…'), html.slice(0, 400));
-report();
-"""
-
-
-def test_NC_retry_pill_phasemap_line_is_load_bearing(tmp_path):
-    """NEUTER: remove the ``retrying:`` phaseMap line from a SCRATCH copy of
-    streaming_swarm_panel.js → the raw English 'retrying' pill leaks back.
-    Shipped file is byte-identical afterwards."""
-    src = os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js')
-    with open(src, encoding='utf-8') as f:
-        original = f.read()
-    anchor = '        retrying: t("swarm.phase.retrying"),\n'
-    assert anchor in original, 'retrying phaseMap anchor missing'
-    patched = original.replace(anchor, '', 1)
-    assert patched != original, 'NC patch did not apply'
-    nc_path = tmp_path / 'streaming_swarm_panel_nc.js'
-    nc_path.write_text(patched, encoding='utf-8')
-    try:
-        out = run_harness(
-            target_js=str(nc_path),
-            body_js=_NEUTER_BODY,
-            min_pass=2,
-            label='swarm retry pill NEUTER',
-        )
-        assert 'PASS NC_raw_english_leaks' in out, out
-        assert 'PASS NC_zh_label_absent' in out, out
-    finally:
-        with open(src, encoding='utf-8') as f:
-            assert f.read() == original, 'shipped streaming_swarm_panel.js must be byte-identical'
-
-
 def test_i18n_key_registered():
     """The REAL i18n tables carry the new key in both languages (the harness
     stubs t(), so pin the shipped tables statically). Post-Vite the tables
@@ -177,13 +119,6 @@ def test_i18n_key_registered():
         en = json.load(f)
     assert zh['swarm.phase.retrying'] == '重试中…'
     assert en['swarm.phase.retrying'] == 'Retrying…'
-
-
-def test_phasemap_consumes_the_key():
-    with open(os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js'),
-              encoding='utf-8') as f:
-        src = f.read()
-    assert 'retrying: t("swarm.phase.retrying"),' in src
 
 
 if __name__ == '__main__':

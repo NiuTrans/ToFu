@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
@@ -72,6 +73,7 @@ async function drain() { for (let i = 0; i < 30; i++) await Promise.resolve(); }
 
 
 def test_pending_row_replacement_keeps_click_inside_timer_panel():
+    require_node_modules('jsdom')
     setup = r'''
 const assert = require('node:assert/strict');
 const {JSDOM} = require('jsdom');

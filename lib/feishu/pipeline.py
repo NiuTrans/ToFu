@@ -2,20 +2,22 @@
 
 Uses the SAME task pipeline as the web UI so tool calls, usage/cost,
 thinking blocks, and tool summaries appear identically on both channels.
+Callers pass the :class:`~lib.feishu.authority.FeishuSender` resolved at the
+boundary: project tools exist only for the owner inside an authorized project,
+and any other sender's chat runs under the sender's execution profile.
 """
 
 import time
 import uuid
 
+from lib.feishu.authority import authorized_project
 from lib.feishu.conversation import (
     append_message,
     get_conv_id,
     get_history,
     get_mode,
     get_model,
-    get_project,
     persist_exchange,
-    resolve_owner_user_id,
 )
 from lib.feishu.user_state import MAX_FEISHU_HISTORY_MESSAGE_CHARS
 
@@ -26,12 +28,24 @@ logger = get_logger(__name__)
 __all__ = ['exec_project_tool', 'run_task_pipeline']
 
 
-def exec_project_tool(user_id: str, fn_name: str, fn_args: dict) -> str:
-    """Execute a project tool and return the result string."""
+def exec_project_tool(sender, fn_name: str, fn_args: dict) -> str:
+    """Run a read-only project tool inside the sender's authorized project.
+
+    The call is a restricted principal of the absolute-path guard whose only
+    registered root is that project, so absolute, ``../`` and symlinked paths
+    cannot leave it (``lib/project_mod/abs_path_guard.py``).
+    """
+    base_path = authorized_project(sender)
+    if base_path is None:
+        return '❌ 尚未选择已登记的项目，请先用 `/project` 选择'
+    from lib.project_mod.abs_path_guard import reset_restricted, set_restricted
+    from lib.project_mod.config import build_root_policy, execution_root_scope
     from lib.project_mod.tools import execute_tool
-    base_path = get_project(user_id)
+    scope_key = 'feishu:' + sender.open_id
+    token = set_restricted(True)
     try:
-        result = execute_tool(fn_name, fn_args, base_path)
+        with execution_root_scope(scope_key, build_root_policy(base_path)):
+            result = execute_tool(fn_name, fn_args, base_path, conv_id=scope_key)
         if isinstance(result, tuple):
             result = result[0] if result else ''
         return str(result) if result else '(empty result)'
@@ -40,9 +54,11 @@ def exec_project_tool(user_id: str, fn_name: str, fn_args: dict) -> str:
             '[FeishuBot] project tool %s execution failed: %s',
             fn_name, e, exc_info=True)
         return '❌ 工具执行失败，请稍后重试'
+    finally:
+        reset_restricted(token)
 
 
-def run_task_pipeline(user_id: str, text: str,
+def run_task_pipeline(sender, text: str,
                       send_progress_fn=None, *, source_message_id: str = '') -> str:
     """Run the full LLM task pipeline for a Feishu message.
 
@@ -69,15 +85,8 @@ def run_task_pipeline(user_id: str, text: str,
             f'{MAX_FEISHU_HISTORY_MESSAGE_CHARS} 个字符以内。'
         )
 
-    owner_user_id = resolve_owner_user_id(user_id)
-    if owner_user_id is None:
-        logger.error(
-            '[FeishuBot] No application owner mapped for %s', user_id[:12]
-        )
-        return (
-            '❌ 该飞书账号尚未绑定应用用户。请配置 '
-            'FEISHU_USER_OWNER_MAP 或 FEISHU_DEFAULT_OWNER_USER_ID。'
-        )
+    user_id = sender.open_id
+    owner_user_id = sender.owner_user_id
 
     # ── Build conversation history ──
     append_message(user_id, 'user', text)
@@ -85,7 +94,6 @@ def run_task_pipeline(user_id: str, text: str,
 
     model = get_model(user_id)
     mode = get_mode(user_id)
-    project_path = get_project(user_id)
     conv_id = get_conv_id(user_id)
 
     # ── Prepare web-format user message ──
@@ -106,10 +114,10 @@ def run_task_pipeline(user_id: str, text: str,
         ],
     }
 
-    # Enable project tools if in tool mode
-    if mode == 'tool' and project_path:
-        config['project_path'] = project_path
-        config['enable_tools'] = True
+    # Project tools: the owner's tool mode inside an authorized project only.
+    project_path = authorized_project(sender) if mode == 'tool' else None
+    if project_path:
+        config['projectPath'] = project_path
 
     # ── Execute pipeline ──
     from lib.tasks_pkg.sync_run import run_task_sync
@@ -117,6 +125,7 @@ def run_task_pipeline(user_id: str, text: str,
         config,
         user_id=owner_user_id,
         progress_fn=send_progress_fn,
+        execution_profile=sender.execution_profile,
     )
 
     if not result:
@@ -138,12 +147,7 @@ def run_task_pipeline(user_id: str, text: str,
     }
     # Persist the same owner identity used by the task itself.
     try:
-        persist_exchange(
-            user_id,
-            user_web_msg,
-            assistant_web_msg,
-            owner_user_id=owner_user_id,
-        )
+        persist_exchange(sender, user_web_msg, assistant_web_msg)
     except Exception:
         logger.warning(
             '[FeishuBot] Canonical exchange persistence failed for %s',

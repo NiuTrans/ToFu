@@ -59,7 +59,7 @@ def test_registered_completion_recovers_without_dispatch_or_repricing(
                 'usage': {'prompt_tokens': 10, 'completion_tokens': 2},
                 'cost': {'costUsd': .125, 'pricingSource': 'original_quote'}}])
         if native_fees:
-            from lib.billing.cost import transfer_native_child_fees
+            from lib.billing.native_cost import transfer_native_child_fees
             from tests.billing.test_native_actor_fee_evidence import paid
             child.update(status='running', apiRounds=[], _nativePricingRequired=True, _executionActualsComplete=True)
             paid(child)

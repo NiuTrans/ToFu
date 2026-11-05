@@ -238,6 +238,36 @@ def test_client_wait_releases_on_degraded_verdict(_breaker_env):
     assert runtime_mod.time.monotonic() - started < 25.0
     runtime.stop(timeout=5.0)
 
+
+def test_degraded_client_error_names_the_recovery(_breaker_env):
+    """A degraded runtime must not read as transient unavailability.
+
+    The 2026-10-22 incident: the breaker latched degraded, the authority
+    stayed fenced for the rest of the process lifetime, and every request
+    reported a generic "sidecar is unavailable" — the operator kept retrying
+    instead of restarting the process. The error text now names the
+    terminal state and the recovery action.
+    """
+    supervisor = _ScriptedSupervisor(always_fail=True)
+    runtime = StorageRuntime(supervisor)
+    runtime._crashed(-9)
+    thread = runtime._restart_thread
+    if thread is not None:
+        thread.join(timeout=30)
+    assert runtime.status()['degraded'] is True
+
+    for write in (False, True):
+        with pytest.raises(StorageError) as excinfo:
+            runtime.client(write=write)
+        error = excinfo.value
+        assert error.code == 'database_unavailable'
+        assert 'degraded' in str(error)
+        assert 'restart' in str(error)
+        # The degraded text carries no host path (the cause stays in logs).
+        assert 'tofu-db' not in str(error)
+    runtime.stop(timeout=5.0)
+
+
 def test_breaker_knob_parsing_and_clamps(monkeypatch):
     monkeypatch.delenv('TOFU_STORAGE_RESTART_CRASH_LIMIT', raising=False)
     monkeypatch.delenv('TOFU_STORAGE_RESTART_CRASH_WINDOW_SECONDS',

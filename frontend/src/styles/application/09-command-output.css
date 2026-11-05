@@ -166,6 +166,10 @@
 .ptool-cmd-block details.ptool-result-block[open] .ptool-cmd-output {
   display: block;
 }
+/* The header's 输出 chip is that disclosure's only control. */
+.ptool-cmd-block > details.ptool-result-block > summary {
+  display: none;
+}
 
 /* ── Fold chips: the explicit per-pane disclosures (owner call 2026-09-05)
  * ──

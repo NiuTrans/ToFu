@@ -170,7 +170,8 @@ def test_unstarted_branch_failure_keeps_joined_siblings(monkeypatch):
         nonlocal starts
         if thread.name.startswith('flow-par'):
             starts += 1
-            if starts == 2:
+            # The failed branch's start and its one startup recovery both fail.
+            if starts in (2, 3):
                 raise RuntimeError('injected unstarted branch')
         return original(thread)
 

@@ -43,13 +43,16 @@ all four ``tool_result_artifact.*`` operations,
 ``browser.site_observation.*`` (2), all seven
 ``tenant.user.*`` operations, all eleven ``credential.*`` operations, and the
 seven executable ``billing.wallet.*``/``billing.ledger.*`` operations and all
-four ``billing.payment.*`` operations, all three redemption-code operations,
+``billing.payment.*`` operations, all three redemption-code operations,
 and ``billing.reserve.stale``. All nineteen ``orchestration.*`` and
 ``goal.run.*`` operations are covered, including definition CAS, event
 projection, terminal fencing, Goal supersession, and cross-owner startup
 retirement. All sixteen ``integration.*`` operations cover durable workspace
 registration, checkpoint queue transitions, global worker claiming/CAS,
-metadata, project status, and events.
+metadata, project status, and events. All four ``project.dispatch.*``
+operations cover atomic head/child CAS commits, command replay, point reads,
+prefix/cursor/reverse paging, owned project listing, byte bounds, and owner
+isolation.
 Three tiers define the denominator honestly:
 
 * the 331-op storage catalog — the OperationSpec registries in
@@ -89,7 +92,8 @@ a *documented* divergence that disappears also fails, so the manifest
 ratchets toward zero.
 
 Tofu-DB binary resolution order:
-  1. ``TOFUDB_DIFFERENTIAL_BIN`` test-only environment override;
+  1. ``TOFUDB_DIFFERENTIAL_BIN`` test-only environment override (defaults to
+     the source-certified ``TOFU_TEST_TOFUDB_BIN``, see ``tests/conftest.py``);
   2. a cargo build via the shared project toolchain (see the
      ``rustup-shared-toolchain-do-not-update`` project memory) when cargo is
      reachable;
@@ -687,6 +691,18 @@ def _record_scripts() -> dict[str, list[Step]]:
             }, command=True),
             Step('record.get', {'namespace': ns, 'key': 'cas'}),
         ]),
+        # Spilled-result alias claims rely on version 0 meaning "absent".
+        'record put create-if-absent then conflict': build(lambda ns: [
+            Step('record.put', {
+                'namespace': ns, 'key': 'fresh', 'value': 'first',
+                'expected_version': 0,
+            }, command=True),
+            Step('record.put', {
+                'namespace': ns, 'key': 'fresh', 'value': 'second',
+                'expected_version': 0,
+            }, command=True),
+            Step('record.get', {'namespace': ns, 'key': 'fresh'}),
+        ]),
         'record delete then absent': build(lambda ns: [
             Step('record.put', {'namespace': ns, 'key': 'gone', 'value': 1},
                  command=True),
@@ -772,6 +788,26 @@ def _record_scripts() -> dict[str, list[Step]]:
             Step('record.list', {'namespace': ns, 'prefix': '键/'}),
         ]),
     }
+
+
+def _project_dispatch_scripts() -> dict[str, list[Step]]:
+    """Exercise the segmented head/children transaction and its four ports."""
+    scope = {'user_id': _OWNER_ID, 'project_path': '/dispatch-' + uuid.uuid4().hex}
+    change = {'collection': 'assignments', 'id': 'a', 'expected_version': 0,
+              'value': {'brief': 'durable'}}
+    return {'project dispatch atomic head children and rollback': [
+        Step('project.dispatch.get', {**scope, 'collection': 'head', 'id': 'root'}),
+        Step('project.dispatch.commit', {**scope, 'expected_revision': 0,
+             'head': {'nextSequence': 1}, 'changes': [change]}, command=True),
+        Step('project.dispatch.get', {**scope, 'collection': 'assignments', 'id': 'a'}),
+        Step('project.dispatch.list', {**scope, 'collection': 'assignments'}),
+        Step('project.dispatch.projects', {'user_id': _OWNER_ID}),
+        Step('project.dispatch.commit', {**scope, 'expected_revision': 1,
+             'head': {'nextSequence': 2}, 'changes': [
+                 {**change, 'id': 'new'}, {**change, 'expected_version': 99}]}, command=True),
+        Step('project.dispatch.get', {**scope, 'collection': 'assignments', 'id': 'new'}),
+        Step('project.dispatch.get', {**scope, 'collection': 'head', 'id': 'root'}),
+    ]}
 
 
 def _project_recent_scripts() -> dict[str, list[Step]]:
@@ -932,6 +968,615 @@ def _project_relink_scripts() -> dict[str, list[Step]]:
         ],
     }
 
+
+def _project_dispatch_cases() -> dict[str, list[tuple[Step, tuple[str, Any]]]]:
+    """Segmented project dispatch storage (``project.dispatch.*``).
+
+    Every step carries its verdict from
+    ``contracts/project_dispatch_storage_v2.json``: ``('error', code)``,
+    ``('ok', value)`` compared without each envelope's wall-clock
+    ``updated_at_ms``, or ``('foreign', legacy_verdict)`` for a payload
+    identity foreign to the authenticated owner.
+    ``_assert_project_dispatch_outcomes`` checks the verdicts on BOTH
+    authorities, so agreement never certifies a jointly wrong answer. Paths
+    are fixed because both fixtures open a fresh authority per test, which
+    keeps the sha256-ordered head keys predictable.
+    """
+    from lib.storage.generated_project_dispatch_contract import SPEC
+
+    user = _OWNER_ID
+    foreign_user = _OWNER_ID + 1
+    limits = SPEC['limits']
+    project = '/diff/dispatch/中文 project'
+    other_project = '/diff/dispatch/other'
+    invalid = ('error', 'database_protocol_error')
+    conflict = ('error', 'database_conflict')
+
+    def script():
+        steps: list[tuple[Step, tuple[str, Any]]] = []
+
+        def add(step: Step, verdict: tuple[str, Any]) -> int:
+            steps.append((step, verdict))
+            return len(steps) - 1
+        return steps, add
+
+    def foreign(step: Step, legacy_verdict: tuple[str, Any]):
+        return (_dc_replace(step, expect_divergence=(
+            'project.dispatch foreign-owner payload identity')),
+            ('foreign', legacy_verdict))
+
+    def head_key(path=project, owner=user):
+        return f'{owner}:{hashlib.sha256(path.encode()).hexdigest()}'
+
+    def key(collection, identity, path=project):
+        return f'{head_key(path)}:{collection}:{identity}'
+
+    def without(payload, field):
+        return {name: value for name, value in payload.items() if name != field}
+
+    def put(collection, identity, value, version=0):
+        return {'collection': collection, 'id': identity,
+                'expected_version': version, 'value': value}
+
+    def delete(identity, version, collection='indexes'):
+        return {'collection': collection, 'id': identity,
+                'expected_version': version, 'delete': True}
+
+    def commit(revision, changes=(), head=None, path=project, **fields):
+        return Step('project.dispatch.commit', {
+            'user_id': user, 'project_path': path,
+            'expected_revision': revision,
+            'head': {'nextSequence': revision + 1} if head is None else head,
+            'changes': list(changes), **fields}, command=True)
+
+    def get(collection, identity, /, path=project, **fields):
+        return Step('project.dispatch.get', {
+            'user_id': user, 'project_path': path,
+            'collection': collection, 'id': identity, **fields})
+
+    def page(collection='indexes', /, path=project, **fields):
+        return Step('project.dispatch.list', {
+            'user_id': user, 'project_path': path,
+            'collection': collection, **fields})
+
+    def projects(**fields):
+        return Step('project.dispatch.projects', {'user_id': user, **fields})
+
+    def receipt(version, path=project, owner=user):
+        return ('ok', {'key': head_key(path, owner), 'version': version})
+
+    def head_value(state, path=project):
+        return {'format': SPEC['format'], 'owner': user,
+                'projectPath': path, 'state': state}
+
+    def head(version, state, path=project):
+        return ('ok', {'value': head_value(state, path), 'version': version})
+
+    def document(value, version=1):
+        return ('ok', {'value': value, 'version': version})
+
+    def indexes(*identities):
+        # Index fixtures store {'ref': id}; only indexes page with values.
+        return ('ok', [{'key': key('indexes', identity),
+                        'value': {'ref': identity}, 'version': 1}
+                       for identity in identities])
+
+    def headers(collection, *identities):
+        return ('ok', [{'key': key(collection, identity), 'version': 1}
+                       for identity in identities])
+
+    collections = SPEC['collections']
+    evidence = {collection: {'kind': collection, 'note': '中文 evidence'}
+                for collection in collections}
+    point, add = script()
+    add(get('head', 'root'), ('ok', None))
+    add(projects(), ('ok', []))
+    add(page('assignments'), ('ok', []))
+    add(commit(0, [put(collection, 'same-id', evidence[collection])
+                   for collection in collections],
+               head={'nextSequence': 1, 'phase': 'open'}), receipt(1))
+    add(get('head', 'root'), head(1, {'nextSequence': 1, 'phase': 'open'}))
+    for collection in collections:
+        # The collection is part of document identity: one id, nine documents.
+        add(get(collection, 'same-id'), document(evidence[collection]))
+    add(get('assignments', 'missing'), ('ok', None))
+    add(get('assignments', 'same-id', path=other_project), ('ok', None))
+    add(get('head', 'root', path=other_project), ('ok', None))
+    add(commit(1, [put('assignments', 'same-id', {'kind': 'revised'}, 1),
+                   put('assignments', 'a-2', {'kind': 'second'})]), receipt(2))
+    add(get('assignments', 'same-id'), document({'kind': 'revised'}, 2))
+    add(get('assignments', 'a-2'), document({'kind': 'second'}))
+    add(get('batches', 'same-id'), document(evidence['batches']))
+    # Empty changes advance only the head.
+    add(commit(2, head={'nextSequence': 3, 'phase': 'closed'}), receipt(3))
+    add(get('head', 'root'), head(3, {'nextSequence': 3, 'phase': 'closed'}))
+    add(get('assignments', 'a-2'), document({'kind': 'second'}))
+    add(projects(), ('ok', [{'key': head_key(), 'version': 3, 'value': head_value(
+        {'nextSequence': 3, 'phase': 'closed'})}]))
+
+    orders = [f'order:{number:04d}' for number in range(1, 6)]
+    index_ids = sorted(['Order:0009', *orders, 'order_x', 'x.y'])
+    members = ['a-1', 'a-2', 'a-3']
+    listing, add = script()
+    add(commit(0, [put('indexes', identity, {'ref': identity})
+                   for identity in reversed(index_ids)]
+               + [put('assignments', member, {'brief': member}) for member in members]
+               + [put('batches', 'b-1', {'brief': 'b-1'})]), receipt(1))
+    add(page(), indexes(*index_ids))
+    add(page(after_key=''), indexes(*index_ids))
+    add(page(limit=limits['pageRows']), indexes(*index_ids))
+    forward = add(page(prefix='order:', limit=2), indexes(*orders[:2]))
+    forward = add(page(prefix='order:', limit=2, after_key=_Ref(forward, (-1, 'key'))),
+                  indexes(*orders[2:4]))
+    forward = add(page(prefix='order:', limit=2, after_key=_Ref(forward, (-1, 'key'))),
+                  indexes(orders[4]))
+    add(page(prefix='order:', after_key=_Ref(forward, (-1, 'key'))), ('ok', []))
+    newest = add(page(prefix='order:', reverse=True, limit=2), indexes(orders[4], orders[3]))
+    middle = add(page(prefix='order:', reverse=True, limit=2,
+                      after_key=_Ref(newest, (-1, 'key'))), indexes(orders[2], orders[1]))
+    oldest = add(page(prefix='order:', reverse=True, limit=2,
+                      after_key=_Ref(middle, (-1, 'key'))), indexes(orders[0]))
+    add(page(prefix='order:', reverse=True, after_key=_Ref(oldest, (-1, 'key'))), ('ok', []))
+    # A cursor names a position; the requested ordering picks the side.
+    add(page(prefix='order:', after_key=_Ref(middle, (0, 'key'))), indexes(*orders[3:]))
+    add(page(prefix='order:', reverse=False, limit=1), indexes(orders[0]))
+    # Prefixes are literal, case-sensitive byte ranges applied before limits.
+    add(page(prefix='Order:'), indexes('Order:0009'))
+    add(page(prefix='order_'), indexes('order_x'))
+    add(page(prefix='order:0003'), indexes('order:0003'))
+    add(page(prefix='x', limit=1), indexes('x.y'))
+    add(page(prefix='zzz'), ('ok', []))
+    add(page(prefix='a' * limits['identityCharacters']), ('ok', []))
+    # Evidence collections page opaque headers without values.
+    member_page = add(page('assignments'), headers('assignments', *members))
+    add(page('assignments', limit=1, after_key=_Ref(member_page, (0, 'key'))),
+        headers('assignments', 'a-2'))
+    add(page('assignments', reverse=True), headers('assignments', *members[::-1]))
+    add(page('batches'), headers('batches', 'b-1'))
+    add(page('requests'), ('ok', []))
+    add(page(path=other_project), ('ok', []))
+    for fields in (
+        {'collection': 'head'}, {'collection': 'arbitrary'}, {'collection': None},
+        {'limit': 0}, {'limit': limits['pageRows'] + 1}, {'limit': True},
+        {'limit': '2'}, {'limit': None},
+        {'reverse': 'true'}, {'reverse': 1}, {'reverse': None},
+        {'prefix': '/'}, {'prefix': 'order :'}, {'prefix': None},
+        {'prefix': 'a' * (limits['identityCharacters'] + 1)},
+        {'after_key': 'wrong'}, {'after_key': 7}, {'after_key': None},
+        # Cursors belong to the exact owner/project/collection/prefix.
+        {'after_key': key('assignments', 'a-1')},
+        {'after_key': key('indexes', 'order:0001', other_project)},
+        {'after_key': key('indexes', 'x.y'), 'prefix': 'order:'},
+        {'after_key': head_key(owner=foreign_user) + ':indexes:x.y'},
+    ):
+        add(page(**fields), invalid)
+    for missing_field in ('user_id', 'project_path', 'collection'):
+        add(Step('project.dispatch.list', without(page().payload, missing_field)), invalid)
+    # Reads never write: the head revision is unchanged.
+    add(get('head', 'root'), head(1, {'nextSequence': 1}))
+
+    paths = ['/diff/dispatch/alpha', '/diff/dispatch/beta',
+             '/diff/dispatch/中文', '/diff/dispatch/delta']
+    states = {path: ({'name': path}, 1) for path in paths}
+    states[paths[1]] = ({'name': paths[1], 'revised': True}, 2)
+    ordered = sorted(paths, key=head_key)
+
+    def heads(*selected):
+        return ('ok', [{'key': head_key(path), 'version': states[path][1],
+                        'value': head_value(states[path][0], path)}
+                       for path in selected])
+
+    owned, add = script()
+    for path in paths:
+        add(commit(0, head={'name': path}, path=path), receipt(1, path))
+    add(commit(1, head=states[paths[1]][0], path=paths[1]), receipt(2, paths[1]))
+    add(projects(), heads(*ordered))
+    first = add(projects(limit=1), heads(ordered[0]))
+    second = add(projects(limit=2, after_key=_Ref(first, (-1, 'key'))), heads(*ordered[1:3]))
+    last = add(projects(limit=2, after_key=_Ref(second, (-1, 'key'))), heads(ordered[3]))
+    add(projects(after_key=_Ref(last, (-1, 'key'))), ('ok', []))
+    newest = add(projects(reverse=True, limit=3), heads(*ordered[:0:-1]))
+    add(projects(reverse=True, after_key=_Ref(newest, (-1, 'key'))), heads(ordered[0]))
+    add(projects(reverse=True), heads(*ordered[::-1]))
+    add(projects(after_key=''), heads(*ordered))
+    for fields in (
+        # A cursor must carry this owner's exact key prefix.
+        {'after_key': '999:elsewhere'}, {'after_key': str(user)},
+        {'after_key': head_key(paths[0], foreign_user)},
+        {'after_key': 'not a key'}, {'after_key': 7},
+        {'limit': 0}, {'limit': limits['pageRows'] + 1}, {'limit': True},
+        {'reverse': 'yes'}, {'reverse': None},
+        {'user_id': 0}, {'user_id': True}, {'user_id': str(user)},
+        {'user_id': -1}, {'user_id': None},
+    ):
+        add(projects(**fields), invalid)
+    add(Step('project.dispatch.projects', {}), invalid)
+    add(*foreign(projects(user_id=foreign_user), ('ok', [])))
+    add(projects(), heads(*ordered))
+
+    cas, add = script()
+    add(commit(0, [put('assignments', 'a', {'n': 1}), put('indexes', 'i-1', {'ref': 'i-1'}),
+                   put('indexes', 'i-2', {'ref': 'i-2'})]), receipt(1))
+    add(commit(0, [put('assignments', 'stale', {'n': 0})]), conflict)
+    add(commit(5, [put('assignments', 'ahead', {'n': 0})]), conflict)
+    # The largest admissible revision is a valid, merely wrong, witness.
+    add(commit(limits['maximumRevision']), conflict)
+    # A late child CAS failure rolls back the head and earlier children.
+    add(commit(1, [put('assignments', 'late', {'n': 2}),
+                   put('assignments', 'a', {'n': 3}, 99)]), conflict)
+    add(commit(1, [put('assignments', 'a', {'n': 4})]), conflict)
+    add(commit(1, [put('assignments', 'fresh', {'n': 5}, 1)]), conflict)
+    for identity in ('stale', 'ahead', 'late', 'fresh'):
+        add(get('assignments', identity), ('ok', None))
+    add(get('assignments', 'a'), document({'n': 1}))
+    add(get('head', 'root'), head(1, {'nextSequence': 1}))
+    # Only indexes are deletable, and deletion is an exact version CAS.
+    add(commit(1, [delete('i-1', 1)]), receipt(2))
+    add(page(), indexes('i-2'))
+    add(get('indexes', 'i-1'), ('ok', None))
+    add(commit(2, [put('assignments', 'b', {'n': 6}), delete('i-1', 1)]), conflict)
+    add(get('assignments', 'b'), ('ok', None))
+    add(commit(2, [delete('i-2', 2)]), conflict)
+    add(commit(2, [delete('a', 1, 'assignments')]), invalid)
+    add(get('assignments', 'a'), document({'n': 1}))
+    add(get('indexes', 'i-2'), document({'ref': 'i-2'}))
+    add(commit(2, [delete('never', 0)]), receipt(3))
+    # A deleted identity is recreated from version zero.
+    add(commit(3, [put('indexes', 'i-1', {'ref': 'again'})]), receipt(4))
+    add(get('indexes', 'i-1'), document({'ref': 'again'}))
+    add(commit(4, [delete('i-2', 1), put('assignments', 'a', {'n': 7}, 1)]), receipt(5))
+    add(page(), ('ok', [{'key': key('indexes', 'i-1'), 'value': {'ref': 'again'},
+                         'version': 1}]))
+    add(get('assignments', 'a'), document({'n': 7}, 2))
+    add(get('head', 'root'), head(5, {'nextSequence': 5}))
+
+    rejected, add = script()
+    change = put('assignments', 'assignment', {'brief': 'kept out'})
+    base = commit(0, [change]).payload
+    for fields in (
+        # collection=head requires id=root; ids are bounded ASCII identities.
+        {'collection': 'head', 'id': 'other'}, {'collection': 'head', 'id': 'ROOT'},
+        {'collection': 'arbitrary'}, {'collection': None},
+        {'id': 'bad/id'}, {'id': ''}, {'id': 'é'}, {'id': 7}, {'id': None},
+        {'id': 'a' * (limits['identityCharacters'] + 1)},
+        {'project_path': ''}, {'project_path': '   '}, {'project_path': '/a\x00b'},
+        {'project_path': '/' + '中' * limits['projectPathCharacters']},
+        {'project_path': None},
+        {'user_id': 0}, {'user_id': True}, {'user_id': str(user)},
+        {'user_id': -1}, {'user_id': None},
+    ):
+        add(get('assignments', 'assignment', **fields), invalid)
+    for missing_field in ('user_id', 'project_path', 'collection', 'id'):
+        add(Step('project.dispatch.get',
+                 without(get('assignments', 'x').payload, missing_field)),
+            invalid)
+    # Inclusive bounds are valid reads (identity bytes, path characters).
+    add(get('assignments', 'a' * limits['identityCharacters']), ('ok', None))
+    add(get('assignments', 'x', path='/' + '中' * (limits['projectPathCharacters'] - 1)),
+        ('ok', None))
+    for fields in (
+        {'changes': [change, change]},
+        {'changes': [change, {**change, 'value': {'brief': 'twin'}}]},
+        {'changes': [put('indexes', 'i', {}), delete('i', 0)]},
+        {'changes': [put('arbitrary', 'x', {})]}, {'changes': [put('head', 'root', {})]},
+        {'changes': [put('assignments', 'bad/id', {})]},
+        {'changes': [put('assignments', 'a' * (limits['identityCharacters'] + 1), {})]},
+        {'changes': [{**change, 'expected_version': -1}]},
+        {'changes': [{**change, 'expected_version': True}]},
+        {'changes': [{**change, 'expected_version': limits['maximumRevision'] + 1}]},
+        {'changes': [without(change, 'expected_version')]},
+        {'changes': [{**change, 'value': None}]}, {'changes': [{**change, 'value': ['x']}]},
+        {'changes': [{**change, 'value': 'text'}]}, {'changes': [without(change, 'value')]},
+        # Exactly one of value or delete=true; only indexes are deletable.
+        {'changes': [{**change, 'delete': False}]}, {'changes': [{**change, 'delete': True}]},
+        {'changes': [{**delete('i', 0), 'delete': 1}]},
+        {'changes': [delete('assignment', 0, 'assignments')]},
+        {'changes': [put('indexes', 'big', {'x': 'x' * (limits['indexBytes'] - 7)})]},
+        {'changes': ['not-an-object']}, {'changes': {'collection': 'assignments'}},
+        {'changes': None},
+        {'changes': [put('indexes', f'i{number}', {})
+                     for number in range(limits['commitChanges'] + 1)]},
+        {'expected_revision': -1}, {'expected_revision': True},
+        {'expected_revision': '0'}, {'expected_revision': None},
+        {'expected_revision': limits['maximumRevision'] + 1},
+        {'head': None}, {'head': []}, {'head': 'state'},
+        {'head': {'x': 'x' * (limits['headBytes'] - 7)}},
+        {'project_path': '   '}, {'project_path': '/a\x00b'}, {'user_id': 0},
+    ):
+        add(Step('project.dispatch.commit', {**base, **fields}, command=True), invalid)
+    for missing_field in ('user_id', 'project_path', 'expected_revision', 'head', 'changes'):
+        add(Step('project.dispatch.commit', without(base, missing_field), command=True),
+            invalid)
+    # No rejected request wrote a head, a child or a project listing.
+    add(get('head', 'root'), ('ok', None))
+    add(get('assignments', 'assignment'), ('ok', None))
+    add(page('assignments'), ('ok', []))
+    add(projects(), ('ok', []))
+
+    bounds, add = script()
+    # Bounds count canonical compact UTF-8 JSON bytes: {"x":"..."} is 8 + body.
+    exact_head = {'x': 'é' * ((limits['headBytes'] - 8) // 2)}
+    add(commit(0, head=exact_head), receipt(1))
+    add(commit(1, head={'x': exact_head['x'] + 'x'}), invalid)
+    escapes = '\x01\n"\\\x7f\u2028'  # 6 + 2 + 2 + 2 + 1 + 3 encoded bytes
+    exact_index = {'x': escapes + 'é' * ((limits['indexBytes'] - 8 - 16) // 2)}
+    add(commit(1, [put('indexes', 'exact', exact_index)]), receipt(2))
+    add(commit(2, [put('indexes', 'over', {'x': exact_index['x'] + 'x'})]), invalid)
+    add(get('indexes', 'exact'), document(exact_index))
+    add(page(), ('ok', [{'key': key('indexes', 'exact'), 'value': exact_index,
+                         'version': 1}]))
+
+    def projection_shaped(total):
+        # Tool input duplicates its tool round, which a private SQL storage
+        # codec may intern; wire bounds still count the caller's JSON.
+        duplicated = {'a': 'x' * 600}
+        value = {'segments': [{'toolCallId': 't', 'input': duplicated}],
+                 'toolRounds': [{'toolCallId': 't', 'toolArgs': duplicated}], 'pad': ''}
+        value['pad'] = 'p' * (total - len(json.dumps(value, separators=(',', ':'))))
+        return value
+    add(commit(2, [put('indexes', 'shaped', projection_shaped(limits['indexBytes'] + 1))]),
+        invalid)
+    shaped = projection_shaped(limits['indexBytes'])
+    add(commit(2, [put('indexes', 'shaped', shaped)]), receipt(3))
+    add(get('indexes', 'shaped'), document(shaped))
+    # A head state is caller data nested in the head envelope, so a key the SQL
+    # projection codec reserves at document top level is ordinary there.
+    codec_shaped = {'segments': [], 'toolRounds': [], '_tofuStorageProjectionCodec': 1}
+    add(commit(3, head=codec_shaped), receipt(4))
+    add(get('head', 'root'), head(4, codec_shaped))
+    # One document at its bound plus one filling the command bound exactly;
+    # the default head {"nextSequence":N} is 18 bytes and counts as well.
+    exact_document = {'x': 'x' * (limits['documentBytes'] - 8)}
+    fill = {'x': 'x' * (limits['commitBytes'] - limits['documentBytes'] - 18 - 8)}
+    add(commit(4, [put('assignments', 'exact', exact_document),
+                   put('batches', 'fill', fill)]), receipt(5))
+    add(commit(5, [put('assignments', 'over', {'x': exact_document['x'] + 'x'})]), invalid)
+    add(commit(5, [put('requests', 'r-1', exact_document),
+                   put('requests', 'r-2', {'x': fill['x'] + 'x'})]), invalid)
+    add(page('assignments'), headers('assignments', 'exact'))
+    add(page('batches'), headers('batches', 'fill'))
+    add(page('requests'), ('ok', []))
+    add(get('head', 'root'), head(5, {'nextSequence': 5}))
+
+    fenced, add = script()
+    add(commit(0, [put('assignments', 'shared', {'owner': 'eleven'}),
+                   put('indexes', 'i', {'ref': 'i'})]), receipt(1))
+    add(*foreign(get('head', 'root', user_id=foreign_user), ('ok', None)))
+    add(*foreign(get('assignments', 'shared', user_id=foreign_user), ('ok', None)))
+    add(*foreign(page(user_id=foreign_user), ('ok', [])))
+    add(*foreign(projects(user_id=foreign_user), ('ok', [])))
+    # The sidecar runs a foreign commit's CAS against that owner's own head.
+    add(*foreign(commit(1, user_id=foreign_user), conflict))
+    add(*foreign(commit(0, [put('assignments', 'shared', {'owner': 'twelve'})],
+                        user_id=foreign_user), receipt(1, owner=foreign_user)))
+    add(get('head', 'root'), head(1, {'nextSequence': 1}))
+    add(get('assignments', 'shared'), document({'owner': 'eleven'}))
+    add(page(), indexes('i'))
+    add(projects(), ('ok', [{'key': head_key(), 'version': 1,
+                             'value': head_value({'nextSequence': 1})}]))
+
+    return {
+        'project dispatch commit creates head and children with point reads': point,
+        'project dispatch list pages prefixes cursors and reverse order': listing,
+        'project dispatch projects pages owned heads': owned,
+        'project dispatch commit CAS conflicts roll back atomically': cas,
+        'project dispatch rejects invalid requests without writes': rejected,
+        'project dispatch byte bounds count encoded JSON bytes': bounds,
+        'project dispatch foreign payload owner is fenced': fenced,
+    }
+
+
+def _project_dispatch_scripts() -> dict[str, list[Step]]:
+    return {name: [step for step, _ in case]
+            for name, case in _project_dispatch_cases().items()}
+
+
+def _dispatch_envelopes(value: Any) -> Any:
+    """Drop each envelope's authority wall clock after checking its type."""
+    if isinstance(value, list):
+        return [_dispatch_envelopes(row) for row in value]
+    if isinstance(value, dict):
+        clock = value.get('updated_at_ms')
+        assert type(clock) is int and clock > 0, value
+        return {name: item for name, item in value.items() if name != 'updated_at_ms'}
+    return value
+
+
+def _assert_project_dispatch_outcomes(name: str, outcomes) -> None:
+    """Check every step's contract verdict on one authority's run."""
+    verdicts = [verdict for _, verdict in _project_dispatch_cases()[name]]
+    assert len(verdicts) == len(outcomes), name
+    fenced = set()
+    for index, ((step, outcome), (kind, expected)) in enumerate(zip(outcomes, verdicts)):
+        if kind == 'foreign':
+            # The per-owner daemon refuses every foreign payload identity;
+            # the multi-owner sidecar answers inside that owner's own scope.
+            refused = not outcome.ok and outcome.error_code == 'authority_scope_mismatch'
+            fenced.add(refused)
+            if refused:
+                continue
+            kind, expected = expected
+        context = f'{name!r} step {index} ({step.operation}): {outcome!r}'
+        if kind == 'error':
+            assert not outcome.ok and outcome.error_code == expected, context
+        else:
+            assert outcome.ok, context
+            assert _json_equal(_dispatch_envelopes(outcome.value), expected), (
+                f'{context}\n  expected: {expected!r}')
+    assert len(fenced) <= 1, f'{name!r} mixes refused and scoped foreign identities'
+
+
+def test_project_dispatch_owner_scopes_and_command_receipts_match(
+    legacy_driver, integration_owner_daemon,
+):
+    """Genuine owner scopes and command receipts for ``project.dispatch.*``.
+
+    Tofu-DB authenticates one owner per daemon, so each owner gets its own
+    process over one authority instead of a spoofed payload identity; the
+    multi-owner sidecar serves both owners directly. Both authorities must
+    produce the contract trace below, and a replayed command must return its
+    original receipt exactly, wall clock included.
+    """
+    from lib.storage.generated_project_dispatch_contract import SPEC
+    path = '/diff/dispatch/shared'
+    digest = hashlib.sha256(path.encode()).hexdigest()
+    owner, other = _OWNER_ID, _OWNER_ID + 1
+    first_changes = [
+        {'collection': 'assignments', 'id': 'shared', 'expected_version': 0,
+         'value': {'owner': 'eleven'}},
+        {'collection': 'indexes', 'id': 'i', 'expected_version': 0, 'value': {'ref': 'i'}},
+    ]
+
+    def run(context) -> list[Any]:
+        trace: list[Any] = []
+
+        def call(driver, user, operation, command_id=None, **payload):
+            outcome = driver.execute(operation, {'user_id': user, **payload}, command_id)
+            trace.append(_dispatch_envelopes(outcome.value) if outcome.ok
+                         else outcome.error_code)
+            return outcome
+
+        def commit(driver, user, revision, state, changes=(), command_id=None):
+            return call(driver, user, 'project.dispatch.commit',
+                        command_id or uuid.uuid4().hex, project_path=path,
+                        expected_revision=revision, head={'n': state},
+                        changes=list(changes))
+
+        def get(driver, user, collection, identity):
+            return call(driver, user, 'project.dispatch.get', project_path=path,
+                        collection=collection, id=identity)
+
+        def indexes(driver, user, **options):
+            return call(driver, user, 'project.dispatch.list', project_path=path,
+                        collection='indexes', **options)
+
+        with context(owner) as driver:
+            first = commit(driver, owner, 0, 1, first_changes, 'dispatch-first')
+            # An unobserved ACK retries the same command: original receipt.
+            assert commit(driver, owner, 0, 1, first_changes,
+                          'dispatch-first').value == first.value
+            commit(driver, owner, 1, 2)
+            # Replay survives later commits and never re-runs the CAS.
+            assert commit(driver, owner, 0, 1, first_changes,
+                          'dispatch-first').value == first.value
+            commit(driver, owner, 2, 99, command_id='dispatch-first')
+            # A failed command leaves no receipt: its ID stays usable.
+            commit(driver, owner, 1, 3, command_id='dispatch-retry')
+            commit(driver, owner, 2, 3, command_id='dispatch-retry')
+            get(driver, owner, 'head', 'root')
+        with context(other) as driver:
+            get(driver, other, 'head', 'root')
+            get(driver, other, 'assignments', 'shared')
+            indexes(driver, other)
+            call(driver, other, 'project.dispatch.projects')
+            # Another owner's keys are never cursors in this scope.
+            indexes(driver, other, after_key=f'{owner}:{digest}:indexes:i')
+            call(driver, other, 'project.dispatch.projects', after_key=f'{owner}:{digest}')
+            # The same path is a separate head; owner 11's revision is no witness.
+            commit(driver, other, 3, 1)
+            commit(driver, other, 0, 1, [{'collection': 'assignments', 'id': 'shared',
+                                          'expected_version': 0,
+                                          'value': {'owner': 'twelve'}}])
+            call(driver, other, 'project.dispatch.projects')
+        with context(owner) as driver:
+            get(driver, owner, 'head', 'root')
+            get(driver, owner, 'assignments', 'shared')
+            indexes(driver, owner)
+            call(driver, owner, 'project.dispatch.projects')
+        return trace
+
+    def receipt(user, version):
+        return {'key': f'{user}:{digest}', 'version': version}
+
+    def head(user, version, state):
+        return {'version': version, 'value': {
+            'format': SPEC['format'], 'owner': user, 'projectPath': path,
+            'state': {'n': state}}}
+
+    expected = [
+        receipt(owner, 1), receipt(owner, 1), receipt(owner, 2), receipt(owner, 1),
+        'database_conflict', 'database_conflict', receipt(owner, 3), head(owner, 3, 3),
+        None, None, [], [], 'database_protocol_error', 'database_protocol_error',
+        'database_conflict', receipt(other, 1),
+        [{'key': f'{other}:{digest}', **head(other, 1, 1)}],
+        head(owner, 3, 3), {'value': {'owner': 'eleven'}, 'version': 1},
+        [{'key': f'{owner}:{digest}:indexes:i', 'value': {'ref': 'i'}, 'version': 1}],
+        [{'key': f'{owner}:{digest}', **head(owner, 3, 3)}],
+    ]
+    for trace in (run(lambda _owner: nullcontext(legacy_driver)),
+                  run(integration_owner_daemon)):
+        assert trace == expected
+        assert _json_equal(trace, expected)
+
+
+
+def test_turn_delete_commands_replay_their_receipt_after_a_lost_ack(
+    legacy_driver, tofudb_daemon,
+):
+    """A delete reissued with its unchanged command_id returns its receipt.
+
+    storage.v2 replays a command after transport loss. Re-executing a delete
+    that had already committed found no rows and answered database_not_found,
+    so the browser reported a failure for a delete that succeeded. A fresh
+    command against the same, now absent rows still reports not-found.
+    """
+    user = _OWNER_ID
+    clock_fields = frozenset({'updatedAt', 'createdAt'})
+
+    def run(driver) -> list[Any]:
+        ns = f'diff_{uuid.uuid4().hex[:8]}'
+        conv = f'{ns}_conv'
+        trace: list[Any] = []
+
+        def call(operation, wire_command_id, **payload):
+            outcome = driver.execute(
+                operation,
+                {'conversation_id': conv, 'user_id': user, **payload},
+                wire_command_id)
+            trace.append(outcome.value if outcome.ok else outcome.error_code)
+            return outcome
+
+        for ordinal in range(2):
+            at = _TURN_TS + 1000 * (ordinal + 1)
+            assert call(
+                'turn.append_settled', f'{ns}_append_{ordinal}',
+                actor='human', status='completed',
+                projection={'content': f'body {ordinal}'}, lane_id='main',
+                command_id=f'{ns}_t{ordinal}_command', turn_id=f'{ns}_t{ordinal}',
+                created_at=at, now=at,
+                conversation_defaults={
+                    'allowCreate': True, 'title': 'Delete replay',
+                    'createdAt': _TURN_TS, 'settings': {}},
+            ).ok
+        branch = call('turn.branch.create', f'{ns}_branch',
+                      parent_turn_id=f'{ns}_t0', expected_projection_revision=1)
+        assert branch.ok, branch
+        lane_id = branch.value['lane']['laneId']
+        trace.clear()
+        for _ in range(2):
+            call('turn.branch.delete', f'{ns}_branch_delete',
+                 parent_turn_id=f'{ns}_t0', lane_id=lane_id)
+        for _ in range(2):
+            call('turn.delete', f'{ns}_delete', turn_ids=[f'{ns}_t1'])
+        call('turn.delete', f'{ns}_delete_again', turn_ids=[f'{ns}_t1'])
+        return [
+            _drop_comparison_fields(
+                json.loads(json.dumps(item).replace(lane_id, '<lane>')
+                           .replace(ns, '<ns>')),
+                clock_fields)
+            for item in trace
+        ]
+
+    traces = [run(legacy_driver), run(tofudb_daemon)]
+    for trace in traces:
+        branch_first, branch_replay, delete_first, delete_replay, fresh = trace
+        assert isinstance(branch_first, dict), trace
+        assert branch_replay == branch_first, trace
+        assert isinstance(delete_first, dict), trace
+        assert delete_first['deletedTurnIds'] == ['<ns>_t1'], trace
+        assert delete_replay == delete_first, trace
+        assert fresh == 'database_not_found', trace
+    assert _json_equal(traces[0], traces[1])
 
 def _event_scripts() -> dict[str, list[Step]]:
     """Task-event stream domain; one fresh task namespace per script.
@@ -1524,6 +2169,212 @@ def _artifact_scripts() -> dict[str, list[Step]]:
 _TURN_TS = 1_800_000_000_000
 
 
+def _turn_event_scripts(
+    *, build, append, read, defaults, attempt_clock, visible_event_fields,
+) -> dict[str, list[Step]]:
+    """turn.event.record and its batch: live, terminal and all-or-nothing runs.
+
+    Shares ``_turn_scripts``' builders and ignored clock fields so identities
+    and revisions stay exactly comparable with the rest of the Turn domain.
+    """
+    user = _OWNER_ID
+
+    def batch_entry(ns: str, sequence: int, content: str, **extra: Any) -> dict[str, Any]:
+        return {
+            'attempt_id': _Ref(0, ('attempt', 'attemptId')),
+            'task_id': f'{ns}_task', 'user_id': user,
+            'projection': {'content': content, 'thinking': '', 'toolRounds': []},
+            'event_payload': {'phase': 'calling', 'updateKind': 'tool_start'},
+            'task_event': {'task_id': f'{ns}_task', 'sequence': sequence,
+                           'event': {'type': 'tool_start', 'detail': content}},
+            'now': _TURN_TS + 2000 + sequence,
+            **extra,
+        }
+
+    def batch_reads(ns: str) -> list[Step]:
+        return [
+            read('turn.get', f'{ns}_conv', visible_event_fields,
+                 turn_id=_Ref(0, ('turn', 'turnId'))),
+            Step('turn.events.list', {
+                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
+                'user_id': user, 'projection_mode': 'patch',
+            }, ignore_fields=visible_event_fields),
+            Step('event.list', {
+                'task_id': f'{ns}_task', 'after_sequence': -1, 'limit': 10}),
+            Step('turn.sync.changes', {
+                'conversation_id': f'{ns}_conv', 'user_id': user,
+                'after': 0, 'limit': 20,
+            }, ignore_fields=visible_event_fields),
+        ]
+
+    return {
+        'turn event record batch commits ordinary records all or nothing': build(lambda ns: [
+            Step('turn.create_pair', {
+                'conversation_id': f'{ns}_conv', 'user_id': user,
+                'command_id': f'{ns}_pair_command',
+                'input_projection': {'content': 'batch input'},
+                'config': {'model': 'batch-differential'},
+                'now': _TURN_TS + 1000,
+                'conversation_defaults': defaults(),
+            }, command=True),
+            Step('turn.attempt.bind', {
+                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
+                'task_id': f'{ns}_task', 'user_id': user,
+            }, command=True, ignore_fields=attempt_clock),
+            # Terminal, interaction and tool-effect entries keep their own
+            # transaction; rows must ascend inside one task stream.
+            Step('turn.event.record_batch', {'user_id': user, 'entries': [
+                batch_entry(ns, 0, 'first'),
+                batch_entry(ns, 1, 'second', terminal=True, status='completed'),
+            ]}, command=True),
+            Step('turn.event.record_batch', {'user_id': user, 'entries': [
+                batch_entry(ns, 1, 'first'), batch_entry(ns, 0, 'second'),
+            ]}, command=True),
+            Step('turn.event.record_batch', {'user_id': user, 'entries': [
+                batch_entry(ns, 0, 'first'),
+                batch_entry(ns, 1, 'second', event_type='interaction_request'),
+            ]}, command=True),
+            *batch_reads(ns),
+            Step('turn.event.record_batch', {'user_id': user, 'entries': [
+                batch_entry(ns, 0, 'first'), batch_entry(ns, 1, 'second'),
+                batch_entry(ns, 3, 'third'),
+            ]}, command=True, ignore_fields=visible_event_fields),
+            *batch_reads(ns),
+            # The gap row applies first; the conflicting row then refuses
+            # the whole batch, so neither revision nor row survives.
+            Step('turn.event.record_batch', {'user_id': user, 'entries': [
+                batch_entry(ns, 2, 'gap'), batch_entry(ns, 3, 'changed'),
+            ]}, command=True),
+            *batch_reads(ns),
+        ]),
+        'turn event record advances live and terminal authority': build(lambda ns: [
+            append(f'{ns}_conv', f'{ns}_human', 0),
+            append(f'{ns}_conv', f'{ns}_assistant', 1, actor='assistant'),
+            Step('turn.attempt.create', {
+                'conversation_id': f'{ns}_conv', 'user_id': user,
+                'turn_id': f'{ns}_assistant',
+                'command_id': f'{ns}_event_attempt',
+                'operation': 'regenerate',
+                'target_actor': 'assistant', 'target_kind': 'reply',
+                'expected_projection_revision': 1,
+                'config': {},
+            }, command=True, ignore_fields=attempt_clock),
+            Step('turn.attempt.bind', {
+                'attempt_id': _Ref(2, ('attempt', 'attemptId')),
+                'task_id': f'{ns}_event_task', 'user_id': user,
+            }, command=True, ignore_fields=attempt_clock),
+            Step('turn.event.record', {
+                'attempt_id': _Ref(2, ('attempt', 'attemptId')),
+                'task_id': f'{ns}_event_task', 'user_id': user,
+                'slim': True, 'content': 'live answer',
+                'thinking': 'live reasoning',
+                'event_payload': {
+                    'phase': 'generating',
+                    'projection': {'mustNotPersistTwice': True},
+                },
+                'now': _TURN_TS + 3_000,
+            }, command=True, ignore_fields=attempt_clock),
+            read('turn.get', f'{ns}_conv', ignore=attempt_clock,
+                 turn_id=f'{ns}_assistant'),
+            Step('turn.events.list', {
+                'attempt_id': _Ref(2, ('attempt', 'attemptId')),
+                'user_id': user, 'projection_mode': 'patch',
+            }, ignore_fields=attempt_clock),
+            Step('turn.event.record', {
+                'attempt_id': _Ref(2, ('attempt', 'attemptId')),
+                'task_id': f'{ns}_event_task', 'user_id': user,
+                'terminal': True, 'status': 'completed', 'slim': True,
+                'content': 'final answer', 'thinking': 'done',
+                'settlement': {
+                    'outcome': 'completed', 'cause': 'finished',
+                    'resumeOptions': [],
+                },
+                'event_payload': {'status': 'completed', 'phase': None},
+                'now': _TURN_TS + 4_000,
+            }, command=True, ignore_fields=attempt_clock),
+            read('turn.get', f'{ns}_conv', ignore=attempt_clock,
+                 turn_id=f'{ns}_assistant'),
+            Step('turn.attempt.get', {
+                'attempt_id': _Ref(2, ('attempt', 'attemptId')),
+                'user_id': user,
+            }, ignore_fields=attempt_clock),
+        ]),
+    }
+
+
+def _turn_live_injection_scripts(*, build, read, defaults, attempt_clock, edited) -> dict[str, list[Step]]:
+    """turn.steer.commit and turn.related.announce into a bound live attempt.
+
+    Shares ``_turn_scripts``' builders and ignored clock fields so identities
+    and revisions stay exactly comparable with the rest of the Turn domain.
+    """
+    user = _OWNER_ID
+
+    return {
+        'turn steer commit atomically appends one live operator injection': build(lambda ns: [
+            Step('turn.create_pair', {
+                'conversation_id': f'{ns}_conv', 'user_id': user,
+                'command_id': f'{ns}_pair_command',
+                'input_projection': {'content': 'steer this response'},
+                'config': {'model': 'steer-differential'},
+                'now': _TURN_TS + 1000,
+                'conversation_defaults': defaults(),
+            }, command=True),
+            Step('turn.attempt.bind', {
+                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
+                'task_id': f'{ns}_task', 'user_id': user,
+            }, command=True, ignore_fields=attempt_clock),
+            Step('turn.steer.commit', {
+                'conversation_id': f'{ns}_conv', 'user_id': user,
+                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
+                'command_id': f'{ns}_steer_command',
+                'text': 'focus on the atomic durable boundary',
+                'author': {'actor': 'human', 'text': 'focus on the atomic durable boundary'},
+            }, command=True, ignore_fields=edited),
+            read(
+                'turn.get', f'{ns}_conv', edited,
+                turn_id=_Ref(0, ('turn', 'turnId')),
+            ),
+            read('turn.revision', f'{ns}_conv'),
+            Step('turn.sync.changes', {
+                'conversation_id': f'{ns}_conv', 'user_id': user,
+                'after': 0, 'limit': 10,
+            }, ignore_fields=edited),
+        ]),
+        'turn related announce bridges one live root revision and replay event': build(lambda ns: [
+            Step('turn.create_pair', {
+                'conversation_id': f'{ns}_conv', 'user_id': user,
+                'command_id': f'{ns}_pair_command',
+                'input_projection': {'content': 'related input'},
+                'config': {'model': 'related-differential'},
+                'now': _TURN_TS + 1000,
+                'conversation_defaults': defaults(),
+            }, command=True),
+            Step('turn.attempt.bind', {
+                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
+                'task_id': f'{ns}_task', 'user_id': user,
+            }, command=True, ignore_fields=attempt_clock),
+            Step('turn.related.announce', {
+                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
+                'turn_ids': [_Ref(0, ('submittedTurn', 'turnId'))],
+                'user_id': user,
+            }, command=True),
+            read(
+                'turn.get', f'{ns}_conv', edited,
+                turn_id=_Ref(0, ('turn', 'turnId')),
+            ),
+            Step('turn.events.list', {
+                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
+                'user_id': user, 'projection_mode': 'patch',
+            }, ignore_fields=edited),
+            Step('turn.sync.changes', {
+                'conversation_id': f'{ns}_conv', 'user_id': user,
+                'after': 0, 'limit': 10,
+            }, ignore_fields=edited),
+        ]),
+    }
+
+
 def _turn_scripts() -> dict[str, list[Step]]:
     """Turn, attempt, branch and conversation-sync domain.
 
@@ -1594,6 +2445,9 @@ def _turn_scripts() -> dict[str, list[Step]]:
     dispatch_now = int(time.time() * 1000)
 
     return {
+        **_turn_event_scripts(
+            build=build, append=append, read=read, defaults=defaults,
+            attempt_clock=attempt_clock, visible_event_fields=visible_event_fields),
         'turn create pair commits one revision and replays by command': build(lambda ns: [
             Step('turn.create_pair', {
                 'conversation_id': f'{ns}_conv', 'user_id': user,
@@ -1710,66 +2564,8 @@ def _turn_scripts() -> dict[str, list[Step]]:
                 'after': 0, 'limit': 10,
             }),
         ]),
-        'turn steer commit atomically appends one live operator injection': build(lambda ns: [
-            Step('turn.create_pair', {
-                'conversation_id': f'{ns}_conv', 'user_id': user,
-                'command_id': f'{ns}_pair_command',
-                'input_projection': {'content': 'steer this response'},
-                'config': {'model': 'steer-differential'},
-                'now': _TURN_TS + 1000,
-                'conversation_defaults': defaults(),
-            }, command=True),
-            Step('turn.attempt.bind', {
-                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
-                'task_id': f'{ns}_task', 'user_id': user,
-            }, command=True, ignore_fields=attempt_clock),
-            Step('turn.steer.commit', {
-                'conversation_id': f'{ns}_conv', 'user_id': user,
-                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
-                'command_id': f'{ns}_steer_command',
-                'text': 'focus on the atomic durable boundary',
-            }, command=True, ignore_fields=edited),
-            read(
-                'turn.get', f'{ns}_conv', edited,
-                turn_id=_Ref(0, ('turn', 'turnId')),
-            ),
-            read('turn.revision', f'{ns}_conv'),
-            Step('turn.sync.changes', {
-                'conversation_id': f'{ns}_conv', 'user_id': user,
-                'after': 0, 'limit': 10,
-            }, ignore_fields=edited),
-        ]),
-        'turn related announce bridges one live root revision and replay event': build(lambda ns: [
-            Step('turn.create_pair', {
-                'conversation_id': f'{ns}_conv', 'user_id': user,
-                'command_id': f'{ns}_pair_command',
-                'input_projection': {'content': 'related input'},
-                'config': {'model': 'related-differential'},
-                'now': _TURN_TS + 1000,
-                'conversation_defaults': defaults(),
-            }, command=True),
-            Step('turn.attempt.bind', {
-                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
-                'task_id': f'{ns}_task', 'user_id': user,
-            }, command=True, ignore_fields=attempt_clock),
-            Step('turn.related.announce', {
-                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
-                'turn_ids': [_Ref(0, ('submittedTurn', 'turnId'))],
-                'user_id': user,
-            }, command=True),
-            read(
-                'turn.get', f'{ns}_conv', edited,
-                turn_id=_Ref(0, ('turn', 'turnId')),
-            ),
-            Step('turn.events.list', {
-                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
-                'user_id': user, 'projection_mode': 'patch',
-            }, ignore_fields=edited),
-            Step('turn.sync.changes', {
-                'conversation_id': f'{ns}_conv', 'user_id': user,
-                'after': 0, 'limit': 10,
-            }, ignore_fields=edited),
-        ]),
+        **_turn_live_injection_scripts(
+            build=build, read=read, defaults=defaults, attempt_clock=attempt_clock, edited=edited),
         'turn visible sync commits flow phases with stable tool segments': build(lambda ns: [
             Step('turn.create_pair', {
                 'conversation_id': f'{ns}_conv', 'user_id': user,
@@ -2172,58 +2968,6 @@ def _turn_scripts() -> dict[str, list[Step]]:
             }, ignore_fields=frozenset({'recordedAt'})),
             read('turn.get', f'{ns}_conv', ignore=attempt_clock,
                  turn_id=f'{ns}_assistant'),
-        ]),
-        'turn event record advances live and terminal authority': build(lambda ns: [
-            append(f'{ns}_conv', f'{ns}_human', 0),
-            append(f'{ns}_conv', f'{ns}_assistant', 1, actor='assistant'),
-            Step('turn.attempt.create', {
-                'conversation_id': f'{ns}_conv', 'user_id': user,
-                'turn_id': f'{ns}_assistant',
-                'command_id': f'{ns}_event_attempt',
-                'operation': 'regenerate',
-                'target_actor': 'assistant', 'target_kind': 'reply',
-                'expected_projection_revision': 1,
-                'config': {},
-            }, command=True, ignore_fields=attempt_clock),
-            Step('turn.attempt.bind', {
-                'attempt_id': _Ref(2, ('attempt', 'attemptId')),
-                'task_id': f'{ns}_event_task', 'user_id': user,
-            }, command=True, ignore_fields=attempt_clock),
-            Step('turn.event.record', {
-                'attempt_id': _Ref(2, ('attempt', 'attemptId')),
-                'task_id': f'{ns}_event_task', 'user_id': user,
-                'slim': True, 'content': 'live answer',
-                'thinking': 'live reasoning',
-                'event_payload': {
-                    'phase': 'generating',
-                    'projection': {'mustNotPersistTwice': True},
-                },
-                'now': _TURN_TS + 3_000,
-            }, command=True, ignore_fields=attempt_clock),
-            read('turn.get', f'{ns}_conv', ignore=attempt_clock,
-                 turn_id=f'{ns}_assistant'),
-            Step('turn.events.list', {
-                'attempt_id': _Ref(2, ('attempt', 'attemptId')),
-                'user_id': user, 'projection_mode': 'patch',
-            }, ignore_fields=attempt_clock),
-            Step('turn.event.record', {
-                'attempt_id': _Ref(2, ('attempt', 'attemptId')),
-                'task_id': f'{ns}_event_task', 'user_id': user,
-                'terminal': True, 'status': 'completed', 'slim': True,
-                'content': 'final answer', 'thinking': 'done',
-                'settlement': {
-                    'outcome': 'completed', 'cause': 'finished',
-                    'resumeOptions': [],
-                },
-                'event_payload': {'status': 'completed', 'phase': None},
-                'now': _TURN_TS + 4_000,
-            }, command=True, ignore_fields=attempt_clock),
-            read('turn.get', f'{ns}_conv', ignore=attempt_clock,
-                 turn_id=f'{ns}_assistant'),
-            Step('turn.attempt.get', {
-                'attempt_id': _Ref(2, ('attempt', 'attemptId')),
-                'user_id': user,
-            }, ignore_fields=attempt_clock),
         ]),
         'turn replay and attempt event retention advance in bounded order': build(lambda ns: [
             # The legacy fixture retains one authority across parameterized
@@ -4607,6 +5351,16 @@ def _timer_scripts() -> dict[str, list[Step]]:
                 'timer_id': first, 'user_id': user,
                 'now': '2026-09-05T10:04:00',
             }, command=True),
+            # A poll that finishes after settlement advances nothing.
+            Step('timer.poll.commit', {
+                **poll, 'poll_id': f'late-{suffix}',
+                'poll_time': '2026-09-05T10:05:00', 'decision': 'wait',
+                'reason': 'Timer no longer active',
+            }, command=True),
+            Step('timer.get', {'timer_id': first, 'user_id': user}),
+            Step('timer.poll.log', {
+                'timer_id': first, 'user_id': user, 'limit': 20,
+            }),
             Step('timer.active.count', {'user_id': user}),
             Step('timer.list', {'user_id': user, 'limit': 20}),
         ],
@@ -5274,6 +6028,20 @@ def _worker_job_scripts() -> dict[str, list[Step]]:
             claim(ns, 'w5', ['ka', 'kb'], now0 + 31_000),
             Step('worker_job.get', {'task_id': f'{ns}_j2', 'user_id': user}),
         ]),
+        'worker job claim horizon predicts claims': build(lambda ns: [
+            Step('worker_job.claim_horizon', {'task_kinds': [f'{ns}_ka']}),
+            enqueue(ns, 'j1', 'ka', 'k1', available_at_ms=now0 + 60_000),
+            # Not yet available: a positive delay, and the claim agrees.
+            Step('worker_job.claim_horizon', {'task_kinds': [f'{ns}_ka']}),
+            claim(ns, 'w1', ['ka'], now0),
+            enqueue(ns, 'j2', 'kb', 'k2'),
+            Step('worker_job.claim_horizon', {'task_kinds': [f'{ns}_ka', f'{ns}_kb']}),
+            claim(ns, 'w1', ['ka', 'kb'], now0),
+            # Only the live kb lease and the delayed ka job remain.
+            Step('worker_job.claim_horizon', {'task_kinds': [f'{ns}_kb', f'{ns}_kb']}),
+            Step('worker_job.claim_horizon', {'task_kinds': []}),
+            Step('worker_job.claim_horizon', {}),
+        ]),
         'worker job claim validation bounds': build(lambda ns: [
             enqueue(ns, 'j1', 'ka', 'k1'),
             Step('worker_job.claim_next', {
@@ -5543,7 +6311,7 @@ def _search_scripts() -> dict[str, list[Step]]:
             search(f'{w}after', 0),
         ]),
         'search limit bounds': [
-            Step('conversation.search', {'user_id': user, 'query': 'x'}),
+            Step('conversation.search', {'user_id': user, 'query': 'x'}, eventual=True),
             # Two consecutive application-error queries are the observed
             # ceiling: the legacy client suppresses every later query
             # with database_unavailable for a window, which is client
@@ -5557,7 +6325,7 @@ def _search_scripts() -> dict[str, list[Step]]:
             }),
         ],
         'search snippet radius bound': [
-            Step('conversation.search', {'user_id': user, 'query': 'zzqqx'}),
+            Step('conversation.search', {'user_id': user, 'query': 'zzqqx'}, eventual=True),
             Step('conversation.search', {
                 'user_id': user, 'query': 'ab', 'snippet_radius': 401,
             }),
@@ -6719,7 +7487,61 @@ def _billing_scripts() -> dict[str, list[Step]]:
     payment_id = f'payment-{suffix}'
     second_payment_id = f'payment-second-{suffix}'
     provider_id = f'provider-payment-{suffix}'
+    unbound_payment = {
+        'id': payment_id, 'user_id': user, 'provider': 'stripe',
+        'provider_id': '', 'amount_minor': 499, 'currency': 'USD',
+        'credit_micro': 0, 'status': 'pending', 'raw': {},
+    }
+    binding = {
+        'payment_id': payment_id, 'user_id': user, 'provider': 'stripe',
+        'provider_id': f'pi_{suffix}', 'amount_minor': 499, 'currency': 'USD',
+    }
+    payment_clocks = frozenset({'created_at', 'settled_at'})
     return {
+        'billing payment binding preserves frozen facts claims and settled replay': [
+            Step('billing.payment.record', unbound_payment, command=True,
+                 ignore_fields=payment_clocks),
+            *[Step('billing.payment.bind', {**binding, **invalid}, command=True)
+              for invalid in (
+                  {'payment_id': f'missing-{suffix}'}, {'user_id': f'foreign-{suffix}'},
+                  {'provider': 'alipay'}, {'amount_minor': 500}, {'currency': 'EUR'},
+              )],
+            Step('billing.payment.bind', binding, command=True, ignore_fields=payment_clocks),
+            Step('billing.payment.bind', binding, command=True, ignore_fields=payment_clocks),
+            Step('billing.payment.bind', {**binding, 'provider_id': f'pi_other_{suffix}'}, command=True),
+            Step('billing.payment.record', {**unbound_payment, 'id': second_payment_id},
+                 command=True, ignore_fields=payment_clocks),
+            Step('billing.payment.bind', {**binding, 'payment_id': second_payment_id}, command=True),
+            Step('billing.payment.find', {'provider': 'stripe', 'provider_id': binding['provider_id']},
+                 ignore_fields=payment_clocks),
+            Step('billing.payment.settle', {'payment_id': payment_id,
+                                           'ledger_id': f'binding-ledger-{suffix}'},
+                 command=True, ignore_fields=payment_clocks),
+            Step('billing.payment.bind', binding, command=True, ignore_fields=payment_clocks),
+            Step('billing.payment.bind', {**binding, 'provider_id': f'pi_other_{suffix}'}, command=True),
+            Step('billing.payment.list', {'user_id': user, 'provider': 'stripe', 'status': '',
+                                         'limit': 20, 'offset': 0}, ignore_fields=payment_clocks),
+        ],
+        'billing payment binding replaces only the witnessed legacy checkout claim': [
+            Step('billing.payment.record', {
+                **unbound_payment, 'provider_id': f'cs_{suffix}',
+                'raw': {'checkout_session': f'cs_{suffix}'},
+            }, command=True, ignore_fields=payment_clocks),
+            Step('billing.payment.bind', {**binding, 'legacy_session_id': f'cs_wrong_{suffix}'}, command=True),
+            Step('billing.payment.bind', {**binding, 'legacy_session_id': f'cs_{suffix}',
+                                         'provider_id': f'cs_new_{suffix}'}, command=True),
+            Step('billing.payment.bind', {**binding, 'legacy_session_id': f'cs_{suffix}'},
+                 command=True, ignore_fields=payment_clocks),
+            Step('billing.payment.find', {'provider': 'stripe', 'provider_id': f'cs_{suffix}'}),
+            Step('billing.payment.find', {'provider': 'stripe', 'provider_id': binding['provider_id']},
+                 ignore_fields=payment_clocks),
+            Step('billing.payment.bind', binding, command=True, ignore_fields=payment_clocks),
+            Step('billing.payment.record', {**unbound_payment, 'id': second_payment_id,
+                                            'status': 'failed'},
+                 command=True, ignore_fields=payment_clocks),
+            Step('billing.payment.bind', {**binding, 'payment_id': second_payment_id,
+                                         'provider_id': f'pi_failed_{suffix}'}, command=True),
+        ],
         # Aggregate invariants with no tie-break risk already exist above.
         # The probes below pin the documented list-ordering contracts that
         # the Rust OCC executor must reproduce without SQL: same-timestamp
@@ -7117,6 +7939,29 @@ def _orchestration_scripts() -> dict[str, list[Step]]:
 
 def _swarm_scripts() -> dict[str, list[Step]]:
     swarm_key = f'swarm-{uuid.uuid4().hex[:8]}'
+    marker_key = f'swarm-marker-{uuid.uuid4().hex[:8]}'
+    append_key = f'swarm-append-{uuid.uuid4().hex[:8]}'
+    transcript = [{'role': 'tool', 'content': f'{index}:' + 'x' * 2048} for index in range(4)]
+
+    def append(*, base, count, checkpoint_id, now_ms, messages, status='running', **extra):
+        return {'swarm_key': append_key, 'agent_id': 'a', 'base_checkpoint_id': base,
+                'base_message_count': count, 'checkpoint_id': checkpoint_id,
+                'messages': messages, 'result': {'step': now_ms}, 'status': status,
+                'rounds_used': now_ms // 100, 'now_ms': now_ms, **extra}
+
+    def marker(*, now_ms, rounds_used=2, result=None):
+        return {'swarm_key': marker_key, 'agent_id': 'a', 'rounds_used': rounds_used,
+                'now_ms': now_ms, 'result': result if result is not None else {
+                    'checkpoint_phase': 'model_in_flight', 'actuals_complete': False,
+                    'total_tokens': 140, 'cost_usd': 0.25}}
+
+    def marker_save(*, now_ms):
+        return {'swarm_key': marker_key, 'agent_id': 'a', 'role': 'coder',
+                'objective': 'resume safely', 'status': 'running',
+                'messages': [{'role': 'tool', 'content': 'x' * 2048}],
+                'result': {'checkpoint_phase': 'ready', 'actuals_complete': True,
+                           'total_tokens': 100, 'tool_log': [{'tool': 'read_files'}]},
+                'rounds_used': 2, 'delivered': None, 'now_ms': now_ms}
     return {
         'swarm checkpoints delivery quarantine repair and lifecycle': [
             Step('swarm.session.save', {
@@ -7153,7 +7998,24 @@ def _swarm_scripts() -> dict[str, list[Step]]:
                 'now_ms': 500,
             }, command=True),
             Step('swarm.session.get', {'swarm_key': swarm_key}),
+            Step('swarm.session.get', {'swarm_key': swarm_key, 'include_agents': False}),
+            Step('swarm.agents.page', {'swarm_key': swarm_key}),
+            Step('swarm.agents.page', {'swarm_key': swarm_key, 'after_agent_id': 'a'}),
+            Step('swarm.agents.page', {'swarm_key': 'missing-swarm'}),
+            Step('swarm.agent.state.get', {'swarm_key': swarm_key, 'agent_id': 'a'}),
+            Step('swarm.agent.state.get', {'swarm_key': swarm_key, 'agent_id': 'absent'}),
+            Step('swarm.agent.state.get', {'swarm_key': 'missing-swarm', 'agent_id': 'a'}),
             Step('swarm.resumable.list', {}),
+            Step('swarm.agents.acknowledge_results', {
+                'swarm_key': swarm_key, 'task_id': 'task-first', 'agent_ids': ['b'],
+            }, command=True),
+            Step('swarm.session.get', {'swarm_key': swarm_key}),
+            Step('swarm.agents.acknowledge_results', {
+                'swarm_key': swarm_key, 'task_id': 'task-second', 'agent_ids': ['b', 'b'],
+            }, command=True),
+            Step('swarm.agents.acknowledge_results', {
+                'swarm_key': swarm_key, 'task_id': 'task-second', 'agent_ids': ['b'],
+            }, command=True),
             Step('swarm.agents.mark_delivered', {
                 'swarm_key': swarm_key, 'agent_ids': ['b', 'b', 'missing'],
             }, command=True),
@@ -7179,6 +8041,109 @@ def _swarm_scripts() -> dict[str, list[Step]]:
             Step('swarm.session.delete', {'swarm_key': swarm_key}, command=True),
             Step('swarm.session.delete', {'swarm_key': swarm_key}, command=True),
             Step('swarm.session.get', {'swarm_key': swarm_key}),
+        ],
+        'swarm checkpoint markers overlay compact fields until the next full save': [
+            Step('swarm.session.save', {
+                'swarm_key': marker_key, 'conv_id': 'conv-marker',
+                'task_id': 'task-marker', 'status': 'running', 'specs': [{'id': 'a'}],
+                'config': {'user_id': _OWNER_ID}, 'now_ms': 100,
+            }, command=True),
+            Step('swarm.agent.checkpoint.mark', marker(rounds_used=1, now_ms=150),
+                 command=True),
+            Step('swarm.agent.state.get', {'swarm_key': marker_key, 'agent_id': 'a'}),
+            Step('swarm.agent.save', marker_save(now_ms=200), command=True),
+            Step('swarm.agent.checkpoint.mark', marker(rounds_used=3, now_ms=300),
+                 command=True),
+            Step('swarm.agent.checkpoint.mark', marker(
+                result={'elapsed_seconds': 7.5, 'checkpoint_phase': None},
+                rounds_used=4, now_ms=310), command=True),
+            Step('swarm.agents.acknowledge_results', {
+                'swarm_key': marker_key, 'task_id': 'task-marker', 'agent_ids': ['a'],
+            }, command=True),
+            Step('swarm.session.get', {'swarm_key': marker_key}),
+            Step('swarm.agents.page', {'swarm_key': marker_key}),
+            Step('swarm.agent.state.get', {'swarm_key': marker_key, 'agent_id': 'a'}),
+            Step('swarm.resumable.list', {}),
+            Step('swarm.agent.checkpoint.mark', marker(result={}, now_ms=400),
+                 command=True),
+            Step('swarm.agent.checkpoint.mark', marker(
+                result={'messages': []}, now_ms=400), command=True),
+            Step('swarm.agent.checkpoint.mark', marker(
+                result={'total_tokens': [1]}, now_ms=400), command=True),
+            Step('swarm.agent.checkpoint.mark', marker(
+                result={'checkpoint_phase': 'p' * 65}, now_ms=400), command=True),
+            Step('swarm.agent.checkpoint.mark', marker(rounds_used=-1, now_ms=400),
+                 command=True),
+            Step('swarm.agent.save', marker_save(now_ms=500), command=True),
+            Step('swarm.session.get', {'swarm_key': marker_key}),
+            Step('swarm.agent.state.get', {'swarm_key': marker_key, 'agent_id': 'a'}),
+            Step('swarm.agent.checkpoint.mark', marker(rounds_used=5, now_ms=600),
+                 command=True),
+            Step('swarm.session.delete', {'swarm_key': marker_key}, command=True),
+            Step('swarm.agent.checkpoint.mark', marker(rounds_used=6, now_ms=700),
+                 command=True),
+        ],
+        'swarm appends extend only the exact checkpoint their writer last saved': [
+            Step('swarm.session.save', {
+                'swarm_key': append_key, 'conv_id': 'conv-append',
+                'task_id': 'task-append', 'status': 'running', 'specs': [{'id': 'a'}],
+                'config': {'user_id': _OWNER_ID}, 'now_ms': 100,
+            }, command=True),
+            Step('swarm.agent.append', append(
+                base='c0', count=0, checkpoint_id='c1', now_ms=150, messages=[]),
+                command=True),
+            Step('swarm.agent.save', {
+                'swarm_key': append_key, 'agent_id': 'a', 'role': 'coder',
+                'objective': 'append safely', 'status': 'running',
+                'messages': transcript[:1], 'result': {'step': 200}, 'rounds_used': 2,
+                'delivered': None, 'checkpoint_id': 'c0', 'now_ms': 200,
+            }, command=True),
+            Step('swarm.agent.checkpoint.mark', {
+                'swarm_key': append_key, 'agent_id': 'a', 'rounds_used': 2,
+                'result': {'checkpoint_phase': 'model_in_flight'}, 'now_ms': 250,
+            }, command=True),
+            Step('swarm.agent.append', append(
+                base='c0', count=1, checkpoint_id='c1', now_ms=300,
+                messages=transcript[1:3]), command=True),
+            Step('swarm.agent.append', append(
+                base='c0', count=3, checkpoint_id='c9', now_ms=350,
+                messages=transcript[:1]), command=True),
+            Step('swarm.agent.append', append(
+                base='c1', count=2, checkpoint_id='c9', now_ms=350,
+                messages=transcript[:1]), command=True),
+            Step('swarm.agents.acknowledge_results', {
+                'swarm_key': append_key, 'task_id': 'task-append', 'agent_ids': ['a'],
+            }, command=True),
+            Step('swarm.agent.append', append(
+                base='c1', count=3, checkpoint_id='c2', now_ms=400,
+                messages=transcript[3:], status='completed'), command=True),
+            Step('swarm.session.get', {'swarm_key': append_key}),
+            Step('swarm.agents.page', {'swarm_key': append_key}),
+            Step('swarm.agent.state.get', {'swarm_key': append_key, 'agent_id': 'a'}),
+            Step('swarm.resumable.list', {}),
+            Step('swarm.agent.append', append(
+                base='c2', count=4, checkpoint_id='c3', now_ms=500, messages=[],
+                base_message_count=-1), command=True),
+            Step('swarm.agent.append', append(
+                base='', count=4, checkpoint_id='c3', now_ms=500, messages=[]),
+                command=True),
+            Step('swarm.agent.append', append(
+                base='c2', count=4, checkpoint_id='c3', now_ms=500, messages={}),
+                command=True),
+            Step('swarm.agent.save', {
+                'swarm_key': append_key, 'agent_id': 'a', 'role': 'coder',
+                'objective': 'append safely', 'status': 'running',
+                'messages': transcript[:1], 'result': {}, 'rounds_used': 6,
+                'delivered': None, 'now_ms': 600,
+            }, command=True),
+            Step('swarm.agent.append', append(
+                base='c2', count=1, checkpoint_id='c3', now_ms=700,
+                messages=transcript[1:2]), command=True),
+            Step('swarm.session.get', {'swarm_key': append_key}),
+            Step('swarm.session.delete', {'swarm_key': append_key}, command=True),
+            Step('swarm.agent.append', append(
+                base='c2', count=1, checkpoint_id='c3', now_ms=800, messages=[]),
+                command=True),
         ],
     }
 
@@ -7690,8 +8655,10 @@ def _conversation_diagnostic_scripts() -> dict[str, list[Step]]:
 
 def _all_scripts() -> dict[str, list[Step]]:
     scripts = _record_scripts()
+    scripts.update(_project_dispatch_scripts())
     scripts.update(_project_recent_scripts())
     scripts.update(_project_relink_scripts())
+    scripts.update(_project_dispatch_scripts())
     scripts.update(_event_scripts())
     scripts.update(_conversation_scripts())
     scripts.update(_conversation_diagnostic_scripts())
@@ -7773,6 +8740,16 @@ KNOWN_DIVERGENCES: dict[str, str] = {
         'authority_scope_mismatch before any operation runs. Neither answer '
         'is reachable in production, where the routed payload identity always '
         'matches the authenticated owner.'),
+    'project.dispatch foreign-owner payload identity': (
+        'the multi-owner legacy sidecar answers a payload user_id naming '
+        'another owner inside that owner\'s own key prefix: reads are empty '
+        'and a commit runs its CAS against that owner\'s separate head. '
+        'Tofu-DB serves each owner through its own authenticated daemon and '
+        'rejects the foreign payload identity at the compile boundary with '
+        'authority_scope_mismatch. The compared reads that follow show the '
+        'authenticated owner\'s project unchanged on both authorities; '
+        'test_project_dispatch_owner_scopes_and_command_receipts_match '
+        'compares genuine two-owner isolation with one daemon per owner.'),
     'project brain format-native cutover state': (
         'a new SQLite/PostgreSQL sidecar starts before its one-time legacy '
         'Project Brain table cutover, while a Tofu-DB authority cannot contain '
@@ -7879,6 +8856,14 @@ def _worker_comparison_value(operation, value):
     if not operation.startswith('worker_job.') or not isinstance(value, dict):
         return value
     result = dict(value)
+    if operation == 'worker_job.claim_horizon':
+        # 0 (claimable now) and null (nothing pending) are exact; a future
+        # delay is read from each engine's own clock at a different instant.
+        delay = result.get('claimableInMs')
+        assert delay is None or (type(delay) is int and delay >= 0), result
+        if delay:
+            result['claimableInMs'] = '<authority-clock>'
+        return result
     if isinstance(result.get('job'), dict):
         result['job'] = _worker_comparison_value(operation, result['job'])
     for key in _WORKER_AUTHORITY_TIME_FIELDS:
@@ -8002,7 +8987,17 @@ def _format_divergence(
 def _assert_management_outcomes(name, outcomes):
     """Successful commands must mutate state, not merely agree on rejection."""
     values = [outcome for _, outcome in outcomes]
-    if name.startswith(('automation owned project', 'automation owned skill')):
+    if name == 'project dispatch atomic head children and rollback':
+        assert all(value.ok for value in values[:5])
+        assert values[0].value is None
+        assert values[1].value['version'] == values[2].value['version'] == 1
+        assert len(values[3].value) == 1
+        assert values[5].error_code == 'database_conflict'
+        assert values[6].ok and values[6].value is None
+        assert values[7].ok and values[7].value['version'] == 1
+    elif name.startswith('project dispatch'):
+        _assert_project_dispatch_outcomes(name, outcomes)
+    elif name.startswith(('automation owned project', 'automation owned skill')):
         assert all(value.ok for value in values[:3])
         assert values[0].value == values[1].value
         assert values[0].value['version'] == 1
@@ -8264,6 +9259,48 @@ def test_integration_delivery_page_cross_owner_claim_beyond_128(
             })
             assert exact == {'rows': expected[-2:], 'hasMore': False,
                              'nextAfterId': 0}
+            observed.append([{key: value for key, value in row.items() if key != 'id'}
+                             for row in rows])
+    assert observed[0] == observed[1]
+
+
+def test_integration_delivery_action_page_selects_every_owner_identically(
+    legacy_driver, integration_owner_daemon,
+):
+    """The resume worker's system-scoped page spans owners on both authorities."""
+    project = '/diff/integration-delivery-action'
+    observed = []
+    for native in (False, True):
+        owner_context = (integration_owner_daemon if native
+                         else lambda _owner: nullcontext(legacy_driver))
+        expected = []
+        for owner in (_OWNER_ID, _OWNER_ID + 1):
+            with owner_context(owner) as driver:
+                for index, receipt in enumerate(('pending', 'preserved', 'blocked')):
+                    registration = _integration_registration(
+                        owner, project, f'action-{owner}-{index}',
+                        f'/diff/action-workspaces/{owner}-{index}', float(index + 1),
+                        origin_json=json.dumps({'delivery': {'state': receipt}}))
+                    _integration_call(driver, 'register', registration, command=True)
+                    if receipt != 'preserved':
+                        expected.append(_integration_call(driver, 'get', registration))
+        with owner_context(_OWNER_ID) as driver:
+            rows, cursor = [], 0
+            for _ in range(8):
+                page = _integration_call(driver, 'delivery_action_page', {
+                    'after_id': cursor, 'limit': 1})
+                assert set(page) == {'rows', 'hasMore', 'nextAfterId'}
+                rows.extend(page['rows'])
+                if not page['hasMore']:
+                    assert page['nextAfterId'] == 0
+                    break
+                cursor = page['nextAfterId']
+                assert cursor == page['rows'][-1]['id']
+            else:
+                pytest.fail('delivery action pagination did not terminate within eight pages')
+            rows = [row for row in rows if row['project_root'] == project]
+            assert rows == expected
+            assert {row['user_id'] for row in rows} == {_OWNER_ID, _OWNER_ID + 1}
             observed.append([{key: value for key, value in row.items() if key != 'id'}
                              for row in rows])
     assert observed[0] == observed[1]
@@ -9010,13 +10047,74 @@ def test_search_v2_pages_preserve_title_sources_and_long_message_tail(legacy_dri
     assert results[0][0]['match_field'] == 'title'
     assert results[0][1]['match_field'] == 'originalContent'
     assert results[0][1]['role'] == 'user'
+    # Body hits name their live Turn; title hits (including the cross-field
+    # match whose first word is only in the title) name none.
+    assert [(hit['match_field'], hit['turn_id'], hit['ordinal']) for hit in results[0]] == [
+        ('title', None, None), ('originalContent', token + 'literalturn', 0),
+        ('title', None, None)]
+    assert (tails[0][0]['match_field'], tails[0][0]['turn_id']) == ('id', None)
     assert token + 'tail' in tails[0][0]['snippet']
-    for driver in drivers:
-        for invalid in ({'query': 'x' * 513}, {'query': 'x\0y'}, {'page': 1}, {'cursor': 'malformed'}):
-            outcome = driver.execute('conversation.search', {
-                'user_id': _OWNER_ID, 'query': phrase, 'page': True, **invalid,
-            }, None)
-            assert not outcome.ok and outcome.error_code == 'database_protocol_error', outcome
+    # docs/STORAGE.md "Search input classification": the application rejects
+    # query and page faults before dispatch, so storage reports them as protocol
+    # errors; only a cursor the authority rejects is the caller's payload fault.
+    rejected = [
+        ({'query': 'x' * 513}, 'database_protocol_error'),
+        ({'query': 'x\0y'}, 'database_protocol_error'),
+        ({'page': 1}, 'database_protocol_error'),
+        ({'cursor': 'malformed'}, 'database_invalid_payload'),
+    ]
+    outcomes = [[driver.execute('conversation.search', {
+        'user_id': _OWNER_ID, 'query': phrase, 'page': True, **invalid,
+    }, None) for invalid, _ in rejected] for driver in drivers]
+    assert [[(outcome.ok, outcome.error_code) for outcome in lane] for lane in outcomes] == [
+        [(False, code) for _, code in rejected]] * len(drivers), outcomes
+
+
+def test_conversation_get_anchor_windows_match(legacy_driver, tofudb_daemon):
+    """Both authorities place an anchored window identically."""
+    conversation = 'anchored' + uuid.uuid4().hex[:12]
+    drivers = [legacy_driver, tofudb_daemon]
+    turn_ids = [f'{conversation}-turn-{index}' for index in range(7)]
+    for index, turn_id in enumerate(turn_ids):
+        payload = {
+            'conversation_id': conversation, 'user_id': _OWNER_ID,
+            'actor': 'human' if index % 2 == 0 else 'assistant',
+            'status': 'completed', 'projection': {'content': f'message {index}'},
+            'lane_id': 'main', 'command_id': turn_id + '-command', 'turn_id': turn_id,
+            'created_at': _TURN_TS + index, 'now': _TURN_TS + index,
+            'conversation_defaults': {'allowCreate': True, 'title': 'Anchored',
+                                      'createdAt': _TURN_TS, 'settings': {}},
+        }
+        for driver in drivers:
+            outcome = driver.execute('turn.append_settled', payload, turn_id + '-command')
+            assert outcome.ok, outcome
+
+    def window(driver, **payload):
+        outcome = driver.execute('conversation.get', {
+            'conv_id': conversation, 'user_id': _OWNER_ID, **payload}, None)
+        if not outcome.ok:
+            return outcome.error_code
+        value = outcome.value
+        return (value['message_page'], value['metadata']['msg_count'],
+                [message['_turnId'] for message in value['messages']])
+
+    cases = [
+        {'message_window': 3, 'anchor_turn_id': turn_ids[3]},
+        {'message_window': 4, 'anchor_turn_id': turn_ids[6]},
+        {'message_window': 5, 'anchor_turn_id': turn_ids[0]},
+        {'message_window': 1, 'anchor_turn_id': turn_ids[2]},
+        {'message_window': 3, 'anchor_turn_id': 'missing-turn'},
+        {'anchor_turn_id': turn_ids[1]},
+        {'message_window': 2, 'before_sequence': 4, 'anchor_turn_id': turn_ids[1]},
+        {'message_window': 2, 'anchor_turn_id': ''},
+    ]
+    observed = [[window(driver, **case) for case in cases] for driver in drivers]
+    assert observed[0] == observed[1]
+    assert observed[0][0] == (
+        {'total_count': 7, 'start': 2, 'end': 5, 'anchor_sequence': 3}, 7, turn_ids[2:5])
+    assert observed[0][4] == (
+        {'total_count': 7, 'start': 0, 'end': 0, 'anchor_sequence': None}, 7, [])
+    assert observed[0][5:] == ['database_protocol_error'] * 3
 
 
 @pytest.mark.parametrize('driver_name', ['legacy_driver', 'tofudb_daemon'])

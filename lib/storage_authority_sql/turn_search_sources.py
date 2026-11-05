@@ -14,6 +14,9 @@ from lib.storage_authority_sql.turn_projection_head import projection_from_turn_
 
 MAX_BYTES = 2_000_000
 MAX_MESSAGE_BYTES = 250_000
+# Chunk identity prefix of frozen pre-Turn and retained archive messages; such
+# text has no live Turn to address (native: ARCHIVED_SOURCE_PREFIX).
+ARCHIVED_SOURCE_PREFIX = 'history:'
 
 
 def _one(session, sql, params):
@@ -189,7 +192,8 @@ def history_page(session, identity, cursor):
                 raise ValueError('malformed_source') from exc
             if value.get('role') in ('user', 'assistant'):
                 rows.append({'user_id': owner, 'conversation_id': conv,
-                    'turn_id': 'history:' + orjson.dumps([source, index]).decode(), 'ordinal': index,
+                    'turn_id': ARCHIVED_SOURCE_PREFIX + orjson.dumps([source, index]).decode(),
+                    'ordinal': index,
                     'actor': value['role'], 'lane_id': 'main', 'status': 'settled',
                     'projection_json': orjson.dumps(_public_fields(value))})
         except ValueError as exc:

@@ -92,14 +92,14 @@ def inject_context_and_emit_chips(
         prefetch_executor: The prefetch pool started before Section 2; this
             function shuts it down after inject.
         tid: The short task id (``task['id'][:8]``).
-        t_run_start: Wall-clock start-of-run anchor (for the prep timing line).
+        t_run_start: Monotonic start-of-run anchor (for the prep timing line).
         vu_phase: Optional callback accepting ``detail`` plus the structured
             ``detail_key`` keyword. The run_task adapter owns the VU-only gate;
             this helper calls it immediately before and after the expensive
             context-injection boundary.
 
     Returns:
-        ``_t_prep_done`` — the wall-clock timestamp taken at the end of
+        ``_t_prep_done`` — the monotonic instant taken at the end of
         Section 3, the anchor stream_llm_response uses for time-to-first-token.
     """
     # 1. Attribute the real slow boundary before entering context providers.
@@ -167,7 +167,7 @@ def inject_context_and_emit_chips(
         logger.debug('[orchestrator] prefetch_executor shutdown failed: %s', _e)
 
     # 6. Timing anchor + prep-duration log line.
-    _t_prep_done = time.time()
+    _t_prep_done = time.monotonic()
     task['_t_prep_done'] = _t_prep_done
     logger.info('[Timing:%s] prep=%.3fs (run_task→context-ready, '
                 'model=%s) — about to build first LLM request',

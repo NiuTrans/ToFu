@@ -162,15 +162,17 @@ def _row_version(alias: str) -> str:
 
 def _source_token(
     turn: Mapping[str, Any], source: Mapping[str, Any], patches: list[dict[str, Any]],
-    revision: int, index: int,
+    index: int,
 ) -> str:
     # SQL has no restore-proof source generation. Normal writes increment rev,
     # but restore derives it from an archived header, not an identity lifetime.
     # Bind actual bytes, not length/timestamps/rowid/xmin or a process-local cache.
     # Byte-identical replacement with identical metadata is deliberately safe to
     # reuse; unlike native envelopes, SQL cannot distinguish such generations.
+    # The conversation revision is fenced per request, not bound here: an
+    # unchanged Turn keeps its token across unrelated writes, as on native.
     envelope = [
-        "tofu.sql-diagnostic-source/v1", revision, index,
+        "tofu.sql-diagnostic-source/v2", index,
         [turn[column] for column in _TURN_COLUMNS.split(",")],
         turn["settlement_json"], patches, source["total_bytes"],
         source.get("declared_bytes"), source.get("checkpoint_updated_at"),
@@ -439,7 +441,7 @@ def _read(
     source = _source(session, turn, head, validate=True, digest=True)
     size = source["total_bytes"]
     patches = _patches(session, turn, head)
-    token = _source_token(turn, source, patches, revision, index)
+    token = _source_token(turn, source, patches, index)
     if kind == "turn":
         if session.backend == "postgres":
             # The source, metadata and bounded patch head must coexist, even

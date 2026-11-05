@@ -20,9 +20,9 @@ Also here: ``make_paper_exec_shim`` (the task-dict shim the shared dispatch
 expects, with the explicit unattended auto-approval policy),
 ``PaperToolResultBudgetV2`` (the shared 8k/result + 24k/round owner-scoped
 artifact contract), and ``paper_effective_tool_name`` (the no-project
-run_command → code_exec flip). ``make_paper_task_tool_executor`` shares Q&A /
-Deepen live tool-round projection over these ports; workflows own their loops
-and terminal settlement adapters.
+run_command → code_exec flip). ``make_paper_task_tool_executor`` shares report,
+Q&A and Deepen live tool-round projection over these ports; workflows own their
+loops and terminal settlement adapters.
 """
 
 import copy
@@ -261,13 +261,11 @@ def _build_paper_full_tool_epoch(*, owner_user_id=None, model='', cfg=None,
     Full-paper agents keep the chat-tier executable catalog (including media,
     scheduler, memory, and agent capabilities). The default provider surface is
     the full uncapped catalog for every model. An explicit, model-neutral budget
-    may defer optional tools behind ``search_tools``/``execute_tools``; that
-    gateway pair independently targets 600 tokens. Budget drift degrades schema
-    detail but never makes a report request unavailable.
+    may defer optional tools behind ``search_tools``/``execute_tools``. Budget
+    drift degrades schema detail but never makes a report request unavailable.
     """
     from lib.tools.gateway import (
         EXECUTE_TOOLS_NAME,
-        LOCAL_GATEWAY_MAX_TOKENS,
         SEARCH_TOOLS_NAME,
         local_wire_tools,
         tool_schema_tokens,
@@ -373,11 +371,6 @@ def _build_paper_full_tool_epoch(*, owner_user_id=None, model='', cfg=None,
         logger.warning(
             '[Paper:ToolEpoch] functional wire schema exceeds cost target: '
             'tokens=%d target=%d; request continues', wire_tokens, budget)
-    if gateway_tokens > LOCAL_GATEWAY_MAX_TOKENS:
-        logger.warning(
-            '[Paper:ToolEpoch] compact gateway exceeds cost target: '
-            'tokens=%d target=%d; request continues',
-            gateway_tokens, LOCAL_GATEWAY_MAX_TOKENS)
     epoch_payload = json.dumps({
         'wire': wire,
         'executable': executable,
@@ -421,18 +414,18 @@ def _text_only_paper_tool_epoch(*, model='', cfg=None,
     try:
         budget = _resolve_paper_schema_budget(
             model, cfg or {}, schema_budget_tokens)
-    except Exception as error:
+    except Exception as budget_error:
         logger.debug(
             'Paper text-only fallback could not resolve schema budget: %s',
-            type(error).__name__,
+            type(budget_error).__name__,
         )
         budget = 0
     try:
         result_envelope = _resolve_paper_result_envelope(cfg or {})
-    except Exception as error:
+    except Exception as envelope_error:
         logger.debug(
             'Paper text-only fallback could not resolve result envelope: %s',
-            type(error).__name__,
+            type(envelope_error).__name__,
         )
         result_envelope = 'v2'
     epoch_payload = json.dumps({
@@ -1358,15 +1351,17 @@ def make_research_tool_executor(messages, *, user_question, abort_signal,
 
 def make_paper_task_tool_executor(
     task, messages, *, user_question, abort_signal, exec_shim, result_budget,
-    paper_tool_executor, on_tool_event, log_prefix,
+    paper_tool_executor, on_tool_event, log_prefix, include_llm_round=False,
 ):
-    """Adapt full-catalog tool calls for Q&A and section Deepen tasks.
+    """Adapt full-catalog tool calls for report, Q&A and section Deepen tasks.
 
     Own only tool-round projection and bounded feedback, not model iteration,
     prompts, authority, cancellation policy or terminal task settlement. The
     explicit executor retains each workflow's injectable dispatch binding.
     Exceptions propagate unchanged to the workflow; no synthetic tool_done
     or successful feedback is published for a failed execution.
+    Reports opt into llmRound on live events for their inline timeline; every
+    workflow retains that index on persisted tool rows.
     """
     import time
 
@@ -1396,10 +1391,11 @@ def make_paper_task_tool_executor(
             'status': 'searching', 'results': None,
         }
         task['tool_rounds'].append(round_entry)
+        event_round = {'llmRound': rnd} if include_llm_round else {}
         on_tool_event({
             'type': 'tool_start', 'roundNum': rn, 'toolName': effective_name,
             'query': display_query, 'toolCallId': tc_id,
-            'toolArgs': round_entry['toolArgs'],
+            'toolArgs': round_entry['toolArgs'], **event_round,
         })
 
         tool_t0 = time.time()
@@ -1426,7 +1422,7 @@ def make_paper_task_tool_executor(
             'type': 'tool_done', 'roundNum': rn, 'toolName': effective_name,
             'toolCallId': tc_id, 'elapsed': round(tool_elapsed, 1),
             'toolContent': result[:4000], 'results': display_results,
-            'status': tool_status,
+            'status': tool_status, **event_round,
         }
         if round_entry.get('contractError'):
             done_ev['contractError'] = round_entry['contractError']

@@ -13,6 +13,7 @@ from lib.storage import StorageError, get_storage_client
 
 from ._context import AuthContext
 from ._crud import _hash_token
+from .transport import TOKEN_PREFIXES
 
 
 logger = get_logger(__name__)
@@ -106,7 +107,7 @@ def validate_token(token: str) -> Optional[AuthContext]:
     if not isinstance(token, str):
         return None
     normalized = token.strip()
-    if not normalized.startswith(('tofu_live_', 'tofu_admin_')):
+    if not normalized.startswith(TOKEN_PREFIXES):
         return None
     now = time.time()
     row = get_storage_client().query(
@@ -140,7 +141,7 @@ def identify_known_token(token: str) -> Optional[dict]:
     if not isinstance(token, str):
         return None
     normalized = token.strip()
-    if not normalized.startswith(('tofu_live_', 'tofu_admin_')):
+    if not normalized.startswith(TOKEN_PREFIXES):
         return None
     return get_storage_client().query(
         'credential.identify', {'secret_hash': _hash_token(normalized)})

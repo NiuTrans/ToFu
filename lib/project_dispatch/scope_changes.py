@@ -291,7 +291,7 @@ class ProjectScopeChanges:
         from lib.conversation_sync.generated_contract import OPENAPI_SCHEMAS
         return status in set(OPENAPI_SCHEMAS['AttemptStatus']['enum']) - {'pending', 'running'}
 
-    def _cancel(self, revocation):
+    def _cancel(self, revocation, change_id):
         attempt = self._attempt(revocation)
         status = attempt.get('status')
         if self._terminal(status):
@@ -305,7 +305,10 @@ class ProjectScopeChanges:
             from lib.conversation_sync.runtime import conversation_turn_commands
             commands = conversation_turn_commands
         # Never fall back to conversation-wide Stop: that affects unrelated grants/tasks.
-        outcome = commands.abort_project_attempt(attempt['attemptId'], self.repo.owner)
+        outcome = commands.abort_project_attempt(
+            attempt['attemptId'], self.repo.owner,
+            provenance=(f"Revoked by project scope change {change_id} "
+                        f"on assignment {revocation['assignmentId']}."))
         response = getattr(outcome, 'value', outcome)
         if not isinstance(response, Mapping) or response.get('attemptId') != attempt['attemptId']:
             raise ProjectDispatchError('Cancellation owner returned no exact receipt')
@@ -325,7 +328,7 @@ class ProjectScopeChanges:
             if revocation['cancellation']['state'] in ('unbound', 'terminal'):
                 continue
             try:
-                outcome = self._cancel(revocation)
+                outcome = self._cancel(revocation, change_id)
             except Exception as exc:
                 logger.debug('retry failure handled: %s', type(exc).__name__)
                 outcome = {'state': 'failed', 'status': '', 'error': type(exc).__name__[:256]}
@@ -361,9 +364,9 @@ class ProjectScopeChanges:
             if notification['state'] != 'submitted':
                 continue
             try:
-                originals = self._mailbox(notification['recipientId']).load()[0]['messages']
-                original = next(m for m in originals if m['id'] == notification['messageId'])
-                notification['messageEvidence'] = {k: original[k] for k in ('id', 'revision', 'state', 'decision')}
+                original = self._mailbox(notification['recipientId']).get(notification['messageId'])
+                if original is not None:
+                    notification['messageEvidence'] = {k: original[k] for k in ('id', 'revision', 'state', 'decision')}
             except Exception as diagnostic_error:
                 logger.debug('_view failure handled: %s', type(diagnostic_error).__name__)
                 pass  # Receipt remains submitted; missing ACK/consideration is unknown.

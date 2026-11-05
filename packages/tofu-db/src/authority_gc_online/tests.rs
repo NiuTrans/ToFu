@@ -194,7 +194,7 @@ fn relink_fence_skips_candidates_rereferenced_since_the_snapshot() {
     }
     let removal = {
         let mut database_guard = database.lock().unwrap();
-        database_guard.online_gc_delete_loose(&[orphan]).unwrap()
+        database_guard.online_gc_delete_loose(&[orphan], &mut Vec::new()).unwrap()
     };
     assert_eq!(removal.blocks_removed, 0);
     drop(capture);
@@ -210,9 +210,59 @@ fn relink_fence_skips_candidates_rereferenced_since_the_snapshot() {
     }
     let removal = {
         let mut database_guard = database.lock().unwrap();
-        database_guard.online_gc_delete_loose(&[orphan]).unwrap()
+        database_guard.online_gc_delete_loose(&[orphan], &mut Vec::new()).unwrap()
     };
     assert_eq!(removal.blocks_removed, 1);
+}
+
+/// The relink fence is exact over one epoch window and has no cap. Under the
+/// former 16,384-entry cap the 16,385th distinct dedupe hit after a capture
+/// set an overflow flag, and every deletion hold of that epoch returned
+/// `WouldBlock`: a store that busy never reclaimed anything.
+#[test]
+fn relink_fence_keeps_every_dedupe_hit_of_an_epoch_window_and_still_filters() {
+    const DEDUPE_HITS: usize = 16_385;
+    let (_vfs, database) = authority();
+    let payloads = (0..DEDUPE_HITS)
+        .map(|index| format!("fence-dedupe-{index}").into_bytes())
+        .collect::<Vec<_>>();
+    let (garbage, relinked) = {
+        let mut database_guard = database.lock().unwrap();
+        for chunk in payloads.chunks(4_096) {
+            database_guard.commit_block_payloads_for_test(chunk).unwrap();
+        }
+        database_guard.checkpoint_for_test().unwrap();
+        (
+            database_guard.write_orphan_block_for_test(b"fence-garbage").unwrap(),
+            database_guard.write_orphan_block_for_test(b"fence-relinked").unwrap(),
+        )
+    };
+    let blocks = database.lock().unwrap().block_store_shared();
+    assert_eq!(blocks.relink_fence_len_for_test(), None, "nothing records outside an epoch window");
+    database.lock().unwrap().online_gc_capture(test_budget().maximum_temporary_bytes).unwrap();
+    {
+        let mut database_guard = database.lock().unwrap();
+        for chunk in payloads.chunks(4_096) {
+            database_guard.commit_block_payloads_for_test(chunk).unwrap();
+        }
+        database_guard.commit_block_payload_for_test(b"fence-relinked").unwrap();
+    }
+    assert_eq!(blocks.relink_fence_len_for_test(), Some(DEDUPE_HITS + 1));
+    let mut unlinked = Vec::new();
+    let removal = database
+        .lock()
+        .unwrap()
+        .online_gc_delete_loose(&[garbage, relinked], &mut unlinked)
+        .unwrap();
+    assert_eq!((removal.blocks_removed, unlinked), (1, vec![garbage]));
+    assert!(database.lock().unwrap().read_block_for_test(relinked).is_ok());
+
+    // A whole epoch closes its window and releases the fence.
+    let mut collector = OnlineGarbageCollector::new(test_budget());
+    run_epoch(&mut collector, &database);
+    assert_eq!(blocks.relink_fence_len_for_test(), None);
+    database.lock().unwrap().commit_block_payload_for_test(&payloads[0]).unwrap();
+    assert_eq!(blocks.relink_fence_len_for_test(), None);
 }
 
 #[test]
@@ -280,6 +330,424 @@ fn live_loose_blocks_compact_into_a_segment_in_one_epoch() {
     }
 }
 
+const SCAN_PROBE_PAYLOAD_BYTES: usize = 16 * 1024;
+const SCAN_PROBE_FILE_BYTES: u64 =
+    SCAN_PROBE_PAYLOAD_BYTES as u64 + crate::block::MIN_BLOCK_FILE_BYTES;
+const SCAN_PROBE_PLANNED_SHARD: u8 = 0xf0;
+
+/// Deterministic 16 KiB payloads whose block IDs land in accepted shards.
+fn scan_probe_payloads(tag: &[u8], count: usize, accept: impl Fn(u8) -> bool) -> Vec<Vec<u8>> {
+    let mut payloads = Vec::with_capacity(count);
+    let mut value = 0_u32;
+    while payloads.len() < count {
+        let mut payload = Vec::with_capacity(SCAN_PROBE_PAYLOAD_BYTES);
+        payload.extend_from_slice(tag);
+        payload.extend_from_slice(&value.to_le_bytes());
+        payload.resize(SCAN_PROBE_PAYLOAD_BYTES, (value % 251) as u8);
+        if accept(BlockId::for_payload(&payload).0[0]) {
+            payloads.push(payload);
+        }
+        value += 1;
+    }
+    payloads
+}
+
+fn scan_probe_ids(payloads: &[Vec<u8>]) -> Vec<BlockId> {
+    payloads.iter().map(|payload| BlockId::for_payload(payload)).collect()
+}
+
+fn loose_block_path(block_id: BlockId) -> PathBuf {
+    let hexadecimal = block_id.to_hex();
+    Path::new("/data/blocks")
+        .join(&hexadecimal[..2])
+        .join(format!("{hexadecimal}.blk"))
+}
+
+/// Counts loose block opens and attributes payload-segment reads to the loose
+/// block opened most recently while counting is armed.
+#[derive(Default)]
+struct ScanProbeLog {
+    counting: AtomicBool,
+    last_block: Mutex<Option<PathBuf>>,
+    block_opens: Mutex<BTreeMap<PathBuf, u64>>,
+    segment_reads_after: Mutex<BTreeMap<PathBuf, u64>>,
+}
+
+impl ScanProbeLog {
+    fn opens(&self, block_id: BlockId) -> u64 {
+        self.block_opens.lock().unwrap().get(&loose_block_path(block_id)).copied().unwrap_or(0)
+    }
+
+    fn segment_reads_after(&self, block_ids: &[BlockId]) -> u64 {
+        let reads = self.segment_reads_after.lock().unwrap();
+        block_ids
+            .iter()
+            .map(|block_id| reads.get(&loose_block_path(*block_id)).copied().unwrap_or(0))
+            .sum()
+    }
+}
+
+struct ScanProbeVfs {
+    inner: Arc<DeterministicVfs>,
+    log: Arc<ScanProbeLog>,
+}
+
+impl Vfs for ScanProbeVfs {
+    fn open(&self, path: &Path, request: OpenRequest) -> io::Result<Box<dyn crate::vfs::VfsFile>> {
+        let file = self.inner.open(path, request)?;
+        let loose_block = path.parent().and_then(Path::parent) == Some(Path::new("/data/blocks"))
+            && path.extension().is_some_and(|extension| extension == "blk");
+        if request.read && loose_block && self.log.counting.load(Ordering::Acquire) {
+            *self.log.block_opens.lock().unwrap().entry(path.to_path_buf()).or_default() += 1;
+            *self.log.last_block.lock().unwrap() = Some(path.to_path_buf());
+        }
+        if path.extension().is_some_and(|extension| extension == "pseg") {
+            return Ok(Box::new(ScanProbeSegmentFile { inner: file, log: self.log.clone() }));
+        }
+        Ok(file)
+    }
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.inner.create_dir(path)
+    }
+    fn rename(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        self.inner.rename(source, destination)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_file(path)
+    }
+    fn metadata(&self, path: &Path) -> io::Result<FileKind> {
+        self.inner.metadata(path)
+    }
+    fn read_directory(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        self.inner.read_directory(path)
+    }
+    fn read_directory_bounded(
+        &self,
+        path: &Path,
+        maximum: usize,
+    ) -> io::Result<crate::vfs::BoundedDirectoryEntries> {
+        self.inner.read_directory_bounded(path, maximum)
+    }
+    fn match_directory_prefix_bounded(
+        &self,
+        path: &Path,
+        prefix: &str,
+        maximum: usize,
+        matches: usize,
+    ) -> io::Result<crate::vfs::BoundedDirectoryMatches> {
+        self.inner
+            .match_directory_prefix_bounded(path, prefix, maximum, matches)
+    }
+    fn sync_directory(&self, path: &Path) -> io::Result<()> {
+        self.inner.sync_directory(path)
+    }
+}
+
+struct ScanProbeSegmentFile {
+    inner: Box<dyn crate::vfs::VfsFile>,
+    log: Arc<ScanProbeLog>,
+}
+
+impl ScanProbeSegmentFile {
+    fn note_read(&self) {
+        if !self.log.counting.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(block) = self.log.last_block.lock().unwrap().clone() {
+            *self.log.segment_reads_after.lock().unwrap().entry(block).or_default() += 1;
+        }
+    }
+}
+
+impl crate::vfs::VfsFile for ScanProbeSegmentFile {
+    fn len(&self) -> io::Result<u64> {
+        self.inner.len()
+    }
+    fn read_all(&mut self, maximum: usize) -> io::Result<Vec<u8>> {
+        self.note_read();
+        self.inner.read_all(maximum)
+    }
+    fn read_exact_at(&mut self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+        self.note_read();
+        self.inner.read_exact_at(offset, bytes)
+    }
+    fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write_all_at(offset, bytes)
+    }
+    fn set_len(&mut self, length: u64) -> io::Result<()> {
+        self.inner.set_len(length)
+    }
+    fn sync_data(&mut self) -> io::Result<()> {
+        self.inner.sync_data()
+    }
+    fn sync_all(&mut self) -> io::Result<()> {
+        self.inner.sync_all()
+    }
+    fn try_lock_exclusive(&mut self) -> io::Result<()> {
+        self.inner.try_lock_exclusive()
+    }
+}
+
+struct ScanProbeFixture {
+    log: Arc<ScanProbeLog>,
+    database: Arc<Mutex<AuthorityDatabase>>,
+    /// Live loose blocks scanned before the planned shard, in scan order.
+    earlier: Vec<BlockId>,
+    /// Live loose blocks in `SCAN_PROBE_PLANNED_SHARD`.
+    planned_shard: Vec<BlockId>,
+    /// One live loose block in a later shard, so the planned shard is never
+    /// the last block the scan opens.
+    tail: BlockId,
+}
+
+/// 140 earlier 16 KiB blocks (more than the plan budgets below admit), eight
+/// in the planned shard and one later block, all spilled to loose files by one
+/// commit. `catalog` adds two compacted two-block segments spanning the planned
+/// shard. The packed filter covers every publication, so filter bits noted for
+/// the loose blocks stand in for the stale bits of retired segments and filter
+/// false positives that keep it from excluding them, and a zero index cache
+/// keeps no membership witnesses: every catalog probe reads segment indexes
+/// exactly as an index-cache miss does in production.
+fn scan_probe_fixture(catalog: bool) -> ScanProbeFixture {
+    let inner = Arc::new(DeterministicVfs::new(None));
+    inner.create_dir(Path::new("/data")).unwrap();
+    inner.sync_directory(Path::new("/")).unwrap();
+    let log = Arc::new(ScanProbeLog::default());
+    let vfs = Arc::new(ScanProbeVfs { inner: inner.clone(), log: log.clone() });
+    let mut authority = AuthorityDatabase::initialize_with_vfs(Path::new("/data"), vfs).unwrap();
+    inner.arm_fault(None).unwrap();
+    authority.block_store_shared().set_segment_index_cache_bytes(0).unwrap();
+    let earlier_payloads =
+        scan_probe_payloads(b"scan-probe-earlier-", 140, |shard| shard < SCAN_PROBE_PLANNED_SHARD);
+    let planned_payloads =
+        scan_probe_payloads(b"scan-probe-planned-", 8, |shard| shard == SCAN_PROBE_PLANNED_SHARD);
+    let tail_payloads =
+        scan_probe_payloads(b"scan-probe-tail-", 1, |shard| shard > SCAN_PROBE_PLANNED_SHARD);
+    let mut segment_payloads = Vec::new();
+    if catalog {
+        for tag in [&b"scan-probe-segment-a-"[..], &b"scan-probe-segment-b-"[..]] {
+            segment_payloads.push(scan_probe_payloads(tag, 1, |shard| shard < 0x80).remove(0));
+            segment_payloads.push(
+                scan_probe_payloads(tag, 1, |shard| shard > SCAN_PROBE_PLANNED_SHARD).remove(0),
+            );
+        }
+    }
+    let mut payloads = earlier_payloads.clone();
+    payloads.extend(planned_payloads.iter().cloned());
+    payloads.extend(tail_payloads.iter().cloned());
+    payloads.extend(segment_payloads.iter().cloned());
+    authority.commit_block_payloads_for_test(&payloads).unwrap();
+    let segment_ids = scan_probe_ids(&segment_payloads);
+    for pair in segment_ids.chunks(2) {
+        authority.compact_payload_blocks_for_test(pair).unwrap();
+    }
+    if catalog {
+        let loose: Vec<BlockId> = [&earlier_payloads, &planned_payloads, &tail_payloads]
+            .into_iter()
+            .flat_map(|payloads| scan_probe_ids(payloads))
+            .collect();
+        authority.block_store_shared().note_packed(&loose).unwrap();
+    }
+    let mut earlier = scan_probe_ids(&earlier_payloads);
+    earlier.sort_unstable();
+    ScanProbeFixture {
+        log,
+        database: Arc::new(Mutex::new(authority)),
+        earlier,
+        planned_shard: scan_probe_ids(&planned_payloads),
+        tail: scan_probe_ids(&tail_payloads)[0],
+    }
+}
+
+fn run_scan_probe_epoch(
+    fixture: &ScanProbeFixture,
+    maximum_temporary_bytes: u64,
+) -> OnlineGarbageCollectionMetrics {
+    let mut collector = OnlineGarbageCollector::new(AuthorityGarbageCollectionBudget {
+        maximum_temporary_bytes,
+        ..test_budget()
+    });
+    fixture.log.counting.store(true, Ordering::Release);
+    run_epoch(&mut collector, &fixture.database);
+    fixture.log.counting.store(false, Ordering::Release);
+    let database = fixture.database.lock().unwrap();
+    for block_id in fixture.earlier.iter().chain(&fixture.planned_shard).chain([&fixture.tail]) {
+        assert!(database.read_block_for_test(*block_id).is_ok());
+    }
+    metrics(&collector)
+}
+
+#[test]
+fn scan_packs_the_segment_it_closes_and_sizes_each_later_block_once() {
+    let fixture = scan_probe_fixture(false);
+    let mut expected = fixture.earlier.clone();
+    expected.extend(&fixture.planned_shard);
+    expected.push(fixture.tail);
+    expected.sort_unstable();
+    {
+        let database = fixture.database.lock().unwrap();
+        let blocks = database.block_store_shared();
+        assert_eq!(blocks.list_block_ids(expected.len() + 64).unwrap(), expected);
+    }
+    // The budget closes a segment after exactly the first 128 earlier blocks.
+    // The scan packs it there and keeps admitting: the 21 blocks after it
+    // form the trailing segment, which stays below the floor.
+    let admitted = crate::authority_gc::MIN_AUTHORITY_GC_PAYLOAD_COMPACTION_BLOCKS;
+    let final_metrics = run_scan_probe_epoch(&fixture, admitted as u64 * SCAN_PROBE_FILE_BYTES);
+    assert_eq!(final_metrics.total_compacted_blocks, admitted as u64);
+    assert_eq!(final_metrics.total_compaction_segments, 1);
+    for block_id in fixture.earlier[admitted..]
+        .iter()
+        .chain(&fixture.planned_shard)
+        .chain([&fixture.tail])
+    {
+        assert_eq!(fixture.log.opens(*block_id), 1, "one size probe per live block after the closed segment");
+    }
+}
+
+#[test]
+fn scan_probes_catalog_membership_for_every_block_a_segment_can_hold() {
+    let fixture = scan_probe_fixture(true);
+    // Room for about 133 earlier blocks per segment: the scan packs the first
+    // segment and admits every later block to the next one, so each of them
+    // must still prove it is not catalogued.
+    let final_metrics = run_scan_probe_epoch(&fixture, 2_200_000);
+    assert_eq!(final_metrics.total_compaction_segments, 1);
+    assert!(
+        fixture.log.segment_reads_after(&fixture.earlier) > 0,
+        "admitted blocks must still prove they are not catalogued"
+    );
+    assert!(fixture.log.segment_reads_after(&fixture.planned_shard) > 0);
+    for block_id in &fixture.planned_shard {
+        assert_eq!(fixture.log.opens(*block_id), 1, "one size probe per live block");
+    }
+}
+
+/// A closed compaction sizes no live block. The membership probe still runs
+/// for each of them, because it also finds loose copies of catalogued blocks
+/// (none here); `tests_redundant_copies` removes such copies with compaction
+/// closed.
+#[test]
+fn scan_skips_compaction_probes_while_no_catalog_slot_stays_below_the_pressure_floor() {
+    let fixture = scan_probe_fixture(true);
+    // Two catalogued segments: a third would put the catalog under pressure.
+    let mut collector = OnlineGarbageCollector::new(test_budget());
+    collector.set_catalog_pressure_floor_for_test(3);
+    fixture.log.counting.store(true, Ordering::Release);
+    run_epoch(&mut collector, &fixture.database);
+    fixture.log.counting.store(false, Ordering::Release);
+    assert_eq!(metrics(&collector).total_compacted_blocks, 0);
+    let live: Vec<BlockId> = fixture
+        .earlier
+        .iter()
+        .chain(&fixture.planned_shard)
+        .chain([&fixture.tail])
+        .copied()
+        .collect();
+    for block_id in &live {
+        assert_eq!(fixture.log.opens(*block_id), 0, "closed compaction sized a live block");
+    }
+    assert_eq!(metrics(&collector).total_redundant_copies_removed, 0);
+    let database = fixture.database.lock().unwrap();
+    assert_eq!(database.payload_segment_count_for_test(), 2);
+    for block_id in &live {
+        assert!(database.read_block_for_test(*block_id).is_ok());
+    }
+}
+
+/// Blocks per segment in the backlog fixtures: their temporary-byte budget
+/// admits exactly this many 16 KiB probe blocks per segment.
+const BACKLOG_SEGMENT_BLOCKS: usize = crate::authority_gc::MIN_AUTHORITY_GC_PAYLOAD_COMPACTION_BLOCKS;
+
+pub(super) fn backlog_budget() -> AuthorityGarbageCollectionBudget {
+    AuthorityGarbageCollectionBudget {
+        maximum_temporary_bytes: BACKLOG_SEGMENT_BLOCKS as u64 * SCAN_PROBE_FILE_BYTES,
+        ..test_budget()
+    }
+}
+
+/// A live loose backlog `segments` segments deep under `backlog_budget`:
+/// 16 KiB payloads committed in near-equal batches of at least 160, so each
+/// commit exceeds the carried ceiling and every block spills to its own
+/// loose file.
+pub(super) fn loose_backlog(
+    database: &Arc<Mutex<AuthorityDatabase>>,
+    segments: usize,
+) -> Vec<(BlockId, Vec<u8>)> {
+    let payloads = scan_probe_payloads(b"loose-backlog-", segments * BACKLOG_SEGMENT_BLOCKS, |_| true);
+    let mut database_guard = database.lock().unwrap();
+    let mut backlog = Vec::with_capacity(payloads.len());
+    let commits = (payloads.len() / 160).max(1);
+    for chunk in payloads.chunks(payloads.len().div_ceil(commits)) {
+        let block_ids = database_guard.commit_block_payloads_for_test(chunk).unwrap();
+        backlog.extend(block_ids.into_iter().zip(chunk.iter().cloned()));
+    }
+    backlog
+}
+
+pub(super) fn loose_backlog_remaining(
+    database: &Arc<Mutex<AuthorityDatabase>>,
+    backlog: &[(BlockId, Vec<u8>)],
+) -> usize {
+    let loose: BTreeSet<BlockId> = database
+        .lock()
+        .unwrap()
+        .block_store_shared()
+        .list_block_ids(backlog.len() + 4096)
+        .unwrap()
+        .into_iter()
+        .collect();
+    backlog.iter().filter(|(block_id, _)| loose.contains(block_id)).count()
+}
+
+/// The 2026-10-31 inode exhaustion: the search projection held ~12.4M live
+/// loose blocks while the collector packed at most one segment per epoch,
+/// and epochs start at least 120 s apart. A backlog five segments deep packs
+/// completely in one epoch: the scan closes a segment whenever the next block
+/// would exceed a format or temporary-byte limit, builds it off the mutex and
+/// publishes it under one short hold, and the trailing segment packs in the
+/// deletion phase. Each loose copy goes only after both CONTROL slots name the
+/// catalog that holds it, so recovery from either slot reads the backlog.
+#[test]
+fn one_epoch_packs_a_loose_backlog_into_every_segment_the_limits_require() {
+    let (vfs, database) = authority();
+    let backlog = loose_backlog(&database, 5);
+    assert_eq!(
+        loose_backlog_remaining(&database, &backlog),
+        backlog.len(),
+        "fixture: every backlog block starts loose"
+    );
+    let mut collector = OnlineGarbageCollector::new(backlog_budget());
+    let mut epochs = Vec::new();
+    while epochs.len() < 8 {
+        let before = database.lock().unwrap().payload_segment_count_for_test();
+        run_epoch(&mut collector, &database);
+        let published = database.lock().unwrap().payload_segment_count_for_test() - before;
+        let remaining = loose_backlog_remaining(&database, &backlog);
+        epochs.push((published, remaining));
+        if remaining == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        epochs,
+        vec![(5, 0)],
+        "per epoch: (segments published, backlog blocks still loose)"
+    );
+    assert_eq!(metrics(&collector).total_compacted_blocks, backlog.len() as u64);
+    assert_eq!(metrics(&collector).total_compaction_segments, 5);
+    for lose_newest_slot in [false, true] {
+        let image = Arc::new(vfs.fork_durable().unwrap());
+        if lose_newest_slot {
+            super::tests_fallback_slot::destroy_newest_slot(&image);
+        }
+        let reopened = AuthorityDatabase::open_with_vfs(Path::new("/data"), image).unwrap();
+        for (block_id, payload) in &backlog {
+            assert_eq!(&reopened.read_block_for_test(*block_id).unwrap(), payload);
+        }
+    }
+}
+
 #[test]
 fn doorbell_and_pressure_never_break_the_pacing_floor() {
     // 2026-09-21 FUSE brownout regression: the app rings `system.reclaim`
@@ -335,6 +803,57 @@ fn duty_cycle_floor_waits_out_the_previous_epochs_duration() {
     assert!(collector.should_run_now(true));
 }
 
+/// At or above 90% of the 4,096-entry payload catalog ceiling consolidation
+/// work is pending, so an epoch that ends there keeps the minimum interval
+/// instead of doubling its idle backoff; the start and duty floors still apply
+/// (`should_run_now`). One segment below, idle epochs back off again once the
+/// shrinking publication's orphan segment and old catalog root are collected.
+/// A two-segment catalog stands in for one at the threshold (a 3,687-segment
+/// fixture takes minutes to build on `DeterministicVfs`), and the pressure
+/// floor is moved past the catalog so that no consolidation runs and the
+/// fixture's epochs find nothing else. Before the change the epochs at the
+/// threshold backed off from the first one: [2 ms, 4 ms].
+#[test]
+fn an_epoch_ending_at_ninety_percent_of_the_catalog_ceiling_keeps_the_minimum_interval() {
+    let expedited = (crate::payload_manifest::MAX_PAYLOAD_SEGMENTS * 90).div_ceil(100);
+    let production = OnlineGarbageCollector::new(test_budget());
+    assert_eq!(
+        (production.catalog_pressure_expedited(expedited), production.catalog_pressure_expedited(expedited - 1)),
+        (true, false),
+        "the threshold is 90% of the catalog ceiling: {expedited} segments"
+    );
+    let (_vfs, database) = authority();
+    let payload = b"catalog-pressure-cadence-shared-live";
+    database.lock().unwrap().commit_block_payload_for_test(payload).unwrap();
+    let references = publish_one_block_segments(&database, payload, 2);
+    let minimum = Duration::from_millis(1);
+    let mut collector = OnlineGarbageCollector::with_min_epoch_interval(test_budget(), minimum);
+    collector.set_catalog_pressure_floor_for_test(crate::payload_manifest::MAX_PAYLOAD_SEGMENTS + 1);
+    collector.set_catalog_expedite_floor_for_test(references.len());
+    let idle_intervals = |collector: &mut OnlineGarbageCollector, epochs: usize| -> Vec<Duration> {
+        (0..epochs)
+            .map(|_| {
+                run_epoch(collector, &database);
+                collector.idle_interval
+            })
+            .collect()
+    };
+    assert_eq!(idle_intervals(&mut collector, 2), vec![minimum; 2], "epochs ending at the threshold keep the minimum");
+    database
+        .lock()
+        .unwrap()
+        .engine_mut_for_test()
+        .publish_payload_manifest_for_test(
+            crate::payload_manifest::PayloadManifest::new(references[..1].to_vec()).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        idle_intervals(&mut collector, 3),
+        vec![minimum, minimum, 2 * minimum],
+        "below it: the orphan segment and the old root are found, then the idle epoch backs off"
+    );
+}
+
 #[test]
 fn driver_runs_epochs_and_reports_health() {
     let (_vfs, database) = authority();
@@ -359,6 +878,33 @@ fn driver_runs_epochs_and_reports_health() {
     }
     assert!(observer.metrics().total_reclaimed_blocks >= 1);
     driver.stop_and_join().unwrap();
+}
+
+#[test]
+fn driver_attributes_mark_reads_to_the_online_gc_component() {
+    let (_vfs, database) = authority();
+    {
+        let mut database_guard = database.lock().unwrap();
+        let mut transaction = database_guard.begin(7, 11).unwrap();
+        database_guard
+            .entity_put(&mut transaction, EntityKey::new(7, 11, "record", b"attributed").unwrap(), b"value".to_vec())
+            .unwrap();
+        database_guard.commit(transaction).unwrap();
+    }
+    let reads = || crate::fsync_stats::component_stage_calls(
+        crate::fsync_stats::COMPONENT_ONLINE_GC, crate::fsync_stats::STAGE_BLOCK_GET);
+    let before = reads();
+    let collector = OnlineGarbageCollector::with_min_epoch_interval(test_budget(), Duration::from_millis(25));
+    let driver =
+        OnlineGarbageCollectionDriver::start_with_collector(&database, collector, false).unwrap();
+    let observer = driver.observer();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while observer.metrics().epochs_completed < 1 {
+        assert!(std::time::Instant::now() < deadline, "driver made no epochs");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    driver.stop_and_join().unwrap();
+    assert!(reads() > before, "the collector's traversal must not be billed to foreground");
 }
 
 /// Same-shard fixtures sized so one commit carrying `count` of them exceeds
@@ -447,6 +993,41 @@ fn catalog_pressure_consolidates_small_segments_into_one() {
     }
 }
 
+/// Publishes a catalog of `count` one-block segments that all hold `payload`
+/// (mirrors engine_adoption_tests::build_full_catalog) and returns it.
+fn publish_one_block_segments(
+    database: &Arc<Mutex<AuthorityDatabase>>,
+    payload: &[u8],
+    count: usize,
+) -> Vec<crate::payload_manifest::PayloadSegmentReference> {
+    let block_id = BlockId::for_payload(payload);
+    let mut database_guard = database.lock().unwrap();
+    let engine = database_guard.engine_mut_for_test();
+    let mut references = Vec::with_capacity(count);
+    for index in 0..count {
+        let segment = engine
+            .block_store()
+            .payload_segment_store()
+            .unwrap()
+            .create(uuid::Uuid::from_u128(index as u128 + 1), vec![block_id], |_| Ok(payload.to_vec()))
+            .unwrap();
+        references.push(
+            crate::payload_manifest::PayloadSegmentReference::new(
+                segment.metadata(),
+                segment.first_block_id(),
+                segment.last_block_id(),
+            )
+            .unwrap(),
+        );
+    }
+    engine
+        .publish_payload_manifest_for_test(
+            crate::payload_manifest::PayloadManifest::new(references.clone()).unwrap(),
+        )
+        .unwrap();
+    references
+}
+
 #[test]
 fn full_catalog_recovers_capacity_through_pressured_consolidation() {
     let (_vfs, database) = authority();
@@ -457,42 +1038,16 @@ fn full_catalog_recovers_capacity_through_pressured_consolidation() {
             .commit_block_payload_for_test(shared_payload)
             .unwrap()
     };
-    // Fill the catalog to its 4,096-entry ceiling with one-block segments
-    // (mirrors engine_adoption_tests::build_full_catalog).
-    {
-        let mut database_guard = database.lock().unwrap();
-        let engine = database_guard.engine_mut_for_test();
-        let mut references = Vec::with_capacity(crate::payload_manifest::MAX_PAYLOAD_SEGMENTS);
-        for index in 0..crate::payload_manifest::MAX_PAYLOAD_SEGMENTS {
-            let segment = engine
-                .block_store()
-                .payload_segment_store()
-                .unwrap()
-                .create(
-                    uuid::Uuid::from_u128(index as u128 + 1),
-                    vec![shared_id],
-                    |_| Ok(shared_payload.to_vec()),
-                )
-                .unwrap();
-            references.push(
-                crate::payload_manifest::PayloadSegmentReference::new(
-                    segment.metadata(),
-                    segment.first_block_id(),
-                    segment.last_block_id(),
-                )
-                .unwrap(),
-            );
-        }
-        engine
-            .publish_payload_manifest_for_test(
-                crate::payload_manifest::PayloadManifest::new(references).unwrap(),
-            )
-            .unwrap();
-        assert_eq!(
-            database_guard.payload_segment_count_for_test(),
-            crate::payload_manifest::MAX_PAYLOAD_SEGMENTS
-        );
-    }
+    // Fill the catalog to its 4,096-entry ceiling with one-block segments.
+    publish_one_block_segments(
+        &database,
+        shared_payload,
+        crate::payload_manifest::MAX_PAYLOAD_SEGMENTS,
+    );
+    assert_eq!(
+        database.lock().unwrap().payload_segment_count_for_test(),
+        crate::payload_manifest::MAX_PAYLOAD_SEGMENTS
+    );
     // Loose compaction needs a free catalog slot and must fail at the wall.
     let loose = {
         let database_guard = database.lock().unwrap();

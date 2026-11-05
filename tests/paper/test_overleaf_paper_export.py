@@ -34,6 +34,9 @@ def exports(monkeypatch):
 
 
 def test_unknown_tool_is_an_error_without_upstream_dispatch(exports):
+    # create_server composes the Git tools; GitPython ships only with the
+    # excluded overleaf-MCP environment, as in the sibling Git suites.
+    pytest.importorskip('git', reason='overleaf-MCP environment not installed')
     from types import SimpleNamespace
     from mcp.types import CallToolRequestParams, ListToolsResult
     _, _, server, _ = exports
@@ -244,6 +247,7 @@ def test_build_contract_fails_before_any_remote_work(exports, replacement):
 
 
 def test_legacy_zero_cache_hint_cannot_disable_authorized_export(exports):
+    pytest.importorskip('git', reason='overleaf-MCP environment not installed')
     _, module, server, transport = exports
 
     async def run():

@@ -57,7 +57,6 @@ from lib.desktop_agent._files import (  # noqa: E402,F401
 # ═══════════════════════════════════════════════════════════════════════════════
 
 from lib.desktop_agent._exec import (  # noqa: E402,F401
-    _SHELL_META_RE,
     cmd_run_local,
 )
 
@@ -105,7 +104,6 @@ __all__ = [
     'cmd_move_file',
     'cmd_open_file',
     'cmd_open_app',
-    '_SHELL_META_RE',
     'cmd_run_local',
     'cmd_screenshot_desktop',
     'cmd_gui_action',

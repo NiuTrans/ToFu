@@ -30,6 +30,19 @@ def test_public_ips_allowed(ip):
     assert utils._ip_is_blocked(ip) is False
 
 
+@pytest.mark.parametrize("ip", [
+    "100.100.100.200",      # Alibaba Cloud ECS instance metadata
+    "100.64.0.1", "100.127.255.254", "::ffff:100.100.100.200",
+])
+def test_shared_address_space_blocked(ip):
+    """RFC 6598 space is not globally routable and hosts cloud metadata."""
+    assert utils._ip_is_blocked(ip) is True
+
+
+def test_should_fetch_blocks_alibaba_metadata_endpoint():
+    assert utils._should_fetch("http://100.100.100.200/latest/meta-data/") is False
+
+
 def test_host_is_safe_literal_internal():
     assert utils._host_is_safe("127.0.0.1") is False
     assert utils._host_is_safe("169.254.169.254") is False

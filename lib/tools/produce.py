@@ -83,8 +83,9 @@ PRODUCE_VIDEO_TOOL = {
                                    "line on a gradient) — pass it only when "
                                    "the user explicitly wants speed over "
                                    "looks. A scene whose authoring fails "
-                                   "falls back to the template, so the film "
-                                   "always completes."
+                                   "may fall back to a template and be marked "
+                                   "degraded. Final task status and quality "
+                                   "determine whether the film was delivered."
                 },
                 "creative_mode": {
                     "type": "string",
@@ -182,6 +183,19 @@ PRODUCE_SLIDES_TOOL = {
                                    "deck binds the uploaded brand deck's "
                                    "palette/typefaces/geometry instead of "
                                    "a curated theme."
+                },
+                "material": {
+                    "type": "string",
+                    "description": "Optional caller-supplied source material "
+                                   "(up to 20000 chars) the deck MUST be "
+                                   "grounded in — a content brief, resume, "
+                                   "project report or notes. Use this whenever "
+                                   "the deck must reflect the user's OWN work, "
+                                   "numbers and attributions rather than public "
+                                   "web research: its facts and figures are "
+                                   "treated as authoritative and are never "
+                                   "replaced by web results or invented values. "
+                                   "Keep 'topic' as the short deck title."
                 }
             },
             "required": ["topic"],
@@ -665,3 +679,19 @@ PRODUCE_TOOL_NAMES = frozenset({
     REVERT_SLIDES_TOOL_NAME,
     REVERT_VIDEO_TOOL_NAME,
 })
+
+
+# The semantic tools remain separately discoverable. All four share the same
+# execution form; this wording is projected into the normal tool catalog, not
+# into a second tool namespace or a free-form child-agent interface.
+for _producer in (PRODUCE_VIDEO_TOOL, PRODUCE_SLIDES_TOOL,
+                  PRODUCE_REPORT_TOOL, PRODUCE_RESEARCH_TOOL):
+    _producer['function']['description'] += (
+        ' This is an agent-based tool with an authored workflow: internal '
+        'models work within fixed stages, with output validation, domain '
+        'quality checks and durable checkpoints. Call it directly from normal '
+        'Chat; no Goal mode or free-form agent delegation is needed. A returned '
+        'task_id confirms acceptance, not delivery. Continue other requested '
+        'work and let the task panel report progress; do not repeatedly poll '
+        'or claim a finished artifact from the acceptance receipt.')
+del _producer

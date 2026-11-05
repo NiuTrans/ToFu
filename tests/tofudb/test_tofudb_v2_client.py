@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import math
+import random
 import socket
+import struct
 import threading
+from decimal import Decimal, localcontext
+from types import SimpleNamespace
 
 import pytest
+from hypothesis import given, settings, strategies as st
 
 from tofu_db.wire import (
     FIELD_CHUNK_INDEX,
@@ -575,6 +582,47 @@ def test_recv_frame_mid_frame_close_is_not_a_clean_close() -> None:
     client_socket.close()
 
 
+class _RecvIntoOnlySocket:
+    """Delivers a byte stream in small fragments, and only through recv_into."""
+
+    def __init__(self, stream: bytes, fragment: int = 7):
+        self._stream = stream
+        self._fragment = fragment
+        self.offset = 0
+
+    def recv(self, _size):
+        raise AssertionError('frames are received into one preallocated buffer')
+
+    def recv_into(self, target, size=0):
+        count = min(self._fragment, size or len(target), len(target), len(self._stream) - self.offset)
+        target[:count] = self._stream[self.offset:self.offset + count]
+        self.offset += count
+        return count
+
+
+def test_recv_frame_reads_each_frame_into_one_buffer_and_returns_owned_fields() -> None:
+    payload = bytes(range(256)) * 40
+    stream = pack_frame(encode_message({
+        FIELD_KIND: KIND_RESPONSE_CHUNK,
+        FIELD_PROTOCOL_VERSION: PROTOCOL_VERSION,
+        FIELD_CORRELATION_ID: b"c" * 16,
+        FIELD_SCHEMA_ID: STORAGE_SCHEMA_VERSION,
+        FIELD_PAYLOAD: payload,
+        FIELD_STREAM_ID: b"s" * 16,
+        FIELD_CHUNK_INDEX: 3,
+        FIELD_FINAL: True,
+    }))
+    transport = _RecvIntoOnlySocket(stream + stream[:2])
+    message = recv_frame(transport)
+    assert message[FIELD_PAYLOAD] == payload and type(message[FIELD_PAYLOAD]) is bytes
+    assert type(message[FIELD_STREAM_ID]) is bytes and message[FIELD_CHUNK_INDEX] == 3
+    assert transport.offset == len(stream)
+    with pytest.raises(StorageV2ProtocolError, match="mid-frame"):
+        recv_frame(transport)
+    with pytest.raises(StorageV2ConnectionClosedError):
+        recv_frame(_RecvIntoOnlySocket(b""))
+
+
 def _probe_session(sock: socket.socket) -> StorageV2Session:
     session = object.__new__(StorageV2Session)
     session._sock = sock
@@ -697,3 +745,330 @@ def test_numeric_looking_quoted_output_keeps_exact_accelerated_decode(monkeypatc
     encoded=json.dumps(fields).encode()
     assert client.StorageV2Response(0,0,encoded,None,None,False).json()==fields
     assert calls==[True], 'Quoted source text must not disable an eligible decoder'
+
+
+# ── Accelerated response decoding: exact differential with stdlib json ─────
+#
+# The oracle is the stdlib fallback itself, json.loads(payload.decode('utf-8')).
+# A decoded response must match it in value type, float bits (including -0.0),
+# dict key order and duplicate-key resolution, or raise the same exception type.
+
+
+def _stdlib_outcome(raw):
+    try:
+        return True, json.loads(bytes(raw).decode('utf-8'))
+    except Exception as exc:  # the exception type is part of the contract
+        return False, type(exc)
+
+
+def _assert_same_json_tree(actual, expected):
+    pending = [(actual, expected, '$')]
+    while pending:
+        left, right, path = pending.pop()
+        assert type(left) is type(right), path
+        if type(right) is float:
+            assert (struct.pack('<d', left) == struct.pack('<d', right)
+                    or (math.isnan(left) and math.isnan(right))), path
+        elif type(right) is dict:
+            assert list(left) == list(right), path
+            pending.extend((left[key], right[key], f'{path}.{key}') for key in right)
+        elif type(right) is list:
+            assert len(left) == len(right), path
+            pending.extend((item, other, f'{path}[{index}]')
+                           for index, (item, other) in enumerate(zip(left, right)))
+        else:
+            assert left == right, path
+
+
+def _assert_decodes_like_stdlib(raw):
+    from tofu_db.wire import StorageV2Response
+    succeeded, expected = _stdlib_outcome(raw)
+    for body in (bytes(raw), bytearray(raw)):
+        response = StorageV2Response(0, 0, body, None, None, False)
+        if not body:
+            assert response.json() is None  # an absent payload is not a JSON document
+        elif succeeded:
+            _assert_same_json_tree(response.json(), expected)
+        else:
+            with pytest.raises(Exception) as caught:
+                response.json()
+            assert type(caught.value) is expected, (raw[:80], caught.value)
+
+
+@pytest.fixture
+def accelerated_decoder(monkeypatch):
+    import tofu_db.wire as client
+    monkeypatch.setattr(client, '_fast_json', pytest.importorskip('orjson'))
+    return client
+
+
+_PAGE_PADDING = json.dumps('工具输出 "quoted" \\ 12:34, [-1] ' * 400).encode()
+_SCALAR_CONTEXTS = [
+    b'%s', b' \r\n%s\t', b'[%s]', b'[1,%s]', b'[ %s ,2]', b'{"k":%s}', b'{"a":0,"k" :\n\t%s}',
+    b'{"text":' + _PAGE_PADDING + b',"k":%s}', b'{"k":%s,"text":' + _PAGE_PADDING + b'}',
+]
+_SCALAR_TOKENS = [
+    # integers around the int64/uint64 edges, and beyond them
+    b'0', b'-0', b'7', b'-7', b'9223372036854775807', b'9223372036854775808',
+    b'-9223372036854775808', b'-9223372036854775809', b'18446744073709551615',
+    b'18446744073709551616', b'-18446744073709551615', b'1234567890123456789',
+    b'-1234567890123456789', b'12345678901234567890', b'99999999999999999999',
+    b'100000000000000000000', b'1208925819614629174706177', b'-1208925819614629174706177',
+    b'1' * 127, b'1' * 128, b'1' * 400, b'9' * 4301,
+    # floats, signed zero, overflow/underflow edges, long digit runs
+    b'-0.0', b'0.0', b'-0e0', b'1.5', b'1e-5', b'1E+5', b'0.00012345678901234567',
+    b'1.7976931348623157e308', b'1.7976931348623159e308', b'1e309', b'-1e400', b'1e-400',
+    b'-1e-400', b'5e-324', b'2.4703282292062327e-324', b'2.4703282292062328e-324',
+    b'2.2250738585072011e-308', b'123456789012345678901234567890.5', b'0.' + b'1' * 200,
+    b'1' * 200 + b'.5', b'1e0000000000000000000001', b'-1e-' + b'9' * 30,
+    b'1.' + b'0' * 126 + b'1e5',
+    # tokens only stdlib accepts, literals, strings
+    b'NaN', b'Infinity', b'-Infinity', b'true', b'false', b'null', b'"plain"', b'"\\ud800"',
+    b'"\\udc00\\ud800"', b'"\\ud800\\u0041"', b'"\\ud83d\\ude00"', b'"\\u0000"',
+    b'"\xf0\x9f\x98\x80"', b'"\xe2\x80\xa8"', b'"\x7f"', b'"12345678901234567890123"',
+    b'"id:12345678901234567890123,"', b'"[-99999999999999999999]"', b'"' + b'7' * 300 + b'"',
+    b'"\\"12345678901234567890123"', b'[]', b'{}',
+]
+_WHOLE_DOCUMENTS = [
+    b'', b' ', b'{', b'[1,]', b'{"a":1,}', b"{'a':1}", b'01', b'-01', b'1.', b'.5', b'+1', b'1e',
+    b'[1 2]', b'{}x', b'{}{}', b'\xef\xbb\xbf{}', b'nul', b'True', b'"\x00"', b'"\x1f"',
+    b'"a\nb"', b'"\xff"', b'"\xc0\x80"', b'"\xed\xa0\x80"', b'"\xe4\xb8"', b'"\\x41"', b'"\\u12"',
+    b'{"a":1,"b":2,"a":3}', b'{"b":{"x":1},"a":2,"b":[3]}', b'{"a":1e309,"b":-0}',
+    b'[' * 1024 + b']' * 1024, b'[' * 1025 + b']' * 1025, b'{"a":' * 1100 + b'0' + b'}' * 1100,
+    b'[' * 3000 + b'1' + b']' * 3000, b'[' * 20000 + b']' * 20000,
+]
+
+
+def test_response_decoder_matches_stdlib_on_divergence_corpus(accelerated_decoder):
+    for token in _SCALAR_TOKENS:
+        for context in _SCALAR_CONTEXTS:
+            _assert_decodes_like_stdlib(context % token)
+    for document in _WHOLE_DOCUMENTS:
+        _assert_decodes_like_stdlib(document)
+
+
+def test_response_decoder_matches_stdlib_on_long_mantissa_halfway_floats(accelerated_decoder):
+    # orjson 3.12 truncates mantissas beyond 768 significant digits before
+    # rounding, so near-halfway decimals printed with 770+ digits round to the
+    # other neighbour about half of the time; stdlib float() is exact.
+    rng = random.Random(20261028)
+    with localcontext() as context:
+        context.prec = 1200
+        cases = 0
+        while cases < 24:
+            low = struct.unpack('<d', struct.pack('<Q', rng.getrandbits(63)))[0]
+            high = math.nextafter(low, math.inf)
+            if not (math.isfinite(low) and math.isfinite(high)):
+                continue
+            midpoint = (Decimal(low) + Decimal(high)) / 2
+            for digits in (40, 400, 760, 770, 800):
+                text = format(midpoint, f'.{digits - 1}e').encode()
+                _assert_decodes_like_stdlib(b'{"cost":' + text + b',"rev":7}')
+                _assert_decodes_like_stdlib(b'[-' + text + b']')
+            cases += 1
+
+
+def _random_digits(rng, count):
+    return ''.join(rng.choice('0123456789') for _ in range(count))
+
+
+def _random_number_text(rng):
+    sign = rng.choice(['', '', '-'])
+    roll = rng.random()
+    if roll < 0.35:
+        count = rng.choice([1, 2, 5, 13, 18, 19, 19, 20, 20, 21, 25, 40, 130])
+        return sign + (str(rng.randint(1, 9)) + _random_digits(rng, count - 1)
+                       if rng.random() < 0.95 else '0')
+    if roll < 0.55:
+        value = struct.unpack('<d', struct.pack('<Q', rng.getrandbits(64)))[0]
+        return json.dumps(value) if math.isfinite(value) else '-1e400'
+    if roll < 0.6:
+        return rng.choice(['NaN', 'Infinity', '-Infinity'])
+    integer = '0' if rng.random() < 0.4 else str(rng.randint(1, 9)) + _random_digits(rng, rng.randint(0, 25))
+    fraction = '.' + _random_digits(rng, rng.randint(1, 30)) if rng.random() < 0.7 else ''
+    exponent = ''
+    if not fraction or rng.random() < 0.5:
+        exponent = (rng.choice('eE') + rng.choice(['', '+', '-'])
+                    + _random_digits(rng, rng.randint(1, 3 if rng.random() < 0.9 else 25)))
+    return sign + integer + fraction + exponent
+
+
+def _random_string_text(rng):
+    pieces = []
+    for _ in range(rng.randint(0, 12)):
+        roll = rng.random()
+        if roll < 0.15:
+            pieces.append(rng.choice(['', 'id:', '[-', ', ', '"x":']) + _random_digits(rng, rng.choice([3, 19, 21, 25, 130])))
+        elif roll < 0.25:
+            pieces.append(rng.choice(['\\"', '\\\\', '\\/', '\\b', '\\f', '\\n', '\\r', '\\t']))
+        elif roll < 0.32:
+            pieces.append('\\u%04x' % rng.choice([0, 0x1f, 0xe9, 0x5de5, 0xd83d, 0xde00, 0xd800, 0xdfff, 0xfeff]))
+        elif roll < 0.36:
+            pieces.append('\\ud83d\\ude00')
+        else:
+            pieces.append(rng.choice(['a', 'Z', ' ', '工', '🙂', '\u2028', '\x7f', ':', ',', '[', ']', '-', '.', 'e']))
+    return '"' + ''.join(pieces) + '"'
+
+
+def _random_json_text(rng, depth=0):
+    def space():
+        return rng.choice(['', '', '', ' ', '\n', '\t', '\r\n  '])
+
+    roll = rng.random()
+    if depth >= 5 or roll < 0.5:
+        scalar = rng.random()
+        if scalar < 0.55:
+            return _random_number_text(rng)
+        if scalar < 0.9:
+            return _random_string_text(rng)
+        return rng.choice(['true', 'false', 'null'])
+    if roll < 0.75:
+        items = [_random_json_text(rng, depth + 1) for _ in range(rng.randint(0, 5))]
+        return '[' + space() + (space() + ',' + space()).join(items) + space() + ']'
+    members = [f'{_random_string_text(rng)}{space()}:{space()}{_random_json_text(rng, depth + 1)}'
+               for _ in range(rng.randint(0, 5))]
+    return '{' + space() + (',' + space()).join(members) + space() + '}'
+
+
+def _random_documents(seed, count):
+    rng = random.Random(seed)
+    return [_random_json_text(rng).encode('utf-8') for _ in range(count)]
+
+
+def test_response_decoder_matches_stdlib_on_randomized_documents(accelerated_decoder):
+    for document in _random_documents(20261028, 600):
+        _assert_decodes_like_stdlib(document)
+
+
+def test_response_decoder_matches_stdlib_on_mutated_documents(accelerated_decoder):
+    rng = random.Random(4096)
+    documents = [document for document in _random_documents(77, 300) if len(document) > 2]
+    alphabet = b'0123456789-+.eE"\\[]{}:, \t\nNaIfty\x00\x1f\x7f\x80\xc0\xed\xff'
+    for _ in range(2500):
+        mutated = bytearray(rng.choice(documents))
+        for _ in range(rng.randint(1, 3)):
+            position = rng.randrange(len(mutated) + 1)
+            operation = rng.random()
+            if operation < 0.4 and position < len(mutated):
+                mutated[position] = rng.choice(alphabet)
+            elif operation < 0.7:
+                mutated[position:position] = bytes([rng.choice(alphabet)]) * rng.choice([1, 1, 19, 25])
+            elif position < len(mutated):
+                del mutated[position]
+        _assert_decodes_like_stdlib(bytes(mutated))
+
+
+_JSON_LEAVES = (st.none() | st.booleans() | st.integers()
+                | st.floats(allow_nan=True, allow_infinity=True)
+                | st.text(st.characters(exclude_categories=()), max_size=24))
+_JSON_VALUES = st.recursive(
+    _JSON_LEAVES,
+    lambda children: st.lists(children, max_size=6)
+    | st.dictionaries(st.text(st.characters(exclude_categories=()), max_size=8), children, max_size=6),
+    max_leaves=30)
+
+
+@settings(max_examples=150, deadline=None)
+@given(value=_JSON_VALUES, ensure_ascii=st.booleans(), compact=st.booleans())
+def test_response_decoder_matches_stdlib_for_generated_values(value, ensure_ascii, compact):
+    import tofu_db.wire as client
+    pytest.importorskip('orjson')
+    assert client._fast_json is not None
+    separators = (',', ':') if compact else (', ', ': ')
+    text = json.dumps(value, ensure_ascii=ensure_ascii, separators=separators)
+    # surrogatepass turns unpaired surrogates into the invalid UTF-8 a peer could send.
+    _assert_decodes_like_stdlib(text.encode('utf-8', 'surrogatepass'))
+
+
+def _turn_projection_page(turns=4, *, wide=False, deep=False):
+    text = '工具输出 "quoted" \\ 12:34, [x] 0955627844683657153957 ' * 120
+    signature = base64.b64encode(bytes(range(256)) * 24).decode()
+    page = {'turns': [{
+        'id': f'turn-{index}', 'ordinal': index, 'status': 'done',
+        'startedAt': 1761600000.125 + index, 'durationMs': 1234.5,
+        'segments': [{'kind': 'thinking', 'text': text, 'signature': signature},
+                     {'kind': 'text', 'text': text, 'translatedText': text}],
+        'toolRounds': [{'toolName': 'run_command', 'toolArgs': {'command': 'ls -la'},
+                        'results': [{'content': text}], 'thinkingSignature': signature,
+                        'elapsedMs': 12.75}],
+        'apiRounds': [{'usage': {'input': 120000, 'output': 1500, 'cacheRead': 118000},
+                       'cost': 0.00012345678901234567, 'timings': {'ttfbMs': 812.25},
+                       'requestNs': 1761600000123456789, 'upstreamId': 18446744073709551615,
+                       'floorId': -9223372036854775808}],
+        'timingTrace': [[step * 0.5, 'phase'] for step in range(50)],
+    } for index in range(turns)], 'syncSeq': 4821, 'hasMore': True}
+    if wide:
+        page['activity'] = [{'at': step + 0.25, 'n': step} for step in range(3000)]
+    if deep:
+        nested = {'leaf': -0.0}
+        for _ in range(40):
+            nested = {'child': nested, 'weight': 0.5}
+        page['tree'] = nested
+    return page
+
+
+def _count_decoders(monkeypatch):
+    import orjson
+    import tofu_db.wire as client
+    calls = {'accelerated': 0, 'stdlib': 0}
+    original_loads = json.loads
+
+    def accelerated_loads(body):
+        calls['accelerated'] += 1
+        return orjson.loads(body)
+
+    def stdlib_loads(*args, **kwargs):
+        calls['stdlib'] += 1
+        return original_loads(*args, **kwargs)
+
+    monkeypatch.setattr(client, '_fast_json', SimpleNamespace(
+        loads=accelerated_loads, JSONDecodeError=orjson.JSONDecodeError))
+    monkeypatch.setattr(client.json, 'loads', stdlib_loads)
+    return client, calls, original_loads
+
+
+@pytest.mark.parametrize('shape', ['page', 'small', 'wide', 'deep', 'float-first', 'float-last'])
+def test_float_bearing_responses_take_one_accelerated_parse(monkeypatch, shape):
+    page = {
+        'page': _turn_projection_page(), 'small': {'cost': 0.25, 'rev': 3},
+        'wide': _turn_projection_page(1, wide=True), 'deep': _turn_projection_page(1, deep=True),
+        'float-first': {'elapsed': -0.0, **_turn_projection_page(2)},
+        'float-last': {**_turn_projection_page(2), 'elapsed': 1e-7},
+    }[shape]
+    raw = json.dumps(page, separators=(',', ':'), ensure_ascii=False).encode()
+    client, calls, original_loads = _count_decoders(monkeypatch)
+    expected = original_loads(raw.decode('utf-8'))
+    _assert_same_json_tree(client.StorageV2Response(0, 0, raw, None, None, False).json(), expected)
+    assert calls == {'accelerated': 1, 'stdlib': 0}
+
+
+@pytest.mark.parametrize('literal', [
+    b'18446744073709551616', b'-9223372036854775809', b'1208925819614629174706177', b'1' * 200])
+@pytest.mark.parametrize('context', [b'%s', b'[%s]', b'{"a":[1, %s]}', b'{"k" : \n %s}', b'PAGE'])
+def test_integer_literals_beyond_64_bits_select_stdlib_without_speculative_parse(
+        monkeypatch, literal, context):
+    if context == b'PAGE':
+        page = json.dumps(_turn_projection_page(2), separators=(',', ':')).encode()
+        raw = page[:-1] + b',"exact":' + literal + b'}'
+    else:
+        raw = context % literal
+    client, calls, original_loads = _count_decoders(monkeypatch)
+    expected = original_loads(raw.decode('utf-8'))
+    _assert_same_json_tree(client.StorageV2Response(0, 0, raw, None, None, False).json(), expected)
+    assert calls == {'accelerated': 0, 'stdlib': 1}
+
+
+@pytest.mark.parametrize('raw', [
+    b'{"text":"12345678901234567890123","n":1.5}',
+    b'{"text":"\\"12345678901234567890123","n":1.5}',
+    b'{"x":1.12345678901234567890123,"n":2.5}',
+    b'{"x":12345678901234567890123.5}',
+    b'{"x":1e0000000000000000000000001}',
+    b'{"x":-1e-0000000000000000000000001}',
+    b'[18446744073709551615,-9223372036854775808,1761600000123456789,1.5]',
+])
+def test_digit_runs_that_decode_exactly_keep_the_accelerated_parse(monkeypatch, raw):
+    client, calls, original_loads = _count_decoders(monkeypatch)
+    expected = original_loads(raw.decode('utf-8'))
+    _assert_same_json_tree(client.StorageV2Response(0, 0, raw, None, None, False).json(), expected)
+    assert calls == {'accelerated': 1, 'stdlib': 0}

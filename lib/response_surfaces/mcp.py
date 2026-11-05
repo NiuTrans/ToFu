@@ -8,6 +8,8 @@ import json
 import re
 from jsonschema import Draft202012Validator
 
+from lib.error_envelope import BadRequest
+
 
 def _tools(user_id):
     from lib.mcp.client import get_bridge
@@ -42,7 +44,7 @@ def read_catalog(connection, provider, *, user_id, cancelled, queue=None):
     bridge, rows = _tools(user_id)
     operation = 'get_queue_resource' if queue is not None else 'compute_catalog'
     if queue is not None and (not isinstance(queue, str) or not queue.strip() or len(queue) > 256):
-        raise ValueError('Explicit queue name required')
+        raise BadRequest('Explicit queue name required', field='queue')
     selected = [row for row in rows if row.get('server_name') == connection and row.get('tool_name') == operation]
     if len(selected) != 1:
         raise PermissionError('Read-only compute catalog unavailable')

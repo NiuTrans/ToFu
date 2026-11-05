@@ -297,7 +297,7 @@ def test_injected_gate_ports_cross_an_isolated_subflow_boundary():
 def test_gate_cancel_during_wait_releases_worker_and_emits_cancelled(monkeypatch, mode):
     from lib.tasks_pkg import approval, human_guidance
     from lib.tasks_pkg.human_gate_registry import OwnedHumanGateRegistry
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(approval, 'human_gate_registry', registry)
     monkeypatch.setattr(human_guidance, 'human_gate_registry', registry)
     monkeypatch.setattr(approval, '_STORE_POLL_INTERVAL', 0.01)
@@ -339,7 +339,7 @@ def test_owner_stop_wins_over_answer_before_continuation(mode):
 def test_request_event_is_answerable_before_publish_returns(monkeypatch, mode):
     from lib.tasks_pkg import approval, human_guidance
     from lib.tasks_pkg.human_gate_registry import OwnedHumanGateRegistry
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(approval, 'human_gate_registry', registry)
     monkeypatch.setattr(human_guidance, 'human_gate_registry', registry)
     events = []

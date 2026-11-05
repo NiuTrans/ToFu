@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -103,6 +105,7 @@ def test_translation_dispatch_enters_strict_billing_stop_context(monkeypatch):
 def test_translation_deadline_reaches_nonstream_dispatch(monkeypatch):
     from lib.llm import AbortedError
     from lib.translate.engine import _engine
+    from lib.translate.errors import TranslationDeadlineExhausted
 
     clock = {'now': 0.0}
     calls = []
@@ -125,20 +128,28 @@ def test_translation_deadline_reaches_nonstream_dispatch(monkeypatch):
 
     monkeypatch.setattr('lib.llm_dispatch.smart_chat', fake_smart_chat)
 
-    with pytest.raises(ValueError, match='Empty translation result'):
+    with pytest.raises(TranslationDeadlineExhausted) as raised:
         _engine._translate_one_chunk(
             'This sentence needs a Chinese translation.',
             'Translate faithfully.', source='English', target='Chinese',
             overall_deadline=1.0, use_cache=False)
 
     assert len(calls) == 1
+    # The deadline cut an attempt in flight: nothing came back empty, and the
+    # cause is named instead of ``last_err=None``.
+    assert raised.value.dispatched_attempts == 1
+    assert raised.value.last_err
+    assert 'Empty translation result' not in str(raised.value)
 
 
-def test_predispatch_deadline_records_last_err(monkeypatch):
-    """A deadline already spent before the first dispatch must not surface
-    ``last_err=None`` — that reads as a no-op bug. Record the real cause so
-    the segment-enrichment 'skipping N segments' wrapper keeps it."""
+def test_predispatch_deadline_is_reported_as_not_dispatched(monkeypatch):
+    """A budget spent before the first attempt is not an empty result.
+
+    Production 2026-10-23 logged 130 'Empty translation result for chunk
+    after 1 attempts (0 dispatch fails, ..., elapsed=0s)' records for chunks
+    whose caller handed over an already-spent budget: zero attempts ran."""
     from lib.translate.engine import _engine
+    from lib.translate.errors import TranslationDeadlineExhausted
 
     monkeypatch.setattr('lib.mt_provider.is_mt_configured', lambda: False)
     monkeypatch.setattr(
@@ -149,13 +160,109 @@ def test_predispatch_deadline_records_last_err(monkeypatch):
 
     monkeypatch.setattr('lib.llm_dispatch.smart_chat', fail_dispatch)
 
-    with pytest.raises(
-            ValueError,
-            match='last_err=overall deadline exhausted before dispatch'):
+    with pytest.raises(TranslationDeadlineExhausted) as raised:
         _engine._translate_one_chunk(
             'This sentence needs a Chinese translation.',
             'Translate faithfully.', source='English', target='Chinese',
             overall_deadline=0.0, use_cache=False)
+
+    error = raised.value
+    assert error.dispatched_attempts == 0
+    assert 'not dispatched' in str(error)
+    assert 'Empty translation result' not in str(error)
+    assert '1 attempts' not in str(error)
+
+
+def test_deadline_never_returns_or_caches_a_rejected_candidate(monkeypatch):
+    """A deadline ends the retry loop; it never accepts the reply it refused.
+
+    The loop keeps the last candidate in hand while it retries. When the
+    deadline expired before that retry, the refused verbatim echo of the
+    source was returned and cached as a successful translation.
+    """
+    from lib.translate.engine import _engine
+    from lib.translate.errors import TranslationDeadlineExhausted
+
+    source = 'This sentence needs a Chinese translation.'
+    clock = {'now': 0.0}
+    stored = []
+    monkeypatch.setattr(_engine.time, 'monotonic', lambda: clock['now'])
+    monkeypatch.setattr('lib.mt_provider.is_mt_configured', lambda: False)
+    monkeypatch.setattr(
+        'lib.llm_dispatch.factory.get_dispatcher',
+        lambda: SimpleNamespace(record_truncation=lambda *_a, **_k: None))
+    monkeypatch.setattr(
+        _engine.translate_cache, 'put',
+        lambda *args, **_kwargs: stored.append(args))
+
+    def echo_until_the_deadline(*_args, **_kwargs):
+        clock['now'] = 11.0
+        return source, {'_dispatch': {'model': 'echo-model', 'key': 'k1'}}
+
+    monkeypatch.setattr('lib.llm_dispatch.smart_chat', echo_until_the_deadline)
+
+    with pytest.raises(TranslationDeadlineExhausted) as raised:
+        _engine._translate_one_chunk(
+            source, 'Translate faithfully.', source='English',
+            target='Chinese', overall_deadline=10.0, use_cache=False)
+
+    assert raised.value.dispatched_attempts == 1
+    assert raised.value.content_fails == 1
+    assert 'verbatim' in str(raised.value)
+    assert stored == []
+
+
+def test_owner_cancel_during_failed_dispatch_is_not_a_deadline(monkeypatch):
+    """``exceeded()`` folds cancellation into the deadline predicate; a
+    cancelled owner must still see an abort, not a deadline expiry."""
+    from lib.llm import AbortedError
+    from lib.llm.llm_errors import RateLimitError
+    from lib.translate.engine import _engine
+
+    cancelled = {'value': False}
+    monkeypatch.setattr('lib.mt_provider.is_mt_configured', lambda: False)
+    monkeypatch.setattr(
+        'lib.llm_dispatch.factory.get_dispatcher', lambda: object())
+
+    def cancelled_while_rate_limited(*_args, **_kwargs):
+        cancelled['value'] = True
+        raise RateLimitError('all keys busy')
+
+    monkeypatch.setattr(
+        'lib.llm_dispatch.smart_chat', cancelled_while_rate_limited)
+
+    with pytest.raises(AbortedError):
+        _engine._translate_one_chunk(
+            'This sentence needs a Chinese translation.',
+            'Translate faithfully.', source='English', target='Chinese',
+            overall_deadline=600, use_cache=False,
+            abort_check=lambda: cancelled['value'])
+
+
+def test_whole_turn_deadline_expiry_settles_as_retryable_timeout(monkeypatch):
+    from lib.translate.errors import TranslationDeadlineExhausted
+    from lib.translate.runtime import _worker
+
+    observed = {}
+
+    def finish(task_id, **kwargs):
+        observed['task_id'] = task_id
+        observed.update(kwargs)
+
+    monkeypatch.setattr(_worker._translate_runtime, 'finish', finish)
+    _worker._settle_error(
+        {'model': None},
+        'translate-task',
+        TranslationDeadlineExhausted(
+            deadline_seconds=90.0, dispatched_attempts=2, dispatch_fails=1),
+        '',
+        '',
+        '',
+        'translatedContent',
+    )
+
+    assert observed['error']['kind'] == 'timeout'
+    assert observed['error']['retryable'] is True
 
 
 def test_translation_call_can_tighten_upstream_429_attempt_budget(monkeypatch):

@@ -347,6 +347,7 @@ impl Agent<'_> {
                 }
                 return Ok(Value::Null);
             }
+            let tool_order = permit.as_ref().and_then(crate::round_admission::Permit::tool_order);
             let response = self.provider.round(messages, session);
             if let Some(permit) = permit {
                 permit.settle(&response)?;
@@ -500,8 +501,9 @@ impl Agent<'_> {
                 authorization: self.authorization,
                 calls: invocations,
             };
+            let after = tool_order.as_ref().and_then(|order| order.get()).map_or(&[][..], Vec::as_slice);
             let dispatched = match self.scheduling {
-                Some(scheduler) => scheduler.dispatch(batch),
+                Some(scheduler) => scheduler.dispatch_in_order(batch, after),
                 None => crate::tool_scheduler::ordered(batch),
             };
             let dispatched = match dispatched {

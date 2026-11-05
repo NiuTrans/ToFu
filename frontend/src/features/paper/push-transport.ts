@@ -1,3 +1,4 @@
+/** Paper task replay and observation lifetimes; domain projections remain injected. */
 import { featureRegistry } from '../../feature-registry';
 export interface PaperPushEvent extends Record<string, unknown> {
   seq?: number;
@@ -34,10 +35,6 @@ type PushWindow = Window & {
     taskId: string,
     handler?: PaperPushHandler,
   ) => void;
-  paperIngestEvent?: typeof paperIngestEvent;
-  paperAttachPush?: typeof paperAttachPush;
-  paperDetachPush?: typeof paperDetachPush;
-  taskReplayIngestPage?: typeof taskReplayIngestPage;
 };
 
 export interface TaskReplayPage {
@@ -137,6 +134,139 @@ function defaultTerminal(event: PaperPushEvent): boolean {
     || event.type === 'aborted';
 }
 
+export interface PaperTaskSnapshot extends TaskReplayPage {
+  ok?: boolean;
+  [key: string]: any;
+}
+
+interface PaperTaskObserverPorts {
+  readonly channel: PaperPushChannel;
+  readonly pollIntervalMs: number;
+  readonly state: () => { status: string; lastEventAt: number };
+  readonly taskId: () => string;
+  readonly read: (taskId: string, cursor: number) => Promise<Response | null | undefined>;
+  readonly consume: (event: PaperPushEvent) => unknown;
+  readonly snapshot: (page: PaperTaskSnapshot) => void;
+  readonly terminal: (page: PaperTaskSnapshot) => void | Promise<void>;
+  readonly lost: () => void;
+  readonly presentation: {
+    readonly render: () => void;
+    readonly progress: () => void;
+    readonly activity: () => void;
+  };
+  readonly warn: (error: unknown) => void;
+}
+
+// Existing Paper media observation contract: five failed reads expose `lost`;
+// the visible activity clock advances each second independently of polling.
+const MEDIA_POLL_FAILURE_LIMIT = 5;
+const MEDIA_ACTIVITY_TICK_MS = 1000;
+
+/**
+ * One media task observation lifetime, shared by Podcast and Video.
+ * Owns the cursor, sequence gate, subscription, read exclusion and timers.
+ * Domain callbacks retain snapshot/terminal projection and error copy; stopping
+ * observation never aborts the durable server task. No resources start on import.
+ */
+export function createPaperTaskObserver(ports: PaperTaskObserverPorts) {
+  const replay: PaperPushState = {};
+  let cursor = 0;
+  let failures = 0;
+  let generation = 0;
+  let busy: { generation: number } | null = null;
+  let pollTimer: number | null = null;
+  let activityTimer: number | null = null;
+
+  const stopPoll = (): void => {
+    if (pollTimer != null) window.clearTimeout(pollTimer);
+    pollTimer = null;
+  };
+  const startActivity = (): void => {
+    if (activityTimer != null) return;
+    activityTimer = window.setInterval(ports.presentation.activity, MEDIA_ACTIVITY_TICK_MS);
+  };
+  const stop = (): void => {
+    generation += 1;
+    stopPoll();
+    if (activityTimer != null) window.clearInterval(activityTimer);
+    activityTimer = null;
+    paperDetachPush(replay);
+  };
+  const reset = (): void => {
+    stop();
+    cursor = failures = 0;
+    replay._seqSeen = -1;
+    replay._replayCursor = 0;
+  };
+  const paint = (changed: unknown): void => {
+    if (changed) ports.presentation.render(); else ports.presentation.progress();
+    ports.presentation.activity();
+  };
+  const attach = (): void => {
+    const taskId = ports.taskId();
+    const attachedGeneration = generation;
+    if (!taskId) return;
+    paperAttachPush(replay, taskId, {
+      channel: ports.channel,
+      isCurrent: () => attachedGeneration === generation && ports.taskId() === taskId,
+      onEvent: (event) => {
+        ports.state().lastEventAt = Date.now();
+        paint(paperIngestEvent(replay, event, (_state, row) => ports.consume(row)));
+        if (defaultTerminal(event)) void poll();
+      },
+    });
+  };
+  const schedule = (): void => {
+    stopPoll();
+    attach();
+    pollTimer = window.setTimeout(() => void poll(), ports.pollIntervalMs);
+  };
+  const fail = (): void => {
+    failures += 1;
+    if (failures >= MEDIA_POLL_FAILURE_LIMIT) {
+      stop();
+      ports.lost();
+    } else schedule();
+  };
+  const poll = async (): Promise<void> => {
+    const taskId = ports.taskId();
+    if (!taskId || busy?.generation === generation) return;
+    stopPoll();
+    const request = { generation };
+    busy = request;
+    const current = () => request.generation === generation && ports.taskId() === taskId;
+    try {
+      const transport = await ports.read(taskId, cursor);
+      // The API transport owns v4 envelope decoding on Response.json().
+      const response: PaperTaskSnapshot | null = transport?.ok ? await transport.json() : null;
+      if (!current()) return;
+      if (!response?.ok) { fail(); return; }
+      failures = 0;
+      const page = taskReplayIngestPage(replay, response,
+        (_state, event) => ports.consume(event), cursor);
+      if (page.accepted) ports.state().lastEventAt = Date.now();
+      cursor = page.nextCursor;
+      ports.snapshot(response);
+      if (response.done) {
+        stop();
+        await ports.terminal(response);
+        return;
+      }
+      if (page.changed) ports.presentation.render(); else ports.presentation.progress();
+      if (ports.state().status === 'generating') startActivity();
+      ports.presentation.activity();
+      schedule();
+    } catch (error: unknown) {
+      ports.warn(error);
+      if (current()) fail();
+    } finally {
+      // A detached read cannot release the exclusion owned by its replacement.
+      if (busy === request) busy = null;
+    }
+  };
+  return { reset, schedule, poll, startActivity, stop };
+}
+
 /** Bind the paper push channel idempotently for one state/task pair. */
 export function paperAttachPush(
   state: PaperPushState | null | undefined,
@@ -194,14 +324,3 @@ export function paperDetachPush(
   state._pushHandler = undefined;
   state._pushChannel = undefined;
 }
-
-/** Install compatibility names consumed by the remaining classic scripts. */
-export function installPaperPushGlobals(): void {
-  const target = pushWindow();
-  target.paperIngestEvent = paperIngestEvent;
-  target.paperAttachPush = paperAttachPush;
-  target.paperDetachPush = paperDetachPush;
-  target.taskReplayIngestPage = taskReplayIngestPage;
-}
-
-installPaperPushGlobals();

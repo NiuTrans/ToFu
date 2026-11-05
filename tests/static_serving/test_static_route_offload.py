@@ -29,6 +29,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import pytest
 
+from tests._jsdom import require_shipped_graph
+
 pytestmark = pytest.mark.unit
 
 
@@ -131,6 +133,7 @@ def test_read_timeout_is_503(client, monkeypatch):
 @pytest.mark.auth_mode("open")
 def test_vite_asset_served_with_etag_and_immutable_cache(client, async_app):
     """A content-hashed Vite asset has an ETag and immutable long caching."""
+    require_shipped_graph()
     path, _ = _first_existing_static(client, vite_only=True)
     if not path:
         pytest.skip('prebuilt Vite artifact absent in this test lane')
@@ -158,6 +161,7 @@ def test_vite_asset_served_with_etag_and_immutable_cache(client, async_app):
 
 @pytest.mark.auth_mode("open")
 def test_vite_javascript_served_with_correct_mime(client):
+    require_shipped_graph()
     path, _ = _first_existing_static(client, vite_only=True)
     if not path:
         pytest.skip('prebuilt Vite artifact absent in this test lane')

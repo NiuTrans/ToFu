@@ -54,26 +54,31 @@ def test_same_pipeline_retries_checkpoint_without_model_or_tool_reexecution(runt
     assert snapshots and len(runtime.calls) == 2 and len(runtime.tool_calls) == 1
 
 
-@pytest.mark.parametrize('blocked_phase', ['model_in_flight', 'tools_in_flight', 'ready', 'final'])
+@pytest.mark.parametrize('blocked_phase', ['model_in_flight', 'tools_in_flight', 'ready', 'final',
+                                           'checkpoint_marker'])
 def test_actual_swarm_writer_retains_same_receipt_and_terminal_answer(runtime, monkeypatch, blocked_phase):
     from lib.swarm import persistence
     # Use the actual swarm writer with a synthetic receipt-capable authority.
     # The model/tools are hermetic and parent conversation storage is not used.
     runtime.parent['_transientRuntime'] = False
     agent = agent_for(runtime)
-    agent.swarm_key = 'hermetic-wave'
+    agent.swarm_key, agent.swarm_run_id = 'hermetic-wave', runtime.parent['id']
     attempts, receipts = [], {}
     def command(operation, payload, command_id):
-        assert operation == 'swarm.agent.save'
+        # The second request's write-ahead overlays the unchanged first-round
+        # transcript with the compact marker; every other write is a full save.
+        assert operation in ('swarm.agent.save', 'swarm.agent.checkpoint.mark')
         result = payload['result']
         selected = ((result.get('status') == 'completed') if blocked_phase == 'final'
+                    else operation == 'swarm.agent.checkpoint.mark'
+                    if blocked_phase == 'checkpoint_marker'
                     else result.get('checkpoint_phase') == blocked_phase)
         if selected and len(attempts) < 20:
             attempts.append((deepcopy(payload), command_id, len(runtime.calls), len(runtime.tool_calls)))
             receipts.setdefault(command_id, deepcopy(payload))
             raise StorageError('database_busy', 'lost acknowledgement or pressure')
         receipts.setdefault(command_id, deepcopy(payload))
-        return {'ok': True}
+        return {'marked': True} if operation == 'swarm.agent.checkpoint.mark' else {'saved': True}
     monkeypatch.setattr(persistence, '_storage', lambda **kw: SimpleNamespace(command=command))
     result = agent.run()
     assert result.status == 'completed', result.error_message

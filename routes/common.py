@@ -32,6 +32,7 @@ from lib.settings_panels import (
     panels_signature as _settings_panels_signature,
 )
 from lib.log import get_logger
+from lib.http_transport.ui_languages import DEFAULT_UI_LANGUAGE, UI_LANGUAGES
 from lib.vite_assets import (
     ViteAssetError,
     get_vite_asset_tags as _get_vite_asset_tags,
@@ -171,10 +172,7 @@ from routes.api_v1.auth import (  # noqa: E402
 @api_v1_common_bp.route("/api/v1/logs/compress", methods=["POST"])
 def log_compress():
     """Use a cheap LLM to intelligently compress verbose logs."""
-    from lib.logging_pkg.log_compression import (
-        LogCompressionBusyError,
-        compress_logs,
-    )
+    from lib.logging_pkg.log_compression import compress_logs
 
     data = parse_body(exact=('text',))
     text = (data.get("text") or "").strip()
@@ -187,13 +185,6 @@ def log_compress():
             owner_user_id=request_principal().require_owner(context="log compression"),
         )
         return api_ok({"compressed": content, "usage": usage})
-    except LogCompressionBusyError:
-        return api_error(
-            "Server at capacity; retry shortly.",
-            status=503,
-            error_kind="overloaded",
-            retry_after=5,
-        )
     except Exception as e:
         logger.error("[LogCompress] Error: %s", e, exc_info=True)
         return api_internal_error("internal_error")
@@ -448,10 +439,11 @@ _bundled_index_cache = {
 # write-through mirror maintained by i18n.js (on boot and in setLanguage). The
 # server only ever READS it, and treats anything unrecognised as the default —
 # a hostile or stale cookie can therefore only ever select a real language,
-# never inject a filename.
+# never inject a filename. The languages come from the frontend-owned
+# manifest (frontend/src/i18n/languages.json).
 _UI_LANG_COOKIE = "tofu_ui_lang"
-_UI_LANGS = ("zh", "en")
-_UI_LANG_DEFAULT = "zh"
+_UI_LANGS = UI_LANGUAGES
+_UI_LANG_DEFAULT = DEFAULT_UI_LANGUAGE
 
 
 def request_ui_lang():

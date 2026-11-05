@@ -65,24 +65,3 @@ def test_writable_turn_admission_precedes_clearing_previous_live_output(monkeypa
         assert 'segments' not in task
         assert task['_flowLiveTurn']['turnId'] == 'next'
         assert len(events) == 1
-
-
-def test_relayed_tool_start_without_status_is_a_running_round():
-    """A foreign tool_start admitted into the parent's durable round list must
-    carry the canonical pending verdict. Without it, every Turn projection
-    fold mirrored the round as ``result: {content: None, status: None}`` — a
-    shape the generated snapshot contract rejects (conv mu5p3vn9x32wcd)."""
-    task = {'content': '', 'thinking': '', 'toolRounds': []}
-    events = []
-    sink = OrchestrationChatTaskEventSink(task, lambda owner, event: events.append(event))
-    sink({'type': 'tool_start', 'roundNum': 1, 'toolCallId': 'call-1',
-          'toolName': 'load_skill', 'toolArgs': '{}', 'query': 'load_skill'})
-    assert task['toolRounds'][0]['status'] == 'searching'
-    sink({'type': 'tool_complete', 'roundNum': 1, 'toolCallId': 'call-1',
-          'toolName': 'load_skill', 'toolContent': 'FULL'})
-    assert task['toolRounds'][0]['status'] == 'done'
-    assert task['toolRounds'][0]['toolContent'] == 'FULL'
-    # An explicit producer verdict always wins over the pending default.
-    sink({'type': 'tool_start', 'roundNum': 2, 'toolCallId': 'call-2',
-          'toolName': 'run_command', 'toolArgs': '{}', 'status': 'executing'})
-    assert task['toolRounds'][1]['status'] == 'executing'

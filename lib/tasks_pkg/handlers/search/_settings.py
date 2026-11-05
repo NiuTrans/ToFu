@@ -1,10 +1,9 @@
 # HOT_PATH
 """update_search_settings tool handler — thin wrapper over lib.search.search_settings.
 
-The validation/clamping/persistence/hot-reload logic lives in
-``lib.search.search_settings.apply_updates`` (single source of truth, shared with
-the Settings UI status projection). This handler only translates between the
-tool-round protocol and that function.
+The validation/persistence/hot-reload logic for the fetch blocklist lives in
+``lib.search.search_settings.apply_updates``. This handler only translates
+between the tool-round protocol and that function.
 """
 
 from __future__ import annotations
@@ -16,70 +15,35 @@ logger = get_logger(__name__)
 
 
 def _format_effective(eff: dict) -> str:
-    """Render the effective-config snapshot compactly for the tool response."""
+    """Render the effective blocklist for the tool response."""
     if not isinstance(eff, dict):
         return ''
     skip = eff.get('skip_domains') or []
-    lines = [
-        f"  fetch_top_n={eff.get('fetch_top_n')}",
-        f"  fetch_timeout={eff.get('fetch_timeout')}s",
-        f"  max_chars_search={eff.get('max_chars_search')}",
-        f"  max_chars_direct={eff.get('max_chars_direct')}",
-        f"  max_chars_pdf={eff.get('max_chars_pdf')}",
-        f"  max_bytes={eff.get('max_bytes')} "
-        f"(~{round((eff.get('max_bytes') or 0) / 1048576, 1)} MB)",
-        f"  llm_content_filter={'on' if eff.get('llm_content_filter') else 'off'}",
-        f"  skip_domains={len(skip)} entries"
-        + (f": {', '.join(skip[:10])}{' …' if len(skip) > 10 else ''}" if skip else ''),
-    ]
-    return '\n'.join(lines)
+    return (f"  skip_domains={len(skip)} entries"
+            + (f": {', '.join(skip)}" if skip else ''))
 
 
 @tool_registry.handler('update_search_settings', category='search',
-                       description='Read or adjust server-wide search/fetch settings')
+                       description='Read or edit the server-wide fetch blocklist')
 def _handle_update_search_settings(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
     from lib.search import search_settings as ss
 
-    args = fn_args or {}
-    retired = {'max_chars_search', 'max_chars_direct', 'max_chars_pdf'}
-    rejected = sorted(retired.intersection(args))
-    overrides = args.get('overrides')
-    if isinstance(overrides, dict):
-        rejected.extend(f'overrides.{key}' for key in sorted(retired.intersection(overrides)))
-    if rejected:
-        # Reject the entire call before the shared settings owner can persist
-        # any sibling values. UI/operator settings remain a separate authority.
-        res = {
-            'ok': False, 'applied': {}, 'notes': [],
-            'errors': {key: 'Output-budget parameters are not accepted by this tool; '
-                            'no settings were changed.' for key in rejected},
-            'effective': ss.read_effective(),
-        }
-    else:
-        res = ss.apply_updates(args)
+    res = ss.apply_updates(fn_args or {})
 
     parts: list[str] = []
     changed = bool(res.get('applied'))
     if res.get('applied'):
-        applied_lines = []
-        for key, val in res['applied'].items():
-            if key == 'max_bytes':
-                applied_lines.append(f"max_download_mb={round(val / 1048576, 1)} (max_bytes={val})")
-            elif isinstance(val, list):
-                applied_lines.append(f"{key}={', '.join(str(v) for v in val)}")
-            else:
-                applied_lines.append(f"{key}={val}")
+        applied_lines = [f"{key}={', '.join(str(v) for v in val)}"
+                         for key, val in res['applied'].items()]
         parts.append('Applied (server-wide, persisted, hot-reloaded):\n  '
                      + '\n  '.join(applied_lines))
     if res.get('errors'):
         parts.append('Rejected:\n  ' + '\n  '.join(
             f'{k}: {v}' for k, v in res['errors'].items()))
-    for note in res.get('notes') or []:
-        parts.append(f'NOTE: {note}')
     if not changed and not res.get('errors'):
-        parts.append('Current effective search/fetch settings (no changes requested):')
+        parts.append('Current fetch blocklist (no changes requested):')
     else:
-        parts.append('Effective settings now:')
+        parts.append('Fetch blocklist now:')
     parts.append(_format_effective(res.get('effective')))
 
     tool_content = '\n\n'.join(p for p in parts if p)
@@ -98,4 +62,4 @@ def _handle_update_search_settings(task, tc, fn_name, tc_id, fn_args, rn, round_
                          query_override='⚙️ update_search_settings')
     logger.info('[SettingsTool] changed=%s ok=%s applied=%s errors=%s',
                 changed, ok, res.get('applied'), res.get('errors') or 'none')
-    return tc_id, tool_content, ok
+    return tc_id, tool_content, False

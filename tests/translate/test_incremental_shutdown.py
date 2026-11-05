@@ -15,7 +15,6 @@ def owner(monkeypatch):
     monkeypatch.setattr(incremental, '_worker_threads', weakref.WeakSet())
     monkeypatch.setattr(incremental, '_shutdown_started', False)
     monkeypatch.setattr(incremental, '_retired_stamps', {})
-    monkeypatch.setattr(incremental, '_PREVIEW_MIN_NARRATION_CHARS', 1)
     yield
     incremental.shutdown_incremental_translations()
     assert not incremental._accumulators
@@ -80,7 +79,7 @@ def test_worker_cannot_join_its_own_owner(monkeypatch):
         observed.set()
         return 'translated', 'fixture'
     monkeypatch.setattr(incremental._Accumulator, '_translate', translate)
-    monkeypatch.setattr(incremental._Accumulator, '_push', lambda *args: None)
+    monkeypatch.setattr(incremental._Accumulator, '_push', lambda *args, **kwargs: None)
     assert incremental.submit_round_segment(task(), 1, 'source')
     assert observed.wait(5)
 

@@ -241,10 +241,6 @@ def test_generated_typed_endpoint_policy_is_current():
         render_typescript()
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not ESBUILD.is_file(),
-    reason='node + vite test bundler unavailable',
-)
 def test_typed_request_registry_is_self_contained_and_matches_canonical(
     tmp_path,
 ):

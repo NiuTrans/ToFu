@@ -36,6 +36,23 @@ def test_declared_recipe_checks_policy_before_page_execution(monkeypatch):
     assert calls == []
 
 
+def test_allowed_recipe_returns_the_page_result_value(monkeypatch):
+    calls = []
+    monkeypatch.setattr('lib.browser.access.require_access', lambda *a, **k: None)
+
+    def execute(expression, *, args, trusted_read):
+        calls.append((args, trusted_read))
+        return {'ok': True, 'page': {}, 'lease': {},
+                'result': {'value': {'ok': True, 'status': 200, 'body': {'value': 42}}}}
+
+    page = SimpleNamespace(lease=SimpleNamespace(owner_user_id='41', client_id='a', profile=''),
+                           execute=execute)
+    recipe = AuthenticatedRead('https://example.test', '/api/data', ('q',))
+    assert recipe.execute(page, {'q': 'value'}) == {
+        'ok': True, 'status': 200, 'body': {'value': 42}}
+    assert calls[0][0]['query'] == {'q': ['value']} and calls[0][1] is True
+
+
 @pytest.mark.parametrize('scenario', ['success', 'missing', 'origin', 'large', 'redirect', 'login'])
 def test_page_request_uses_and_scrubs_token_before_result(scenario):
     harness = r'''

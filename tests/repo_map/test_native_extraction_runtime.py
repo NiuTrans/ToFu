@@ -5,6 +5,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import sys
 import threading
 
 import pytest
@@ -223,7 +224,7 @@ import native_extraction_owned
 assert not {'native_extraction_library', 'native_extraction_scan'} & sys.modules.keys()
 assert not {'grep_ast', 'tree_sitter_language_pack'} & sys.modules.keys()
 """
-    run = subprocess.run([os.environ['TOFU_BENCHMARK_PYTHON'], '-c', code], cwd=root,
+    run = subprocess.run([os.environ.get('TOFU_BENCHMARK_PYTHON', sys.executable), '-c', code], cwd=root,
                          capture_output=True, text=True, timeout=30)
     assert run.returncode == 0, run.stderr
 

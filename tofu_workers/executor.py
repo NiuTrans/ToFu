@@ -7,15 +7,20 @@ this package must never import application configuration or storage.
 
 from __future__ import annotations
 
+import itertools
 import logging
+import queue
 import threading
 import time
-import uuid
 import weakref
 from collections import deque
 from concurrent.futures import Executor, Future
 from dataclasses import dataclass
 from typing import Any, Callable
+
+# Generic jobs need only process-local identity: uuid4 reads the OS random
+# source, which releases the GIL on every submit and stalls it under load.
+_GENERIC_JOB_IDS = itertools.count()
 
 
 def _cancel_unstarted_weak(future, item_ref, executor_ref):
@@ -32,7 +37,6 @@ class _SilentMetrics:
         pass
 
     observe_executor_queue_wait = _ignore
-    publish_executor_state = _ignore
     record_executor_abandonment = _ignore
     record_executor_idle_retirement = _ignore
     record_executor_rejection = _ignore
@@ -54,10 +58,56 @@ class _WorkItem(_WeakWorkItemBase):
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
     queued_at: float
+    # A carrier owns the job: it entered it, or the job was handed to it and
+    # no carrier has taken it yet (its Future still PENDING, cancellable).
     started: bool = False
     admission_ready: bool = False
     abandoned: bool = False
     cancel_notification_claimed: bool = False
+
+
+class _Carrier:
+    """One physical worker's private hand-off slot and wake-up.
+
+    The scheduler hands over only after removing the carrier from its parked
+    set, inside the hold that decided it. The woken carrier takes the job
+    without the scheduler lock and enters its Future then, so a job cancelled
+    before it is taken never runs; a None hand-off retires the carrier. Until
+    the carrier has taken a job, a carrier holding the scheduler lock may take
+    it back instead: the inbox pops atomically, so exactly one of them enters
+    it. The robbed carrier finds a notice in place of the job, so the wake-up
+    it was given ends in a claim instead of a silent wait.
+    """
+    __slots__ = ('thread', '_inbox')
+
+    def __init__(self, thread: threading.Thread) -> None:
+        self.thread = thread
+        self._inbox: queue.SimpleQueue[_WorkItem | object | None] = queue.SimpleQueue()
+
+    def hand_off(self, item: _WorkItem | None) -> None:
+        self._inbox.put(item)
+
+    def park(self) -> _WorkItem | object | None:
+        """Wait for a started job, None to retire, or the _TAKEN_BACK notice."""
+        return self._inbox.get()
+
+    def reclaim(self) -> _WorkItem | None:
+        """Take back a handed-off job this carrier has not taken yet."""
+        try:
+            item = self._inbox.get_nowait()
+        except queue.Empty:
+            return None
+        if item is None or item is _TAKEN_BACK:
+            # A retirement or an unread notice is never taken back.
+            self._inbox.put(item)
+            return None
+        self._inbox.put(_TAKEN_BACK)
+        return item
+
+
+_PARK = object()
+# Left in a robbed carrier's inbox in place of the job taken back from it.
+_TAKEN_BACK = object()
 
 
 class DemandExecutor(Executor):
@@ -68,13 +118,32 @@ class DemandExecutor(Executor):
     executor; it cannot reject work. The short handoff deque owns cancellation
     before worker entry. Proven wedged calls retain quarantine accounting and
     retire on return; they do not prevent unrelated submissions from starting.
-    Optional ``state_publisher`` receives scalar scheduling snapshots so
-    multiple owners can aggregate observations. It must not acquire executor
-    locks or raise. The app adapter supplies process metrics; standalone owners
-    default to silent observers.
+    ``metric_snapshot()`` returns the exported scheduling gauges on demand, so
+    observers read state when metrics are scraped and no job publishes it. The
+    app adapter supplies process metrics; standalone owners default to silent
+    observers.
 
     Physical startup may recover once while the same Future remains provisional.
     User callables, initializers and control exceptions are never retried here.
+
+    The hold that admits a job also commits it to a parked carrier and hands
+    it over through that carrier's private inbox, so the woken carrier runs it
+    without re-acquiring the scheduler lock; a carrier already holding the
+    lock takes back a hand-off whose carrier has not woken yet. Whichever
+    carrier takes the job enters its Future, so until then cancellation,
+    ``cancel_task`` and ``shutdown(cancel_futures=True)`` still withdraw it. The robbed
+    carrier, woken all the same, finds a notice and claims like a carrier
+    that finished a job, so admitted jobs wait for such carriers instead of
+    waking parked ones. A carrier records its finished job without the lock
+    before resolving the Future, and every hold settles such records before
+    it reads job bookkeeping. Its next hold ends callback occupancy and
+    claims, parks or retires: surplus
+    retires at completion boundaries and on capacity or terminal transitions,
+    one retirement hand-off per parked carrier, and only terminal transitions
+    release all parked carriers.
+    A job that started carriers can absorb is admitted in one hold; any other
+    submitter starts carriers it reserved itself, without a global startup
+    lock, so no submitter waits behind another's Thread.start().
     """
 
     def __init__(
@@ -86,7 +155,6 @@ class DemandExecutor(Executor):
         thread_name_prefix: str = 'tofu-agent',
         metric_pool: str = 'agent',
         idle_retain_threads: int = 0,
-        state_publisher: Callable[..., None] | None = None,
         initializer: Callable[..., None] | None = None,
         initargs: tuple[Any, ...] = (),
         daemon_workers: bool = True,
@@ -110,17 +178,30 @@ class DemandExecutor(Executor):
         self._initargs = tuple(initargs)
         self._daemon_workers = bool(daemon_workers)
         self._broken_reason = None
-        self._state_publisher = state_publisher
         self._idle_retain_threads = max(
             0, min(self._max_workers, int(idle_retain_threads)))
 
         self._lifecycle_lock = threading.RLock()
+        # Joined shutdown waits on _condition. Parked carriers never wait on
+        # it: each blocks on its own _Carrier slot, woken by one hand-off.
         self._condition = threading.Condition(self._lifecycle_lock)
-        # Physical startup was already serialized by the scheduler condition.
-        # Keep that ordering separately so slow Thread.start never owns the
-        # lock needed by completion, cancellation, snapshots or shutdown.
-        self._startup_lock = threading.RLock()
+        # Serializes only abandon/resize check-start-commit transactions.
+        # Submissions and carrier replacement never take it, and no physical
+        # start ever holds the condition.
+        self._control_lock = threading.RLock()
         self._pending: deque[_WorkItem] = deque()
+        # While any carrier is parked, admitted jobs wait in _pending only for
+        # carriers counted in _woken_claimers.
+        self._parked: deque[_Carrier] = deque()
+        # Carriers handed a job, oldest first; an entry whose carrier has
+        # already taken its job is stale and dropped when next examined.
+        self._handed: deque[_Carrier] = deque()
+        # Carriers whose hand-off was taken back: each was woken for it and
+        # claims the oldest waiting job in its next hold, before it can park.
+        self._woken_claimers = 0
+        # Appended without the lock by carriers before they resolve a Future:
+        # (item, failed, finished_at). Settled by the next scheduler hold.
+        self._finished: deque[tuple[_WorkItem, bool, float]] = deque()
         self._jobs_by_id: dict[str, _WorkItem] = {}
         self._running_by_id: dict[str, _WorkItem] = {}
         self._threads: set[threading.Thread] = set()
@@ -128,6 +209,11 @@ class DemandExecutor(Executor):
         self._live_threads: set[threading.Thread] = set()
         self._retiring_threads: set[threading.Thread] = set()
         self._startup_extra_demand = 0
+        # Registered jobs not yet admitted: each owner is still starting the
+        # carriers that cover it, so started carriers never count on it.
+        self._provisional_jobs = 0
+        # A reserved carrier serves only after its starter commits it.
+        self._commit_events: dict[threading.Thread, threading.Event] = {}
         self._next_thread_index = 0
         self._completed_jobs = 0
         self._failed_jobs = 0
@@ -136,7 +222,6 @@ class DemandExecutor(Executor):
         self._abandoned_jobs = 0
         self._last_excess_activity = time.monotonic()
         self._shutdown = False
-        self._publish_locked()
 
     def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any):
         """Submit a generic job, preserving ``Executor`` compatibility.
@@ -146,7 +231,7 @@ class DemandExecutor(Executor):
         semantics without gaining task-addressed cancellation.
         """
         task_id = str(getattr(fn, '_tofu_task_id', '') or '')
-        return self.submit_task(task_id or f'executor:{uuid.uuid4().hex}', fn,
+        return self.submit_task(task_id or f'executor:{next(_GENERIC_JOB_IDS):032x}', fn,
                                 *args, **kwargs)
 
     def submit_task(
@@ -170,79 +255,104 @@ class DemandExecutor(Executor):
             kwargs=dict(kwargs),
             queued_at=time.monotonic(),
         )
-        with self._startup_lock:
-            with self._condition:
-                if self._broken_reason is not None:
-                    from concurrent.futures.thread import BrokenThreadPool
-                    raise BrokenThreadPool(self._broken_reason)
-                if self._shutdown:
-                    self._metrics.record_executor_rejection(self.metric_pool, reason='shutdown')
-                    raise RuntimeError('cannot schedule new futures after shutdown')
-                if job_id in self._jobs_by_id:
-                    self._metrics.record_executor_rejection(self.metric_pool, reason='duplicate')
-                    raise RuntimeError(f'agent task already scheduled: {job_id}')
-                self._pending.append(item)
-                self._jobs_by_id[job_id] = item
-                self._last_excess_activity = item.queued_at
-                cancellation_owner = weakref.ref(item)
-                cancellation_scheduler = weakref.ref(self)
-                future.add_done_callback(
-                    lambda completed, owner=cancellation_owner, scheduler=cancellation_scheduler:
-                        _cancel_unstarted_weak(completed, owner, scheduler)
-                )
-                threads, reservation_error = self._reserve_workers_outcome_locked()
-            first_startup_error = None
-            while True:
-                try:
-                    if reservation_error is not None:
-                        raise reservation_error
-                    self._start_reserved_workers(threads)
-                    break
-                except BaseException as error:
-                    # Startup cleanup has released its physical reservations.
-                    # The same unpublished item/Future can attempt admission
-                    # once more, without re-entering any user callable. A live
-                    # carrier from a late start may already satisfy the demand.
-                    with self._condition:
-                        recover = (first_startup_error is None
-                            and isinstance(error, Exception)
-                            and not self._shutdown and self._broken_reason is None
-                            and self._jobs_by_id.get(job_id) is item
-                            and not item.future.done())
-                        if recover:
-                            first_startup_error = error
-                            threads, reservation_error = self._reserve_workers_outcome_locked()
-                        else:
-                            # Final refusal still withdraws the provisional
-                            # item before any physical carrier can consume it.
-                            if self._jobs_by_id.get(job_id) is item:
-                                self._pending.remove(item)
-                                self._jobs_by_id.pop(job_id, None)
-                            self._last_excess_activity = time.monotonic()
-                            self._metrics.record_executor_rejection(
-                                self.metric_pool, reason='thread_start_failed')
-                            self._publish_locked()
-                            self._condition.notify_all()
+        with self._condition:
+            self._settle_finished_locked()
+            self._register_locked(item)
+            threads, reservation_error = self._reserve_workers_outcome_locked(own=True)
+            if not threads and reservation_error is None:
+                # Started carriers beyond admitted demand cannot fail
+                # physical startup, so the job is published in this hold.
+                self._admit_locked(item)
+                return future
+        first_startup_error = None
+        while True:
+            try:
+                if reservation_error is not None:
+                    raise reservation_error
+                self._start_reserved_workers(threads, admit=item)
+                break
+            except BaseException as error:
+                # Startup cleanup has released its physical reservations.
+                # The same unpublished item/Future can attempt admission
+                # once more, without re-entering any user callable. A live
+                # carrier from a late start may already satisfy the demand.
+                with self._condition:
+                    recover = (first_startup_error is None
+                        and isinstance(error, Exception)
+                        and not self._shutdown and self._broken_reason is None
+                        and self._jobs_by_id.get(job_id) is item
+                        and not item.future.done())
                     if recover:
-                        continue
+                        first_startup_error = error
+                        threads, reservation_error = self._reserve_workers_outcome_locked(own=True)
+                        if not threads and reservation_error is None:
+                            self._admit_locked(item)
+                    else:
+                        # Final refusal still withdraws the provisional
+                        # item before any physical carrier can consume it.
+                        if self._jobs_by_id.get(job_id) is item:
+                            self._discard_pending_locked(item)
+                        self._last_excess_activity = time.monotonic()
+                        self._metrics.record_executor_rejection(
+                            self.metric_pool, reason='thread_start_failed')
+                        self._dispatch_parked_locked()
+                if not recover:
                     item.future.cancel()
                     if first_startup_error is not None:
                         self._record_startup_recovery('failed')
                         if error is not first_startup_error:
                             raise error from first_startup_error
                     raise
-            with self._condition:
-                # Concurrent cancel/shutdown/initializer failure may already
-                # have terminally settled this Future; never resurrect it.
-                if self._jobs_by_id.get(job_id) is item:
-                    item.admission_ready = True
-                self._publish_locked()
-                self._condition.notify_all()
-            if first_startup_error is not None:
-                self._record_startup_recovery(
-                    'cancelled' if future.cancelled() else
-                    'accepted' if item.admission_ready else 'failed')
+                if not threads and reservation_error is None:
+                    break
+        if first_startup_error is not None:
+            self._record_startup_recovery(
+                'cancelled' if future.cancelled() else
+                'accepted' if item.admission_ready else 'failed')
         return future
+
+    def _register_locked(self, item: _WorkItem) -> None:
+        if self._broken_reason is not None:
+            from concurrent.futures.thread import BrokenThreadPool
+            raise BrokenThreadPool(self._broken_reason)
+        if self._shutdown:
+            self._metrics.record_executor_rejection(self.metric_pool, reason='shutdown')
+            raise RuntimeError('cannot schedule new futures after shutdown')
+        if item.job_id in self._jobs_by_id:
+            self._metrics.record_executor_rejection(self.metric_pool, reason='duplicate')
+            raise RuntimeError(f'agent task already scheduled: {item.job_id}')
+        self._pending.append(item)
+        self._jobs_by_id[item.job_id] = item
+        self._provisional_jobs += 1
+        self._last_excess_activity = item.queued_at
+        cancellation_owner = weakref.ref(item)
+        cancellation_scheduler = weakref.ref(self)
+        item.future.add_done_callback(
+            lambda completed, owner=cancellation_owner, scheduler=cancellation_scheduler:
+                _cancel_unstarted_weak(completed, owner, scheduler)
+        )
+
+    def _admit_locked(self, item: _WorkItem) -> None:
+        # Concurrent cancel/shutdown/initializer failure may already have
+        # terminally settled this Future; never resurrect it.
+        if self._jobs_by_id.get(item.job_id) is item and not item.admission_ready:
+            item.admission_ready = True
+            self._provisional_jobs -= 1
+            # Admission only adds demand: surplus is retired at completion
+            # boundaries and terminal or capacity transitions, not here.
+            self._hand_off_admitted_locked()
+            if self._shutdown:
+                self._retire_parked_surplus_locked()
+
+    def _discard_pending_locked(self, item: _WorkItem) -> bool:
+        try:
+            self._pending.remove(item)
+        except ValueError:
+            return False
+        self._jobs_by_id.pop(item.job_id, None)
+        if not item.admission_ready:
+            self._provisional_jobs -= 1
+        return True
 
     def _record_startup_recovery(self, outcome: str) -> None:
         """Optional bounded observations; no identity or exception payload."""
@@ -255,20 +365,19 @@ class DemandExecutor(Executor):
                 'record_executor_startup_recovery failed for pool %s', self.metric_pool)
 
     def cancel_task(self, task_id: str) -> bool:
-        """Cancel one task only while it is still waiting in this queue."""
+        """Cancel one task only while no carrier has entered it."""
         with self._condition:
+            self._settle_finished_locked()
             item = self._jobs_by_id.get(str(task_id or ''))
-            if item is None or item.started:
+            if item is None:
                 return False
-            try:
-                self._pending.remove(item)
-            except ValueError:
-                return False
-            self._jobs_by_id.pop(item.job_id, None)
-            self._last_excess_activity = time.monotonic()
-            self._publish_locked()
-            self._condition.notify_all()
+            if not item.started:
+                if not self._discard_pending_locked(item):
+                    return False
+                self._last_excess_activity = time.monotonic()
+                self._dispatch_parked_locked()
         # Caller callbacks must never run while the scheduling lock is held.
+        # A handed-off job cancels unless its carrier has already entered it.
         return item.future.cancel()
 
     def abandon_task(self, task_id: str) -> bool:
@@ -278,8 +387,9 @@ class DemandExecutor(Executor):
         means the task was not running here, was already quarantined, or the
         explicit replacement-residency budget is exhausted.
         """
-        with self._startup_lock:
+        with self._control_lock:
             with self._condition:
+                self._settle_finished_locked()
                 item = self._running_by_id.get(str(task_id or ''))
                 if item is None or item.abandoned:
                     return False
@@ -290,7 +400,7 @@ class DemandExecutor(Executor):
                 # Keep the original running accounting until replacement is
                 # physically started. Completion may race while start waits.
                 self._startup_extra_demand += 1
-                threads, reservation_error = self._reserve_workers_outcome_locked()
+                threads, reservation_error = self._reserve_workers_outcome_locked(own=True)
             try:
                 if reservation_error is not None:
                     raise reservation_error
@@ -299,11 +409,11 @@ class DemandExecutor(Executor):
                 with self._condition:
                     self._startup_extra_demand -= 1
                     self._last_excess_activity = time.monotonic()
-                    self._publish_locked()
-                    self._condition.notify_all()
+                    self._dispatch_parked_locked()
                 self._metrics.record_executor_abandonment(self.metric_pool, recovered=False)
                 raise
             with self._condition:
+                self._settle_finished_locked()
                 self._startup_extra_demand -= 1
                 if self._running_by_id.get(item.job_id) is item:
                     item.abandoned = True
@@ -312,14 +422,14 @@ class DemandExecutor(Executor):
                 # If it completed meanwhile, its completion already restored
                 # capacity. Do not manufacture active/abandoned bookkeeping.
                 self._last_excess_activity = time.monotonic()
-                self._publish_locked()
-                self._condition.notify_all()
+                self._dispatch_parked_locked()
             self._metrics.record_executor_abandonment(self.metric_pool, recovered=True)
             return True
 
     def scheduling_snapshot(self, task_id: str | None = None) -> dict[str, Any]:
         """Return bounded scheduler evidence for diagnostics and presentation."""
         with self._lifecycle_lock:
+            self._settle_finished_locked()
             job_id = str(task_id or '')
             item = self._jobs_by_id.get(job_id) if job_id else None
             queue_position = None
@@ -359,7 +469,7 @@ class DemandExecutor(Executor):
         """Change idle thread reuse; active and future work remain demand-driven."""
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
             raise ValueError('worker capacity must be a positive integer')
-        with self._startup_lock:
+        with self._control_lock:
             with self._condition:
                 if self._shutdown:
                     raise RuntimeError('cannot resize a stopped executor')
@@ -373,17 +483,29 @@ class DemandExecutor(Executor):
             except BaseException:
                 with self._condition:
                     self._max_workers = previous
-                    self._condition.notify_all()
+                    self._dispatch_parked_locked()
                 raise
             with self._condition:
-                self._publish_locked()
-                self._condition.notify_all()
+                self._dispatch_parked_locked()
 
     def resource_snapshot(self) -> dict[str, int]:
         with self._condition:
+            self._settle_finished_locked()
             return {'capacity': max(self._max_workers, self._active_jobs + len(self._pending)), 'used': self._active_jobs,
                     'waiting': len(self._pending), 'completed': self._completed_jobs,
                     'errors': self._failed_jobs}
+
+    def metric_snapshot(self) -> dict[str, int]:
+        """Exported scheduling gauges, read when metrics are scraped."""
+        with self._condition:
+            self._settle_finished_locked()
+            return {
+                'workers': max(self._max_workers, self._active_jobs + len(self._pending)),
+                'queued': len(self._pending),
+                'active': self._active_jobs,
+                'resident_threads': len(self._live_threads),
+                'abandoned': self._abandoned_jobs,
+            }
 
     def idle_retirement_snapshot(
         self,
@@ -394,6 +516,7 @@ class DemandExecutor(Executor):
         """Return the same quiescent-generation contract as the sync pool."""
         observed_at = time.monotonic() if now is None else float(now)
         with self._lifecycle_lock:
+            self._settle_finished_locked()
             quiet_for = max(0.0, observed_at - self._last_excess_activity)
             resident = len(self._live_threads)
             due = bool(
@@ -424,17 +547,22 @@ class DemandExecutor(Executor):
     def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
         """Reject new work, optionally cancel queued work, and wake workers."""
         pending: tuple[_WorkItem, ...] = ()
+        handed: tuple[_WorkItem, ...] = ()
         with self._condition:
             if not self._shutdown:
                 self._shutdown = True
             if cancel_futures:
                 pending = tuple(self._pending)
                 self._pending.clear()
+                self._provisional_jobs = 0
                 for item in pending:
                     self._jobs_by_id.pop(item.job_id, None)
-            self._publish_locked()
+                # cancel() withdraws the hand-offs no carrier has entered yet
+                # and leaves entered jobs running.
+                handed = tuple(self._running_by_id.values())
+            self._dispatch_parked_locked()
             self._condition.notify_all()
-        for item in pending:
+        for item in pending + handed:
             item.future.cancel()
         if wait:
             with self._condition:
@@ -450,15 +578,20 @@ class DemandExecutor(Executor):
         if not future.cancelled():
             return
         with self._condition:
-            if item.started or item.cancel_notification_claimed:
+            if item.cancel_notification_claimed:
+                return
+            if item.started:
+                # Handed to a carrier that has not taken it (an entered job
+                # cannot be cancelled). Its accounting ends now; whoever takes
+                # it completes the Future's cancellation handshake.
+                self._settle_unentered_locked(item)
+                self._dispatch_parked_locked()
                 return
             item.cancel_notification_claimed = True
             if self._jobs_by_id.get(item.job_id) is item:
-                self._pending.remove(item)
-                self._jobs_by_id.pop(item.job_id, None)
+                self._discard_pending_locked(item)
                 self._last_excess_activity = time.monotonic()
-                self._publish_locked()
-                self._condition.notify_all()
+                self._dispatch_parked_locked()
         # No worker will consume a removed item. Finish the executor-side
         # cancellation handshake before invoking the caller's later callbacks.
         future.set_running_or_notify_cancel()
@@ -466,43 +599,125 @@ class DemandExecutor(Executor):
     def _healthy_worker_count_locked(self) -> int:
         return max(0, len(self._threads) - self._abandoned_jobs)
 
-    def _reserve_workers_locked(self) -> tuple[threading.Thread, ...]:
+    def _demand_locked(self) -> int:
+        return (self._active_jobs + self._notifying_jobs + len(self._pending)
+                + self._startup_extra_demand)
+
+    def _admitted_demand_locked(self) -> int:
+        # Provisional jobs and abandon replacements are covered by carriers
+        # their own owner is starting, never by already-started carriers.
+        return (self._active_jobs + self._notifying_jobs
+                + len(self._pending) - self._provisional_jobs)
+
+    def _started_worker_count_locked(self) -> int:
+        # Committed carriers only: an unresolved start may still fail, and
+        # only the owner that reserved it recovers that demand.
+        return self._healthy_worker_count_locked() - len(self._starting_threads)
+
+    def _excess_workers_locked(self) -> int:
+        # Retention still counts provisional demand, so a started carrier
+        # never retires on the strength of another owner's unresolved start.
+        return self._started_worker_count_locked() - max(
+            self._max_workers, self._demand_locked())
+
+    def _dispatch_parked_locked(self) -> None:
+        """Start admitted jobs no woken claimer covers on parked carriers, then
+        retire parked surplus.
+
+        Cancellation, withdrawal, abandonment, resize and terminal transitions
+        call this. Admission only hands off; a carrier that finds no job to
+        take retires itself and any parked surplus in its own hold. Each
+        removal from the parked set is one hand-off: an
+        already-started job, or None to retire. Shutdown releases all parked
+        carriers once no provisional job can still be admitted.
+        """
+        self._hand_off_admitted_locked()
+        self._retire_parked_surplus_locked()
+
+    def _hand_off_admitted_locked(self) -> None:
+        parked = self._parked
+        # Admitted jobs that already-woken claimers will take wake no one.
+        while parked and (len(self._pending) - self._provisional_jobs
+                          > self._woken_claimers):
+            item = self._pop_admitted_locked()
+            if item is None:
+                break
+            if self._commit_hand_off_locked(item):
+                # The most recently parked carrier is the warmest one.
+                carrier = parked.pop()
+                carrier.hand_off(item)
+                self._handed.append(carrier)
+
+    def _retire_parked_surplus_locked(self) -> None:
+        parked = self._parked
+        if not parked:
+            return
+        if self._shutdown:
+            surplus = 0 if self._pending else len(parked)
+        else:
+            surplus = min(len(parked), self._excess_workers_locked())
+        for _ in range(surplus):
+            carrier = parked.popleft()
+            self._withdraw_carrier_locked(carrier.thread)
+            carrier.hand_off(None)
+
+    def _reserve_threads_locked(self, count: int) -> tuple[threading.Thread, ...]:
         if self._shutdown:
             return ()
-        desired = (self._active_jobs + self._notifying_jobs + len(self._pending)
-                   + self._startup_extra_demand)
         reserved = []
         try:
-            while self._healthy_worker_count_locked() < desired:
+            for _ in range(count):
                 index = self._next_thread_index
                 self._next_thread_index += 1
                 thread = threading.Thread(target=self._worker,
                     name=f'{self.thread_name_prefix}_{index}', daemon=self._daemon_workers)
                 reserved.append(thread)
+                self._commit_events[thread] = threading.Event()
                 self._threads.add(thread)
                 self._starting_threads.add(thread)
         except BaseException:
             for thread in reserved:
                 self._threads.discard(thread)
                 self._starting_threads.discard(thread)
+                self._commit_events.pop(thread, None)
             self._condition.notify_all()
             raise
         return tuple(reserved)
 
-    def _reserve_workers_outcome_locked(self):
+    def _reserve_workers_locked(self) -> tuple[threading.Thread, ...]:
+        """Repair admitted demand that started carriers no longer cover."""
+        return self._reserve_threads_locked(
+            self._admitted_demand_locked() - self._started_worker_count_locked())
+
+    def _reserve_own_workers_locked(self) -> tuple[threading.Thread, ...]:
+        """Reserve the carriers that cover the caller's one provisional unit.
+
+        None when started carriers exceed admitted demand; the caller then
+        admits in the same hold. Other owners' unresolved starts never count,
+        so an admission never depends on a start its owner cannot recover.
+        """
+        return self._reserve_threads_locked(
+            self._admitted_demand_locked() + 1 - self._started_worker_count_locked())
+
+    def _reserve_workers_outcome_locked(self, *, own: bool = False):
         # Admission registration and reservations share one atomic condition
         # hold. Rollback/cancellation callbacks happen after releasing it.
         try:
-            return self._reserve_workers_locked(), None
+            return (self._reserve_own_workers_locked() if own
+                    else self._reserve_workers_locked()), None
         except BaseException as error:
             return (), error
 
-    def _start_reserved_workers(self, threads: tuple[threading.Thread, ...]) -> None:
-        # Caller owns startup_lock, never condition. Reservations are visible
-        # to shutdown but not reported as live physical worker threads.
+    def _start_reserved_workers(self, threads: tuple[threading.Thread, ...],
+                                admit: _WorkItem | None = None) -> None:
+        # Callers hold no executor lock, so independent owners start their own
+        # reservations concurrently. Reservations are visible to shutdown but
+        # not reported as live physical worker threads.
+        started = False
         try:
             for thread in threads:
                 thread.start()
+            started = True
         finally:
             with self._condition:
                 for thread in threads:
@@ -513,13 +728,19 @@ class DemandExecutor(Executor):
                     else:
                         self._threads.discard(thread)
                         self._live_threads.discard(thread)
+                    committed = self._commit_events.pop(thread, None)
+                    if committed is not None:
+                        committed.set()
+                if started and admit is not None:
+                    # Committed carriers and their owner's job become visible
+                    # in one hold, so admitted demand never exceeds them.
+                    self._admit_locked(admit)
                 self._condition.notify_all()
 
     def _ensure_workers(self) -> None:
-        with self._startup_lock:
-            with self._condition:
-                threads = self._reserve_workers_locked()
-            self._start_reserved_workers(threads)
+        with self._condition:
+            threads = self._reserve_workers_locked()
+        self._start_reserved_workers(threads)
 
     def worker_threads_snapshot(self) -> tuple[threading.Thread, ...]:
         """Observe physical carriers without granting mutation ownership."""
@@ -534,11 +755,12 @@ class DemandExecutor(Executor):
             self._shutdown = True
             pending = tuple(self._pending)
             self._pending.clear()
+            self._provisional_jobs = 0
             for item in pending:
                 self._jobs_by_id.pop(item.job_id, None)
                 item.cancel_notification_claimed = True
             self._notifying_jobs += len(pending)
-            self._publish_locked()
+            self._dispatch_parked_locked()
             self._condition.notify_all()
         try:
             for item in pending:
@@ -547,14 +769,22 @@ class DemandExecutor(Executor):
         finally:
             with self._condition:
                 self._notifying_jobs -= len(pending)
-                self._publish_locked()
-                self._condition.notify_all()
 
     def _worker(self) -> None:
         current = threading.current_thread()
+        carrier = _Carrier(current)
         with self._condition:
             self._live_threads.add(current)
-        retire_after_item = False
+            committed = self._commit_events.get(current)
+        # The job whose Future callbacks this carrier is running. It counts
+        # as notifying until the next hold, which also claims, parks or exits.
+        notified = None
+        # A hand-off cancelled before this carrier took it never ran; the next
+        # hold releases its accounting unless the cancellation already did.
+        unentered = None
+        # Set by a take-back notice: this carrier counts among
+        # _woken_claimers until its next hold.
+        claiming = False
         try:
             if self._initializer is not None:
                 try:
@@ -562,32 +792,39 @@ class DemandExecutor(Executor):
                 except BaseException:
                     self._fail_initializer()
                     return
+            if committed is not None:
+                # Serve only once the starter commits this carrier, so it never
+                # claims work or retires against an unresolved startup.
+                committed.wait()
             while True:
                 with self._condition:
-                    while True:
-                        if (not self._shutdown and
-                                self._healthy_worker_count_locked() > max(
-                                    self._max_workers, self._active_jobs + self._notifying_jobs + len(self._pending) + self._startup_extra_demand)):
+                    self._settle_finished_locked()
+                    if unentered is not None:
+                        self._settle_unentered_locked(unentered)
+                        unentered = None
+                    if claiming:
+                        self._woken_claimers -= 1
+                        claiming = False
+                    if notified is not None:
+                        self._notifying_jobs -= 1
+                        # Settled above, so quarantine can no longer mark it.
+                        retire, notified = notified.abandoned, None
+                        if retire:
+                            self._withdraw_carrier_locked(current)
                             return
-                        if self._pending:
-                            if self._pending[0].admission_ready:
-                                break
-                            self._condition.wait()
-                            continue
-                        if self._shutdown and not self._pending:
-                            return
-                        self._condition.wait()
-                    item = self._pending.popleft()
-                    if not item.future.set_running_or_notify_cancel():
-                        item.cancel_notification_claimed = True
-                        self._jobs_by_id.pop(item.job_id, None)
-                        self._publish_locked()
+                    item = self._claim_item_locked(current, carrier)
+                if item is _PARK:
+                    item = carrier.park()
+                    if item is _TAKEN_BACK:
+                        claiming = True
                         continue
-                    item.started = True
-                    self._running_by_id[item.job_id] = item
-                    self._active_jobs += 1
-                    self._last_excess_activity = time.monotonic()
-                    self._publish_locked()
+                    # Taking the hand-off enters it; a cancellation until
+                    # now wins and the job never runs.
+                    if item is not None and not item.future.set_running_or_notify_cancel():
+                        unentered, item = item, None
+                        continue
+                if item is None:
+                    return
                 try:
                     self._metrics.observe_executor_queue_wait(
                         self.metric_pool, time.monotonic() - item.queued_at,
@@ -605,72 +842,166 @@ class DemandExecutor(Executor):
                     execution_outcome.set_exception(exc)
 
                 # A completed Future is an observable resource-release
-                # boundary: commit the scheduler bookkeeping first so a
-                # waiter that immediately snapshots or retires the pool cannot
-                # see the job as both completed and still active.
-                with self._condition:
-                    self._completed_jobs += 1
-                    if execution_outcome.exception() is not None:
-                        self._failed_jobs += 1
-                    self._running_by_id.pop(item.job_id, None)
-                    self._jobs_by_id.pop(item.job_id, None)
-                    if item.abandoned:
-                        self._abandoned_jobs = max(
-                            0, self._abandoned_jobs - 1)
-                        retire_after_item = True
-                    else:
-                        self._active_jobs = max(0, self._active_jobs - 1)
-                    # Future callbacks still occupy this physical worker.
-                    # A callback may submit and synchronously await another
-                    # job, so it cannot count as an available idle thread.
-                    self._notifying_jobs += 1
-                    self._last_excess_activity = time.monotonic()
-                    self._publish_locked()
-                    self._condition.notify_all()
+                # boundary: record the finished job before resolving it. Every
+                # scheduler hold settles the record before reading job
+                # bookkeeping, so a waiter that immediately snapshots or
+                # retires the pool never sees the job as completed and still
+                # active, and the result never waits for the scheduler lock.
+                # Future callbacks still occupy this physical worker: one may
+                # submit and synchronously await another job, so the settled
+                # record counts this carrier as notifying, not idle.
+                self._finished.append((item, execution_outcome.exception() is not None,
+                                       time.monotonic()))
+                notified = item
                 try:
                     result = execution_outcome.result()
                 except BaseException as exc:
                     item.future.set_exception(exc)
                 else:
                     item.future.set_result(result)
-                finally:
-                    with self._condition:
-                        self._notifying_jobs -= 1
-                        self._condition.notify_all()
                 # Idle reuse must retain the carrier, not the completed call,
                 # its copied request context, or its duplicate outcome Future.
+                # The next hold releases ``notified`` before parking.
                 item = execution_outcome = result = None
-                if retire_after_item:
-                    return
         finally:
             with self._condition:
-                self._threads.discard(current)
-                self._retiring_threads.add(current)
-                self._publish_locked()
-                self._condition.notify_all()
+                self._settle_finished_locked()
+                if unentered is not None:
+                    self._settle_unentered_locked(unentered)
+                    unentered = None
+                if claiming:
+                    # Pending jobs counted on this claim must not wait for it.
+                    self._woken_claimers -= 1
+                    self._dispatch_parked_locked()
+                if notified is not None:
+                    self._notifying_jobs -= 1
+                    notified = None
+                self._withdraw_carrier_locked(current)
             try:
                 # Completion and callback bookkeeping above never wait for
-                # physical startup. Only replacement creation is serialized.
+                # physical startup. Replacement creation starts outside locks.
                 if not self._shutdown:
                     self._ensure_workers()
             finally:
                 with self._condition:
                     self._retiring_threads.discard(current)
                     self._live_threads.discard(current)
-                    self._publish_locked()
-                    self._condition.notify_all()
 
-    def _publish_locked(self) -> None:
-        publisher = (self._metrics.publish_executor_state if self._state_publisher is None
-                     else self._state_publisher)
-        publisher(
-            self.metric_pool,
-            workers=max(self._max_workers, self._active_jobs + len(self._pending)),
-            queued=len(self._pending),
-            active=self._active_jobs,
-            resident_threads=len(self._live_threads),
-            abandoned=self._abandoned_jobs,
-        )
+    def _claim_item_locked(self, current: threading.Thread, carrier: _Carrier):
+        """Return a started job, _PARK after parking ``carrier``, or None to exit."""
+        # Hand-offs are older than any job still in _pending. One whose
+        # carrier has not woken yet (it may be waiting for the GIL) runs here
+        # now. That carrier was woken for it and finds a notice instead: it
+        # claims like this one, taking the oldest waiting job, else parking
+        # or retiring as surplus. Until then it is counted, so admitted jobs
+        # wait for it instead of waking a parked carrier. Taking a hand-off
+        # back enters it; one cancelled meanwhile is skipped.
+        while self._handed:
+            item = self._handed.popleft().reclaim()
+            if item is not None:
+                self._woken_claimers += 1
+                if item.future.set_running_or_notify_cancel():
+                    return item
+                self._settle_unentered_locked(item)
+        while True:
+            item = self._pop_admitted_locked()
+            if item is None:
+                break
+            if self._enter_item_locked(item):
+                return item
+        if self._shutdown:
+            if not self._pending:
+                self._retire_parked_surplus_locked()
+                return None
+        elif self._excess_workers_locked() > 0:
+            self._withdraw_carrier_locked(current)
+            self._retire_parked_surplus_locked()
+            return None
+        self._parked.append(carrier)
+        return _PARK
+
+    def _enter_item_locked(self, item: _WorkItem) -> bool:
+        """Start a claimed job's Future; a cancelled one is consumed instead."""
+        if not item.future.set_running_or_notify_cancel():
+            item.cancel_notification_claimed = True
+            self._jobs_by_id.pop(item.job_id, None)
+            return False
+        self._count_started_locked(item)
+        return True
+
+    def _commit_hand_off_locked(self, item: _WorkItem) -> bool:
+        """Make an admitted job a parked carrier's without entering its Future.
+
+        The job counts as active from this hold; it enters RUNNING only when a
+        carrier takes it, so cancellation still withdraws it until then.
+        """
+        if item.future.cancelled():
+            return self._enter_item_locked(item)
+        self._count_started_locked(item)
+        return True
+
+    def _count_started_locked(self, item: _WorkItem) -> None:
+        item.started = True
+        self._running_by_id[item.job_id] = item
+        self._active_jobs += 1
+        self._last_excess_activity = time.monotonic()
+
+    def _settle_unentered_locked(self, item: _WorkItem) -> None:
+        """Release the accounting of a hand-off cancelled before entry, once.
+
+        Called by the cancellation's notification and by the carrier that took
+        the cancelled job; whichever holds the lock first settles it.
+        """
+        if item.cancel_notification_claimed:
+            return
+        item.cancel_notification_claimed = True
+        if self._running_by_id.get(item.job_id) is item:
+            del self._running_by_id[item.job_id]
+        if self._jobs_by_id.get(item.job_id) is item:
+            del self._jobs_by_id[item.job_id]
+        if item.abandoned:
+            self._abandoned_jobs = max(0, self._abandoned_jobs - 1)
+        else:
+            self._active_jobs = max(0, self._active_jobs - 1)
+        self._last_excess_activity = time.monotonic()
+
+    def _pop_admitted_locked(self) -> _WorkItem | None:
+        # Each submitter still starting its own carriers owns one unclaimable
+        # provisional item; admitted items behind them stay claimable.
+        for index, item in enumerate(self._pending):
+            if item.admission_ready:
+                del self._pending[index]
+                return item
+        return None
+
+    def _withdraw_carrier_locked(self, current: threading.Thread) -> None:
+        # Commit the capacity change in the same hold as the exit decision so
+        # no concurrently evaluating carrier retires on a stale count.
+        if current in self._threads:
+            self._threads.discard(current)
+            self._retiring_threads.add(current)
+
+    def _settle_finished_locked(self) -> None:
+        """Commit scheduler bookkeeping for jobs their carriers recorded.
+
+        A settled job stops being active (or quarantined) and its carrier
+        counts as notifying until that carrier's own next hold.
+        """
+        finished = self._finished
+        while finished:
+            item, failed, finished_at = finished.popleft()
+            self._completed_jobs += 1
+            if failed:
+                self._failed_jobs += 1
+            self._running_by_id.pop(item.job_id, None)
+            self._jobs_by_id.pop(item.job_id, None)
+            if item.abandoned:
+                self._abandoned_jobs = max(0, self._abandoned_jobs - 1)
+            else:
+                self._active_jobs = max(0, self._active_jobs - 1)
+            self._notifying_jobs += 1
+            if finished_at > self._last_excess_activity:
+                self._last_excess_activity = finished_at
 
 
 _STANDALONE_POOLS = weakref.WeakSet()

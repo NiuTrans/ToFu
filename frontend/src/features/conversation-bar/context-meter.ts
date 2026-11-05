@@ -1,5 +1,6 @@
 /** Context usage presentation only; accounting and compaction commands stay in the runtime adapter. */
 import { createAnchoredDisclosure, positionDisclosure } from './disclosure';
+import { scheduledCompactionState, type ScheduledCompactionApplies } from './scheduled-compaction';
 import { createAlert, createButton } from '../../ui';
 import type { WorkingFactsPorts } from '../working-facts/ports';
 
@@ -11,19 +12,29 @@ export interface ContextMeterSnapshot {
   pctRaw: number;
   pct: number | null;
   zone: string;
-  compactions: number;
+  /** Listed archive count; null until the history listing settles. */
+  compactions: number | null;
   convId: string | null;
   busy: boolean;
 
   compacting?: boolean;
   compactionPending?: boolean;
+  /** The server holds a working-view compaction request for this conversation. */
+  compactionScheduled?: boolean;
+  /** When that request applies (defaults to the next reply). */
+  compactionAppliesAt?: ScheduledCompactionApplies | null;
+  /** A cancellation of that request is in flight. */
+  compactionCancelPending?: boolean;
   hasHistory: boolean;
 }
 export interface ContextMeterOptions {
   host: HTMLElement;
   translate: (key: string, fallback: string) => string;
   read: () => ContextMeterSnapshot;
+  /** Compact now when idle; while a task runs the server schedules it instead. */
   onCompact: (convId: string) => void;
+  /** Withdraw the acknowledged scheduled request. */
+  onCancelScheduled?: (convId: string) => void;
   onHistory: (convId: string) => void;
   workingFacts?: WorkingFactsPorts;
 }
@@ -77,6 +88,10 @@ export function createContextMeter(options: ContextMeterOptions) {
     panel.append(node);
     return node;
   };
+  const scheduledStatus = doc.createElement('p');
+  scheduledStatus.className = 'ctx-pop-status';
+  scheduledStatus.setAttribute('role', 'status');
+  panel.append(scheduledStatus);
   const compact = button('ctx-pop-compact');
   const facts = createButton({ label: tt('workingFacts.title', 'Current basis'), variant: 'ghost', size: 'sm',
     onClick: () => void openFacts() }, doc);
@@ -112,7 +127,10 @@ export function createContextMeter(options: ContextMeterOptions) {
 
     if (disposed) return;
     const compacting = Boolean(snapshot.compacting);
+    const scheduled = Boolean(snapshot.compactionScheduled) && !compacting;
     if (compacting) el.dataset.compacting = '1'; else delete el.dataset.compacting;
+    if (scheduled) el.dataset.compactionScheduled = '1'; else delete el.dataset.compactionScheduled;
+    const scheduledLabel = scheduledCompactionState(snapshot.compactionAppliesAt || 'next_reply', tt);
     if (current && current.convId !== snapshot.convId) { disclosure.close(false); closeLiveSummary(); retireFacts(); }
     current = snapshot;
     facts.textContent = tt('workingFacts.title', 'Current basis');
@@ -128,16 +146,25 @@ export function createContextMeter(options: ContextMeterOptions) {
     if (el.style.getPropertyValue('--ctx-fill') !== fill) el.style.setProperty('--ctx-fill', fill);
     if (el.dataset.zone !== snapshot.zone) el.dataset.zone = snapshot.zone;
     el.setAttribute('aria-label', context + ': ' + (snapshot.known && snapshot.used > 0 ? percent : unknown)
-      + (compacting ? ' · ' + tt('conversationBar.compacting', 'Compacting…') : ''));
+      + (compacting ? ' · ' + tt('conversationBar.compacting', 'Compacting…') : '')
+      + (scheduled ? ' · ' + scheduledLabel : ''));
     text(heading, tt('conversationBar.contextDetails', 'Context details'));
     const defaults = ['Usage', 'Capacity', 'Compactions'];
     const values = [snapshot.used > 0 ? String(snapshot.used) : unknown,
-      snapshot.limit == null ? unknown : String(snapshot.limit) + (snapshot.exact ? '' : ' · ' + estimated), String(snapshot.compactions)];
+      snapshot.limit == null ? unknown : String(snapshot.limit) + (snapshot.exact ? '' : ' · ' + estimated),
+      snapshot.compactions == null ? unknown : String(snapshot.compactions)];
     rows.forEach((row, i) => { text(row.term, tt('conversationBar.' + row.key, defaults[i])); text(row.value, values[i]); });
+    text(scheduledStatus, scheduled ? scheduledLabel : '');
+    scheduledStatus.hidden = !scheduled;
+    const cancelling = scheduled && Boolean(snapshot.compactionCancelPending);
     text(compact, snapshot.compactionPending || compacting ? tt('conversationBar.compacting', 'Compacting…')
-      : snapshot.busy ? tt('compactNow.busy', 'Cannot compact while a task is running') : tt('compactNow.action', 'Compact context now'));
+      : cancelling ? tt('compactNow.cancelling', 'Cancelling…')
+      : scheduled ? tt('compactNow.cancelScheduled', 'Cancel scheduled compaction')
+      : snapshot.busy ? tt('compactNow.schedule', 'Compact at the next model call')
+      : tt('compactNow.action', 'Compact context now'));
     const ownedFocus = doc.activeElement === compact;
-    compact.disabled = Boolean(snapshot.busy || snapshot.compactionPending || compacting || !snapshot.convId);
+    compact.disabled = Boolean(snapshot.compactionPending || compacting || cancelling || !snapshot.convId
+      || (scheduled && !options.onCancelScheduled));
     if (ownedFocus && compact.disabled) close.focus({ preventScroll: true });
     text(history, tt('compactNow.viewHistory', 'View compaction history'));
     history.hidden = !snapshot.hasHistory;
@@ -157,7 +184,12 @@ export function createContextMeter(options: ContextMeterOptions) {
   compact.addEventListener('click', () => {
     const snapshot = options.read();
     disclosure.close(true);
-    if (snapshot.convId && !snapshot.busy && !snapshot.compacting && !snapshot.compactionPending) options.onCompact(snapshot.convId);
+    if (!snapshot.convId || snapshot.compacting || snapshot.compactionPending) return;
+    if (snapshot.compactionScheduled) {
+      if (!snapshot.compactionCancelPending) options.onCancelScheduled?.(snapshot.convId);
+      return;
+    }
+    options.onCompact(snapshot.convId);
   });
   history.addEventListener('click', () => {
     const snapshot = options.read();

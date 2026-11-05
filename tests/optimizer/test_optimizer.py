@@ -234,8 +234,8 @@ class TestApplyProposalGate:
             'owner_user_id'] == _OWNER_USER_ID
 
     def test_suggest_only_action_does_NOT_auto_apply(self, _stub_storage):
-        prop = {"title": "Tune timeout", "rationale": "r",
-                "action_type": "adjust_fetch_timeout", "action_args": {}}
+        prop = {"title": "Extend cache TTL", "rationale": "r",
+                "action_type": "extend_cache_ttl", "action_args": {}}
         res = applier.apply_proposal(
             prop, owner_user_id=_OWNER_USER_ID)
         assert res["status"] == "pending_review"
@@ -426,6 +426,9 @@ class TestAnalyzerPureLogic:
             'updated_at_gte': int(cutoff.timestamp() * 1000),
             'limit': 200,
             'settings_keys': [],
+            # A transcript too large for one storage response is read back
+            # to the cutoff in windows instead of failing the whole scan.
+            'oversized_messages_since_ms': int(cutoff.timestamp() * 1000),
         }
         assert result == {
             'tool_counts': {'web_search': 1, 'fetch_url': 1},
@@ -433,8 +436,9 @@ class TestAnalyzerPureLogic:
             'fetch_urls': [{'domain': 'docs.example.org', 'count': 1}],
         }
 
-    def test_conversation_tool_scan_discards_partial_counts_on_lazy_error(
-            self, monkeypatch):
+    def test_conversation_tool_scan_raises_on_lazy_error(self, monkeypatch):
+        """Partial counts are never returned as a complete distribution: a
+        failed scan raises so gather_evidence records it as unavailable."""
         from lib.conversations import repository
 
         def rows():
@@ -449,12 +453,9 @@ class TestAnalyzerPureLogic:
             lambda **_kwargs: (2, rows()),
         )
 
-        result = analyzer._collect_conversation_tool_distribution(
-            datetime(2026, 8, 29), owner_user_id=_OWNER_USER_ID)
-
-        assert result == {
-            'tool_counts': {}, 'search_urls': [], 'fetch_urls': [],
-        }
+        with pytest.raises(RuntimeError, match='later transcript frame'):
+            analyzer._collect_conversation_tool_distribution(
+                datetime(2026, 8, 29), owner_user_id=_OWNER_USER_ID)
 
     def test_classify_error_signature(self):
         assert analyzer._classify_error_signature("xx KeyError yy") == "KeyError"
@@ -936,3 +937,55 @@ def test_distributed_evidence_excludes_unowned_and_foreign_owner_logs(
     assert 'foreign raw secret' not in serialized
     assert 'foreign owner private failure' not in serialized
     assert tail_paths == [str(audit_log)]
+
+
+def _stub_log_and_db_collectors(tmp_path, monkeypatch):
+    from lib.optimizer.analyzer import _model
+
+    for const in ('APP_LOG', 'ERROR_LOG', 'AUDIT_LOG_FILE'):
+        path = tmp_path / f'{const}.log'
+        path.write_text('')
+        monkeypatch.setattr(analyzer, const, str(path))
+    monkeypatch.setattr(
+        analyzer.storage, 'list_applied_actions', mock.Mock(return_value=[]))
+    monkeypatch.setattr(
+        _model, '_collect_scheduler_signals',
+        lambda **_kwargs: {
+            'failing_scheduled_tasks': [], 'idle_proactive_tasks': []})
+    monkeypatch.setattr(
+        _model, '_collect_cost_outliers',
+        lambda **_kwargs: {'top_cost_conversations': []})
+    monkeypatch.setattr(
+        _model, '_collect_daily_report_snippets', lambda **_kwargs: [])
+    return _model
+
+
+def test_failed_conversation_scan_is_explicit_unavailable_evidence(
+        tmp_path, monkeypatch):
+    """A transcript scan the authority cannot serve (e.g. an oversized
+    transcript with a message above the response bound) is missing evidence,
+    never a silent empty distribution."""
+    from lib.storage.errors import StorageError
+
+    _model = _stub_log_and_db_collectors(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        _model, '_collect_conversation_tool_distribution',
+        mock.Mock(side_effect=StorageError(
+            'database_resource_exhausted', 'database_resource_exhausted')))
+
+    bundle = analyzer.gather_evidence(
+        principal=_optimizer_principal(), window_hours=24)
+
+    assert bundle.unavailable_signals == ['conversation_tool_distribution']
+
+    prompt = proposer._build_user_prompt(bundle)
+    assert '## Unavailable evidence (collection failed)' in prompt
+    assert 'conversation_tool_distribution' in prompt
+    assert 'unknown, never a zero count' in prompt
+
+
+def test_proposer_prompt_names_no_unavailable_evidence_when_all_collected():
+    bundle = analyzer.EvidenceBundle(window_hours=24, generated_at='now')
+    prompt = proposer._build_user_prompt(bundle)
+    assert '## Unavailable evidence (collection failed)' in prompt
+    assert '(none)' in prompt

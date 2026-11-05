@@ -256,7 +256,9 @@ fn restore_definition(
     let count_key = definition_count_key(tx)?;
     let count = read_count(database, tx, count_key.clone())?;
     if count >= MAX_ORCHESTRATION_DEFINITIONS_PER_OWNER as u64 {
-        return Err(exhausted("orchestration definition capacity reached"));
+        return Err(crate::resource_exhaustion::capacity_quota(
+            "orchestration definition capacity reached",
+        ));
     }
     put_global_document(
         database,
@@ -417,7 +419,7 @@ fn restore_run(
     let count_key = run_count_key(tx)?;
     let count = read_count(database, tx, count_key.clone())?;
     if count >= MAX_ORCHESTRATION_RUNS_PER_OWNER as u64 {
-        return Err(exhausted("orchestration run capacity reached"));
+        return Err(crate::resource_exhaustion::capacity_quota("orchestration run capacity reached"));
     }
     put_global_document(
         database,

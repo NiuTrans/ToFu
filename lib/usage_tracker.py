@@ -262,7 +262,7 @@ def record(key_id: str, *, n_tokens: int = 0,
 
 
 def flush() -> None:
-    """Force-flush to disk. Called at shutdown or from /metrics."""
+    """Force-flush to disk. Production shutdown calls this after dispatch stops."""
     _ensure_loaded()
     with _lock:
         _flush_locked()

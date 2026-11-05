@@ -15,20 +15,17 @@ Owner directives (2026-08-05, screenshot of the inline state panel):
 
 Renderer under test: _renderMsgBodyHtml / _debugRenderBody /
 _debugOpenBlock (core/debug_panel.js) driven through the REAL inline panel
-mount (request_inspector.js openToolDebugPanel → _riRenderToolPanel).
+mount through openToolDebugPanel and the native inline owner.
 
-NEUTERs (each patches a COPY; the shipped files stay byte-identical):
-  1. Drop the arguments JSON.parse in _debugToolCallHtml → the per-key
-     structured argument blocks disappear and the pin flips red.
-  2. Disable the auto-expand gate in _riRenderToolPanel → blocks render
-     collapsed and the auto-expand pin flips red.
+The argument-parser negative control patches a copy; shipped files stay
+byte-identical. Inline expansion boundaries are behavioral specifications in
+test_inspector_inline_owner.py, independent of private renderer locations.
 """
 
 from __future__ import annotations
 
 import os
 import json
-import shutil
 import subprocess
 
 import pytest
@@ -42,12 +39,6 @@ ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 JS_DIR = runtime_sections_dir()
 _DEBUG_SRC = os.path.join(JS_DIR, 'core', 'debug_panel.js')
 _RI_SRC = os.path.join(JS_DIR, 'core', 'request_inspector.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -215,13 +206,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 """
 
 
-def _run(debug_path=None, ri_path=None, expect_fail=None):
+def _run(debug_path=None, expect_fail=None):
     harness = os.path.join(HERE, '_debug_structured_body_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, debug_path or _DEBUG_SRC, ri_path or _RI_SRC,
+            ['node', harness, debug_path or _DEBUG_SRC, _RI_SRC,
              ROOT],
             capture_output=True, text=True, timeout=60,
         )
@@ -254,14 +245,10 @@ def _neutered_copy(src_path, anchor, replacement, tmp_name):
     return tmp, src
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed')
 def test_structured_body_renderer():
     _run()
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed')
 def test_neuter_arguments_parse_dropped_flips_red():
     """NC: make _debugToolCallHtml treat the arguments string as opaque → the
     per-key structured argument blocks MUST disappear (the owner's unreadable
@@ -278,26 +265,6 @@ def test_neuter_arguments_parse_dropped_flips_red():
         os.remove(tmp)
     with open(_DEBUG_SRC, encoding='utf-8') as f:
         assert f.read() == src, 'shipped debug_panel.js must be byte-identical'
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed')
-def test_neuter_auto_expand_dropped_flips_red():
-    """NC: disable the auto-expand gate → blocks render collapsed and the
-    at-a-glance pin MUST fail. The panel exists to answer one round; making
-    the user click every message open again is the old unreadable panel."""
-    tmp, src = _neutered_copy(
-        _RI_SRC,
-        'if (shown.length <= 6 && total <= 300 * 1024 &&',
-        'if (false &&',
-        '_request_inspector_struct_neutered.js')
-    try:
-        _run(ri_path=tmp, expect_fail='auto_expanded_without_click')
-    finally:
-        os.remove(tmp)
-    with open(_RI_SRC, encoding='utf-8') as f:
-        assert f.read() == src, (
-            'shipped request_inspector.js must be byte-identical')
 
 
 def test_structured_body_static_pins():

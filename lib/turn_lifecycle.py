@@ -12,26 +12,44 @@ import hashlib
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from lib.error_envelope import make_envelope, normalize_envelope
+import orjson
+
+from lib.agent_core.events import interaction_types
+from lib.error_envelope import BadRequest, make_envelope, normalize_envelope
 from lib.conversation_sync.dispatch_contract import (
     CONVERSATION_EXECUTOR_DISPATCH_MODE,
     normalize_attempt_dispatch_mode,
 )
+from lib.conversation_sync.workspace import is_conversation_workspace
 from lib.identity import PrincipalContext, require_user_id
 from lib.log import get_logger
-from lib.storage.errors import StorageError
+from lib.storage.commit_events import CommittedEventOrder, defer_committed_events
+from lib.storage.errors import ProjectionRebaseRequired, StorageError
+from lib.storage.protocol import FrozenPayload, encode_json_value
 from lib.tasks_pkg.failure_attribution import (
     ensure_failure_attribution,
     turn_retry_chain,
 )
+from lib.tasks_pkg.segments import INJECTED_NOTES_FIELD
+from lib.conversation_sync.settled_rows import (
+    SettledDict,
+    derive_rows,
+    detach_sharing_settled,
+    memo_get,
+    memo_put,
+    settle,
+    settle_items,
+)
 from lib.storage.storage_projection import (
     compact_tool_rounds_for_frame_budget,
     sanitize_api_rounds_for_persist,
-    trim_tool_round_for_persist,
+    tool_round_payload_chars,
+    trim_tool_round_copy,
 )
 from lib.tool_results.tool_round_identity import tool_rounds_with_execution_identity
 from lib.tool_results.tool_round_replay import (
@@ -39,7 +57,11 @@ from lib.tool_results.tool_round_replay import (
     scan_replayable_tool_round_prefix,
 )
 from lib.turn_verdict import (
+    CONTENT_FILTER_CAUSES,
+    CONTENT_FILTER_SETTLEMENT_KEY,
+    DISPATCH_AUTHORITY_ABORT_REASONS,
     derive_turn_verdict,
+    dispatch_authority_stop_detail,
     task_terminal_evidence,
 )
 from lib.turn_projection_segments import (
@@ -47,7 +69,10 @@ from lib.turn_projection_segments import (
     public_turn_with_stable_segments,
     public_value_with_stable_segments,
 )
-from lib.turn_projection_patch import build_projection_patch
+from lib.turn_projection_patch import (
+    build_projection_patch,
+    with_turn_context_snapshot,
+)
 
 
 logger = get_logger(__name__)
@@ -308,14 +333,23 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
     """Atomically create the input turn, output turn and first attempt."""
     user_id = require_user_id(user_id, context='create turn pair')
     if not command_id:
-        raise ValueError('commandId is required')
+        raise BadRequest('commandId is required', field='commandId')
     if output_actor not in ACTORS or output_actor == 'human':
-        raise ValueError('invalid output actor')
+        raise BadRequest('invalid output actor', field='actor')
     if input_actor not in {'human', 'virtual_user', 'critic'}:
-        raise ValueError('invalid input actor')
+        raise BadRequest('invalid input actor', field='inputActor')
     dispatch_mode = normalize_attempt_dispatch_mode(dispatch_mode)
     lane_id = lane_id or 'main'
     from lib.storage import StorageError
+    # Every input opens a round whose context rail renders from this block,
+    # including agent-authored inputs. Actor/authority stays independent.
+    context_config = dict(config or {})
+    # Browser-captured rails never list the private managed root.
+    if is_conversation_workspace(
+            context_config.get('projectPath'), conversation_id, user_id):
+        context_config['projectPath'] = ''
+    input_projection = with_turn_context_snapshot(
+        input_projection, context_config)
     normalized_input_projection = projection_with_stable_segments(
         input_projection,
         actor=input_actor,
@@ -362,7 +396,7 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
                         'user_id': user_id,
                         'lane_id': lane_id,
                     })
-                latest = rows[-1] if rows else None
+                latest = _lane_busy_turn(rows, user_id=user_id)
             except StorageError:
                 # Delivery needs the authoritative live attempt. Preserve a
                 # failed read's typed availability/retry contract for the API;
@@ -384,6 +418,31 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
         if exc.code == 'database_conflict':
             raise LifecycleConflict(exc.code, str(exc)) from exc
         raise
+
+
+def _lane_busy_turn(
+    rows: list[dict[str, Any]], *, user_id: Any,
+) -> dict[str, Any] | None:
+    """Name the Turn whose attempt makes the lane busy, not merely the lane tail.
+
+    Settled Turns (Coordinator reports) and queued pairs can follow the live
+    reply. Both authorities define the busy attempt as the newest
+    pending/running attempt that is not queue-bound; a steer addressed to any
+    other Turn finds its window closed. The tail remains the answer only when
+    the live attempt settled after the authority refused the command.
+    """
+    for row in reversed(rows):
+        attempt_id = row.get('currentAttemptId')
+        if not attempt_id or row.get('status') not in ('pending', 'running'):
+            continue
+        try:
+            attempt = get_attempt(attempt_id, user_id=user_id)
+        except LifecycleNotFound:
+            continue
+        if (attempt.get('status') in ('pending', 'running')
+                and not attempt.get('queueBinding')):
+            return row
+    return rows[-1] if rows else None
 
 
 def activate_queued_turn_pair(
@@ -448,8 +507,14 @@ def commit_user_steer(
     text: str,
     user_id: Any,
     images: list[dict[str, Any]] | None = None,
+    author: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Commit a bounded receipt; callers must wake the inbox before hydration."""
+    """Commit a bounded receipt; callers must wake the inbox before hydration.
+
+    ``author`` (``lib.turn_initiation.steer_author``) is stored once with the
+    record and is what makes the steered message forwardable as its author's
+    words (docs/ROUTER.md R2); a replayed command keeps the original.
+    """
     user_id = require_user_id(user_id, context='commit user steer')
     payload: dict[str, Any] = {
         'conversation_id': conversation_id,
@@ -460,6 +525,8 @@ def commit_user_steer(
     }
     if images:
         payload['images'] = images
+    if author is not None:
+        payload['author'] = author
     try:
         return public_value_with_stable_segments(_turn_client(write=True).command(
             'turn.steer.commit',
@@ -567,9 +634,11 @@ def create_attempt(conversation_id: str, turn_id: str, *, command_id: str,
                    user_id: Any) -> dict[str, Any]:
     user_id = require_user_id(user_id, context='create turn attempt')
     if not command_id:
-        raise ValueError('commandId is required')
+        raise BadRequest('commandId is required', field='commandId')
     if operation not in OPERATIONS - {'generate'}:
-        raise ValueError('operation must be continue, checkpoint_resume, regenerate, or answer_guidance')
+        raise BadRequest(
+            'operation must be continue, checkpoint_resume, regenerate, or answer_guidance',
+            field='operation')
     dispatch_mode = normalize_attempt_dispatch_mode(dispatch_mode)
 
     executable_config = dict(config or {})
@@ -801,7 +870,9 @@ def _merge_user_steer_records(previous: Any, local: Any) -> Any:
     confirmation appears later in the worker's sidecar; replacing the entire
     lane with that sidecar loses other accepted (still pending) messages, while
     blindly concatenating renders one steer twice. Stable blockId is the only
-    identity; never deduplicate by message text or by round number.
+    identity; never deduplicate by message text or by round number. A record's
+    ``author`` comes only from ``turn.steer.commit``: executor copies never
+    replace or add one.
     """
     if not isinstance(local, list):
         return local
@@ -816,14 +887,15 @@ def _merge_user_steer_records(previous: Any, local: Any) -> Any:
         if not isinstance(item, dict):
             result.append(item)
             continue
+        item = {key: value for key, value in item.items() if key != 'author'}
         block_id = item.get('blockId')
         if not isinstance(block_id, str) or not block_id:
-            result.append(dict(item))
+            result.append(item)
             continue
         index = index_by_id.get(block_id)
         if index is None:
             index_by_id[block_id] = len(result)
-            result.append(dict(item))
+            result.append(item)
         else:
             current_state = result[index].get('deliveryState')
             next_state = item.get('deliveryState')
@@ -835,6 +907,33 @@ def _merge_user_steer_records(previous: Any, local: Any) -> Any:
                 continue
             result[index] = {**result[index], **item}
     return result
+
+
+def projection_with_committed_steer_authors(projection: Any, authority: Any) -> Any:
+    """Keep every stored steer ``author`` through a whole-projection client edit.
+
+    Authors are written only by ``turn.steer.commit``; an edit can neither add
+    one nor change one, so a client cannot mint a forwardable owner message.
+    """
+    records = projection.get('_userSteerInjects') if isinstance(projection, Mapping) else None
+    if not isinstance(records, list):
+        return projection
+    stored = authority.get('_userSteerInjects') if isinstance(authority, Mapping) else None
+    authors = {record['blockId']: record['author'] for record in stored or ()
+               if isinstance(record, Mapping) and isinstance(record.get('blockId'), str)
+               and 'author' in record} if isinstance(stored, list) else {}
+    kept, changed = [], False
+    for record in records:
+        if isinstance(record, Mapping):
+            author = authors.get(record.get('blockId')) if isinstance(record.get('blockId'), str) else None
+            if author is None and 'author' in record:
+                record = {key: value for key, value in record.items() if key != 'author'}
+                changed = True
+            elif author is not None and record.get('author') != author:
+                record = {**record, 'author': author}
+                changed = True
+        kept.append(record)
+    return {**projection, '_userSteerInjects': kept} if changed else projection
 
 
 def _projection_provenance(task: dict[str, Any], previous: Any) -> Any:
@@ -907,7 +1006,14 @@ def _file_changes_block(
 
 
 def task_event_projection_is_progress(event):
-    """The projection owner alone classifies shareable progress snapshots."""
+    """The projection owner alone classifies shareable progress snapshots.
+
+    A ``tool_progress`` frame carrying ``status`` is a row lifecycle
+    transition (queued -> running), not output progress: it re-folds
+    ``toolRounds`` and is never coalesced away.
+    """
+    if event.get('type') == 'tool_progress' and event.get('status'):
+        return False
     return event.get('type') in _COALESCIBLE_EVENT_KINDS
 
 
@@ -918,40 +1024,132 @@ def capture_task_projection_source(task, event, *, previous_source=None):
     events replace it; live task mutation can never change an accepted frame.
     The worker rebases these inputs against the actual committed projection.
     """
-    from copy import deepcopy
+    source, _ = _capture_task_projection_snapshot(
+        task, event, previous_source=previous_source, previous_bytes=0, measure=False)
+    return source
+
+
+def capture_task_projection_snapshot(
+        task, event, *, previous_source=None, previous_bytes=0):
+    """Freeze projection inputs and charge their shared structure in one walk.
+
+    Settled history rows are immutable and shared by reference; each one is
+    charged its standalone retained size once per graph, computed once per row.
+    History lists derive, copy and charge again only the rows that are live or
+    new since the task's previous capture (``derive_rows``).
+    """
+    return _capture_task_projection_snapshot(
+        task, event, previous_source=previous_source, previous_bytes=previous_bytes,
+        measure=True)
+
+
+_SEGMENT_WITHOUT_ROUND_KEY = ('segment-without-round-mirror',)
+
+
+def _segment_without_round_mirror(segment):
+    if type(segment) is SettledDict:
+        stripped = memo_get(segment, _SEGMENT_WITHOUT_ROUND_KEY)
+        if stripped is None:
+            stripped = memo_put(segment, _SEGMENT_WITHOUT_ROUND_KEY, (
+                settle({key: value for key, value in segment.items()
+                        if key != '_round'})
+                if '_round' in segment else segment))
+        return stripped
+    if isinstance(segment, dict) and '_round' in segment:
+        return {key: value for key, value in segment.items() if key != '_round'}
+    return segment
+
+
+def _trimmed_tool_rounds(rows):
+    return [trim_tool_round_copy(row) for row in rows]
+
+
+def _segments_without_round_mirror(segments):
+    # Stable-segment normalization drops every segment's ``_round`` mirror
+    # (the sibling toolRounds own it) and never reads it.
+    return [_segment_without_round_mirror(segment) for segment in segments]
+
+
+def _same_rows(rows):
+    return rows
+
+
+# The task's previous capture memo of each history list (``derive_rows``).
+# Terminal persistence releases it with the other projection fields.
+_PROJECTION_ROWS_KEY = '_projectionCaptureRows'
+
+
+def _derive_history_rows(task, values):
+    """Replace the history lists of ``values`` by their derived rows.
+
+    Returns the detach plans (``{id(rows): memo}``) of the derived lists and
+    keeps each list's memo on the task for its next capture.
+    """
+    memos = task.get(_PROJECTION_ROWS_KEY) or {}
+    next_memos, plans = {}, {}
+
+    def derive(field, derive_field, weigh=None):
+        rows, memo = derive_rows(values[field], derive_field, memos.get(field), weigh=weigh)
+        values[field] = rows
+        next_memos[field] = plans[id(rows)] = memo
+        return rows, memo
+
+    if isinstance(values.get('apiRounds'), list) and values['apiRounds']:
+        derive('apiRounds', sanitize_api_rounds_for_persist)
+    if 'toolRounds' in values:
+        rows, memo = derive('toolRounds', _trimmed_tool_rounds, tool_round_payload_chars)
+        compacted = compact_tool_rounds_for_frame_budget(rows, payload_chars=memo.weight + sum(
+            tool_round_payload_chars(rows[position]) for position in memo.live))
+        if compacted is not rows:
+            del plans[id(rows)]
+            values['toolRounds'] = compacted
+    if isinstance(values.get('segments'), list):
+        derive('segments', _segments_without_round_mirror)
+    for field in ('_timingStatusHistory', '_checkpointToolRounds'):
+        if isinstance(values.get(field), list) and values[field]:
+            derive(field, _same_rows)
+    task[_PROJECTION_ROWS_KEY] = next_memos
+    return plans
+
+
+def _capture_task_projection_snapshot(
+        task, event, *, previous_source, previous_bytes, measure):
+    from lib.utils import fast_deepcopy as deepcopy
     progress = task_event_projection_is_progress(event)
     if progress and previous_source is not None:
         source = dict(previous_source)
+        structure_bytes = previous_bytes
     else:
         keys = {
             'id', 'taskId', '_attemptId', 'attemptId', '_turnActor', '_turnStatus',
             'status', '_turnVisibleRunTurnIds', '_checkpointToolRounds', '_mcpImages',
             'toolRounds', 'apiRounds', 'error', '_activeModelRequestSpan',
-            '_timingStatusHistory', '_timingStatusDroppedCount',
+            '_timingStatusHistory', '_timingStatusDroppedCount', INJECTED_NOTES_FIELD,
         }
         keys.update(key for key, _ in _PROJECTION_TASK_FIELDS)
         keys.update(key for key, _, _ in _PROJECTION_INJECTION_LANES)
         keys.update(key for key, _ in _PROJECTION_PROVENANCE_FIELDS)
         values = {key: task[key] for key in keys if key in task}
-        if 'apiRounds' in values:
-            values['apiRounds'] = sanitize_api_rounds_for_persist(values['apiRounds'])
-        if 'toolRounds' in values:
-            values['toolRounds'] = compact_tool_rounds_for_frame_budget([
-                trim_tool_round_for_persist(dict(row)) if isinstance(row, dict) else row
-                for row in values['toolRounds']])
-        source = deepcopy(values)
+        plans = _derive_history_rows(task, values)
         if task.get('_todoState'):
             # The owned checklist changes during tool execution, before any
             # terminal projection. Structural round receipts must preserve it
             # so a hard restart never needs to replay a completed tool.
             from lib.tools.todo import public_todo_state
-            source['todoState'] = public_todo_state(task['_todoState'])
-        source['config'] = deepcopy({'checkpointToolRounds':
-            (task.get('config') or {}).get('checkpointToolRounds', [])})
+            values['todoState'] = public_todo_state(task['_todoState'])
+        # Projection reads the config copy only while no retained checkpoint
+        # list exists; never detach a second, shadowed copy of that history.
+        values['config'] = {'checkpointToolRounds': [] if task.get('_checkpointToolRounds')
+            else (task.get('config') or {}).get('checkpointToolRounds', [])}
+        # Build the complete immutable structural graph before detaching it.
+        # The copying owner can now account its actual reachable objects as
+        # it visits them, instead of traversing the same long history again.
+        source, structure_bytes = detach_sharing_settled(
+            values, measure=measure, derived_rows=plans)
     from lib.tasks_pkg.manager._events import snapshot_task_text
     source['content'], source['thinking'], _ = snapshot_task_text(task)
     source['phase'] = deepcopy(task.get('phase'))
-    return source
+    return source, structure_bytes
 
 
 def _task_projection(
@@ -994,11 +1192,7 @@ def _task_projection(
     )
     if owns_visible_run_turns:
         merged_rounds = previous.get('toolRounds') or []
-    projected_rounds = [
-        trim_tool_round_for_persist(dict(item))
-        if isinstance(item, dict) else item
-        for item in merged_rounds
-    ]
+    projected_rounds = [trim_tool_round_copy(item) for item in merged_rounds]
     # Keep the durable document below one storage frame: without this cap a
     # long tool-heavy turn grows past the wire limit and every authoritative
     # write starts failing closed (task mtdx825fjmhmx5: 379 rejected frames).
@@ -1118,6 +1312,8 @@ def _task_projection(
             projection.get('activityTimeline'), raw_event, task,
         )
         if activity_timeline is not None:
+            # Later folds replace rows instead of editing them: share them.
+            activity_timeline['entries'] = settle_items(activity_timeline['entries'])
             projection['activityTimeline'] = activity_timeline
     # The live status remains transient for rendering, but its bounded history
     # is durable diagnostic evidence. Provider-ingress isolation may keep an
@@ -1130,21 +1326,8 @@ def _task_projection(
         projection,
         actor=str(task.get('_turnActor') or 'assistant'),
         status=str(task.get('_turnStatus') or task.get('status') or 'running'),
+        injected_notes=task.get(INJECTED_NOTES_FIELD),
     )
-
-
-def _supports_lossless_prefill(task: dict[str, Any], projection: dict[str, Any]) -> bool:
-    if not projection.get('content'):
-        return False
-    model = task.get('model') or (task.get('config') or {}).get('model') or ''
-    if not model:
-        return False
-    try:
-        from lib.model_info import model_supports_assistant_prefill
-        return bool(model_supports_assistant_prefill(model))
-    except Exception as exc:
-        logger.debug('[TurnLifecycle] prefill capability probe failed: %s', exc)
-        return False
 
 
 def automatic_recovery_blocker(error: Any) -> dict[str, Any] | None:
@@ -1209,7 +1392,10 @@ def _settlement(task: dict[str, Any], raw_event: dict[str, Any],
             # boundary so neither snapshots nor reconnect replay can degrade
             # to the opaque policy cause ``generation_error``.
             detail = str(
-                raw_event.get('detail')
+                dispatch_authority_stop_detail(
+                    cause, str(task.get('_abortReasonDetail') or ''))
+                if cause in DISPATCH_AUTHORITY_ABORT_REASONS
+                else raw_event.get('detail')
                 or raw_event.get('content')
                 or finish
                 or 'Terminal generation event contained no error detail.'
@@ -1217,7 +1403,9 @@ def _settlement(task: dict[str, Any], raw_event: dict[str, Any],
             model = str(
                 task.get('model') or (task.get('config') or {}).get('model') or '')
             stream_error_kind = (
-                str(finish)
+                cause
+                if cause in DISPATCH_AUTHORITY_ABORT_REASONS
+                else str(finish)
                 if finish in {'premature_close', 'abnormal_stop'}
                 else 'premature_close'
                 if cause == 'provider_stream_error'
@@ -1233,6 +1421,17 @@ def _settlement(task: dict[str, Any], raw_event: dict[str, Any],
                 context='turn-settlement', source='turn-lifecycle',
                 raw=detail,
             )
+    if status == 'truncated' and cause in CONTENT_FILTER_CAUSES:
+        # A content-filter outcome stays truncated, so adapters keep their
+        # ``200 finish_reason=content_filter``, yet carries the typed
+        # explanation its producer stamped beside the task error channel.
+        stamped = task.get(CONTENT_FILTER_SETTLEMENT_KEY)
+        error = normalize_envelope(
+            stamped.get('error') if isinstance(stamped, Mapping) else None,
+            context='turn-settlement',
+            source='turn-lifecycle',
+            require_complete=True,
+        )
     blocker = automatic_recovery_blocker(raw_error)
     if error is not None and blocker is not None:
         error['retryPolicy'] = dict(blocker['retryPolicy'])
@@ -1242,36 +1441,37 @@ def _settlement(task: dict[str, Any], raw_event: dict[str, Any],
     options: list[dict[str, Any]] = []
     checkpoint_prefix = scan_replayable_tool_round_prefix(
         projection.get('toolRounds') or [])
-    # ``continue``/``checkpoint_resume``/``answer_guidance`` restore the settled
-    # checkpoint, whose explicit ``usageComplete=false`` makes the restarted
-    # account refuse its first model dispatch with this very error. For an
-    # unknown-usage failure they were therefore guaranteed dead ends — click
-    # once, get an identical refusal, and no way forward. The confirmed
-    # usage-recovery command owns that continuation instead, so do not
-    # advertise a control it will refuse. ``regenerate`` starts a fresh Turn
-    # with no restored checkpoint and stays available.
+    # A resume restores the checkpoint's accounting as well as its progress.
+    # Every conversation turn (chat, Goal Mode, Flow) keeps going when a
+    # receipt is missing: its shared account records the paid lower bound and
+    # only an explicit finite cap stops it (`_unknownUsagePolicy`), so a
+    # refusal that account recorded (`source: execution-budget`) cannot recur
+    # on resume and advertising the resume is honest. Other producers of the
+    # same kind (the native model account, delegated swarm recovery) refuse
+    # independently of that policy; offering a resume they would refuse again
+    # is the dead control this gate exists to prevent.
     usage_unconfirmed = (error is not None
-                         and error.get('kind') == 'execution_token_usage_unknown')
+                         and error.get('kind') == 'execution_token_usage_unknown'
+                         and error.get('source') != 'execution-budget')
     resumable = (status in {'interrupted', 'truncated', 'failed'}
                  and not usage_unconfirmed)
-    if resumable and _supports_lossless_prefill(task, projection):
-        options.append({
-            'operation': 'continue',
-            'anchor': {'type': 'lossless_prefill',
-                       'contentChars': len(projection.get('content') or '')},
-        })
-    elif (resumable and not projection.get('content')
+    # Every resume rewinds the unfinished tail and resends from the last
+    # complete message, never a prefill: Claude 4.6+ and Gemini 3.6+ reject a
+    # trailing assistant turn and OpenAI-style APIs answer it as a new message.
+    # A prose tail therefore needs the checkpoint boundary, which moves it into
+    # ``rolledBack``; ``continue`` only covers a prose-free tail.
+    content_tail = bool(projection.get('content'))
+    if (resumable and not content_tail
             and (checkpoint_prefix.rounds or projection.get('thinking'))):
-        # No prose tail to prefill, so continuing needs no prefill
-        # capability at all: the replayed checkpoint prefix is the wire
-        # continuity and the write boundary preserves the interrupted
-        # thinking tail as a rolled-back block. Offering only
-        # checkpoint_resume here would force a needless projection rewrite.
+        # The replayed checkpoint prefix is the wire continuity and the write
+        # boundary preserves the interrupted thinking tail as a rolled-back
+        # block. Offering only checkpoint_resume here would force a needless
+        # projection rewrite.
         options.append({
             'operation': 'continue',
             'anchor': {'type': 'replay_only', 'contentChars': 0},
         })
-    if (resumable and checkpoint_prefix.rounds):
+    if resumable and (checkpoint_prefix.rounds or content_tail):
         # Retention is wider than replay: the durable projection keeps every
         # pre-gap row (display carriers included) so a resume never erases
         # rendered history; only discarded provider-attempt artifacts are
@@ -1361,15 +1561,26 @@ def _settlement(task: dict[str, Any], raw_event: dict[str, Any],
     return status, settlement
 
 
-_INTERACTION_EVENTS = frozenset({
-    'stdin_request', 'human_guidance_request', 'write_approval_request',
-    'ask_human', 'approval_request',
-})
-# Raw frames preserved inside their durable attempt event (never the
-# projection) so the frontend debug surfaces can rebuild without a separate
-# task-event stream. Kept deliberately narrow: only frames whose consumers
-# lost their transport in the conversation-sync migration.
+# Registered response-requiring events record as ``interaction_request``.
+_INTERACTION_EVENTS = interaction_types()
+# Diagnostic frames preserved inside their durable attempt event so the
+# frontend debug surfaces can rebuild without a separate task-event stream.
+# Kept deliberately narrow: only frames whose consumers lost their transport
+# in the conversation-sync migration.
 _DEBUG_EVIDENCE_EVENTS = frozenset({'messages_snapshot', 'tool_compacted'})
+# Frames whose stored encoding (compact UTF-8 JSON, ``_CommandEncoding``)
+# exceeds this size are carried in their shared-prefix delta form (the same
+# projection the durable event log stores) instead of duplicating the full
+# wire frame on the attempt event. ``read_events`` rehydrates them.
+_DEBUG_EVIDENCE_INLINE_MAX_BYTES = 64 * 1024
+# Canonical source: contracts/tofudb_ir_v1.json -> bounds.maximumLegacyDocumentBytes.
+# The native authority admits one attempt event only while its expanded
+# conversation-sync form fits this bound (turn/sync_attempt_reference.rs); a
+# contract test pins the parity.
+_ATTEMPT_EVENT_DOCUMENT_MAX_BYTES = 8 * 1024 * 1024
+# Identity, sequence, status, attempt and sync-envelope fields the authority
+# adds around the producer payload, plus replay-patch normalization drift.
+_ATTEMPT_EVENT_ENVELOPE_RESERVE_BYTES = 64 * 1024
 _TERMINAL_EVENTS = frozenset({'done', 'error', 'aborted'})
 
 
@@ -1408,6 +1619,212 @@ def _signal_stale_attempt_abort(task: dict[str, Any], attempt_id: str,
     except Exception:
         logger.debug('[TurnLifecycle] stale-attempt abort signal failed '
                      '(non-fatal)', exc_info=True)
+
+
+class _CommandEncoding:
+    """Each value of one turn-event command, encoded once.
+
+    Byte bounds read ``len`` of exactly the bytes both storage clients splice
+    into the request (``lib.storage.protocol.FrozenPayload``), and every send
+    of the command, including a shed or oversize retry, reuses the encoding of
+    each unchanged value. The inline evidence copy and the carried row's
+    ``event`` share one encoding.
+    """
+
+    __slots__ = ('_held', '_copies')
+
+    def __init__(self) -> None:
+        self._held: dict[int, tuple[Any, bytes]] = {}
+        self._copies: dict[int, tuple[Any, Any]] = {}
+
+    def encoded(self, value: Any) -> bytes:
+        copied = self._copies.get(id(value))
+        if copied is not None and copied[0] is value:
+            value = copied[1]
+        held = self._held.get(id(value))
+        if held is None or held[0] is not value:
+            held = (value, encode_json_value(value))
+            self._held[id(value)] = held
+        return held[1]
+
+    def share(self, copy: Any, original: Any) -> None:
+        """Encode the shallow copy ``copy`` with the bytes of ``original``."""
+        self._copies[id(copy)] = (copy, original)
+
+    def frozen(self, payload: dict[str, Any]) -> FrozenPayload:
+        encoded = {}
+        for key, value in payload.items():
+            if key in ('event_payload', 'task_event') and isinstance(value, dict):
+                # Small envelopes that retries edit in place; their ``event``
+                # splices the single encoding of that frame.
+                envelope = dict(value)
+                if isinstance(envelope.get('event'), Mapping):
+                    envelope['event'] = orjson.Fragment(self.encoded(envelope['event']))
+                encoded[key] = encode_json_value(envelope)
+            elif isinstance(value, (Mapping, list, tuple)):
+                encoded[key] = self.encoded(value)
+        return FrozenPayload(payload, encoded)
+
+
+def _storage_rejection_reason(exc: 'StorageError') -> str:
+    """One bounded line naming the authority fence; older engines echo the code."""
+    return ' '.join(str(exc.message or exc.code).split())[:200]
+
+
+def _note_debug_evidence_shed(task: dict[str, Any], attempt_id: str,
+                              event_kind: str, reason: str) -> None:
+    count = int(task.get('_debugEvidenceOmittedCount') or 0) + 1
+    task['_debugEvidenceOmittedCount'] = count
+    (logger.warning if count == 1 else logger.debug)(
+        '[TurnLifecycle] %s evidence shed from its turn event '
+        'task=%s attempt=%s count=%d: %s',
+        event_kind, str(task.get('id') or '?')[:8], str(attempt_id)[:8],
+        count, reason)
+
+
+def _oversize_circuit_open(task: dict[str, Any]) -> bool:
+    """True while an oversized full projection probes again only later."""
+    try:
+        retry_at = float(task.get('_turnProjectionOversizeRetryAt') or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        retry_at = 0.0
+    return time.monotonic() < retry_at
+
+
+def _frame_projection(
+    source: dict[str, Any],
+    previous: dict[str, Any],
+    raw_event: dict[str, Any],
+    *,
+    slim: bool,
+    oversize_circuit_open: bool,
+    segments_stable: bool,
+    actor: str,
+) -> tuple[bool, dict[str, Any], dict[str, Any]]:
+    """Return ``(slim, patch baseline, projection)`` for one Turn event frame."""
+    if slim and not oversize_circuit_open:
+        content, thinking = _delta_text_fields(source, previous)
+        if ((content and not previous.get('content'))
+                or (thinking and not previous.get('thinking'))):
+            # The first nonempty channel creates a structural render block.
+            # Later tokens can patch only cumulative text; skipping this
+            # boundary leaves reasoning invisible until an unrelated tool.
+            slim = False
+    if slim:
+        content, thinking = _delta_text_fields(source, previous)
+        return True, previous, {'content': content, 'thinking': thinking}
+    if not segments_stable:
+        # Text appends retain the committed structural shape. Repair its
+        # mirrors once when a structural/terminal patch needs the stable
+        # baseline that the authority independently derives under CAS.
+        previous = projection_with_stable_segments(
+            previous, actor=actor, status='running')
+    return False, previous, _task_projection(source, previous, raw_event)
+
+
+def _projection_update_event_payload(
+    phase: Any,
+    event_kind: str,
+    raw_event: dict[str, Any],
+    task_event: Mapping[str, Any] | None,
+    encoding: _CommandEncoding,
+) -> dict[str, Any]:
+    """Attempt-event payload of one ``projection_updated`` frame."""
+    event_payload = {'phase': phase, 'updateKind': event_kind}
+    if event_kind in _DEBUG_EVIDENCE_EVENTS:
+        # Diagnostic evidence (debug panel / Request Inspector) never
+        # folds into the projection. Carrying the live frame on its own
+        # durable attempt event restores the per-frame delivery that the
+        # conversation-sync migration removed — replay of the attempt
+        # stream re-delivers the same frame, so live and cold reconnect
+        # converge. Large message snapshots use the shared-prefix delta
+        # already computed for the event log; ``read_events`` rehydrates
+        # it, while the first frame of a (task, turn) stays full so a
+        # live debug panel that attached mid-stream still gets a baseline.
+        evidence = task_event.get('event') if isinstance(
+            task_event, Mapping) else None
+        if (event_kind == 'messages_snapshot'
+                and isinstance(evidence, Mapping)
+                and evidence.get('snapshotDeltaVersion') is not None
+                and int(evidence.get('prefixLen') or 0) > 0
+                and not _fits_inline(raw_event, encoding)):
+            event_payload['event'] = dict(evidence)
+            encoding.share(event_payload['event'], evidence)
+        else:
+            event_payload['event'] = raw_event
+    return event_payload
+
+
+def _fits_inline(raw_event: dict[str, Any], encoding: _CommandEncoding) -> bool:
+    try:
+        return len(encoding.encoded(raw_event)) <= _DEBUG_EVIDENCE_INLINE_MAX_BYTES
+    except StorageError:
+        # A frame no client can encode never rides inline; its delta takes
+        # the ordinary evidence-refusal path.
+        return False
+
+
+def _frame_projection_patch(
+    previous: dict[str, Any],
+    projection: dict[str, Any],
+    *,
+    slim: bool,
+    base_revision: int,
+) -> dict[str, Any]:
+    """Command fields that move one frame from ``base_revision`` to the next."""
+    if slim:
+        # Revision-fenced text patches carry only the new suffix. The
+        # authority preserves its exact structural baseline; no segment
+        # normalization is implied by a text-only update.
+        return {'projection_patch': build_projection_patch(
+            {field: previous[field] for field in ('content', 'thinking')
+             if field in previous},
+            projection,
+            base_revision=base_revision,
+            target_revision=base_revision + 1,
+        )}
+    # ``_task_projection`` and the terminal boundary both return a canonical
+    # stable-segment document.  This private evidence lets the Sidecar reuse
+    # that exact revision without re-normalizing it on the next structural
+    # event; older producers omit it and safely fall back.
+    return {
+        'projection_patch': build_projection_patch(
+            previous,
+            projection,
+            base_revision=base_revision,
+            target_revision=base_revision + 1,
+        ),
+        'projection_segments_stable': True,
+    }
+
+
+def _shed_oversized_inline_evidence(command_payload: dict[str, Any],
+                                    encoding: _CommandEncoding) -> str | None:
+    """Drop an inline diagnostic copy the attempt-event bound cannot carry.
+
+    The inline evidence is a diagnostic duplicate of the carried task-event
+    row (or of the caller's standalone append). A full baseline -- the first
+    frame of a (task, turn), or one after projector eviction/reset -- of a
+    conversation whose wire request exceeds the attempt-event bound would
+    otherwise make this frame deterministically unwritable and kill the run.
+    Returns the shed reason, or ``None`` when the copy fits.
+    """
+    event_payload = command_payload['event_payload']
+    if 'event' not in event_payload:
+        return None
+    try:
+        evidence_bytes = len(encoding.encoded(event_payload['event']))
+        patch_bytes = len(encoding.encoded(command_payload['projection_patch']))
+    except StorageError:
+        # Sending the command reports this refusal; its handler sheds evidence.
+        return None
+    if (evidence_bytes + patch_bytes + _ATTEMPT_EVENT_ENVELOPE_RESERVE_BYTES
+            <= _ATTEMPT_EVENT_DOCUMENT_MAX_BYTES):
+        return None
+    del event_payload['event']
+    return (f'inline copy of {evidence_bytes} bytes exceeds the '
+            f'{_ATTEMPT_EVENT_DOCUMENT_MAX_BYTES}-byte attempt-event '
+            'bound; the carried task event keeps the complete frame')
 
 
 def _is_frame_overflow_error(exc: 'StorageError') -> bool:
@@ -1550,6 +1967,7 @@ def _drain_queue_after_settlement(task: dict[str, Any], conversation_id: str,
 
 _TURN_PROJECTION_STATE_KEY = '_turnProjectionState'
 _TURN_PROJECTION_LOCK_KEY = '_turnProjectionStateLock'
+_TURN_COMMITTED_EVENT_ORDER_KEY = '_turnCommittedEventOrder'
 
 
 def _task_projection_state_lock(task: dict[str, Any]) -> threading.RLock:
@@ -1559,6 +1977,23 @@ def _task_projection_state_lock(task: dict[str, Any]) -> threading.RLock:
         return existing
     candidate = threading.RLock()
     return task.setdefault(_TURN_PROJECTION_LOCK_KEY, candidate)
+
+
+@contextmanager
+def _task_projection_critical_section(task: dict[str, Any]) -> Iterator[None]:
+    """Own the task projection lock; publish its commit wakeups after release.
+
+    Every Turn write of this task commits under the lock, so its notices join
+    the task's order in commit order. Wake publication encodes push frames on
+    workers shared by every conversation and must not extend this section.
+    """
+    order = task.get(_TURN_COMMITTED_EVENT_ORDER_KEY)
+    if order is None:
+        order = task.setdefault(
+            _TURN_COMMITTED_EVENT_ORDER_KEY, CommittedEventOrder())
+    with defer_committed_events(order):
+        with _task_projection_state_lock(task):
+            yield
 
 
 def _task_projection_state(
@@ -1637,8 +2072,11 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
     ``require_attempts_live`` — the attempt ids the caller's standalone
     append must have the storage authority verify inside the append
     transaction (2026-09-18 stream-churn fix; see the coalesced branch).
+
+    Commit wakeups of these writes publish after the projection lock is
+    released, in commit order (``_task_projection_critical_section``).
     """
-    with _task_projection_state_lock(task):
+    with _task_projection_critical_section(task):
         if task.get('_flowLiveTurn') and raw_event.get('type') not in _TERMINAL_EVENTS:
             from lib.orchestration.chat_live_turn import project_live_flow_task
             projected = project_live_flow_task(task)
@@ -1662,6 +2100,7 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
             outcome = _record_task_event_locked(
                 task, raw_event, task_event, fence_out=fence_out,
                 projection_source=projection_source)
+            task.pop('_turnProjectionRebasePending', None)
             if terminal and attempt_id:
                 settled = bool(outcome)
                 if not settled:
@@ -1678,21 +2117,23 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
             if (isinstance(exc, StorageError)
                     and exc.code == 'database_protocol_error'):
                 # Deterministic engine rejection (InvalidPayload): retrying
-                # the identical request shape can never succeed, and the
-                # daemon echoes only the code as the message — so the
-                # client-side request shape logged here is the only record
-                # of WHICH validation fence fired.
+                # the identical request shape can never succeed. Engines
+                # that classify the fence send its literal reason; older
+                # ones echo only the code, so the client-side request shape
+                # stays in the same line.
                 from lib.tasks_pkg.manager._registry import task_user_id
                 state = (_task_projection_state(
                     task, attempt_id, task_user_id(task))
                     if attempt_id else None)
                 logger.warning(
                     '[TurnLifecycle] deterministic event-record rejection '
-                    'task=%s attempt=%s kind=%s terminal=%s client_rev=%s',
+                    'task=%s attempt=%s kind=%s terminal=%s client_rev=%s '
+                    'reason=%s',
                     str(task.get('id') or '?')[:8],
                     str(attempt_id or '?')[:8],
                     raw_event.get('type'), terminal,
-                    (state or {}).get('projectionRevision'))
+                    (state or {}).get('projectionRevision'),
+                    _storage_rejection_reason(exc))
             if terminal and attempt_id:
                 # A timeout may follow a committed transaction. Re-read the
                 # attempt on retry before rebuilding any projection patch.
@@ -1708,7 +2149,7 @@ def ensure_terminal_task_settled(task: dict[str, Any]) -> bool:
     facts from the retained task rather than treating task_results as authority.
     No new receipt/state machine is needed; maintenance re-enters this boundary.
     """
-    with _task_projection_state_lock(task):
+    with _task_projection_critical_section(task):
         pending = task.get('_terminalTurnPending')
         if pending:
             event, carrier = pending
@@ -1754,8 +2195,13 @@ def _record_task_event_locked(
     allow_rebase: bool = True,
     fence_out: dict[str, Any] | None = None,
     projection_source: dict[str, Any] | None = None,
+    coalesce: bool = True,
 ):
-    """Record one event while this task owns its projection state lock."""
+    """Record one event while this task owns its projection state lock.
+
+    ``coalesce=False`` always carries the frame in its own transaction; the
+    batch owner's per-event path uses it so rows commit in FIFO order.
+    """
     attempt_id = task.get('_attemptId') or task.get('attemptId')
     if not attempt_id:
         return False
@@ -1766,7 +2212,8 @@ def _record_task_event_locked(
         source['_activityLastLlmRound'] = task.get('_activityLastLlmRound', 0)
     now = _now_ms()
     event_kind = str(raw_event.get('type') or 'projection')
-    if (event_kind in _COALESCIBLE_EVENT_KINDS
+    if (coalesce and task_event_projection_is_progress(raw_event)
+            and task.get('_turnProjectionRebasePending') != attempt_id
             and not (task_event or {}).get('preceding_events')
             and not _delta_throttle_allows(attempt_id)):
         # Coalesced frames do not enter the write transaction that normally
@@ -1814,47 +2261,27 @@ def _record_task_event_locked(
         )}
     previous = turn.get('projection') or {}
     terminal = event_kind in _TERMINAL_EVENTS
-    try:
-        oversize_retry_at = float(
-            task.get('_turnProjectionOversizeRetryAt') or 0.0)
-    except (TypeError, ValueError, OverflowError):
-        oversize_retry_at = 0.0
     oversize_circuit_open = bool(
         task_event is not None
         and not terminal
-        and time.monotonic() < oversize_retry_at
+        and _oversize_circuit_open(task)
     )
     background_receipt = event_kind == 'background_command_inject'
     effect_intent = event_kind == 'tool_effect'
     slim = not terminal and not background_receipt and not effect_intent and (
         oversize_circuit_open
         or (
-            event_kind in _COALESCIBLE_EVENT_KINDS
+            task_event_projection_is_progress(raw_event)
             and not _structural_fold_due(attempt_id)
         )
     )
-    if slim and not oversize_circuit_open:
-        content, thinking = _delta_text_fields(source, previous)
-        if ((content and not previous.get('content'))
-                or (thinking and not previous.get('thinking'))):
-            # The first nonempty channel creates a structural render block.
-            # Later tokens can patch only cumulative text; skipping this
-            # boundary leaves reasoning invisible until an unrelated tool.
-            slim = False
+    slim, previous, projection = _frame_projection(
+        source, previous, raw_event, slim=slim,
+        oversize_circuit_open=oversize_circuit_open,
+        segments_stable=state is None or state.get('segmentsStable', True) is not False,
+        actor=str(turn.get('actor') or 'assistant'))
     if slim:
-        content, thinking = _delta_text_fields(source, previous)
-        projection = {'content': content, 'thinking': thinking}
-    else:
-        if state is not None and state.get('segmentsStable', True) is False:
-            # Text appends retain the committed structural shape. Repair its
-            # mirrors once when a structural/terminal patch needs the stable
-            # baseline that the authority independently derives under CAS.
-            previous = projection_with_stable_segments(
-                previous,
-                actor=str(turn.get('actor') or 'assistant'),
-                status='running',
-            )
-        projection = _task_projection(source, previous, raw_event)
+        content, thinking = projection['content'], projection['thinking']
     if projection_source is not None and '_activityLastLlmRound' in source:
         task['_activityLastLlmRound'] = source['_activityLastLlmRound']
     settlement = {}
@@ -1907,25 +2334,15 @@ def _record_task_event_locked(
     # the command.  It must not ride inside this event envelope too: the
     # Sidecar replaces this private command shape with its own canonical
     # revision patch before durable replay / sync capture.
-    event_payload = {'phase': _live_phase}
+    encoding = _CommandEncoding()
     if terminal:
         event_payload = {'status': status, 'settlement': settlement,
                          'phase': None}
     elif event_type == 'interaction_request':
-        event_payload['request'] = raw_event
+        event_payload = {'phase': _live_phase, 'request': raw_event}
     else:
-        event_payload['updateKind'] = event_kind
-        if event_kind in _DEBUG_EVIDENCE_EVENTS:
-            # Diagnostic evidence (debug panel / Request Inspector) never
-            # folds into the projection. Carrying the live frame on its own
-            # durable attempt event restores the per-frame delivery that the
-            # conversation-sync migration removed — replay of the attempt
-            # stream re-delivers the same frame, so live and cold reconnect
-            # converge. Use the LIVE wire frame, never the delta-encoded
-            # storage form: that form carries prefix/tool references only the
-            # event-log decoder (``snapshot_delta.rebuild_snapshots``) can
-            # resolve.
-            event_payload['event'] = raw_event
+        event_payload = _projection_update_event_payload(
+            _live_phase, event_kind, raw_event, task_event, encoding)
     command_payload = {
         'attempt_id': attempt_id, 'user_id': user_id,
         'task_id': str(task.get('id') or ''),
@@ -1945,30 +2362,9 @@ def _record_task_event_locked(
                 logger.warning('[ModelReplay] preparation unavailable', exc_info=True)
         command_payload['model_continuation'] = candidate or {
             'status': task['_modelReplayPublishStatus']}
-    if slim:
-        # Revision-fenced text patches carry only the new suffix. The
-        # authority preserves its exact structural baseline; no segment
-        # normalization is implied by a text-only update.
-        command_payload['projection_patch'] = build_projection_patch(
-            {field: previous[field] for field in ('content', 'thinking')
-             if field in previous},
-            projection,
-            base_revision=int(turn.get('projectionRevision') or 0),
-            target_revision=int(turn.get('projectionRevision') or 0) + 1,
-        )
-    else:
-        base_revision = int(turn.get('projectionRevision') or 0)
-        command_payload['projection_patch'] = build_projection_patch(
-            previous,
-            projection,
-            base_revision=base_revision,
-            target_revision=base_revision + 1,
-        )
-        # ``_task_projection`` and the terminal boundary above both return a
-        # canonical stable-segment document.  This private evidence lets the
-        # Sidecar reuse that exact revision without re-normalizing it on the
-        # next structural event; older producers omit it and safely fall back.
-        command_payload['projection_segments_stable'] = True
+    command_payload.update(_frame_projection_patch(
+        previous, projection, slim=slim,
+        base_revision=int(turn.get('projectionRevision') or 0)))
     if background_receipt:
         receipt = projection['_bgCommandInjects'][-1]
         command_payload['background_command_ack'] = {
@@ -1982,26 +2378,76 @@ def _record_task_event_locked(
         command_payload['flow_root_attempt_id'] = task['_flowRootAttemptId']
     if task_event is not None:
         command_payload['task_event'] = task_event
+    shed = _shed_oversized_inline_evidence(command_payload, encoding)
+    if shed is not None:
+        _note_debug_evidence_shed(task, attempt_id, event_kind, shed)
     client = _turn_client(write=True)
     command_id = (
         f'turn-event:{attempt_id}:{now}:{event_kind}'
+        f':revision:{command_payload["projection_patch"]["baseRevision"]}'
         f'{":rebase" if not allow_rebase else ""}'
     )
     try:
-        result = client.command(
-            'turn.event.record', command_payload, command_id,
-            # Projection frames are high-rate executor output, not interactive
-            # commands.  Putting them on the default user lane let a fleet of
-            # live turns occupy all eight user-weighted queue slots and starve
-            # Send / Regenerate behind multi-MiB projection writes.
-            priority='event')
+        try:
+            result = client.command(
+                'turn.event.record', encoding.frozen(command_payload), command_id,
+                # Projection frames are high-rate executor output, not
+                # interactive commands.  Putting them on the default user lane
+                # let a fleet of live turns occupy all eight user-weighted
+                # queue slots and starve Send / Regenerate behind multi-MiB
+                # projection writes.
+                priority='event')
+        except StorageError as exc:
+            refused_snapshot = (
+                task_event.get('event')
+                if event_kind == 'messages_snapshot'
+                and isinstance(task_event, Mapping) else None)
+            if (terminal or event_kind not in _DEBUG_EVIDENCE_EVENTS
+                    or exc.code != 'database_protocol_error'
+                    or _is_frame_overflow_error(exc)
+                    or ('event' not in event_payload
+                        and not isinstance(refused_snapshot, Mapping))):
+                raise
+            # Diagnostic evidence never mutates the Turn projection
+            # (conversation_sync_v3 AttemptEvent payload.event), and a
+            # snapshot row may be explicitly degraded (EVENTS.md
+            # model-visible <=> logged). Shed it once and keep the projection
+            # patch and sequence in one transaction; a second rejection is
+            # the authority's verdict on the frame itself.
+            reason = _storage_rejection_reason(exc)
+            event_payload.pop('event', None)
+            if isinstance(refused_snapshot, Mapping):
+                from lib.tasks_pkg.event_log import degraded_persistent_event
+                task_event = {**task_event, 'event': degraded_persistent_event(
+                    refused_snapshot,
+                    f'storage authority rejected this evidence frame: {reason}')}
+                command_payload['task_event'] = task_event
+            _note_debug_evidence_shed(
+                task, attempt_id, event_kind,
+                f'authority rejected the frame ({reason})')
+            result = client.command(
+                'turn.event.record', encoding.frozen(command_payload), command_id,
+                priority='event')
+            if isinstance(refused_snapshot, Mapping):
+                # The refused frame never became durable; the next snapshot
+                # must store a self-contained baseline, not a delta on it.
+                from lib.tasks_pkg.event_log import (
+                    reset_persistent_event_projection,
+                )
+                reset_persistent_event_projection(
+                    task_event.get('task_id'), refused_snapshot)
     except StorageError as exc:
-        if (exc.code == 'turn_projection_stale'
-                and allow_rebase):
-            # A legitimate external projection CAS advanced the row after our
-            # last event. Refresh exactly once and rebuild this same raw event
-            # against that base; repeated contention still fails closed.
+        if exc.code == 'turn_projection_stale':
+            # Every rejected CAS invalidates the producer's baseline. After
+            # one immediate refresh, the existing persistence owner retains
+            # and retries the exact event with backoff, including its shutdown
+            # controls. A second concurrent writer must not kill the task.
             task.pop(_TURN_PROJECTION_STATE_KEY, None)
+            task['_turnProjectionRebasePending'] = attempt_id
+            if not allow_rebase:
+                raise ProjectionRebaseRequired(
+                    exc.code, exc.message, retryable=True,
+                    operation_id=exc.operation_id) from exc
             return _record_task_event_locked(
                 task,
                 raw_event,
@@ -2057,7 +2503,7 @@ def _record_task_event_locked(
         slim = True
         try:
             result = client.command(
-                'turn.event.record', command_payload, command_id,
+                'turn.event.record', encoding.frozen(command_payload), command_id,
                 priority='event')
         except StorageError as retry_exc:
             # Even the text-only frame was rejected: the cumulative content
@@ -2135,7 +2581,7 @@ def _record_task_event_locked(
                 or latest_attempt.get('status') not in LIVE_ATTEMPT_STATUSES):
             _signal_stale_attempt_abort(
                 task, attempt_id, 'event-record-rejected')
-    if applied and event_kind in _COALESCIBLE_EVENT_KINDS:
+    if applied and task_event_projection_is_progress(raw_event):
         _delta_throttle_stamp(attempt_id)
     if applied and not slim and not terminal:
         _structural_fold_stamp(attempt_id)
@@ -2155,9 +2601,496 @@ def _record_task_event_locked(
             str(attempt_id), task['_modelReplayPublishStatus'])
         _drain_queue_after_settlement(
             task, str(turn.get('conversationId') or ''), status)
+        if status == 'failed':
+            _report_watchdog_turn_fault(task, turn, attempt_id, error)
     if applied and task_event is not None and result.get('task_event') is not None:
         return 'carried'
     return applied
+
+
+def _report_watchdog_turn_fault(task: dict[str, Any], turn: Mapping[str, Any], attempt_id: str,
+                                error: Any) -> None:
+    """Router Watchdog fault signal for a committed failed Turn (docs/ROUTER.md R7).
+
+    Only infrastructure error kinds qualify. The report reads durable metadata
+    and may wake the Watchdog, so it runs off the settlement path and never
+    raises into it.
+    """
+    try:
+        from lib.router.watchdog.signals import TURN_FAULT_KINDS
+        if not isinstance(error, Mapping) or error.get('kind') not in TURN_FAULT_KINDS:
+            return
+        from lib.tasks_pkg.manager import task_user_id
+        owner = int(task_user_id(task))
+        conversation_id = str(turn.get('conversationId') or '')
+        turn_id = str(turn.get('turnId') or '')
+        envelope = dict(error)
+
+        def _report():
+            from lib.router.watchdog.signals import report_turn_failure
+            report_turn_failure(owner, conversation_id=conversation_id, turn_id=turn_id,
+                                attempt_id=str(attempt_id), error=envelope)
+
+        threading.Thread(target=_report, daemon=True,
+                         name=f'router-watchdog-signal-{conversation_id[:8]}').start()
+    except Exception:
+        logger.debug('[TurnLifecycle] watchdog fault report hook failed', exc_info=True)
+
+
+# ── Batched structural events (turn.event.record_batch) ─────────────────────────
+# A barrier waiting on a queued run of frames commits them as ordinary
+# ``turn.event.record`` steps of one authority transaction instead of one
+# commit each (docs/TOFUDB_EXECUTION_FRAMES.md, "Batched structural events").
+# Barrier-class frames (``event_delivery.is_barrier_event``) never join a run.
+
+# Refusals that prove the batch transaction did not commit.
+_BATCH_DEFINITIVE_REFUSALS = frozenset({
+    'turn_projection_stale', 'database_protocol_error', 'storage_payload_too_large',
+    'unknown_operation', 'operation_not_implemented', 'database_integrity',
+    'database_conflict', 'database_forbidden', 'database_invalid_payload',
+    'database_resource_exhausted',
+})
+_TURN_EVENT_BATCH_UNKNOWN_KEY = '_turnEventBatchUnknownOutcome'
+
+
+@dataclass(eq=False)
+class TaskEventBatchEntry:
+    """One FIFO task event for :func:`record_task_events`.
+
+    ``raw_event`` is the live frame and ``sequence`` its TaskRuntime sequence.
+    ``projection_source`` is the detached input captured at acceptance
+    (``capture_task_projection_source``); ``None`` reads the live task.
+    ``preceding_events`` optionally carries already projected progress rows
+    that precede this frame inside the same Turn event, exactly like
+    ``task_event['preceding_events']``.
+
+    The batch owner freezes ``task_event`` (the durable carrier, projected
+    once in FIFO order) and records ``outcome`` only after the entry's commit
+    is proven. Pass the same entry objects to every retry: an unknown outcome
+    is then reconciled against identical rows, and a committed entry is never
+    applied twice.
+    """
+
+    raw_event: dict[str, Any]
+    sequence: int
+    projection_source: dict[str, Any] | None = None
+    preceding_events: list[dict[str, Any]] | None = None
+    task_event: dict[str, Any] | None = None
+    outcome: Any = None
+
+
+@dataclass
+class _PreparedBatchEntry:
+    entry: TaskEventBatchEntry
+    payload: dict[str, Any]
+    applied_projection: dict[str, Any]
+    slim: bool
+    progress: bool
+    shed: str | None
+    rows: int
+    wire: bytes
+
+    @property
+    def wire_bytes(self) -> int:
+        return len(self.wire)
+
+
+def record_task_events(task: dict[str, Any],
+                       entries: list[TaskEventBatchEntry]) -> list[Any]:
+    """Persist a FIFO run of task events before any of them becomes visible.
+
+    Each entry is exactly what one ``record_task_event(task, raw_event,
+    task_event=...)`` records. The run commits as ordinary
+    ``turn.event.record`` steps of ``turn.event.record_batch``: one
+    all-or-nothing transaction per existing storage-event RPC budget
+    (``resolve_storage_event_budget``), K projection revisions chained from
+    the cached committed revision, K conversation-sync events and K rows, and
+    one projection-state update per transaction.
+
+    Returns one outcome per entry, as ``record_task_event`` would:
+    ``'carried'`` once its row committed inside the Turn transaction,
+    ``False`` when the authority rejected the attempt (nothing of the entry was
+    written; a stale attempt also plants the cooperative abort).
+
+    Terminal, interaction, background-receipt and tool-effect frames keep
+    their own transaction and barrier (``event_delivery.is_barrier_event``,
+    the producer's own barrier test): such an entry, or a sequence that does
+    not ascend, raises ``ValueError`` before any write. An authority without
+    the command (``unknown_operation``), or a deterministic refusal of the
+    whole batch, falls back to the per-event path, whose single-event rules
+    isolate a refused frame. A batch the native authority cannot commit as one
+    ordinary commit (``database_resource_exhausted``) records its first half
+    alone, and later transactions of the call start at that size. After an
+    unknown outcome the next call reads the exact rows before resending: all
+    present and identical means committed, none means resend, some fails
+    closed with ``database_conflict``.
+    """
+    from lib.tasks_pkg.event_delivery import is_barrier_event
+    entries = list(entries)
+    previous = -1
+    for entry in entries:
+        if is_barrier_event(entry.raw_event):
+            kind = str(entry.raw_event.get('type') or 'projection')
+            raise ValueError(f'{kind} events keep their own Turn transaction')
+        for sequence in [*(row.get('sequence') for row in entry.preceding_events or ()),
+                         entry.sequence]:
+            if type(sequence) is not int or sequence <= previous:
+                raise ValueError('Batched task event sequences must strictly ascend')
+            previous = sequence
+    with _task_projection_critical_section(task):
+        try:
+            if task.get('_flowLiveTurn'):
+                from lib.orchestration.chat_live_turn import project_live_flow_task
+                projected = project_live_flow_task(task)
+                try:
+                    return _record_task_events_locked(projected, entries, live_flow=True)
+                finally:
+                    task['_flowLiveTurn']['projectionState'] = projected.get(
+                        _TURN_PROJECTION_STATE_KEY)
+            return _record_task_events_locked(task, entries, live_flow=False)
+        except BaseException:
+            from lib.tasks_pkg.event_log import reset_persistent_event_projection
+            for entry in entries:
+                if entry.outcome is None and entry.task_event is not None:
+                    # The commit may be unknown: the next snapshot stores a
+                    # self-contained baseline, never a delta on this row.
+                    reset_persistent_event_projection(
+                        task.get('id'), entry.task_event.get('event'))
+            raise
+
+
+def _record_task_events_locked(task: dict[str, Any], entries: list[TaskEventBatchEntry],
+                               *, live_flow: bool) -> list[Any]:
+    attempt_id = task.get('_attemptId') or task.get('attemptId')
+    if not attempt_id:
+        return [False] * len(entries)
+    from lib.tasks_pkg.event_log import project_persistent_event
+    for entry in entries:
+        if entry.task_event is None:
+            carrier = {'task_id': task['id'], 'sequence': entry.sequence,
+                       'event': project_persistent_event(task['id'], entry.raw_event)}
+            if entry.preceding_events:
+                carrier['preceding_events'] = entry.preceding_events
+            entry.task_event = carrier
+    from lib.storage import storage_event_policy
+    budget = storage_event_policy.resolve_storage_event_budget()
+    batch_supported = True
+    # Entries one ordinary commit carried after the authority split a chunk.
+    limit = None
+    while True:
+        pending = [entry for entry in entries if entry.outcome is None]
+        if not pending:
+            break
+        if batch_supported:
+            committed, batch_supported, limit = _record_task_event_chunk(
+                task, pending, attempt_id, budget, live_flow=live_flow, limit=limit)
+        else:
+            committed = _record_task_events_per_event(task, pending, live_flow=live_flow)
+        if not committed:
+            break
+    return [entry.outcome or False for entry in entries]
+
+
+def _record_task_events_per_event(task: dict[str, Any], entries: list[TaskEventBatchEntry],
+                                  *, live_flow: bool) -> bool:
+    """The single-event path, in FIFO order, each row carried in its record."""
+    for entry in entries:
+        outcome = _record_task_event_locked(
+            task, entry.raw_event, entry.task_event,
+            projection_source=None if live_flow else entry.projection_source,
+            coalesce=False)
+        task.pop('_turnProjectionRebasePending', None)
+        if not outcome:
+            return False
+        entry.outcome = outcome
+    return True
+
+
+def _authority_lacks_turn_event_batch(exc: StorageError) -> bool:
+    """An older native engine or SQL authority predates the batch command."""
+    return (exc.code in ('unknown_operation', 'operation_not_implemented')
+            or (exc.code == 'database_internal' and str(exc) == 'unknown_operation')
+            or (exc.code == 'database_protocol_error'
+                and str(exc) == 'Unknown storage operation'))
+
+
+def _record_task_event_chunk(task: dict[str, Any], pending: list[TaskEventBatchEntry],
+                             attempt_id: str, budget: Any, *, live_flow: bool,
+                             allow_rebase: bool = True,
+                             limit: int | None = None) -> tuple[bool, bool, int | None]:
+    """Commit the longest pending prefix within one RPC budget.
+
+    Returns ``(committed, batch_supported, limit)``; ``committed`` is False
+    when the authority rejected the attempt. ``limit`` caps the entries of
+    later chunks once the native authority refused a larger one with
+    ``database_resource_exhausted``: those records no longer fit one
+    ordinary commit, so the first half is recorded alone.
+    """
+    from lib.storage.generated_task_event_delivery_contract import (
+        STRUCTURAL_BATCH_COMMAND,
+    )
+    from lib.tasks_pkg.manager._registry import task_user_id
+    user_id = task_user_id(task)
+    marker = task.pop(_TURN_EVENT_BATCH_UNKNOWN_KEY, None)
+    if (marker is not None and marker['attemptId'] == attempt_id
+            and marker['sequences'] == [entry.sequence for entry in pending[:len(marker['sequences'])]]):
+        unknown = pending[:len(marker['sequences'])]
+        task[_TURN_EVENT_BATCH_UNKNOWN_KEY] = marker
+        if _task_event_rows_durable(task['id'], unknown):
+            task.pop(_TURN_EVENT_BATCH_UNKNOWN_KEY, None)
+            _remember_task_projection_state(
+                task, attempt_id=attempt_id, user_id=user_id, turn=marker['turn'],
+                projection=marker['projection'], projection_revision=marker['revision'],
+                segments_stable=marker['segmentsStable'])
+            _finish_task_event_chunk(task, attempt_id, unknown, marker['progress'],
+                                     marker['structural'])
+            return True, True, limit
+        task.pop(_TURN_EVENT_BATCH_UNKNOWN_KEY, None)
+    state = _task_projection_state(task, attempt_id, user_id)
+    if state is None:
+        attempt = get_attempt(attempt_id, user_id=user_id)
+        if attempt['status'] not in LIVE_ATTEMPT_STATUSES:
+            _signal_stale_attempt_abort(task, attempt_id, 'attempt-not-live')
+            return False, True, limit
+        turn = get_turn(attempt['conversationId'], attempt['turnId'], user_id=user_id)
+        # Remember the committed base before sending: a retry after an
+        # unknown outcome rebuilds the same CAS chain, which a committed run
+        # refuses as stale instead of applying it twice.
+        _remember_task_projection_state(
+            task, attempt_id=attempt_id, user_id=user_id, turn=turn,
+            projection=projection_with_stable_segments(
+                turn.get('projection'),
+                actor=str(turn.get('actor') or 'assistant'),
+                status=str(turn.get('status') or 'running')),
+            projection_revision=int(turn.get('projectionRevision') or 0))
+        state = _task_projection_state(task, attempt_id, user_id)
+    revision = state['projectionRevision']
+    previous = state['projection']
+    segments_stable = state.get('segmentsStable', True) is not False
+    fold_due = _structural_fold_due(attempt_id)
+    chunk: list[_PreparedBatchEntry] = []
+    rows = wire_bytes = 0
+    for entry in pending:
+        if limit is not None and len(chunk) >= limit:
+            break
+        prepared = _prepare_task_event_batch_entry(
+            task, entry, attempt_id=attempt_id, user_id=user_id, actor=state['actor'],
+            previous=previous, segments_stable=segments_stable,
+            revision=revision + len(chunk), fold_due=fold_due, live_flow=live_flow)
+        if chunk and (rows + prepared.rows > budget.batch_max_events
+                      or wire_bytes + prepared.wire_bytes > budget.batch_max_bytes):
+            break
+        chunk.append(prepared)
+        rows += prepared.rows
+        wire_bytes += prepared.wire_bytes
+        previous, segments_stable = prepared.applied_projection, not prepared.slim
+        if not prepared.slim:
+            # The sequential path stamps the fold after this commit.
+            fold_due = _structural_record_min_interval_s() <= 0
+    entries = [prepared.entry for prepared in chunk]
+    progress = any(prepared.progress for prepared in chunk)
+    structural = any(not prepared.slim for prepared in chunk)
+    command_id = (
+        f'turn-event-batch:{attempt_id}:{_now_ms()}'
+        f':{entries[0].sequence}-{entries[-1].sequence}:revision:{revision}'
+        f'{":rebase" if not allow_rebase else ""}')
+    try:
+        result = _turn_client(write=True).command(
+            STRUCTURAL_BATCH_COMMAND,
+            FrozenPayload(
+                {'user_id': user_id, 'entries': [prepared.payload for prepared in chunk]},
+                {'entries': b'[' + b','.join(prepared.wire for prepared in chunk) + b']'}),
+            command_id, priority='event')
+    except StorageError as exc:
+        if exc.code not in _BATCH_DEFINITIVE_REFUSALS and not exc.request_not_dispatched:
+            task[_TURN_EVENT_BATCH_UNKNOWN_KEY] = _unknown_batch_outcome(
+                attempt_id, state, chunk, revision, progress, structural)
+            raise
+        if exc.code == 'database_resource_exhausted' and len(chunk) > 1:
+            return _record_task_event_chunk(task, pending, attempt_id, budget,
+                                            live_flow=live_flow, allow_rebase=allow_rebase,
+                                            limit=len(chunk) // 2)
+        if _authority_lacks_turn_event_batch(exc):
+            return _record_task_events_per_event(task, entries, live_flow=live_flow), False, limit
+        if exc.code == 'turn_projection_stale':
+            task.pop(_TURN_PROJECTION_STATE_KEY, None)
+            if _task_event_rows_durable(task['id'], entries):
+                # An earlier unknown outcome committed exactly these rows; the
+                # next frame rereads the revision instead of applying them again.
+                _finish_task_event_chunk(task, attempt_id, entries, progress, structural)
+                return True, True, limit
+            task['_turnProjectionRebasePending'] = attempt_id
+            if not allow_rebase:
+                raise ProjectionRebaseRequired(
+                    exc.code, exc.message, retryable=True,
+                    operation_id=exc.operation_id) from exc
+            return _record_task_event_chunk(task, pending, attempt_id, budget,
+                                            live_flow=live_flow, allow_rebase=False,
+                                            limit=limit)
+        if exc.code == 'database_integrity':
+            _signal_authority_integrity_abort(
+                task, attempt_id, 'turn_event_batch', detail=str(exc)[:300])
+            raise
+        if exc.code in ('database_protocol_error', 'storage_payload_too_large'):
+            logger.warning(
+                '[TurnLifecycle] turn event batch refused task=%s attempt=%s '
+                'events=%d reason=%s; recording them one by one',
+                str(task.get('id') or '?')[:8], str(attempt_id)[:8], len(chunk),
+                _storage_rejection_reason(exc))
+            return _record_task_events_per_event(task, entries, live_flow=live_flow), True, limit
+        raise
+    except BaseException:
+        task[_TURN_EVENT_BATCH_UNKNOWN_KEY] = _unknown_batch_outcome(
+            attempt_id, state, chunk, revision, progress, structural)
+        raise
+    if (not isinstance(result, list) or len(result) != len(chunk)
+            or not all(isinstance(item, Mapping) for item in result)):
+        raise StorageError('database_protocol_error',
+                           'Storage did not confirm every batched turn event')
+    if not any(item.get('applied') for item in result):
+        task.pop(_TURN_PROJECTION_STATE_KEY, None)
+        try:
+            latest_attempt = get_attempt(attempt_id, user_id=user_id)
+        except LifecycleNotFound:
+            latest_attempt = None
+        if (latest_attempt is None
+                or latest_attempt.get('status') not in LIVE_ATTEMPT_STATUSES):
+            _signal_stale_attempt_abort(task, attempt_id, 'event-record-rejected')
+        return False, True, limit
+    for offset, (prepared, item) in enumerate(zip(chunk, result)):
+        count = item.get('task_event_count')
+        if (item.get('applied') is not True or item.get('task_event') is None
+                or item.get('projection_revision') != revision + offset + 1
+                or type(count) is not int or count != prepared.rows):
+            raise StorageError('database_protocol_error',
+                               'Storage did not confirm the complete turn event batch')
+    _remember_task_projection_state(
+        task, attempt_id=attempt_id, user_id=user_id,
+        turn={'conversationId': state['conversationId'], 'turnId': state['turnId'],
+              'actor': state['actor']},
+        projection=chunk[-1].applied_projection,
+        projection_revision=revision + len(chunk),
+        segments_stable=not chunk[-1].slim)
+    for prepared in chunk:
+        if prepared.shed is not None:
+            _note_debug_evidence_shed(
+                task, attempt_id, str(prepared.entry.raw_event.get('type') or 'projection'),
+                prepared.shed)
+    _finish_task_event_chunk(task, attempt_id, entries, progress, structural)
+    return True, True, limit
+
+
+def _prepare_task_event_batch_entry(
+    task: dict[str, Any], entry: TaskEventBatchEntry, *, attempt_id: str, user_id: int,
+    actor: str, previous: dict[str, Any], segments_stable: bool, revision: int,
+    fold_due: bool, live_flow: bool,
+) -> _PreparedBatchEntry:
+    """Build the ordinary record of one frame on top of ``revision``."""
+    raw_event = entry.raw_event
+    source = (task if live_flow or entry.projection_source is None
+              else entry.projection_source)
+    if source is not task:
+        source['_activityLastLlmRound'] = task.get('_activityLastLlmRound', 0)
+    event_kind = str(raw_event.get('type') or 'projection')
+    oversize_circuit_open = _oversize_circuit_open(task)
+    slim, baseline, projection = _frame_projection(
+        source, previous, raw_event,
+        slim=oversize_circuit_open or (
+            task_event_projection_is_progress(raw_event) and not fold_due),
+        oversize_circuit_open=oversize_circuit_open,
+        segments_stable=segments_stable, actor=actor)
+    if source is not task and '_activityLastLlmRound' in source:
+        task['_activityLastLlmRound'] = source['_activityLastLlmRound']
+    encoding = _CommandEncoding()
+    payload = {
+        'attempt_id': attempt_id, 'user_id': user_id,
+        'task_id': str(task.get('id') or ''),
+        'terminal': False, 'status': 'running', 'settlement': {}, 'error': {},
+        'event_type': 'projection_updated',
+        'event_payload': _projection_update_event_payload(
+            source.get('phase'), event_kind, raw_event, entry.task_event, encoding),
+        'now': _now_ms(),
+        **_frame_projection_patch(baseline, projection, slim=slim,
+                                  base_revision=revision),
+    }
+    if task.get('_flowRootAttemptId'):
+        payload['flow_root_attempt_id'] = task['_flowRootAttemptId']
+    payload['task_event'] = entry.task_event
+    shed = _shed_oversized_inline_evidence(payload, encoding)
+    frozen = encoding.frozen(payload)
+    applied = projection
+    if slim:
+        applied = dict(baseline)
+        applied['content'] = projection['content']
+        applied['thinking'] = projection['thinking']
+    return _PreparedBatchEntry(
+        entry=entry, payload=frozen, applied_projection=applied, slim=slim,
+        progress=task_event_projection_is_progress(raw_event), shed=shed,
+        rows=1 + len(entry.task_event.get('preceding_events') or ()),
+        wire=encode_json_value(frozen.wire_body()))
+
+
+def _unknown_batch_outcome(attempt_id: str, state: dict[str, Any],
+                           chunk: list[_PreparedBatchEntry], revision: int,
+                           progress: bool, structural: bool) -> dict[str, Any]:
+    """What a proven commit of this unacknowledged chunk must remember."""
+    return {
+        'attemptId': attempt_id,
+        'sequences': [prepared.entry.sequence for prepared in chunk],
+        'turn': {'conversationId': state['conversationId'], 'turnId': state['turnId'],
+                 'actor': state['actor']},
+        'revision': revision + len(chunk),
+        'projection': chunk[-1].applied_projection,
+        'segmentsStable': not chunk[-1].slim,
+        'progress': progress,
+        'structural': structural,
+    }
+
+
+def _finish_task_event_chunk(task: dict[str, Any], attempt_id: str,
+                             entries: list[TaskEventBatchEntry], progress: bool,
+                             structural: bool) -> None:
+    """Apply the sequential path's post-commit bookkeeping once per chunk."""
+    for entry in entries:
+        entry.outcome = 'carried'
+    task.pop('_turnProjectionRebasePending', None)
+    if progress:
+        _delta_throttle_stamp(attempt_id)
+    if structural:
+        _structural_fold_stamp(attempt_id)
+        task.pop('_turnProjectionOversizeRetryAt', None)
+        task.pop('_turnProjectionOversizeCount', None)
+
+
+def _task_event_rows_durable(task_id: str, entries: list[TaskEventBatchEntry]) -> bool:
+    """Reconcile one unacknowledged batch against its exact durable rows.
+
+    True when every carried row is present and identical, False when none
+    is. Anything else is not this batch's all-or-nothing commit and fails
+    closed rather than rebasing over foreign or partial state.
+    """
+    from lib.event_envelope import stamp_event_format_envelope
+    from lib.storage.protocol import canonical_json
+    from lib.storage.storage_projection import project_event_usage_for_storage
+    from lib.tasks_pkg.event_log import read_events
+    expected = {}
+    for entry in entries:
+        for row in [*(entry.task_event.get('preceding_events') or ()), entry.task_event]:
+            expected[int(row['sequence'])] = canonical_json(stamp_event_format_envelope(
+                project_event_usage_for_storage(row['event'])))
+    first, last = min(expected), max(expected)
+    stored = {
+        int(row['event_id']): canonical_json(row['payload'])
+        for row in read_events(task_id, since_event_id=first - 1,
+                               limit=last - first + 1, raise_on_error=True)
+        if int(row['event_id']) in expected
+    }
+    if not stored:
+        return False
+    if stored == expected:
+        return True
+    raise StorageError('database_conflict',
+                       'Turn event batch is partially durable; refusing to rebase it')
 
 
 def sync_visible_run_turns(task: dict[str, Any], messages: list[dict[str, Any]],
@@ -2320,13 +3253,34 @@ def list_turns(conversation_id: str, *, user_id: Any,
     }
 
 
-def get_turn(conversation_id: str, turn_id: str, *, user_id: Any) -> dict[str, Any]:
+def get_turn(conversation_id: str, turn_id: str, *, user_id: Any,
+             include_projection: bool = True) -> dict[str, Any]:
+    """Read an owned Turn; context identity consumers can omit its body."""
     user_id = require_user_id(user_id, context='get conversation turn')
-    row = _turn_client().query(
-        'turn.get', {'conversation_id': conversation_id,
-                     'turn_id': turn_id, 'user_id': user_id})
+    if type(include_projection) is not bool:
+        raise TypeError('Invalid Turn projection flag')
+    payload = {'conversation_id': conversation_id,
+               'turn_id': turn_id, 'user_id': user_id}
+    if not include_projection:
+        payload['include_projection'] = False
+    row = _turn_client().query('turn.get', payload)
     if row is None:
         raise LifecycleNotFound('Turn not found')
+    if not include_projection:
+        from lib.conversation_sync.validation import ContractViolation, decode
+        if not isinstance(row, Mapping) or 'projection' in row:
+            raise StorageError('database_protocol_error', 'Turn metadata read returned an invalid result')
+        try:
+            # The empty body exists only in this small validation carrier. Reuse
+            # TurnRecord's canonical metadata constraints without duplicating a
+            # schema, materializing a real projection or changing the response.
+            decode('TurnRecord', {**row, 'projection': {}})
+        except ContractViolation as exc:
+            raise StorageError('database_protocol_error',
+                               'Turn metadata read returned malformed public metadata') from exc
+        if row['turnId'] != turn_id or row['conversationId'] != conversation_id:
+            raise StorageError('database_protocol_error', 'Turn metadata identity differs')
+        return row
     return public_turn_with_stable_segments(row)
 
 
@@ -2436,7 +3390,7 @@ def record_turn_perception(
     user_id = require_user_id(user_id, context='record turn perception')
     observation_id = str(observation.get('observationId') or '')
     if not observation_id:
-        raise ValueError('observationId is required')
+        raise BadRequest('observationId is required', field='observationId')
     receipt_identity = hashlib.sha256(
         f'{user_id}\0{attempt_id}\0{observation_id}'.encode('utf-8')
     ).hexdigest()
@@ -2556,6 +3510,16 @@ def create_branch_lane(conversation_id: str, parent_turn_id: str, *,
         raise
 
 
+def _delete_receipt_command_id(kind: str, *identities: str) -> str:
+    """Receipt identity of one delete intent within every command-ID bound.
+
+    A lost-ACK replay or a repeated request names the same receipt, however
+    many turns the intent covers.
+    """
+    digest = hashlib.sha256('\0'.join(identities).encode('utf-8')).hexdigest()
+    return f'{kind}:{digest}'
+
+
 def delete_branch_lane(conversation_id: str, parent_turn_id: str,
                        lane_id: str, *, user_id: Any) -> dict[str, Any]:
     """Delete one explicit branch lane and all of its diagnostic attempts."""
@@ -2565,7 +3529,9 @@ def delete_branch_lane(conversation_id: str, parent_turn_id: str,
         return _turn_client(write=True).command(
             'turn.branch.delete', {'conversation_id': conversation_id,
                 'user_id': user_id, 'parent_turn_id': parent_turn_id,
-                'lane_id': lane_id}, f'turn-branch-delete:{parent_turn_id}:{lane_id}')
+                'lane_id': lane_id},
+            _delete_receipt_command_id(
+                'turn-branch-delete', conversation_id, parent_turn_id, lane_id))
     except StorageError as exc:
         if exc.code == 'database_not_found':
             raise LifecycleNotFound(str(exc)) from exc
@@ -2578,15 +3544,17 @@ def delete_turns(conversation_id: str, turn_ids: list[str], *,
                  user_id: Any) -> dict[str, Any]:
     """Delete explicitly named settled visible turns by stable identity."""
     user_id = require_user_id(user_id, context='delete conversation turns')
-    wanted = list(dict.fromkeys(str(item) for item in turn_ids if item))
+    # Canonical order: the receipt replays only a byte-identical request, and
+    # one set of turns is one delete intent whatever order the caller used.
+    wanted = sorted({str(item) for item in turn_ids if item})
     if not wanted:
-        raise ValueError('turnIds required')
+        raise BadRequest('turnIds required', field='turnIds')
     from lib.storage import StorageError
     try:
         return _turn_client(write=True).command(
             'turn.delete', {'conversation_id': conversation_id,
                 'user_id': user_id, 'turn_ids': wanted},
-            f'turn-delete:{conversation_id}:{",".join(sorted(wanted))}')
+            _delete_receipt_command_id('turn-delete', conversation_id, *wanted))
     except StorageError as exc:
         if exc.code == 'database_not_found':
             raise LifecycleNotFound(str(exc)) from exc
@@ -2608,7 +3576,8 @@ def read_events(attempt_id: str, *, after: int = 0,
                                  else 'full')})
     if events is None:
         raise LifecycleNotFound('Attempt not found')
-    return events
+    from lib.tasks_pkg.snapshot_delta import rebuild_attempt_event_frames
+    return rebuild_attempt_event_frames(events)
 
 
 def attempt_is_terminal(attempt_id: str, *, user_id: Any) -> bool:
@@ -2640,7 +3609,26 @@ def _notify_abort_busy_projection(conversation_id: Any, user_id: Any) -> None:
         logger.debug('[turns] abort busy-notify failed: %s', exc)
 
 
-def abort_attempt(attempt_id: str, *, user_id: Any, withdraw_dispatch: bool = True) -> dict[str, Any]:
+def _withdraw_conversation_dispatch(conversation_id: Any, user_id: Any) -> dict[str, str]:
+    """Durable project-dispatch Stop; an unacknowledged Stop watermark propagates."""
+    from lib.project_dispatch.recovery import revoke_conversation_dispatch
+    outcome = revoke_conversation_dispatch(conversation_id, user_id=user_id)
+    return {'dispatchWithdrawal': outcome['withdrawal']}
+
+
+def abort_attempt(attempt_id: str, *, user_id: Any, withdraw_dispatch: bool = True,
+                  abort_reason: str = '', abort_detail: str = '') -> dict[str, Any]:
+    """Stop one attempt; ``abort_reason`` names a non-user cause, a human Stop has none.
+
+    ``abort_detail`` is that cause's provenance (who stopped it, through which
+    path); it travels with the reason into the settled error detail.
+
+    The reason is recorded only when this is the first stop of the attempt's
+    executor, or on the settled Turn when no executor is live. A conversation
+    Stop answers only after its durable dispatch watermark is acknowledged;
+    ``dispatchWithdrawal`` then reports whether every referenced grant record
+    is revoked (``complete``) or left to recovery (``pending_revocation``).
+    """
     user_id = require_user_id(user_id, context='abort turn attempt')
     row = _turn_client().query(
         'turn.attempt.get', {'attempt_id': attempt_id, 'user_id': user_id,
@@ -2654,10 +3642,10 @@ def abort_attempt(attempt_id: str, *, user_id: Any, withdraw_dispatch: bool = Tr
     task_id = str(row.get('taskId') or '')
     status = row['status']
     if status not in LIVE_ATTEMPT_STATUSES:
-        if withdraw_dispatch:
-            from lib.project_dispatch.recovery import revoke_conversation_dispatch
-            revoke_conversation_dispatch(row['conversationId'], user_id=user_id)
-        return {'attemptId': attempt_id, 'status': status, 'alreadyTerminal': True}
+        withdrawal = (_withdraw_conversation_dispatch(row['conversationId'], user_id)
+                      if withdraw_dispatch else {})
+        return {'attemptId': attempt_id, 'status': status, 'alreadyTerminal': True,
+                **withdrawal}
     queue_binding = row.get('queueBinding')
     if isinstance(queue_binding, dict) and queue_binding.get('queueId'):
         # A queue-bound attempt has no executor task: stopping it withdraws
@@ -2667,19 +3655,21 @@ def abort_attempt(attempt_id: str, *, user_id: Any, withdraw_dispatch: bool = Tr
         cancelled = cancel_queued_turn_pair(
             str(row['conversationId']), str(queue_binding['queueId']),
             user_id=user_id)
-        if withdraw_dispatch:
-            from lib.project_dispatch.recovery import revoke_conversation_dispatch
-            revoke_conversation_dispatch(row['conversationId'], user_id=user_id)
+        withdrawal = (_withdraw_conversation_dispatch(row['conversationId'], user_id)
+                      if withdraw_dispatch else {})
         return {
             'attemptId': attempt_id,
             'status': 'cancelled',
             'queueId': str(queue_binding['queueId']),
             'cancelled': bool(cancelled.get('cancelled')),
             'deletedTurnIds': list(cancelled.get('deletedTurnIds') or []),
+            **withdrawal,
         }
     from lib.tasks_pkg.manager.cancellation import cancel_task
 
-    receipt = (cancel_task(task_id, user_id=user_id, source='turn_attempt_abort')
+    receipt = (cancel_task(task_id, user_id=user_id, source='turn_attempt_abort',
+                           reason=abort_reason or None,
+                           reason_detail=abort_detail or None)
                if task_id else {'found': False})
     if not receipt['found']:
         # Registry miss (or no task bound yet): plant the durable abort
@@ -2702,12 +3692,16 @@ def abort_attempt(attempt_id: str, *, user_id: Any, withdraw_dispatch: bool = Tr
              'thinking': projection.get('thinking') or '',
              'toolRounds': projection.get('toolRounds') or [],
              'segments': projection.get('segments') or [],
-             'model': projection.get('model') or ''}, {'type': 'aborted'})
-    if withdraw_dispatch:
-        from lib.project_dispatch.recovery import revoke_conversation_dispatch
-        revoke_conversation_dispatch(row['conversationId'], user_id=user_id)
+             'model': projection.get('model') or '',
+             **({'_abort_reason': abort_reason} if abort_reason else {}),
+             **({'_abortReasonDetail': abort_detail}
+                if abort_reason and abort_detail else {})},
+            {'type': 'aborted'})
+    # The executor is signalled whatever the dispatch withdrawal outcome.
     _notify_abort_busy_projection(row.get('conversationId'), user_id)
-    return {'attemptId': attempt_id, 'status': 'abort_signaled'}
+    withdrawal = (_withdraw_conversation_dispatch(row['conversationId'], user_id)
+                  if withdraw_dispatch else {})
+    return {'attemptId': attempt_id, 'status': 'abort_signaled', **withdrawal}
 
 
 def build_api_messages(
@@ -2762,6 +3756,16 @@ def build_api_messages(
         parent_projection.get('planExecution')
         if isinstance(parent_projection, dict) else None
     )
+    usage_recovery = (
+        parent_projection.get('usageRecovery')
+        if isinstance(parent_projection, dict) else None
+    )
+    if isinstance(usage_recovery, dict) and allow_model_replay:
+        # Confirmation creates a fresh execution, not replay authority for the
+        # rejected request. A cold read retains the original objective/tool
+        # evidence rather than restoring an earlier opaque working context.
+        return build_api_messages(conversation_id, turn_id, config,
+            user_id=owner_user_id, allow_model_replay=False)
     if (isinstance(plan_execution, dict)
             and plan_execution.get('contextMode') == 'fresh'):
         # Fresh execution is a model-context boundary, not a destructive
@@ -2809,12 +3813,17 @@ def build_api_messages(
         role = 'user' if row.get('actor') in {'human', 'virtual_user', 'critic'} else 'assistant'
         projection['role'] = role
         projection['_turnId'] = row['turnId']
+        projection['_turnKind'] = row.get('kind')
         projection['_turnStatus'] = row.get('status')
         raw.append(projection)
     from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
-    return _transform_messages(
+    messages = _transform_messages(
         raw, config, exclude_last=bool(config.get('excludeLast')),
         user_id=owner_user_id, prefix_messages=prefix_messages)
+    if isinstance(usage_recovery, dict):
+        from lib.conversation_sync.usage_recovery import fresh_recovery_model_messages
+        return fresh_recovery_model_messages(messages)
+    return messages
 
 
 def backfill_turn_search_index(*, max_rounds: int = 100_000) -> dict[str, Any]:
@@ -3036,9 +4045,11 @@ __all__ = [
     'create_attempt', 'attempt_dispatch_lock', 'claim_attempt_start',
     'dispatch_attempt_to_worker',
     'bind_task', 'mark_task_started', 'fail_start',
-    'record_task_event', 'sync_visible_run_turns', 'next_progress_projection_deadline',
+    'record_task_event', 'record_task_events', 'TaskEventBatchEntry',
+    'sync_visible_run_turns', 'next_progress_projection_deadline',
     'list_turns', 'get_turn', 'get_attempt', 'list_dispatchable_attempts',
     'update_turn_projection', 'accept_live_guidance_answer',
+    'projection_with_committed_steer_authors',
     'create_branch_lane', 'delete_branch_lane',
     'delete_turns',
     'get_conversation_revision', 'read_events',

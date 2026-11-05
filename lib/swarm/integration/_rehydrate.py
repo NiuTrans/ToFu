@@ -351,25 +351,31 @@ def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
     if resume_task is not None:
         from lib.swarm.routing import tool_schema_name
         from lib.tasks_pkg.child_invocation import snapshot_conversation_child_policy
+        from lib.tool_input_repair import RENAMED_TOOL_NAMES
         names = (config.get('parent_cfg') or {}).get('_swarmToolNames')
         if not isinstance(names, list) or any(not isinstance(name, str) or not name for name in names):
             raise RuntimeError('Swarm restart has no original tool-authority receipt')
-        original_names = set(names)
-        current_catalog = resume_task.get('_executable_tool_catalog')
+        # A receipt recorded before a pure rename authorizes the successor.
+        original_names = {RENAMED_TOOL_NAMES.get(name, name) for name in names}
+        # A Delegate Mode root is narrowed; resumed workers keep the policy
+        # it delegates. Outside that mode the view is the task itself.
+        from lib.tasks_pkg.delegate_mode import delegation_policy_view
+        policy_view = delegation_policy_view(resume_task)
+        current_catalog = policy_view.get('_executable_tool_catalog')
         if current_catalog is None:
             current_catalog = tool_list or []
         execution_parent = _continue_execution_parent(config, resume_task)
         all_tools = [tool for tool in current_catalog
                      if tool_schema_name(tool) in original_names]
         original = config.get('parent_cfg') or {}
-        current_cfg = resume_task.get('config') or {}
+        current_cfg = policy_view.get('config') or {}
         config['model'] = resume_task.get('model') or config.get('model')
         config['thinking_enabled'] = current_cfg.get('thinkingEnabled')
         policy = execution_parent.get('_workspaceRootPolicy') or {}
         config['project_path'] = str(policy.get('primaryPath') or resume_task.get('projectPath')
                                    or current_cfg.get('projectPath') or '')
         child_policy = snapshot_conversation_child_policy(
-            {**resume_task, 'config': {**current_cfg, '_executableToolCatalog': all_tools}},
+            {**policy_view, 'config': {**current_cfg, '_executableToolCatalog': all_tools}},
             model=config['model'], tools=all_tools, project_path=config['project_path'],
             thinking_enabled=config['thinking_enabled'])
         parent_cfg = child_policy['config']
@@ -481,7 +487,8 @@ def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
             if spec.retained_execution_context is None:
                 continue  # Legacy sessions use their original session receipt.
             _, assignment = _retained_assignment_proxy(spec, execution_parent)
-            names = {tool_schema_name(tool) for tool in assignment['tools']}
+            names = {RENAMED_TOOL_NAMES.get(tool_schema_name(tool), tool_schema_name(tool))
+                     for tool in assignment['tools']}
             selected = [tool for tool in current_catalog if tool_schema_name(tool) in names]
             assignment_parent = execution_parent
             if assignment['execution_context'].get('_workspaceExecution'):
@@ -632,32 +639,43 @@ def resume_swarm_for_continue(task: dict, tool_list: list) -> bool:
 def rehydrate_swarms_on_startup() -> int:
     """Resume all persisted non-terminal swarm sessions after a restart.
 
-    Called once from ``server.py`` startup (after the DB is ready). Loads
-    every resumable session from the DB, rebuilds its MasterOrchestrator +
+    Run by the post-readiness boot recovery step, whose bounded backoff
+    retries a retryable storage failure. Lists the resumable keys, reads each
+    session through bounded storage pages, rebuilds its MasterOrchestrator +
     tool list, and re-spawns the still-running sub-agents from their
     checkpointed message history. Returns the count successfully resumed.
 
-    Best-effort and isolated per session: one bad session never blocks the
-    others or the server boot.
+    Isolated per session: one unreadable or broken session never blocks the
+    others. A storage failure is never reported as "nothing to resume": an
+    unreadable index raises, and a transient session read raises after the
+    other sessions resumed, so the retry finishes the pass (live sessions
+    are skipped).
     """
-    try:
-        from lib.swarm import persistence
-        sessions = persistence.load_resumable_sessions()
-    except Exception as e:
-        logger.warning('[Swarm] startup rehydrate: could not load sessions: %s', e)
-        return 0
-
-    if not sessions:
-        return 0
-
+    from lib.swarm import persistence
+    keys = persistence.list_resumable_session_keys()
     resumed = 0
-    for sess in sessions:
+    transient_failure = None
+    for key in keys:
+        if _get_session(key) is not None:
+            continue
+        try:
+            sess = persistence.load_session(key, required=True)
+        except Exception as e:
+            if getattr(e, 'retryable', None) is True:
+                transient_failure = transient_failure or e
+            else:
+                logger.error('[Swarm:%s] retained session is unreadable; its '
+                             'checkpoints were not resumed: %s', key, e)
+            continue
+        if sess is None:
+            continue
         try:
             if _rehydrate_one(sess):
                 resumed += 1
         except Exception as e:
-            logger.error('[Swarm] rehydrate of %s failed: %s',
-                         sess.get('swarm_key', '?'), e, exc_info=True)
+            logger.error('[Swarm] rehydrate of %s failed: %s', key, e, exc_info=True)
     logger.info('[Swarm] startup rehydration complete — %d/%d session(s) resumed',
-                resumed, len(sessions))
+                resumed, len(keys))
+    if transient_failure is not None:
+        raise transient_failure
     return resumed

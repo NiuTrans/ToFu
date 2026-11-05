@@ -48,6 +48,77 @@ const edit=(env,name,value)=>{const field=env.root.querySelector(`[name="${name}
 const executorModel={creator_id:'fixture',model_id:'executor'},reviewerModel={creator_id:'fixture',model_id:'reviewer'};
 const policyModels=[{model:executorModel,label:'Controlled executor'},{model:reviewerModel,label:'Controlled independent reviewer'}];
 
+test('Chat is the primary entry and the notebook returns only to its confirmed source conversation',async t=>{
+ const opened=[];let wrong=false;
+ const env=setup({getProgram:async id=>({program:program(wrong?'other':id,{chat_source:{conversation_id:'source-'+id,turn_id:'human'}})})},
+  {path:'evolution/programs/a',openConversation:id=>opened.push(id)});t.after(()=>env.close());await tick();
+ const chat=[...env.root.querySelectorAll('aside button')].find(button=>button.textContent===locale['evolution.program.startInChat']);
+ chat.click();assert.deepEqual(env.navigations,['chat']);
+ const back=env.root.querySelector('[data-program-chat]');assert.equal(back.hidden,false);back.click();assert.deepEqual(opened,['source-a']);
+ wrong=true;env.mounted.updateRoute('evolution/programs/b');
+ assert.equal(back.hidden,true);back.click();await tick();assert.deepEqual(opened,['source-a']);
+ wrong=false;await env.mounted.refresh();assert.equal(back.hidden,false);back.click();assert.deepEqual(opened,['source-a','source-b']);
+ env.close();back.click();assert.deepEqual(opened,['source-a','source-b']);
+});
+
+test('installed skill selection shares the project catalog and survives draft reload',async()=>{
+ const storage=draftStorage(),requests=[],calls=[];
+ const overrides={listInstalledSkills:async(project,signal)=>{requests.push({project,signal});return {skills:[
+  {id:'novelty',name:'Novelty checks',enabled:true,eligible:true,scope:'project'},
+  {id:'disabled',name:'Disabled guide',enabled:false,eligible:true,scope:'global'}]};},
+  createProgram:async body=>{calls.push(body);return {program:program('created')};},
+  commandProgram:async()=>({program:program('created')})};
+ const ports={draftOwner:()=>7,draftScope:'/tofu',draftStorage:storage,path:'evolution/programs/new'};
+ const first=setup(overrides,ports);
+ try {
+  edit(first,'objective','Evaluate a mechanism');edit(first,'project','/explicit/project');
+  [...first.root.querySelectorAll('button')].find(button=>button.textContent===locale['evolution.program.loadSkills']).click();await tick();
+  assert.equal(requests[0].project,'/explicit/project');
+  const options=first.root.querySelector(`select[aria-label="${locale['evolution.program.availableSkills']}"]`);
+  assert.equal(options.querySelector('option[value="disabled"]').disabled,true);
+  options.value='novelty';options.dispatchEvent(new first.dom.window.Event('change',{bubbles:true}));
+  assert.equal(first.root.querySelector('[name="selected-skills"]').value,'novelty');
+ } finally {first.close();}
+ const second=setup(overrides,ports);
+ try {
+  assert.equal(second.root.querySelector('[name="selected-skills"]').value,'novelty');
+  submit(second,'.exp-create-form');await tick();await tick();
+  assert.deepEqual(calls[0].skill_selection,['novelty']);
+  assert.equal(calls[0].project_path,'/explicit/project');
+ } finally {second.close();}
+});
+
+test('changed project fences a late skill catalog without losing selected IDs',async()=>{
+ let resolve;const env=setup({listInstalledSkills:()=>new Promise(done=>resolve=done)});
+ try {
+  edit(env,'selected-skills','already-selected');edit(env,'project','/old');
+  [...env.root.querySelectorAll('button')].find(button=>button.textContent===locale['evolution.program.loadSkills']).click();
+  edit(env,'project','/new');resolve({skills:[{id:'stale',name:'Stale',scope:'project',enabled:true,eligible:true}]});await tick();
+  assert.equal(env.root.querySelector('option[value="stale"]'),null);
+  assert.equal(env.root.querySelector('[name="selected-skills"]').value,'already-selected');
+ } finally {env.close();}
+});
+
+test('source handoff retains the complete selected protocol and bindings through refresh',async()=>{
+ const storage=draftStorage(),source={task_id:'original',idea_id:'idea'};
+ const researchContext={hypothesis:'Falsifiable mechanism',protocol:{falsifier:'A null result kills it',random_seeds:[3,7]},
+  capability_bindings:[{capability:'experiment.execute',tool:'mcp__lab__run',provider:'lab',schema_hash:'original',enabled:true,argument_defaults:{seeds:[3,7]},notes:''}]};
+ const draft=load('features/evolution/programs/drafts.ts');
+ const route=draft.researchProgrammePath(source);
+ draft.createProgramDraftStore({owner:()=>7,scope:'/tofu',storage:()=>storage}).save(draft.programmeCreationDraftIdentity(route),
+  {fields:[],researchSource:source,researchContext,seedObjective:'Measure the mechanism'});
+ const calls=[],ports={path:route,draftOwner:()=>7,draftScope:'/tofu',draftStorage:storage};
+ const first=setup({},ports);first.close();
+ const second=setup({createProgram:async body=>{calls.push(body);return {program:program('created')};},commandProgram:async()=>({program:program('created')})},ports);
+ try {
+  assert.equal(second.root.querySelector('[data-research-context]').hidden,false);
+  assert.match(second.root.querySelector('[data-research-context]').textContent,/A null result kills it/);
+  submit(second,'.exp-create-form');await tick();await tick();
+  assert.deepEqual(calls[0].research_context,researchContext);
+  assert.deepEqual(calls[0].research_source,source);
+ } finally {second.close();}
+});
+
 test('review allocation is frozen with the original creation and restored unsent draft',async t=>{
  const calls=[],storage=draftStorage(),ports={draftStorage:storage,draftOwner:()=>7,draftScope:'/app/'};
  const overrides={createProgram:async(body,key)=>{calls.push({body,key});throw Error('Lost ACK');}};

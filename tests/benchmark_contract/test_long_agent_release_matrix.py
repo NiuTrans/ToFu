@@ -223,7 +223,7 @@ def test_compiled_matrix_binds_to_valid_benchmark_v2_manifest():
                  "commitSha256": _sha("harness")},
         agent={"name": "tofu", "version": "test",
                "commitSha256": _sha("agent")},
-        provider_face="meituan-chat", provider_slot_id="kimi-slot-fixture",
+        provider_face="yourprovider-chat", provider_slot_id="kimi-slot-fixture",
         thinking="high",
         experiment_arm="combined_v2", pair_id="release-pair",
         comparison_role="candidate",
@@ -316,7 +316,7 @@ def test_manifest_write_is_immutable_and_config_rejects_bool_timeout(tmp_path):
     config.write_text(json.dumps({
         "contractVersion": "tofu-long-agent-release-config/v2",
         "releaseId": "release", "runId": "run",
-        "harness": {}, "agent": {}, "providerFace": "meituan-chat",
+        "harness": {}, "agent": {}, "providerFace": "yourprovider-chat",
         "providerSlotId": "kimi-slot-fixture",
         "thinking": "high", "experimentArm": "combined_v2",
         "pairId": "pair", "comparisonRole": "candidate",

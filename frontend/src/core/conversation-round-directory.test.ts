@@ -20,7 +20,8 @@ function fixture() {
   const published = vi.fn();
   const coordinator = new ConversationSyncCoordinator({conversationId: 'a',
     api: api as unknown as ConversationSyncApi, onSnapshot: () => {},
-    onAttemptEvent: () => true, onTurnDelta: () => true, onTurnPage: published});
+    onAttemptEvent: () => true, onTurnDelta: () => true, onTurnPage: published,
+    eventSourceFactory: () => { throw new Error('Round directory reads open no stream'); }});
   return {api, coordinator, published, advance: () => head++, switchOwner: () => owner++};
 }
 
@@ -65,12 +66,18 @@ describe('head/owner scoped compact round directory', () => {
     const second = fixture(); await second.coordinator.hydrate(false);
     second.api.turnPage.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
     const flight = second.coordinator.loadTurnPage('main', 31, 8, 'detached');
-    const rejected = expect(flight).rejects.toThrow('stale');
-    // Even a reset retaining the same syncSeq/owner invalidates earlier pages.
+    // Even a reset retaining the same syncSeq/owner invalidates earlier pages:
+    // the jump's read is repeated under the replaced projection instead.
     await second.coordinator.hydrate(false);
-    resolve({conversationId: 'a', laneId: 'main', syncSeq: 10, turns: [], attempts: [],
-      beforeOrdinal: 31, nextBeforeOrdinal: 23, totalTurns: 500, hasMore: true} as unknown as ConversationTurnPage);
-    await rejected; expect(second.published).not.toHaveBeenCalled(); second.coordinator.close();
+    resolve({conversationId: 'a', laneId: 'main', syncSeq: 10,
+      turns: [{turnId: 'before-reset', laneId: 'main', ordinal: 30, projection: {content: 'old'}}],
+      attempts: [], beforeOrdinal: 31, nextBeforeOrdinal: 23, totalTurns: 500,
+      hasMore: true} as unknown as ConversationTurnPage);
+    await expect(flight).resolves.toMatchObject({turns: []});
+    expect(second.api.turnPage).toHaveBeenCalledTimes(2);
+    expect(second.published).toHaveBeenCalledTimes(1);
+    expect(second.published.mock.calls[0][0].turns).toEqual([]);
+    second.coordinator.close();
     coordinator.close();
   });
 });

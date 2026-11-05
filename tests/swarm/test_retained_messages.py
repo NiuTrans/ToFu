@@ -195,7 +195,8 @@ def settle(context, receipt, *, status='completed'):
     session = context.sessions.get(key)
     if session:
         spec = next(spec for spec in session.specs if spec.id == assignment['agent_id'])
-        RunMessageRepository(binding_for(session._parent_task_proxy, spec, key)).close()
+        RunMessageRepository(binding_for(session._parent_task_proxy, spec, key,
+                                         run_id=session.task_id)).close()
         with session._lock:
             session._results_by_id[spec.id] = SimpleNamespace(status=status)
     if key in context.checkpoints:
@@ -212,7 +213,8 @@ def mailbox(context, receipt):
     assignment = receipt['assignment']
     session = context.sessions[assignment['conversation_id']]
     spec = next(spec for spec in session.specs if spec.id == assignment['agent_id'])
-    return RunMessageRepository(binding_for(session._parent_task_proxy, spec, session.inbox_key))
+    return RunMessageRepository(binding_for(session._parent_task_proxy, spec, session.inbox_key,
+                                            run_id=session.task_id))
 
 
 def test_idle_message_launches_with_saved_history_and_current_authority(context):

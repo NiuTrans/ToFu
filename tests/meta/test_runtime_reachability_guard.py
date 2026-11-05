@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
+
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -14,8 +15,8 @@ ROOT = Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "scripts/check_runtime_reachability.mjs"
 
 
-@pytest.mark.skipif(not shutil.which("node"), reason="node is required")
 def test_reachability_guard_distinguishes_roots_from_closed_dead_chains():
+    require_node_modules("typescript")
     program = r"""
 const { analyzeRuntimeReachability } = await import(process.argv[1]);
 const live = analyzeRuntimeReachability(`

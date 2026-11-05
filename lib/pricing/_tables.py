@@ -18,6 +18,7 @@ import re
 
 from lib.log import get_logger
 from lib.model_info._openai_gpt56 import gpt56_pricing_rows
+from lib.pricing._revision import RevisionedTable
 
 logger = get_logger(__name__)
 
@@ -45,7 +46,8 @@ DEFAULT_USD_DISPLAY_RATES = MappingProxyType({
 
 # ── Canonical model pricing (USD per 1M tokens) — hardcoded fallback ──
 # cacheWriteMul / cacheReadMul are multipliers of the base input price:
-#   Anthropic Claude: write=1.25x, read=0.10x (5-min TTL)
+#   Anthropic Claude: write=1.25x, read=0.10x (5-min TTL); 1-hour writes use
+#                     an optional cacheWrite1hMul, else 2.0x (lib.cost)
 #   OpenAI GPT-5.6:   write=1.25x, read=0.10x
 #   DeepSeek:         write=1.00x, read=0.10x (disk cache)
 MODEL_PRICING = {
@@ -53,7 +55,7 @@ MODEL_PRICING = {
     'fable-5':                   {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Fable 5'},
     'aws.fable-5':               {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Fable 5'},
     'us.anthropic.fable-5-v1:0': {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Fable 5 (Bedrock)'},
-    # Meituan-gateway Fable 5 (Jul 2026 marketplace) — ¥72/¥360 per 1M.
+    # YourProvider-gateway Fable 5 (Jul 2026 marketplace) — ¥72/¥360 per 1M.
     'claude-fable-5':            {'input': 9.94,  'output': 49.72, 'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Fable 5'},
     # ── Anthropic Fable 5.1 (GA 2026-09-01) — $10/$50 per 1M, same as Fable 5 list;
     # cache reads cut 75%: $0.25/1M → cacheReadMul 0.025. Official API id: claude-fable-5-1.
@@ -64,9 +66,9 @@ MODEL_PRICING = {
     # ── Logical Claude ids (the model-identity contract) ──
     # These are LOGICAL names: what presets target, the picker shows, and
     # conversations persist. The gateway spellings they dispatch to live in the
-    # template's ``request_ids`` (yuju-…-evaDaily / aws.…). Both channels need a
-    # row: cost keys on the WIRE id, the picker's display name on the LOGICAL
-    # one — see lib/llm_dispatch/model_entry.py.
+    # template's ``request_ids`` (yuju-…-evaDaily / aws.…). Dispatch stamps
+    # ``usage['_dispatch']['logical_model']`` and cost keys on that LOGICAL id;
+    # wire-spelling rows only price legacy records that carry the wire id alone.
     # Opus 5.5 (GA 2026-09-22): $4/$20 per 1M; 5m cache write $5, 1h write $8,
     # cache read $0.20. Adaptive thinking is always on (cannot be disabled).
     'claude-opus-5.5':           {'input': 4.0,   'output': 20.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.05, 'name': 'Claude Opus 5.5'},
@@ -77,8 +79,9 @@ MODEL_PRICING = {
     'claude-sonnet-5':           {'input': 3.0,   'output': 15.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Sonnet 5'},
     # Sonnet 5.5 (GA 2026-09-28): $2/$10 per 1M, 1M ctx; adaptive thinking
     # default ON (lowest rung between_tools), API default effort high.
-    'claude-sonnet-5.5':         {'input': 2.0,   'output': 10.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Sonnet 5.5'},
-    'claude-sonnet-5-5':         {'input': 2.0,   'output': 10.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Sonnet 5.5'},
+    # Cache read $0.10 = 0.05x input, like Opus 5.5 (prompt-caching docs).
+    'claude-sonnet-5.5':         {'input': 2.0,   'output': 10.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.05, 'name': 'Claude Sonnet 5.5'},
+    'claude-sonnet-5-5':         {'input': 2.0,   'output': 10.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.05, 'name': 'Claude Sonnet 5.5'},
     'claude-opus-4.8':           {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.8'},
     'claude-opus-4.7':           {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.7'},
     'claude-opus-4.6':           {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.6'},
@@ -92,7 +95,7 @@ MODEL_PRICING = {
     # 1M pricing). Adaptive thinking default ON; disable works only <= high.
     'claude-haiku-5.5':          {'input': 0.10,  'output': 0.50,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Haiku 5.5'},
     'claude-haiku-5-5':          {'input': 0.10,  'output': 0.50,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Haiku 5.5'},
-    # Meituan-gateway aws./azure. spellings — wire channel of the split
+    # YourProvider-gateway aws./azure. spellings — wire channel of the split
     # identities above; cost keys on the raw gateway id (model_entry.py).
     'aws.claude-opus-4.5':       {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.5'},
     'aws.claude-sonnet-4.5':     {'input': 3.0,   'output': 15.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Sonnet 4.5'},
@@ -100,10 +103,10 @@ MODEL_PRICING = {
     'aws.claude-haiku-4.5':      {'input': 1.0,   'output': 5.0,   'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Haiku 4.5'},
     'claude-fable-5.1':          {'input': 10.0,  'output': 50.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.025, 'name': 'Fable 5.1'},
     'azure.claude-fable-5.1':    {'input': 10.0,  'output': 50.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.025, 'name': 'Fable 5.1'},
-    # qwen3.5 (Meituan plaza, baidu channel) — 广场价隐含 ¥2.8/¥5.6 per 1M。
+    # qwen3.5 (YourProvider plaza, baidu channel) — 广场价隐含 ¥2.8/¥5.6 per 1M。
     'qwen3.5':                   {'input': 0.39,  'output': 0.78,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen 3.5'},
     'qwen3.5-baidu':             {'input': 0.39,  'output': 0.78,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen 3.5'},
-    # Meituan-gateway yuju evaDaily models — raw gateway IDs stay on the wire; .name is the display channel.
+    # YourProvider-gateway yuju evaDaily models — raw gateway IDs stay on the wire; .name is the display channel.
     'yuju-claude-opus-5-evaDaily':   {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 5'},
     'yuju-claude-opus-4.8-evaDaily': {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.8'},
     'yuju-claude-opus-4.7-evaDaily': {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.7'},
@@ -169,15 +172,16 @@ MODEL_PRICING = {
     'deepseek-v4-pro':           {'input': 0.66,  'output': 1.98,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0333, 'name': 'DeepSeek V4 Pro'},
     'deepseek-v4-flash':         {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4 Flash',
                                   'peak': {'mul': 2.0, 'windows': [(1, 4), (6, 10)], 'tz_offset': 0, 'weekdays': [0, 1, 2, 3, 4], 'effective_from': 1786900800}},
-    # Meituan gateway Huawei-cloud mirror for DeepSeek V4 Flash — same pricing.
+    # YourProvider gateway Huawei-cloud mirror for DeepSeek V4 Flash — same pricing.
     'deepseek-v4-flash-huawei':  {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4 Flash (Huawei)'},
-    # Meituan gateway Tencent/Meituan-cloud mirrors for DeepSeek V4 — same pricing.
+    # YourProvider gateway Tencent/YourProvider/Azure-cloud mirrors for DeepSeek V4 — same pricing.
     'deepseek-v4-flash-tencent': {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4 Flash (Tencent)'},
-    'deepseek-v4-flash-meituan': {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4 Flash (Meituan)'},
+    'deepseek-v4-flash-yourprovider': {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4 Flash (YourProvider)'},
+    'deepseek-v4-flash-azure':   {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4 Flash (Azure)'},
     'deepseek-v4-pro-tencent':   {'input': 0.66,  'output': 1.98,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0333, 'name': 'DeepSeek V4 Pro (Tencent)'},
 
-    # Meituan gateway spelling of the same V4.1 product as 'deepseek-flash'
-    # (aa 39.5, 2026-09-10). It is a LOGICAL id in meituan.json whose wire pool
+    # YourProvider gateway spelling of the same V4.1 product as 'deepseek-flash'
+    # (aa 39.5, 2026-09-10). It is a LOGICAL id in yourprovider.json whose wire pool
     # is the repointed legacy family above, so it needs its own row: lookup on
     # the logical id is what the picker prints, and a miss there is what showed
     # a raw gateway string. No 'peak' — that schedule is the official API's
@@ -189,6 +193,8 @@ MODEL_PRICING = {
     # A row's `name` is the MODEL's name, not its upstream route's.
     'deepseek-v4.1-flash':       {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4.1 Flash'},
     'deepseek-v4-1-flash':       {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4.1 Flash'},
+    # 2026-10-17 minor checkpoint; YourProvider serves it on the undated V4.1 id.
+    'deepseek-v4.1-flash-1017':  {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4.1 Flash 1017'},
     # Gateway region/mirror spellings of the same product. Cost keys on the
     # WIRE id, so each needs a row or the route books at $0.
     'deepseek-v4.1-flash-baidu':  {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.02, 'name': 'DeepSeek V4.1 Flash (Baidu)'},
@@ -219,6 +225,9 @@ MODEL_PRICING = {
     # Qwen3.8-Omni-Flash (GA 2026-09-18, DashScope): ¥0.8/¥2.7 per 1M, implicit cache
     # hit ¥0.1 → cacheReadMul 0.125; native omni (text+image+audio+video in, text out).
     'qwen3.8-omni-flash':        {'input': 0.11, 'output': 0.37, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.125, 'name': 'Qwen 3.8 Omni Flash'},
+    # Qwen3.8-27B (2026-08-17, Model Studio Beijing): ¥3/¥12 per 1M, single tier ≤1M,
+    # thinking and non-thinking billed alike; implicit cache hit ¥0.6 → cacheReadMul 0.20.
+    'qwen3.8-27b':               {'input': 0.41, 'output': 1.66, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.20, 'name': 'Qwen 3.8 27B'},
     'qwen3-vl-plus':             {'input': 0.14, 'output': 1.38, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen3 VL Plus'},  # ¥1/¥10 per 1M (≤32K)
     # qwen-mt-plus (translation): Alibaba Cloud Model Studio international rate.
     'qwen-mt-plus':              {'input': 2.46, 'output': 7.37, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen MT Plus'},
@@ -241,7 +250,7 @@ MODEL_PRICING = {
     'gemini-2.5-flash-lite':     {'input': 0.10, 'output': 0.40, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 2.5 Flash-Lite'},
     'gemini-2.0-flash-lite':     {'input': 0.075,'output': 0.30, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 2.0 Flash-Lite'},
     'gemini-3.1-flash-lite-preview': {'input': 0.25, 'output': 1.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.1 Flash-Lite'},
-    # GA id (the Meituan gateway 404s the -preview spelling, serves this one).
+    # GA id (the YourProvider gateway 404s the -preview spelling, serves this one).
     'gemini-3.1-flash-lite':     {'input': 0.25, 'output': 1.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.1 Flash-Lite'},
     'gemini-3.1-pro-preview':    {'input': 2.00, 'output': 12.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.1 Pro'},
     'gemini-3-flash-preview':    {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3 Flash'},
@@ -259,7 +268,7 @@ MODEL_PRICING = {
     'gemini-2.5-flash-image':        {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 2.5 Flash Image'},
     'gemini-2.0-flash-preview-image-generation': {'input': 0.10, 'output': 0.40, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 2.0 Flash Image'},
     'gpt-image-1.5':                 {'input': 0.0,  'output': 0.0,  'cacheWriteMul': 0, 'cacheReadMul': 0, 'name': 'GPT Image 1.5'},
-    # GPT Image 2 — token-priced (Meituan): text in ¥36/M ($4.97), image in ¥57.6/M ($7.96), image out ¥216/M ($29.83).
+    # GPT Image 2 — token-priced (YourProvider): text in ¥36/M ($4.97), image in ¥57.6/M ($7.96), image out ¥216/M ($29.83).
     'gpt-image-2':                   {'input': 4.97, 'output': 29.83,'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GPT Image 2'},
     # GPT Image 2.5 Sunburst (2026-09-08) — official rates: text in $5/M (cached $1.25 →
     # 0.25), image in $8/M (cached $2), image out $30/M; "token rates match GPT Image 2".
@@ -270,7 +279,7 @@ MODEL_PRICING = {
     'dall-e-3':                      {'input': 0.0,  'output': 0.0,  'cacheWriteMul': 0, 'cacheReadMul': 0, 'name': 'DALL-E 3'},
     # ── OpenAI GPT-5.6 public family ──
     # Includes the official >272K full-request pricing tier. Gateway-specific
-    # prices (for example Meituan) remain provider overrides and win at runtime.
+    # prices (for example YourProvider) remain provider overrides and win at runtime.
     **gpt56_pricing_rows(),
     # ── OpenAI (GPT-5.4 family — March 2026; kept as the cost tier) ──
     'gpt-5.4':                   {'input': 2.50, 'output': 15.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GPT-5.4'},
@@ -345,13 +354,19 @@ MODEL_PRICING = {
     'doubao-seed-1-6-vision-250815': {'input': 0.11, 'output': 1.10, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Doubao Seed 1.6 Vision'},  # ¥0.8/¥8 per 1M (≤32K)
     # ── Mistral AI ──
     # mistral-large-latest → Mistral Large 3 (25.12): $0.50/$1.50 per 1M.
-    # Mistral Large 4 (Public Preview 2026-10-06, v26.10): list $1.36/$4.18,
-    # cached $0.14 (current 50% promo $0.68/$2.09 NOT used — list price only).
-    # 1T-param / 52B-active natively-multimodal MoE; reasoning_effort high/none.
-    'mistral-large-4-0':         {'input': 1.36, 'output': 4.18, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Mistral Large 4'},
+    # Mistral Large 4 (Public Preview 2026-10-06; improved version 2026-10-29 under the
+    # same ids mistral-large-4 / mistral-large-4-0): list $0.70/$2.10, cached $0.07
+    # (docs model page + inference pricing, checked 2026-11-02; the preview list was
+    # $1.36/$4.18). 1T-param / 52B-active multimodal MoE; reasoning_effort low/medium/high.
+    'mistral-large-4-0':         {'input': 0.70, 'output': 2.10, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Mistral Large 4'},
     'mistral-large-latest':      {'input': 0.50, 'output': 1.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Mistral Large 3'},
     # mistral-small-latest → Mistral Small 4 (26.03): $0.15/$0.60 per 1M.
     'mistral-small-latest':      {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Mistral Small 4'},
+    # ── StepFun ──
+    # Step 5 Preview (2026-09-20): platform.stepfun.ai USD list $1.00/$2.70, cache hit
+    # $0.10 → cacheReadMul 0.10; the cache-miss rate includes the cache write.
+    # (platform.stepfun.com CNY card: ¥7/¥20, hit ¥0.70.)
+    'step-5-preview':            {'input': 1.00, 'output': 2.70, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Step 5 Preview'},
     # codestral-latest: Codestral 25.01 is on Mistral's official deprecated list; the coding
     # role moved to mistral-medium-latest (Medium 3.5). Do NOT re-add.
     # Medium 3 matches la plateforme ($0.40/$2.00); Medium 3.5 has no first-party
@@ -368,7 +383,7 @@ MODEL_PRICING = {
     # xAI charges $4/$1/$12 above 200K prompt tokens; this flat table
     # records only the base tier, not an enforceable high-context price cap.
     'grok-4.7':                  {'input': 2.00, 'output': 6.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Grok 4.7'},
-    # aws.grok-4.7: Meituan AIGC gateway deployment spelling of the same xAI card
+    # aws.grok-4.7: YourProvider AIGC gateway deployment spelling of the same xAI card
     # (live probe 2026-10-20: 429 per-model RPM, while bare grok-4.7 400s
     # 不支持的模型类型). Cost keys on the WIRE id, so the mirror needs its own row.
     'aws.grok-4.7':              {'input': 2.00, 'output': 6.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Grok 4.7'},
@@ -386,6 +401,10 @@ MODEL_PRICING = {
     # ── Moonshot (Kimi) — per OpenRouter (2026-04-20 release) ──
     # kimi-k3 (2026-07-17): ¥20/¥100 per 1M → $2.76/$13.81 @ 7.24; 1M context
     'kimi-k3':                   {'input': 2.76, 'output': 13.81,'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Kimi K3'},
+    # kimi-k3.1-pro (2026-10-23): $2.00/$10.00 per 1M, cached input $0.20,
+    # 5-min cache write = input; flat, no context tiers
+    # (kimi.ai/resources/kimi-k3-1-pro-pricing; OpenRouter agrees).
+    'kimi-k3.1-pro':             {'input': 2.00, 'output': 10.00,'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Kimi K3.1 Pro'},
     'kimi-k2.6':                 {'input': 0.60, 'output': 2.80, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Kimi K2.6'},
     # kimi-k2-instruct-0905 (K2 0905 checkpoint pin): $0.60/$2.50 per 1M — matches
     # OpenRouter moonshotai/kimi-k2-0905 (2026-09-08). Exact id wins over date-fold.
@@ -399,9 +418,12 @@ MODEL_PRICING = {
     'hy4-preview':               {'input': 0.829,'output': 2.486,'cacheWriteMul': 1.00, 'cacheReadMul': 0.05, 'name': 'Hunyuan HY4 Preview'},
     # ── Tencent Hunyuan ── cheapest tier (≤16K): ¥1.2/¥4 per 1M = $0.166/$0.553 @ 7.24
     'hy3-preview':               {'input': 0.166,'output': 0.553,'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Hunyuan HY3 Preview'},
-    # -- BEGIN meituan_template_sync auto-added (regenerated wholesale) --
-    # -- END meituan_template_sync auto-added --
+    # -- BEGIN yourprovider_template_sync auto-added (regenerated wholesale) --
+    # -- END yourprovider_template_sync auto-added --
 }
+# Every runtime write (model registration, test patches) stamps the pricing
+# revision that settled-round cost memos validate against.
+MODEL_PRICING = RevisionedTable(MODEL_PRICING)
 
 # Dated-checkpoint pins (deepseek-v4-pro-0813, claude-opus-4-5-20251001) serve
 # the same model as their rolling alias, and vendors do not reprice a pin. An
@@ -462,3 +484,4 @@ QWEN_PRICING_CNY = {
     'glm-5v-turbo':     {'input': [(32_000, 5.0), (1_000_000, 7.0)],  'output': [(32_000, 22.0), (1_000_000, 26.0)]},
     '_default':         {'input': [(128_000, 0.8), (256_000, 2.0), (1_000_000, 4.0)], 'output': [(128_000, 4.8), (256_000, 12.0), (1_000_000, 24.0)]},
 }
+QWEN_PRICING_CNY = RevisionedTable(QWEN_PRICING_CNY)

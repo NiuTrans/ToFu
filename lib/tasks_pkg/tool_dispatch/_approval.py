@@ -44,14 +44,17 @@ def mint_approval_receipt(task: dict, fn_name: str, tc_id: str,
     """Bind an already-authorized gateway decision to one executable call."""
     if not tc_id or authority not in _TOOL_APPROVAL_RECEIPT_AUTHORITIES:
         return False
-    from lib.tasks_pkg.tool_dispatch._flags import _call_id_signature
-    receipts = task.setdefault('_tool_approval_receipts', {})
-    while len(receipts) >= _TOOL_APPROVAL_RECEIPT_MAX:
-        receipts.pop(next(iter(receipts)), None)
-    receipts[tc_id] = {
+    from lib.tasks_pkg.tool_dispatch._flags import _call_id_signature, _tool_receipt_lock
+    receipt = {
         'signature': _call_id_signature(fn_name, fn_args),
         'minted_at': time.time(), 'authority': authority,
     }
+    # Sibling calls admit on their own workers; eviction iterates the ledger.
+    with _tool_receipt_lock(task):
+        receipts = task.setdefault('_tool_approval_receipts', {})
+        while len(receipts) >= _TOOL_APPROVAL_RECEIPT_MAX:
+            receipts.pop(next(iter(receipts)), None)
+        receipts[tc_id] = receipt
     return True
 
 
@@ -62,10 +65,12 @@ def consume_approval_receipt(
     fn_args: dict[str, Any],
 ) -> bool:
     """Consume one approval bound to the exact tool name, call id, and args."""
+    from lib.tasks_pkg.tool_dispatch._flags import _tool_receipt_lock
     receipts = task.get('_tool_approval_receipts')
     if not isinstance(receipts, dict):
         return False
-    received = receipts.pop(str(tc_id or ''), None)
+    with _tool_receipt_lock(task):
+        received = receipts.pop(str(tc_id or ''), None)
     if not isinstance(received, dict):
         return False
     signature = received.get('signature')
@@ -551,6 +556,14 @@ def _approval_meta_timer_create(approval_meta, fn_args):
     approval_meta['description'] = 'Create a polling watcher (runs unattended)'
 
 
+def _approval_meta_await_device(approval_meta, fn_args):
+    """Name the device and the work an unattended wake will continue."""
+    _risk(approval_meta,
+          ('Device', fn_args.get('device')), ('Reason', fn_args.get('reason')),
+          note=('Registers a durable wait. When the device reconnects this conversation '
+                'continues without human input; device tools keep their approvals.'))
+
+
 def _approval_meta_timer_manage(approval_meta, fn_args):
     """Enrich approval metadata for ``timer_manage`` (action + target)."""
     action = fn_args.get('action', '') or ''
@@ -922,24 +935,19 @@ def _approval_meta_local_serve_remove(approval_meta, fn_args):
     )
 
 
-#: The adjustable knobs of ``update_search_settings`` (schema order). Every
-#: one is optional and any subset may change in one call, so the dialog must
-#: name each knob being touched — a bare "update settings" row is the blind
-#: approval this enricher exists to prevent.
-_SEARCH_SETTINGS_KNOBS = (
-    'profile', 'overrides', 'fetch_top_n', 'fetch_timeout',
-    'max_chars_search', 'max_chars_direct', 'max_chars_pdf',
-    'max_download_mb', 'llm_content_filter',
-    'block_domain', 'unblock_domain',
-)
+#: The adjustable keys of ``update_search_settings`` (schema order). Both are
+#: optional and may change in one call, so the dialog names each one being
+#: touched — a bare "update settings" row is the blind approval this enricher
+#: exists to prevent.
+_SEARCH_SETTINGS_KNOBS = ('block_domain', 'unblock_domain')
 
 
 def _approval_meta_update_search_settings(approval_meta, fn_args):
-    """``update_search_settings`` — mutates SERVER-WIDE search/fetch config.
+    """``update_search_settings`` — mutates the SERVER-WIDE fetch blocklist.
 
     Changes are global, persist across restarts, and hit every conversation,
-    so each knob being changed is listed with its new value. A no-arg call
-    is a pure READ (the model inspecting current values before proposing a
+    so each requested change is listed with its value. A no-arg call is a
+    pure READ (the model inspecting the current list before proposing a
     change) — say so instead of rendering an empty table.
     """
     changes = [
@@ -951,14 +959,14 @@ def _approval_meta_update_search_settings(approval_meta, fn_args):
         _risk(
             approval_meta,
             ('Change set', 'none — read-only inspection of current values'),
-            note='Read the current search/fetch pipeline settings (no change)',
+            note='Read the current fetch blocklist (no change)',
         )
         return
     approval_meta['path'] = ', '.join(k for k, _v in changes)
     _risk(
         approval_meta,
         *changes,
-        note=('Change SERVER-WIDE search/fetch settings — applies globally, '
+        note=('Change the SERVER-WIDE fetch blocklist — applies globally, '
               'persists across restarts, affects every conversation'),
     )
 
@@ -1072,12 +1080,9 @@ def _approval_meta_manage_agents(approval_meta, fn_args):
 
 def _approval_meta_coordinator_work(approval_meta, fn_args):
     """Show the delegated scope or exact reviewed checkpoint before approval."""
-    from lib.project_dispatch.repository import CONTRACT
-    defaults = CONTRACT['delegationDefaults']
     _risk(approval_meta,
         ('Worker', fn_args.get('title')), ('Objective', fn_args.get('brief')),
-        ('Token allowance', fn_args.get('max_tokens', defaults['workerTokens']) if 'brief' in fn_args else None),
-        ('Model requests', fn_args.get('max_model_requests', defaults['workerModelRequests']) if 'brief' in fn_args else None),
+        ('Recommendation', fn_args.get('recommendation')),
         ('Assignment', fn_args.get('assignment_id')), ('Result revision', fn_args.get('result_revision')),
         ('Decision', fn_args.get('decision') or fn_args.get('outcome')), ('Report', fn_args.get('report_turn_id')), ('Evidence', fn_args.get('note')),
         ('Checkpoint to integrate', fn_args.get('checkpoint_sha')),
@@ -1090,6 +1095,7 @@ def _approval_meta_coordinator_work(approval_meta, fn_args):
 _APPROVAL_META_ENRICHERS = {
     'cancel_project_work': _approval_meta_coordinator_work,
     'finish_project_request': _approval_meta_coordinator_work,
+    'request_user_decision': _approval_meta_coordinator_work,
     'delegate_project_work': _approval_meta_coordinator_work,
     'review_project_work': _approval_meta_coordinator_work,
     'manage_agents': _approval_meta_manage_agents,
@@ -1122,6 +1128,7 @@ _APPROVAL_META_ENRICHERS = {
     'schedule_manage':        _approval_meta_schedule_manage,
     'timer_create':           _approval_meta_timer_create,
     'timer_manage':           _approval_meta_timer_manage,
+    'await_device':           _approval_meta_await_device,
     # ── browser interaction: the selector/target is the risk ──
     'browser_click':            _approval_meta_browser_click,
     'browser_close_tab':        _approval_meta_browser_close_tab,
@@ -1283,7 +1290,7 @@ def _handle_approval(
         return False, tool_content
 
     # Approved — do NOT execute here. The caller lets the item fall through to
-    # the normal serial write-tool dispatch (_execute_tool_one), so a single
+    # the normal write-tool dispatch (_execute_tool_one), so a single
     # execution path serves project writes, run_command, memory, MCP, and custom
     # write tools uniformly. round_entry stays 'pending_approval' until that
     # execution finalizes it.
@@ -1313,5 +1320,7 @@ def _handle_approval(
                          tid, fn_name)
             return False, 'Approval could not be bound to this tool call.'
         if file_recovery is not None:
-            task['_tool_approval_receipts'][tc_id]['fileRecoveryEvidence'] = file_recovery.fingerprint
+            from lib.tasks_pkg.tool_dispatch._flags import _tool_receipt_lock
+            with _tool_receipt_lock(task):
+                task['_tool_approval_receipts'][tc_id]['fileRecoveryEvidence'] = file_recovery.fingerprint
     return True, None

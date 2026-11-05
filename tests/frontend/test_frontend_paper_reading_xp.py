@@ -1,5 +1,5 @@
 """jsdom guard: the native reading-experience rail and the
-report.js seams) distributes the v2 insight payload through the reader.
+report presenter distribute the v2 insight payload through the reader.
 
 Drives the retained Report renderer plus compiled native Paper owners
 under jsdom:
@@ -12,8 +12,8 @@ under jsdom:
   • re-running the distribution is idempotent (no duplicate cards);
   • the v2 'insight' EVENT stashes the payload and distributes live WITHOUT
     appending the markdown block to fullText (legacy events still append);
-  • the 'report_meta' event hot-swaps the finish tag with the secondPasses
-    total + breakdown;
+  • completion metadata is covered by the typed report-metadata owner and
+    the real report/review browser timeline;
   • NEUTER: strip the after-render seam from report.js → no cards (the wiring
     is load-bearing), shipped file byte-identical after.
 
@@ -24,12 +24,12 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 import os
-import shutil
 import subprocess
 
 import pytest
 from tests._paper_vite import compiled_typescript
-from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root, native_module_graph
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -44,19 +44,11 @@ DEEPEN_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'deepen.ts')
 QA_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'qa.ts')
-ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 @pytest.fixture(scope='module')
 def native_reading_owners():
-    if not _node_deps_available() or not os.path.isfile(ESBUILD):
-        pytest.skip('node + jsdom + vite test bundler dev dependencies required')
+    require_node_modules('jsdom', 'vite')
     with ExitStack() as stack:
         built = {
             key: stack.enter_context(compiled_typescript(
@@ -70,6 +62,10 @@ def native_reading_owners():
                 'qa': QA_TS,
             }.items()
         }
+        built['glossary'] = native_module_graph([
+            ('.native/glossary.js', os.path.join(ROOT, 'frontend/src/features/paper/report-article/glossary.ts')),
+            ('.native/terms.js', os.path.join(ROOT, 'frontend/src/features/paper/report-article/terms.ts')),
+        ])
         yield built
 
 
@@ -86,6 +82,7 @@ global.document = win.document;
 global.localStorage = win.localStorage;
 global.console = console;
 global.AbortController = win.AbortController;
+global.Element = win.Element;
 win.HTMLDialogElement.prototype.showModal = function() { this.open = true; };
 win.HTMLDialogElement.prototype.close = function() { this.open = false; this.dispatchEvent(new win.Event('close')); };
 
@@ -97,6 +94,8 @@ win.t = global.t = (k, p) => {
     'paper.xpConnTitle': 'Connections to your reading',
     'paper.xpProvTitle': 'Pause and think',
     'paper.xpRecapTitle': 'What you are taking away',
+    'paper.xpReadingStats': '~{minutes} min read · ~{words} words covered',
+    'paper.xpReadingNotes': ' · {n} notes',
     'paper.xpCostBody': 'Report',
     'paper.xpPassInsight': 'Insight',
     'paper.xpPassTermfill': 'Glossary',
@@ -123,8 +122,8 @@ win.renderMarkdown = global.renderMarkdown = (md) => {
 win.formatCny = global.formatCny = (v) => '¥' + Number(v).toFixed(4);
 global._i18nLang = win._i18nLang = 'en';
 
+eval(fs.readFileSync(process.argv[8], 'utf8'));  // real glossary owners
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // real paper/report.js
-win._renderReportFinishTag = _renderReportFinishTag;
 eval(fs.readFileSync(process.argv[3], 'utf8'));  // compiled reading-XP owner
 eval(fs.readFileSync(process.argv[5], 'utf8'));  // compiled QA owner
 eval(fs.readFileSync(process.argv[6], 'utf8'));  // compiled deepen owner
@@ -143,22 +142,12 @@ for (const name of [
 }
 const _realPaperAskQuestion = _paperAskQuestion;  // qa.js 真入口,§7 覆盖后 §8 恢复
 
-// Capture the REAL glossary helpers before the stub block replaces them —
-// §10 exercises the analogy column through the real implementation.
-const _realExtractGlossary = _extractGlossary;
-const _realDecorateGlossaryTerms = _decorateGlossaryTerms;
+// Exercise the analogy column through the typed glossary owners.
+const _realExtractGlossary = extractGlossary;
+const _realDecorateGlossaryTerms = decorateGlossaryTerms;
 
-// Stub layout/enrichment helpers (jsdom has no layout; the functions under
-// test run for real).
-_decorateCallouts = () => {};
-_frameFigures = () => {};
-_decorateZoomableImages = () => {};
-_decorateGlossaryTerms = () => {};
-_extractGlossary = () => ({});
-_indexHeadings = () => [];
-_buildReportTOC = () => '';
+// Stub reading-time layout; article decoration and event projection run for real.
 _buildReadingTimeBar = () => null;
-_wireReportScrollSpy = () => {};
 _wireReadingTimeTracking = () => {};
 // Reading-position capture/restore now lives on the typed report owner
 // (report-runtime.ts) and the retained renderer consumes it through
@@ -283,26 +272,6 @@ const s2 = { kind: 'report', fullText: REPORT, toolRounds: [], _insightApplied: 
 const handled2 = window._paperXpHandleInsightEvent(s2, {
   type: 'insight', insight: '## 💡 old block\n' }, view);
 check('legacy_event_falls_through', handled2 === false);
-
-// ── (5) report_meta event: finish tag hot-swap with secondPasses ──
-const meta2 = { model: 'm1', costCny: 0.01, promptTokens: 1000, completionTokens: 200,
-  totalCostCny: 0.015, totalCostUsd: 0.002,
-  secondPasses: { insight: { fired: true, baseline: 3.2, costCny: 0.005,
-                             usage: { prompt_tokens: 150, completion_tokens: 50 } } } };
-const s3 = { kind: 'report', meta: { model: 'm1' } };
-const mHandled = window._paperXpApplyMetaEvent(s3, { type: 'report_meta', meta: meta2 }, view);
-check('report_meta_handled', mHandled === true);
-check('report_meta_updates_view_meta', view.meta === meta2);
-const tag = c.querySelector('.paper-report-finish-tag');
-check('finish_tag_shows_total',
-      !!tag && tag.innerHTML.indexOf('¥0.0150') !== -1);
-check('finish_tag_breakdown_tooltip',
-      !!tag && (tag.getAttribute('title') || tag.innerHTML).indexOf('Insight') !== -1);
-
-// ── (6) cost breakdown builder ──
-const bd = window._paperXpCostBreakdown(meta2);
-check('breakdown_text', bd.indexOf('Report') !== -1 && bd.indexOf('Insight') !== -1);
-check('breakdown_empty_without_passes', window._paperXpCostBreakdown({ model: 'm' }) === '');
 
 // ── (7) P1: action buttons on cards ──
 // NOTE: §2/§3 re-distributed, so §1's node refs are detached — re-query the
@@ -556,25 +525,12 @@ check('legacy_3col_glossary_ok', gloss3.length === 1 && gloss3[0].analogy === ''
 """
 
 
-def _write_harness() -> str:
-    harness = os.path.join(HERE, '_paper_reading_xp_harness.js')
-    with open(harness, 'w', encoding='utf-8') as f:
-        f.write(_HARNESS)
-    return harness
-
-
 def _run(report_js: str, owners: dict[str, str]) -> subprocess.CompletedProcess:
-    harness = _write_harness()
-    try:
-        return subprocess.run(
-            ['node', harness, report_js, owners['xp'], ROOT, owners['qa'],
-             owners['deepen'], owners['notes']],
-                              capture_output=True, text=True, timeout=60)
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
+    return subprocess.run(
+        ['node', '-e', _HARNESS, 'paper-xp', report_js, owners['xp'], ROOT,
+         owners['qa'], owners['deepen'], owners['notes'], owners['glossary']],
+        capture_output=True, text=True, timeout=60,
+    )
 
 
 def _assert_reading_xp_contract(proc):
@@ -582,16 +538,14 @@ def _assert_reading_xp_contract(proc):
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'reading-xp rail failures:\n' + out
-    assert out.count('PASS') >= 71, f'expected >=71 PASS lines, got:\n{out}'
-@pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
-                    reason='node + jsdom + vite test bundler dev-deps not installed')
+    # Metadata assertions belong to report-article/metadata.test.ts and the browser
+    # replay contract; these 65 assertions cover the retained reading rail.
+    assert out.count('PASS') >= 65, f'expected >=65 PASS lines, got:\n{out}'
 def test_vite_reading_xp_satisfies_full_dom_contract(native_reading_owners):
     _assert_reading_xp_contract(_run(REPORT_JS, native_reading_owners))
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_after_render_seam_is_load_bearing(native_reading_owners):
+def test_after_render_seam_is_load_bearing(native_reading_owners, tmp_path):
     """NEUTER: strip the _paperXpAfterRender seam from _renderFinalReport →
     the cached-payload distribution no longer happens (cards absent), proving
     the seam (not some incidental render) is what surfaces anchored cards."""
@@ -603,7 +557,7 @@ def test_after_render_seam_is_load_bearing(native_reading_owners):
     )
     assert marker in src, 'after-render seam marker not found — test stale'
     patched = src.replace(marker, '', 1)
-    tmp = os.path.join(HERE, '_paper_reading_xp_neuter.js')
+    tmp = str(tmp_path / 'paper-reading-xp-neuter.js')
     with open(tmp, 'w', encoding='utf-8') as f:
         f.write(patched)
     try:

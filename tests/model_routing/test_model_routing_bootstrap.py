@@ -54,6 +54,45 @@ def test_owner_bootstrap_activates_empty_authority_without_legacy_state(
     assert repository.get(boundary).document['providers'] == []
 
 
+def test_large_staged_listing_imports_a_part_with_the_chosen_models(
+        tmp_path, monkeypatch):
+    from lib.model_routing.discovered_provider import DISCOVERY_RETAINED_MODEL_COUNT
+
+    repository = InMemoryModelRoutingRepository()
+    boundary = OwnerBoundary.create(73)
+    repository.compare_and_swap(
+        boundary, empty_document(), expected_revision=0)
+    models = [{'model_id': f'relay/model-{index:03d}', 'capabilities': ['text']}
+              for index in range(700)]
+    models.append({'model_id': 'private-wire', 'capabilities': ['text'],
+                   'catalog_pinned': True})
+    pending_path = tmp_path / 'pending.json'
+    pending_path.write_text(json.dumps({
+        'contract_version': 'tofu.bootstrap-provider-stage/v1',
+        'name': 'Relay',
+        'brand': 'example',
+        'base_url': 'https://relay.example/v1',
+        'protocol': 'openai',
+        'credential_env': 'LLM_API_KEYS',
+        'default_model': 'relay/model-699',
+        'models': models,
+    }), encoding='utf-8')
+    monkeypatch.setattr(
+        bootstrap_module, '_pending_provider_path', lambda: str(pending_path))
+    monkeypatch.setattr(
+        bootstrap_module, '_legacy_sources', lambda _boundary: ({}, []))
+    monkeypatch.setenv('LLM_API_KEYS', 'owner-secret')
+
+    result = bootstrap_module.bootstrap_owner_model_routing(
+        boundary, repository=repository)
+
+    assert result['pending_provider']['status'] == 'imported'
+    imported = {row['pending_model_id']
+                for row in repository.get(boundary).document['offerings']}
+    assert len(imported) == DISCOVERY_RETAINED_MODEL_COUNT
+    assert {'relay/model-699', 'private-wire'} <= imported
+
+
 def test_active_authority_consumes_secret_free_pending_provider(
         tmp_path, monkeypatch):
     repository = InMemoryModelRoutingRepository()

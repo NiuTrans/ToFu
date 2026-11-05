@@ -1,4 +1,7 @@
 /** Right-hand background agent disclosure. Snapshot/Turn projections remain authority.
+ * A row answers what the agent does (its objective's brief), its state (glyph and
+ * word) and how many model rounds it has run; the agent ID stays a quiet identifier.
+ * Execution detail opens on demand; message folds appear only once messages exist.
  * Owns only keyed DOM and reader folds; lazy execution detail uses the canonical
  * swarm renderer through ports. One render at a time; at most one queued
  * demand per mounted disclosure. No timers, transport or durable state.
@@ -6,6 +9,8 @@
 import { mountSwarmMessages, type SwarmMessagesSnapshot } from './conversation/ui/swarm-messages';
 import type { Translator } from './i18n';
 import { createButton } from './ui/button';
+import { iconHtml } from './icons';
+import { swarmAgentBrief } from './conversation/presentation/swarm-agent-presentation';
 
 import { backgroundActivitySummary } from './background-activity-presentation';
 
@@ -28,9 +33,14 @@ export interface AgentDockItem {
   swarmRunId?: string;
 
   statusLabel?: string;
+  /** Model rounds the worker has run; absent until evidenced. */
+  roundCount?: number;
   objective?: string;
   revision?: string;
   openConversation?: () => void;
+  /** Present only while live activity lists this exact-run agent running. Resolves
+   * true once the stop signal is accepted, false when nothing was left to stop. */
+  stop?: () => Promise<boolean>;
   render(): Promise<string>;
 }
 interface AgentDockRow {
@@ -39,10 +49,15 @@ interface AgentDockRow {
   generation: number;
   renderedGeneration?: number;
   el: HTMLDetailsElement;
-  name: HTMLElement;
+  glyph: HTMLElement;
+  purpose: HTMLElement;
   status: HTMLElement;
+  rounds: HTMLElement;
+  name: HTMLElement;
   body: HTMLElement;
   conversationButton?: HTMLButtonElement;
+  stopButton?: HTMLButtonElement;
+  actions?: HTMLElement;
   messages: HTMLDetailsElement;
   messageView?: ReturnType<typeof mountSwarmMessages>;
   loaded: boolean;
@@ -61,7 +76,17 @@ interface Ports {
   translate(key: string, fallback: string, vars?: Record<string, string | number>): string;
 }
 const succeeded = (item: AgentDockItem) => ['done', 'completed', 'succeeded'].includes(item.status);
-const archived = (item: AgentDockItem) => succeeded(item) || ['aborted', 'cancelled', 'canceled'].includes(item.status);
+const cancelled = (item: AgentDockItem) => ['aborted', 'cancelled', 'canceled'].includes(item.status);
+const archived = (item: AgentDockItem) => succeeded(item) || cancelled(item);
+function statusTone(item: AgentDockItem): string {
+  if (succeeded(item)) return 'ok';
+  if (cancelled(item)) return 'cancelled';
+  if (item.status === 'running') return 'live';
+  if (item.status === 'pending') return 'queued';
+  return ['failed', 'error'].includes(item.status) ? 'error' : 'attention';
+}
+/* Registry glyphs per outcome; the live dot and queued ring are drawn in CSS. */
+const TONE_GLYPHS: Readonly<Record<string, string>> = { ok: 'check', cancelled: 'ban', error: 'x', attention: 'alertTriangle' };
 const PAGE_SIZE = 20;
 export function createAgentSidebarDock({ host, translate: tt }: Ports) {
   const doc = host.ownerDocument;
@@ -120,6 +145,43 @@ export function createAgentSidebarDock({ host, translate: tt }: Ports) {
   history.addEventListener('toggle', () => { if (!disposed) paint(); });
   function retireRow(row: AgentDockRow) {
     row.messageView?.dispose(); row.el.remove(); rows.delete(row.key); pending.delete(row);
+  }
+  function placeAction(row: AgentDockRow, button: HTMLButtonElement, first: boolean) {
+    if (!row.actions) {
+      row.actions = doc.createElement('div');
+      row.actions.className = 'agent-dock-actions';
+      row.el.insertBefore(row.actions, row.messages);
+    }
+    if (first) row.actions.prepend(button); else row.actions.append(button);
+  }
+  function removeAction(row: AgentDockRow, button: HTMLButtonElement) {
+    if (doc.activeElement === button) row.el.querySelector('summary')?.focus();
+    button.remove();
+    if (row.actions && !row.actions.childElementCount) { row.actions.remove(); row.actions = undefined; }
+  }
+  function syncStop(row: AgentDockRow, item: AgentDockItem) {
+    if (!item.stop) {
+      if (row.stopButton) { removeAction(row, row.stopButton); row.stopButton = undefined; }
+      return;
+    }
+    if (row.stopButton) return;
+    const current = row;
+    const idle = tt('agentDock.stop', 'Stop agent');
+    const button = createButton({ label: idle, variant: 'danger', size: 'sm', onClick: () => {
+      const stop = current.source.stop;
+      if (disposed || rows.get(current.key) !== current || current.stopButton !== button || button.disabled || !stop) return;
+      if (doc.activeElement === button) current.el.querySelector('summary')?.focus();
+      button.disabled = true;
+      button.textContent = tt('agentDock.stopping', 'Stopping…');
+      // An accepted signal stays busy until the snapshot settles the agent and drops its port.
+      void stop().catch(() => false).then(accepted => {
+        if (accepted || current.stopButton !== button) return;
+        button.disabled = false;
+        button.textContent = idle;
+      });
+    } }, doc);
+    row.stopButton = button;
+    placeAction(row, button, false);
   }
   function reconcileRows(next: readonly AgentDockItem[]) {
     const matches = new Map<AgentDockItem, AgentDockRow>();
@@ -220,14 +282,23 @@ export function createAgentSidebarDock({ host, translate: tt }: Ports) {
         disclosure.className = 'agent-dock-agent';
         disclosure.dataset.agentKey = item.key;
         const summary = doc.createElement('summary');
-
-        const name = doc.createElement('span');
-        name.className = 'agent-dock-name';
+        const glyph = doc.createElement('span');
+        glyph.className = 'agent-dock-glyph';
+        glyph.setAttribute('aria-hidden', 'true');
+        const purpose = doc.createElement('span');
+        purpose.className = 'agent-dock-purpose';
+        const meta = doc.createElement('span');
+        meta.className = 'agent-dock-meta';
         const status = doc.createElement('span');
         status.className = 'agent-dock-status';
+        const rounds = doc.createElement('span');
+        rounds.className = 'agent-dock-rounds';
+        const name = doc.createElement('span');
+        name.className = 'agent-dock-name';
+        meta.append(status, rounds, name);
         const body = doc.createElement('div');
         body.className = 'agent-dock-detail';
-        summary.append(name, status);
+        summary.append(glyph, purpose, meta);
         disclosure.append(summary);
 
         const communication = doc.createElement('details');
@@ -236,7 +307,7 @@ export function createAgentSidebarDock({ host, translate: tt }: Ports) {
         communicationSummary.textContent = tt('swarm.messagesTitle', 'Messages');
         communication.append(communicationSummary);
         row = { key: item.key, identity: item.identity && { ...item.identity }, generation: 0,
-          el: disclosure, name, status, body, messages: communication, loaded: false, source: item };
+          el: disclosure, glyph, purpose, status, rounds, name, body, messages: communication, loaded: false, source: item };
         rows.set(item.key, row);
         const current = row;
         disclosure.append(communication, body);
@@ -255,25 +326,38 @@ export function createAgentSidebarDock({ host, translate: tt }: Ports) {
           if (!disposed && rows.get(current.key) === current && current.conversationButton === button) current.source.openConversation?.();
         } }, doc);
         row.conversationButton = button;
-        row.el.insertBefore(button, row.messages);
+        placeAction(row, button, true);
       } else if (!item.openConversation && row.conversationButton) {
-        if (doc.activeElement === row.conversationButton) row.el.querySelector('summary')?.focus();
-        row.conversationButton.remove(); row.conversationButton = undefined;
+        removeAction(row, row.conversationButton); row.conversationButton = undefined;
       }
+      syncStop(row, item);
       const run = item.swarmRunId && runs.find(candidate => candidate.swarm_id === item.swarmRunId);
-      row.messages.hidden = !run || !item.agentId;
       if (run && item.agentId) {
         if (row.messageView) row.messageView.update(run, messageTranslate);
         else row.messageView = mountSwarmMessages(row.messages, run, messageTranslate, { participantId: item.agentId });
       } else { row.messageView?.dispose(); row.messageView = undefined; }
+      row.messages.hidden = !row.messageView?.messageCount;
       row.el.dataset.status = item.status;
-
+      const tone = statusTone(item);
+      if (row.el.dataset.tone !== tone) {
+        row.el.dataset.tone = tone;
+        row.glyph.innerHTML = TONE_GLYPHS[tone] ? iconHtml(TONE_GLYPHS[tone]) : '';
+      }
+      const brief = swarmAgentBrief(item.objective);
+      const purpose = brief || item.name;
+      if (row.purpose.textContent !== purpose) { row.purpose.textContent = purpose; row.purpose.title = purpose; }
       if (row.name.textContent !== item.name) row.name.textContent = item.name;
+      // Without a brief the name already reads as the purpose line.
+      row.name.hidden = !brief;
       const phase = ({ done: 'complete', completed: 'complete', succeeded: 'complete', pending: 'queued', unknown: 'noResult' } as Record<string, string>)[item.status] || item.status;
       const label = item.statusLabel || tt('swarm.phase.' + phase, item.status);
       if (row.status.textContent !== label) row.status.textContent = label;
-      row.el.querySelector('summary')!.setAttribute('aria-label', `${item.name} · ${label}`);
-      row.el.title = item.objective || item.name;
+      const roundCount = item.roundCount ?? 0;
+      const rounds = roundCount > 0
+        ? tt('agentDock.rounds', '{count} round{s}', { count: roundCount, s: roundCount === 1 ? '' : 's' }) : '';
+      if (row.rounds.textContent !== rounds) row.rounds.textContent = rounds;
+      row.rounds.hidden = !rounds;
+      row.el.querySelector('summary')!.setAttribute('aria-label', [purpose, label, rounds, brief ? item.name : ''].filter(Boolean).join(' · '));
       const inHistory = archived(item) && !reading.has(item.key);
       const target = inHistory ? historyBody : active;
       // Reorder only if necessary: moving a focused native disclosure loses focus.
@@ -283,7 +367,7 @@ export function createAgentSidebarDock({ host, translate: tt }: Ports) {
     historySummary.textContent = tt('agentDock.history', 'Finished history · {count}', { count: terminal.length });
     history.hidden = terminal.length === 0;
     more.hidden = terminal.length <= limit;
-    el.hidden = items.length === 0 && messageViews.size === 0;
+    el.hidden = items.length === 0 && messages.hidden;
 
 
     void drain();
@@ -308,7 +392,6 @@ export function createAgentSidebarDock({ host, translate: tt }: Ports) {
         messageViews.clear();
       }
       runs = nextRuns;
-      messages.hidden = runs.length === 0;
       const keep = new Set(runs.map(run => run.swarm_id));
       for (const [run, view] of messageViews) if (!keep.has(run)) { view.dispose(); messageViews.delete(run); }
       for (const run of runs) {
@@ -316,6 +399,7 @@ export function createAgentSidebarDock({ host, translate: tt }: Ports) {
         if (view) view.update(run, messageTranslate);
         else messageViews.set(run.swarm_id, mountSwarmMessages(messages, run, messageTranslate));
       }
+      messages.hidden = ![...messageViews.values()].some(view => view.messageCount > 0);
       reconcileRows(next);
       items = next;
       paint();
@@ -332,18 +416,36 @@ export function createAgentSidebarDock({ host, translate: tt }: Ports) {
 }
 
 /** The section is conversation activity, not a claim that the host Turn spawned it.
- * Use the selected main human Turn's existing context column/fold; never a new rail.
+ * Use the selected main round input's existing context column/fold; never a new rail.
+ * Inside a rail the section joins the rail's sticky card, so it travels with the facts.
+ * Round inputs are every user-role Turn (human, critic, virtual_user). A swarm-settlement
+ * or autopilot continuation opens a new round whose card stays beside the
+ * reply being read; the human rail above it scrolls away with its own round.
+ * An input persisted without a context snapshot has an empty rail and reads inside
+ * the round of the nearest preceding visible rail, whose track spans it; that rail's
+ * card hosts the section.
  * An unmounted latest Turn or foreign Surface is not permission to use old history.
  */
-export function backgroundAgentContextHost(root: HTMLElement | null, conversationId: string, humanTurnId?: string): HTMLElement | null {
+export function backgroundAgentContextHost(root: HTMLElement | null, conversationId: string, inputTurnId?: string): HTMLElement | null {
   if (!root || !conversationId) return null;
   const surface = root.matches('.conversation-surface') ? root : root.querySelector<HTMLElement>('.conversation-surface');
   if (surface?.dataset.conversationId !== conversationId) return null;
-  const inputs = Array.from(surface.querySelectorAll<HTMLElement>('.user-msg[data-lane-id="main"][data-turn-id]'));
-  const input = humanTurnId ? inputs.find(node => node.dataset.turnId === humanTurnId) : inputs.at(-1);
+  const inputs = Array.from(surface.querySelectorAll<HTMLElement>('.conversation-turn[data-lane-id="main"][data-turn-role="user"][data-turn-id]'));
+  const input = inputTurnId ? inputs.find(node => node.dataset.turnId === inputTurnId) : inputs.at(-1);
   if (!input) return null;
-  const rail = Array.from(input.children).find(node => (node as HTMLElement).dataset.conversationPart === 'turn-context-rail') as HTMLElement | undefined;
+  const view = surface.ownerDocument.defaultView;
+  const part = (parent: Element, name: string) => Array.from(parent.children).find(node => (node as HTMLElement).dataset.conversationPart === name) as HTMLElement | undefined;
+  const contextRail = (turn: Element) => part(turn, 'turn-context-rail');
+  const card = (shownRail: HTMLElement) => part(shownRail, 'turn-context-card') ?? null;
+  const rail = contextRail(input);
   if (!rail) return null;
-  if (surface.ownerDocument.defaultView?.getComputedStyle(rail).display !== 'none') return rail;
-  return input.querySelector<HTMLElement>('.conversation-block--context');
+  const shown = (node: HTMLElement) => !node.hidden && view?.getComputedStyle(node).display !== 'none';
+  if (shown(rail)) return card(rail);
+  const fold = input.querySelector<HTMLElement>('.conversation-block--context');
+  if (fold || !rail.hidden) return fold;
+  for (let turn = input.previousElementSibling; turn; turn = turn.previousElementSibling) {
+    const covering = contextRail(turn);
+    if (covering && !covering.hidden) return shown(covering) ? card(covering) : null;
+  }
+  return null;
 }

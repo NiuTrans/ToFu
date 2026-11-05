@@ -3,10 +3,33 @@ import { describe, expect, it, vi } from 'vitest';
 import { agentDockProjection } from './agent-sidebar-dock-projection';
 const base = () => ({ turns: [] as any[], swarms: [] as any[], recover: (_round: any, _rounds: any[]): any[] => [],
   renderPanel: vi.fn(() => '<div class="sw-agent" data-agent-id="agent-1"><div class="sw-a-body"><details data-call-id="real-call"><summary>run_command</summary><pre>Actual output (truncated)</pre></details></div></div>'),
-  renderActivity: (_agent: any) => document.createElement('div'), openConversation: vi.fn(), translate: (_: string, fallback: string, vars?: Record<string, string | number>) => fallback.replace(/\{(\w+)\}/g, (match, key) => String(vars?.[key] ?? match)) });
+  renderActivity: (_agent: any) => document.createElement('div'), openConversation: vi.fn(),
+  stopAgent: vi.fn(async (_swarmId: string, _agentId: string) => true), translate: (_: string, fallback: string, vars?: Record<string, string | number>) => fallback.replace(/\{(\w+)\}/g, (match, key) => String(vars?.[key] ?? match)) });
 const turn = (run: string, status = 'running') => ({ turnId: 'turn-' + run, projection: { toolRounds: [{ _swarm: true, _swarmRunId: run, _swarmKey: 'session', attemptId: run,
   _swarmAgents: [{ id: 'agent-1', role: 'tester', status, _toolCalls: [{ id: 'real-call', name: 'run_command' }], conversationId: 'child' }] }] } });
 describe('agent dock canonical projection', () => {
+
+  it.each([false, true])('does not rescan unrelated runs when agent IDs repeat: %s', reusedAgentId => {
+    const ports = base();
+    const size = 64;
+    let runReads = 0;
+    for (let index = 0; index < size; index++) {
+      const id = reusedAgentId ? 'worker' : 'worker-' + index;
+      ports.turns.push({ turnId: 'turn-' + index, projection: { toolRounds: [{
+        _swarm: true, _swarmRunId: 'run-' + index, _swarmKey: 'session-' + index,
+        _swarmAgents: [{ id, status: 'pending' }],
+      }] } });
+      ports.swarms.push({ get swarm_id() { runReads++; return 'run-' + index; },
+        agents: [{ id, status: 'running' }] });
+    }
+    const rows = agentDockProjection(ports);
+    expect(rows).toHaveLength(size);
+    expect(rows.every(row => row.status === 'running')).toBe(true);
+    expect(new Set(rows.map(row => row.key)).size).toBe(size);
+    // Ingress, matching and Stop projection may read their own run. A read
+    // budget linear in inputs excludes scans of unrelated canonical/activity rows.
+    expect(runReads).toBeLessThanOrEqual(size * 8);
+  });
 
   it('updates a unique unsettled launch from activity after its parent has completed', async () => {
     const ports = base(); ports.turns = [{ ...turn('run-one', 'pending'), status: 'completed' }];
@@ -14,7 +37,8 @@ describe('agent dock canonical projection', () => {
     ports.swarms = [{ swarm_key: 'session', agents: [{ id: 'agent-1', status: 'running', round: 42 }] }];
     const items = agentDockProjection(ports);
     expect(items).toHaveLength(1); expect(items[0].status).toBe('running');
-    expect(items[0].statusLabel).toBe('running · round 42');
+    // The label stays a state word; the round count is its own row field.
+    expect(items[0].statusLabel).toBe('running'); expect(items[0].roundCount).toBe(42);
     expect(await items[0].render()).toContain('real-call');
     expect(JSON.stringify(ports.turns)).toBe(before);
   });
@@ -34,13 +58,14 @@ describe('agent dock canonical projection', () => {
   });
   it('empty activity does not imply success or remove unresolved canonical evidence', () => {
     const ports = base(); ports.turns = [turn('run-one')];
-    expect(agentDockProjection(ports)[0].status).toBe('running');
+    const [item] = agentDockProjection(ports);
+    expect(item.status).toBe('running'); expect(item.roundCount).toBeUndefined();
   });
-  it('delegates actual execution detail to canonical renderer and declares bounded evidence', async () => {
+  it('delegates execution detail to the canonical card body without adding disclaimers', async () => {
     const ports = base(); ports.turns = [turn('run-one')];
     const [agent] = agentDockProjection(ports); expect(ports.renderPanel).not.toHaveBeenCalled();
     const html = await agent.render(); expect(ports.renderPanel).toHaveBeenCalledTimes(1);
-    expect(html).toContain('real-call'); expect(html).toContain('not a full transcript');
+    expect(html).toBe('<div class="sw-a-body"><details data-call-id="real-call"><summary>run_command</summary><pre>Actual output (truncated)</pre></details></div>');
     agent.openConversation?.(); expect(ports.openConversation).toHaveBeenCalledWith('child');
   });
   it('does not collapse repeated agent/tool identities across runs and attempts', () => {
@@ -51,12 +76,12 @@ describe('agent dock canonical projection', () => {
     const ports = base(); ports.turns = [turn('run-one')];
     ports.swarms = [{ swarm_key: 'different-session', created_at: 1, agents: [{ id: 'agent-1', status: 'running' }] }];
     const items = agentDockProjection(ports); expect(items).toHaveLength(2);
-    const html = await items[1].render(); expect(html).toContain('not yet available'); expect(html).not.toContain('real-call');
+    expect(await items[1].render()).toBe('<div></div>');
   });
-  it('escapes labels and never mutates canonical source', async () => {
+  it('keeps translated copy out of rendered detail and never mutates canonical source', async () => {
     const ports = base(); ports.turns = [turn('run-one')]; const before = JSON.stringify(ports.turns);
     ports.translate = () => '<script>injection</script>';
-    expect(await agentDockProjection(ports)[0].render()).toContain('&lt;script&gt;');
+    expect(await agentDockProjection(ports)[0].render()).not.toContain('injection');
     expect(JSON.stringify(ports.turns)).toBe(before);
   });
 });
@@ -94,7 +119,7 @@ describe('assignment-scoped sidebar identity', () => {
     const before = JSON.stringify([ports.turns, ports.swarms]);
     const items = agentDockProjection(ports);
     expect(items.map(item => item.agentId)).toEqual(['A', 'B', 'C']);
-    expect(items.every(item => item.statusLabel === 'running · round 42')).toBe(true);
+    expect(items.every(item => item.statusLabel === 'running')).toBe(true);
     await items[0].render();
     const rendered = (ports.renderPanel.mock.calls as unknown as any[][])[0][0];
     expect(rendered._swarmAgents[0]).toMatchObject({ id: 'A', role: 'researcher', model: 'model-a', round: 42,
@@ -116,7 +141,7 @@ describe('assignment-scoped sidebar identity', () => {
     const ports = base(); const first = launch(['A']);
     ports.turns = [withRounds(first, { ...first })];
     ports.swarms = [{ swarm_key: 'session', agents: [{ id: 'A', status: 'running', round: 9 }] }];
-    expect(agentDockProjection(ports).map(item => [item.agentId, item.statusLabel])).toEqual([['A', 'running · round 9']]);
+    expect(agentDockProjection(ports).map(item => [item.agentId, item.statusLabel])).toEqual([['A', 'running']]);
   });
 
   it('keeps reused IDs separate across runs and attempts and binds only explicitly scoped activity', () => {
@@ -128,7 +153,7 @@ describe('assignment-scoped sidebar identity', () => {
     const items = agentDockProjection(ports);
     expect(items).toHaveLength(3); expect(new Set(items.map(item => item.key)).size).toBe(3);
     expect(items.map(item => item.status)).toEqual(['pending', 'pending', 'running']);
-    expect(items[2].statusLabel).toBe('running · round 8');
+    expect(items[2].statusLabel).toBe('running');
   });
 
   it('keeps explicit parent execution conflicts separate within the same run and attempt', () => {
@@ -165,13 +190,14 @@ describe('assignment-scoped sidebar identity', () => {
     'keeps settled $status authority over duplicate live cards (settled first: $settledFirst)', async ({ status, settledFirst }) => {
     const ports = base();
     const settled = launch(['agent-1'], { _swarmSnapshot: { swarm_id: 'run-one', settled: true,
-      agents: [{ id: 'agent-1', status, preview: 'Final bounded evidence' }] } });
+      agents: [{ id: 'agent-1', status, round: 57, preview: 'Final bounded evidence' }] } });
     const stale = launch(['agent-1'], { _swarmAgents: [{ id: 'agent-1', status: 'running' }] });
     ports.recover = round => round._swarmSnapshot?.agents || [];
     ports.turns = [withRounds(...(settledFirst ? [settled, stale] : [stale, settled]))];
     ports.swarms = [{ swarm_id: 'run-one', agents: [{ id: 'agent-1', status: 'running', round: 99 }] }];
     const items = agentDockProjection(ports);
     expect(items).toHaveLength(1); expect(items[0].status).toBe(status);
+    expect(items[0].roundCount).toBe(57);
     await items[0].render();
     const rendered = (ports.renderPanel.mock.calls as unknown as any[][])[0][0];
     expect(rendered._swarmSnapshot.settled).toBe(true);
@@ -207,7 +233,8 @@ describe('assignment-scoped sidebar identity', () => {
     ports.renderActivity = renderActivity;
     const items = agentDockProjection(ports);
     expect(items).toHaveLength(2); expect(items[0].swarmRunId).toBe('run-one');
-    expect(items[1].swarmRunId).toBe('run-two'); expect(items[0].statusLabel).toBe('running · round 4');
+    expect(items[1].swarmRunId).toBe('run-two'); expect(items[0].statusLabel).toBe('running');
+    expect(items.map(item => item.roundCount)).toEqual([4, undefined]);
     await items[0].render();
     expect(renderActivity).toHaveBeenCalledWith(expect.objectContaining({ model: 'model-a', objective: 'Full objective', round: 4 }));
     ports.swarms = [{ ...activity, created_at: 9 }];
@@ -459,5 +486,42 @@ describe('order-independent execution evidence', () => {
     expect(items).toHaveLength(1); expect(items[0].status).toBe('done');
     await items[0].render();
     expect((ports.renderPanel.mock.calls as unknown as any[][])[0][0]._swarmSnapshot.settled).toBe(true);
+  });
+});
+
+describe('live Stop authority', () => {
+  it('offers Stop only for an agent its exact live run lists as running', async () => {
+    const ports = base();
+    ports.turns = [withRounds(launch(['A', 'B', 'C']))];
+    ports.swarms = [{ swarm_id: 'run-one', swarm_key: 'session', agents: [{ id: 'A', status: 'running' },
+      { id: 'B', status: 'pending', waitReason: 'dependencies' }, { id: 'C', status: 'completed' }] }];
+    const items = agentDockProjection(ports);
+    expect(items.map(item => [item.agentId, item.status, Boolean(item.stop)])).toEqual([
+      ['A', 'running', true], ['B', 'pending', false], ['C', 'done', false]]);
+    await expect(items[0].stop!()).resolves.toBe(true);
+    expect(ports.stopAgent).toHaveBeenCalledWith('run-one', 'A');
+  });
+
+  it('never grants Stop from canonical evidence alone or over a settled verdict', () => {
+    const ports = base(); ports.turns = [turn('run-one')];
+    const [unbound] = agentDockProjection(ports);
+    expect(unbound.status).toBe('running'); expect(unbound.stop).toBeUndefined();
+    ports.recover = round => round._swarmSnapshot?.agents || [];
+    ports.turns = [withRounds(launch(['A'], { _swarmSnapshot: { swarm_id: 'run-one', settled: true,
+      agents: [{ id: 'A', status: 'done' }] } }))];
+    ports.swarms = [{ swarm_id: 'run-one', agents: [{ id: 'A', status: 'running' }] }];
+    const [settled] = agentDockProjection(ports);
+    expect(settled.status).toBe('done'); expect(settled.stop).toBeUndefined();
+  });
+
+  it('addresses activity-only rows by their run and withholds Stop without run identity', async () => {
+    const ports = base();
+    ports.swarms = [{ swarm_id: 'run-two', swarm_key: 'session', agents: [{ id: 'A', status: 'retrying' }] },
+      { swarm_key: 'legacy-session', created_at: 1, agents: [{ id: 'B', status: 'running' }] }];
+    const items = agentDockProjection(ports);
+    expect(items.map(item => [item.agentId, item.status, Boolean(item.stop)])).toEqual([
+      ['A', 'running', true], ['B', 'running', false]]);
+    await items[0].stop!();
+    expect(ports.stopAgent).toHaveBeenCalledWith('run-two', 'A');
   });
 });

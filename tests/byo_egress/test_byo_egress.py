@@ -34,6 +34,25 @@ class EgressGuardTest(unittest.TestCase):
         ok, _ = is_egress_allowed('http://0.0.0.0:8080/v1')
         self.assertFalse(ok)
 
+
+    def test_metadata_outside_link_local_always_blocked(self):
+        # Alibaba Cloud ECS (RFC 6598) and AWS Nitro IPv6 IMDS (ULA) serve
+        # instance credentials outside 169.254/16.
+        for url in ('http://100.100.100.200/latest/meta-data/',
+                    'http://[fd00:ec2::254]/latest/meta-data/'):
+            ok, reason = is_egress_allowed(url)
+            self.assertFalse(ok, url)
+            self.assertIn('metadata', reason)
+
+    def test_shared_address_space_allowed_by_default(self):
+        ok, reason = is_egress_allowed('http://100.101.102.103:11434/v1')
+        self.assertTrue(ok, reason)
+
+    def test_shared_address_space_blocked_under_private_flag(self):
+        os.environ['TOFU_BYO_BLOCK_PRIVATE'] = '1'
+        ok, reason = is_egress_allowed('http://100.101.102.103:11434/v1')
+        self.assertFalse(ok)
+        self.assertIn('private', reason)
     def test_bad_scheme_blocked(self):
         for url in ('file:///etc/passwd', 'gopher://x/', 'ftp://h/'):
             ok, _ = is_egress_allowed(url)

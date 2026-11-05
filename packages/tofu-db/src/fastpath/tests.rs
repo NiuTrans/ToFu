@@ -527,3 +527,73 @@ fn namespace_directory_publication_survives_each_lost_sync_and_preserves_ancesto
         }
     }
 }
+
+fn probe(durable_fsync_us: u64, local_fsync_us: u64, durable_lookup_us: u64, local_lookup_us: u64) -> CandidateProbe {
+    CandidateProbe {
+        durable_fsync: Duration::from_micros(durable_fsync_us),
+        local_fsync: Duration::from_micros(local_fsync_us),
+        durable_lookup: Duration::from_micros(durable_lookup_us),
+        local_lookup: Duration::from_micros(local_lookup_us),
+    }
+}
+
+#[test]
+fn candidate_probe_admits_a_commit_or_bounded_metadata_win_only() {
+    // Decisive barrier win (network SSD versus local NVMe).
+    assert!(probe(1_900, 120, 330, 300).admits());
+    // Metadata-bound network authority over a local disk with a comparable
+    // barrier: the measured 2026-10-27 BeeGFS FUSE versus HDD-overlay shape.
+    assert!(probe(1_940, 2_390, 332, 4).admits());
+    // A metadata win that would make every strict commit materially slower.
+    assert!(!probe(1_000, 2_500, 330, 4).admits());
+    // Neither cost improves decisively.
+    assert!(!probe(1_900, 1_000, 300, 150).admits());
+}
+
+#[test]
+fn pre_relocation_refusals_are_typed_and_leave_no_fastpath_state() {
+    let (_root, config) = setup();
+    fs::create_dir_all(&config.local_authority).unwrap();
+    let error = config.prepare_with_probe(None, false).err().unwrap();
+    assert_eq!(admission_refusal(&error).map(|refusal| refusal.reason), Some("unclaimed-artifacts"));
+    fs::remove_dir(&config.local_authority).unwrap();
+
+    let error = require_capacity(config.local_authority.parent().unwrap(), u64::MAX / 4).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+    assert_eq!(admission_refusal(&error).map(|refusal| refusal.reason), Some("capacity"));
+
+    let walk = corpus_walk_refusal(io::Error::new(io::ErrorKind::InvalidInput, "capacity preflight directory bound exceeded"));
+    assert_eq!(admission_refusal(&walk).map(|refusal| refusal.reason), Some("authority-too-large"));
+    let fatal = corpus_walk_refusal(io::Error::new(io::ErrorKind::PermissionDenied, "denied"));
+    assert!(admission_refusal(&fatal).is_none(), "an unreadable corpus is not an admission refusal");
+
+    assert!(!relocation_is_fenced(&config.durable_authority));
+    assert!(!config.durable_authority.join(PENDING_MARKER).exists());
+    assert!(Engine::open(&config.durable_authority).is_ok());
+}
+
+#[test]
+fn stale_preparation_is_a_typed_refusal_but_an_active_fence_never_declines() {
+    let (_root, config) = setup();
+    let mut source = Engine::open(&config.durable_authority).unwrap();
+    let pending = Marker {
+        format: FORMAT.into(),
+        authority_uuid: *source.state().authority_uuid.as_bytes(),
+        local_authority: config.local_authority.clone(),
+        shadow_directory: config.shadow_directory.clone(),
+        seed_sequence: source.state().durable_sequence,
+        seed_hash: source.state().root_hash,
+        interval_ms: 1000,
+    };
+    publish_marker(&config.durable_authority.join(PENDING_MARKER), &pending).unwrap();
+    source.commit(b"served-classically-after-an-interrupted-seed").unwrap();
+    drop(source);
+    let error = config.prepare_for_test(None).err().unwrap();
+    assert_eq!(admission_refusal(&error).map(|refusal| refusal.reason), Some("stale-preparation"));
+    assert!(!relocation_is_fenced(&config.durable_authority));
+
+    let (_active_root, active) = setup();
+    let lease = active.prepare_for_test(None).unwrap();
+    drop(lease);
+    assert!(relocation_is_fenced(&active.durable_authority));
+}

@@ -63,9 +63,17 @@ def _handle_execute_js(fn_args, runtime):
 
 
 def _handle_screenshot(fn_args, runtime):
-    params = {}
-    if fn_args.get('tabId') is not None:
-        params['tabId'] = int(fn_args['tabId'])
+    # Without a tabId the extension captures the focused window's active tab,
+    # which is usually the user's own page (often the Tofu chat), not the page
+    # the agent works in. Resolve the owned working tab like every other
+    # tab-scoped tool and never let the extension guess.
+    from lib.browser._resolve import resolve_work_tab
+    tab_id = resolve_work_tab(
+        fn_args, route_key=runtime.route_key, send=runtime.send)
+    if tab_id is None:
+        return ('Error: no tab to screenshot. Pass tab_id (see '
+                'browser_list_tabs), or call browser_navigate first.')
+    params = {'tabId': int(tab_id)}
     if fn_args.get('format'):
         params['format'] = fn_args['format']
     # fullPage defaults to True on the extension side; pass through only if

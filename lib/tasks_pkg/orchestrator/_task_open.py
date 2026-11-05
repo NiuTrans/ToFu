@@ -54,18 +54,19 @@ def snapshot_turn_input(task) -> None:
 def log_task_open(task, tid) -> float:
     """Emit the queue-wait timing line + the ▶ START bracket.
 
-    queue_wait compares ``_t_created`` (set in create_task) against the
-    moment a thread picked the task up — thread-pool / queue latency.
-    The START bracket logs the FULL task id (not the 8-char prefix) so
-    a user can copy the id from the cost popover and grep the whole
+    queue_wait compares ``_t_created_monotonic`` (set in create_task)
+    against the moment a thread picked the task up — thread-pool / queue
+    latency. The START bracket logs the FULL task id (not the 8-char prefix)
+    so a user can copy the id from the cost popover and grep the whole
     turn's lifecycle; it pairs with the '[Task:%s] ■ DONE' summary.
 
     Returns:
-        ``_t_run_start`` — the caller's later ``_t_prep_done`` anchor.
+        ``_t_run_start`` — the monotonic anchor of the caller's later
+        ``_t_prep_done``.
     """
-    _t_run_start = time.time()
-    _t_created = task.get('_t_created')
-    if _t_created:
+    _t_run_start = time.monotonic()
+    _t_created = task.get('_t_created_monotonic')
+    if _t_created is not None:
         _queue_wait = max(0.0, _t_run_start - _t_created)
         logger.info('[Timing:%s] queue_wait=%.3fs (create→run_task)',
                     tid, _queue_wait)

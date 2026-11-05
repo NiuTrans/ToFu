@@ -1,10 +1,14 @@
 """Registered task checkpoints are not delivered until canonical adoption."""
+from pathlib import Path
+import json
 import subprocess
 import pytest
 
 from lib import integration_control as ic
 from lib.project_mod import delivery
 from lib import integration_state_repository as state
+
+ROOT = Path(__file__).resolve().parents[2]
 
 pytestmark = pytest.mark.unit
 
@@ -308,11 +312,15 @@ def test_git_subprocess_inherits_workspace_lease(repo, monkeypatch):
     with workspace_write_lease(canonical):
         expected = workspace_lease_fds()
         def run(*args, **kwargs):
-            observed.append(kwargs.get('pass_fds'))
+            argv = args[0] if args else kwargs['args']
+            observed.append((list(argv), kwargs.get('pass_fds')))
             return original(*args, **kwargs)
         monkeypatch.setattr(ic.subprocess, 'run', run)
         assert ic._git(canonical, ['status', '--short']).returncode == 0
-    assert expected and observed == [expected]
+    # Git read preparation may probe `git --version` first; the lease belongs
+    # to the one command that touches the repository.
+    status_runs = [fds for argv, fds in observed if 'status' in argv]
+    assert expected and status_runs == [expected]
 
 
 @pytest.mark.parametrize('live_status', ['running', 'done'])
@@ -457,6 +465,32 @@ def test_automatic_task_workspace_freezes_input_without_mutating_canonical(repo,
     assert 'untracked.txt' not in git(root, 'ls-tree', '--name-only', publication)
     assert git(root, 'status', '--porcelain') == status
 
+
+def test_clean_source_workspace_reuses_selected_commit_without_repeated_capture(
+        repo, tmp_path, monkeypatch):
+    root, _work, owner = repo
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(tmp_path / 'managed'))
+    before = git(root, 'rev-parse', 'HEAD')
+    assert git(root, 'status', '--porcelain') == ''
+    assert ic._clean_input_tree(root, before, cancel=None) == git(root, 'rev-parse', 'HEAD^{tree}')
+
+    original = ic._alternate_index_tree
+    captures = []
+
+    def observed_capture(*args, **kwargs):
+        tree = original(*args, **kwargs)
+        captures.append(tree)
+        return tree
+
+    monkeypatch.setattr(ic, '_alternate_index_tree', observed_capture)
+    created = ic.create_task_workspace(str(root), 'clean-source', user_id=owner)
+    row = state.get_workspace(str(root), 'clean-source', user_id=owner)
+    assert created['workId'] == 'clean-source'
+    assert row['origin']['inputBaseSha'] == before
+    assert row['origin']['inputHeadSha'] == before
+    assert len(captures) == 1
+    assert git(created['workspacePath'], 'rev-parse', 'HEAD') == before
+    assert git(created['workspacePath'], 'status', '--porcelain') == ''
 
 def test_noop_task_does_not_publish_borrowed_dirty_input(repo, tmp_path, monkeypatch):
     root, _work, owner = repo
@@ -634,6 +668,51 @@ def test_task_delta_conflict_preserves_entire_canonical_tree_and_task_checkpoint
     assert git(root, 'show', row['checkpoint_sha'] + ':base.txt') == 'task replacement'
 
 
+def test_task_delta_regenerates_i18n_after_merging_authored_sources(repo, monkeypatch, tmp_path):
+    """The 4ccf615f shape: independent locale edits conflict in compact outputs."""
+    root, work, owner = repo
+    for directory in (root / 'frontend/src/i18n/locales',
+                      root / 'frontend/src/i18n/generated', root / 'scripts'):
+        directory.mkdir(parents=True, exist_ok=True)
+    (root / 'frontend/src/i18n/languages.json').write_text(
+        '{"languages":[{"code":"en","tag":"en","name":"English",'
+        '"englishName":"English"}],"sources":["en"],"fallback":"en",'
+        '"default":"en"}\n')
+    (root / 'frontend/src/i18n/locales/en.json').write_text(
+        '{\n  "key0": "Value0",\n  "key1": "Value1",\n  "key2": "Value2"\n}\n')
+    (root / 'scripts/gen_i18n_contract.mjs').write_bytes(
+        (ROOT / 'scripts/gen_i18n_contract.mjs').read_bytes())
+    subprocess.run(['node', 'scripts/gen_i18n_contract.mjs'], cwd=root,
+                   check=True, capture_output=True, timeout=60)
+    git(root, 'add', '-A')
+    git(root, 'commit', '-m', 'shared locale base')
+    git(work, 'merge', '--ff-only', 'main')
+    baseline = git(work, 'rev-parse', 'HEAD')
+    assert baseline == git(root, 'rev-parse', 'HEAD')
+    for checkout, key, value in ((work, 'task', 'Task'), (root, 'canonical', 'Canonical')):
+        source = json.loads((checkout / 'frontend/src/i18n/locales/en.json').read_text())
+        source = {key: value, **source} if checkout == work else {**source, key: value}
+        (checkout / 'frontend/src/i18n/locales/en.json').write_text(
+            json.dumps(source, indent=2) + '\n')
+        subprocess.run(['node', 'scripts/gen_i18n_contract.mjs'], cwd=checkout,
+                       check=True, capture_output=True, timeout=60)
+        git(checkout, 'add', '-A')
+        git(checkout, 'commit', '-m', key)
+    delivery.bind_task_workspace(str(work), 'task', user_id=owner,
+                                 conversation_id='conv')
+    from lib.project_mod import task_delta_delivery
+    checkpoint = ic._alternate_index_checkpoint(work, baseline, 'task')
+    source = task_delta_delivery._canonical_tree(root, git(root, 'rev-parse', 'HEAD'))
+    source = ic._checkpoint_tree(root, git(root, 'rev-parse', 'HEAD'), source, 'task')
+
+    target, conflict, paths = task_delta_delivery._merge_workspace_delta(
+        root, source, tmp_path / 'task.patch', 'task', tmp_path / 'index', baseline, checkpoint)
+
+    assert conflict == '' and paths == [], (conflict, paths)
+    catalog = json.loads(git(root, 'show', target + ':frontend/src/i18n/generated/en.generated.json'))
+    assert catalog == {'task': 'Task', 'key0': 'Value0', 'key1': 'Value1',
+                       'key2': 'Value2', 'canonical': 'Canonical'}
+
 
 @pytest.mark.parametrize('outcome', ['failed', 'cancelled', 'stopped'])
 def test_automatic_unsuccessful_task_is_preserved_without_publication(repo, monkeypatch, outcome):
@@ -801,8 +880,8 @@ def test_source_snapshot_observes_new_ignore_rules_without_retaining_untracked_f
     original = ic._alternate_index_tree
     captured = []
 
-    def capture(checkout, parent, index_path):
-        tree = original(checkout, parent, index_path)
+    def capture(checkout, parent, index_path, **kwargs):
+        tree = original(checkout, parent, index_path, **kwargs)
         if not captured:
             (root / '.gitignore').write_text('ignored-later.txt\n')
         captured.append(tree)
@@ -928,7 +1007,10 @@ def test_source_snapshot_waits_for_content_writer_and_honors_cancellation(repo, 
     def writer():
         with workspace_lease.workspace_write_lease(root):
             ready.set()
-            assert waiting.wait(5)
+            # Only the snapshot's fenced read (or test teardown) releases the
+            # writer. Its optimistic captures run dozens of git commands; a
+            # timed wait expiring first drops the writer before it writes.
+            waiting.wait()
             (root / 'base.txt').write_text('writer finished\n')
             task['aborted'] = cancel_while_waiting
 

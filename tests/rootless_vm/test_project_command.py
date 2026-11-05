@@ -24,9 +24,48 @@ from rootless_vm import pdeath_exec, qemu_launcher
 
 pytestmark = pytest.mark.unit
 
+_LEASE_NAMESPACE_ENV = 'TOFU_TEST_PROJECT_COMMAND_LEASE_NAMESPACE'
+
+
+def _process_handle_refusal():
+    try:
+        pidfd.require_process_handles()
+    except OSError as error:
+        return (f'host cannot open pidfd process handles ({os.strerror(error.errno)}); '
+                'run_project_command refuses every launch here by design')
+    return None
+
+
+_PROCESS_HANDLE_REFUSAL = _process_handle_refusal()
+requires_process_handles = pytest.mark.skipif(
+    _PROCESS_HANDLE_REFUSAL is not None, reason=_PROCESS_HANDLE_REFUSAL or '')
+
+
+def _adopt_lease_namespace(directory):
+    """Point this process's workspace lease namespace at a private directory.
+
+    The jail lives below the checkout, so run_project_command fences every
+    checkout ancestor in the per-user lease namespace. A running Tofu server
+    shares that namespace and fences the cwd of its agents' commands there;
+    such a fence on the checkout must not decide these tests.
+    """
+    from lib.project_mod import workspace_lease
+    namespace = Path(directory)
+    workspace_lease._tree_lock_namespace = lambda: namespace
+
 
 @pytest.fixture
-def jailed_shell(host_tmp_path):
+def private_lease_namespace(tmp_path, monkeypatch):
+    from lib.project_mod import workspace_lease
+    namespace = tmp_path / 'workspace-leases'
+    namespace.mkdir(mode=0o700)
+    monkeypatch.setattr(workspace_lease, '_tree_lock_namespace', lambda: namespace)
+    monkeypatch.setenv(_LEASE_NAMESPACE_ENV, str(namespace))
+    return namespace
+
+
+@pytest.fixture
+def jailed_shell(host_tmp_path, private_lease_namespace):
     jail = host_tmp_path / 'jail'
     jail.mkdir(mode=0o700)
     sources = [Path(shutil.which(name)).resolve() for name in ('bash', 'setsid', 'sleep')]
@@ -58,6 +97,7 @@ def jailed_shell(host_tmp_path):
     return spec
 
 
+@requires_process_handles
 def test_expired_original_deadline_cannot_start(jailed_shell):
     with pytest.raises(TimeoutError, match='original command deadline'):
         run_project_command(replace(jailed_shell, deadline_epoch=time.time() - 1))
@@ -95,11 +135,13 @@ def test_invalid_scope_never_launches(jailed_shell, field, value):
         run_project_command(replace(jailed_shell, **{field: value}))
 
 
+@requires_process_handles
 def test_cancel_before_spawn(jailed_shell):
     result = run_project_command(jailed_shell, task={'aborted': True})
     assert 'aborted' in result.lower()
 
 
+@requires_process_handles
 def test_pidfd_cannot_signal_a_reused_numeric_identity():
     child = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(30)'])
     descriptor = None
@@ -162,6 +204,7 @@ def _read_spec(payload):
 
 def _supervise_case(case, payload):
     """An expendable subreaper owns all children, including crash orphans."""
+    _adopt_lease_namespace(os.environ[_LEASE_NAMESPACE_ENV])
     if case == 'owner_death':
         return _supervise_owner_death(payload)
     assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
@@ -270,6 +313,7 @@ def _supervise_case(case, payload):
                 time.sleep(0.02)
 
 def _controller(payload):
+    _adopt_lease_namespace(os.environ[_LEASE_NAMESPACE_ENV])
     task = {}
     spec = _read_spec(payload)
     spec = replace(spec, argv=(spec.argv[0], '-c',
@@ -343,6 +387,7 @@ def _supervise_owner_death(payload):
         child.stderr.close()
 
 
+@requires_process_handles
 @pytest.mark.parametrize('case', ['cancel', 'context', 'interrupt', 'timeout',
                                 'exit', 'parent_death', 'owner_death', 'write', 'file_limit'])
 def test_real_namespace_command_teardown(jailed_shell, case, host_tmp_path):

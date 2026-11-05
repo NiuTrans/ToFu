@@ -166,15 +166,15 @@ def test_reexec_arms_shutdown_before_saving_snapshot(monkeypatch, tmp_path):
         lambda: calls.append(('prepared', None)) or True)
     monkeypatch.setattr('lib.write_freshness.save_snapshot',
                         lambda: calls.append(('save', None)) or True)
-    monkeypatch.setattr(upd, 'data_root', lambda: str(tmp_path))
+    monkeypatch.setattr(reexec, 'data_root', lambda: str(tmp_path))
     monkeypatch.setattr(
-        upd, '_prepare_server_reexec_frontend', lambda: '')
+        reexec, 'prepare_server_reexec_frontend', lambda: '')
     def refuse_manager(*_args, **_kwargs):
         raise RuntimeError('isolated test exercises the no-manager fallback')
     monkeypatch.setattr(
         'serverctl_pkg.application_restart.run_application_restart_control',
         refuse_manager)
-    assert upd._perform_server_reexec('test') is True
+    assert reexec.perform_server_reexec('test') is True
     assert calls == [
         ('begin', 'test'),
         ('save', None),

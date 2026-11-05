@@ -1,0 +1,196 @@
+/* ══════════════════════════════════════════
+   Trading Advisor 投资持仓顾问
+   ══════════════════════════════════════════ */
+
+/* Iteration banner inside streaming message */
+.ep-iter-banner{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:var(--space-1) var(--space-3);
+  margin-bottom:var(--space-2);
+  background:rgba(245,158,11,0.08);
+  border:1px solid rgba(245,158,11,0.2);
+  border-radius:20px;
+  font-size:var(--font-size-xs);
+  font-weight:700;
+  font-family:'JetBrains Mono',monospace;
+  color:#f59e0b;
+  letter-spacing:.02em;
+}
+/* Review score display */
+/* Endpoint result tag on rendered messages */
+
+/* ── Critic verdict badges ── */
+.ep-verdict-badge{
+  display:inline-flex;
+  align-items:center;
+  gap:3px;
+  padding:2px var(--space-2);
+  border-radius:10px;
+  font-size:10px;
+  font-weight:700;
+  font-family:'JetBrains Mono',monospace;
+  margin-left:6px;
+  vertical-align:middle;
+}
+.ep-verdict-stop{background:rgba(34,197,94,0.10);color:#22c55e;border:1px solid rgba(34,197,94,0.25)}
+.ep-verdict-continue{background:rgba(245,158,11,0.10);color:#f59e0b;border:1px solid rgba(245,158,11,0.25)}
+.ep-verdict-stuck{background:rgba(239,68,68,0.10);color:#ef4444;border:1px solid rgba(239,68,68,0.25)}
+.ep-verdict-planner{background:rgba(99,102,241,0.10);color:#6366f1;border:1px solid rgba(99,102,241,0.25)}
+.ep-verdict-replan{background:rgba(217,119,6,0.12);color:#d97706;border:1px solid rgba(217,119,6,0.30)}
+/* Planner message styling — indigo accent to distinguish from worker */
+.ep-planner-msg{
+  border-left:2px solid rgba(99,102,241,0.35);
+}
+.ep-planner-msg .message-avatar{
+  color:#6366f1;
+  width:40px;height:40px;
+}
+.ep-planner-msg .message-role{
+  color:#6366f1;
+}
+.ep-planner-msg .md-content{
+  color:var(--text-secondary);
+}
+/* Planner iteration banner variant */
+.ep-iter-banner-planner{
+  background:rgba(99,102,241,0.08);
+  border-color:rgba(99,102,241,0.2);
+  color:#6366f1;
+}
+/* Critic message styling — slightly different background to distinguish from user */
+.ep-critic-msg{
+  border-left:2px solid rgba(245,158,11,0.35);
+}
+.ep-critic-msg .message-avatar{
+  color:#f59e0b;
+  width:40px;height:40px;
+}
+.ep-critic-msg .md-content{
+  color:var(--text-secondary);
+}
+/* Worker message styling — green accent */
+.ep-worker-msg .message-avatar{
+  width:40px;height:40px;
+}
+/* Autopilot virtual user — distinguishable from a real user message but
+ * still rendered in the user lane.  Dashed border + cool indigo accent. */
+.vu-user-msg{
+  opacity:.94;
+}
+.vu-user-msg .message-avatar{
+  color:#f59e0b;
+  width:40px;height:40px;
+}
+.vu-user-msg .message-role{
+  color:#f59e0b;
+  font-style:italic;
+}
+/* Header above the autopilot's investigation tool panel inside a VU
+ * message.  Tells the user "this isn't normal user content — it's the
+ * tool calls Autopilot ran before composing the reply". */
+/* Provenance boundary header above the VU's REPLY text.  The
+ * investigation (indigo, above) + thinking (below) are display-only; only
+ * this reply is fed to the agent as its next message.  Green "sent" accent
+ * contrasts with the indigo "private process" accent so the human reads the
+ * boundary at a glance. */
+/* ── VU provenance: PRIVATE zone (collapsible) ──
+ * Wraps the autopilot's investigation tool panel + private reasoning into a
+ * single default-collapsed container. The dashed indigo frame + "Private ·
+ * not sent" summary make it unmistakable that NONE of this reaches the agent
+ * (only the reply below does — see conv_message_builder._build_user_message).*/
+/* ── VU provenance: SENT zone (the reply that reaches the agent) ──
+ * Bounds the handoff header + reply markdown in a green-accented block so the
+ * "this is what's sent" region is visually separate from the private zone. */
+/* ── Autopilot run fold ──────────────────────────────────────────────
+ * Collapses a concluded autopilot run's VU<->agent transcript into one
+ * <details>, leaving [human msg → summary report] as the visible spine. */
+.autopilot-run-fold{
+  margin:var(--space-2) 0;
+  border:1px solid rgba(129,140,248,0.30);
+  border-radius:10px;
+  background:rgba(129,140,248,0.045);
+  overflow:hidden;
+}
+/* "View report" button — opens the close-out debrief in a sub-window. Shares
+ * the summarize button's visual language plus a leading document glyph. */
+
+/* Light theme: the base indigo hex values are light-on-light over the cream
+ * --bg-primary (#f4f2ed) — swap to dark indigo (matches --accent #6366f1). */
+[data-theme="light"] .autopilot-run-fold{
+  border-color:rgba(99,102,241,0.35);
+  background:rgba(99,102,241,0.05);
+}
+/* Tofu theme: indigo clashes with the warm cream palette and is unreadable on
+ * --bg-primary (#F5F3ED) — use the kinako ink/accent (#BB9572) family. */
+[data-theme="tofu"] .autopilot-run-fold{
+  border-color:rgba(187,149,114,0.4);
+  background:rgba(187,149,114,0.07);
+}
+/* Inner turns get a subtle inset so the fold boundary reads clearly. */
+.autopilot-run-fold > .message{margin-left:6px;margin-right:6px;}
+.autopilot-run-fold[open]{padding-bottom:var(--space-1);}
+/* ── Autopilot run-tail notice ────────────────────────────────────────
+ * Shown when a run ended WITHOUT answering (yielded to a human / aborted /
+ * superseded / hit a safety cap). Amber rather than the indigo run-fold
+ * palette: this is an unfinished outcome, not a clean conclusion, and it must
+ * not read as a normal turn. Any preserved-but-unsent VU text sits behind the
+ * <details> inside. */
+.ap-run-notice{
+  margin:6px 0 10px;
+  padding:var(--space-2) var(--space-3);
+  border:1px dashed rgba(245,158,11,0.42);
+  border-radius:10px;
+  background:rgba(245,158,11,0.06);
+  font-size:12.5px;
+  line-height:1.5;
+}
+.ap-run-notice-label{color:#f59e0b;font-style:italic;}
+.ap-run-notice-unsent{margin-top:6px;}
+.ap-run-notice-unsent > summary{
+  cursor:pointer;
+  color:var(--text-secondary);
+  font-size:var(--font-size-sm);
+}
+/* Plain text, deliberately NOT rendered markdown — it never became a turn. */
+.ap-run-notice-text{
+  margin:6px 0 0;
+  padding:var(--space-2) 10px;
+  max-height:320px;
+  overflow:auto;
+  white-space:pre-wrap;
+  word-break:break-word;
+  border-radius:8px;
+  background:var(--bg-tertiary);
+  color:var(--text-secondary);
+  font-size:var(--font-size-sm);
+}
+/* Lazy full-report expander: the fold record carries the settings excerpt;
+ * the complete stop report is fetched from the durable GoalRun transition. */
+.ap-run-notice-full-report{
+  margin-top:6px;
+  padding:2px 10px;
+  border:1px solid var(--border-default, rgba(128,128,128,0.35));
+  border-radius:8px;
+  background:transparent;
+  color:var(--text-secondary);
+  font-size:var(--font-size-sm);
+  cursor:pointer;
+}
+.ap-run-notice-full-report:hover:not(:disabled){color:var(--text-primary);}
+.ap-run-notice-full-report:disabled{opacity:0.6;cursor:default;}
+/* Light / tofu: the dark-theme amber is washed out on the cream surfaces —
+ * darken to keep the label legible (mirrors the run-fold theme overrides). */
+[data-theme="light"] .ap-run-notice,
+[data-theme="tofu"] .ap-run-notice{
+  border-color:rgba(180,83,9,0.42);
+  background:rgba(180,83,9,0.06);
+}
+[data-theme="light"] .ap-run-notice-label,
+[data-theme="tofu"] .ap-run-notice-label{color:#b45309;}
+/* The close-out report banner (legacy: visible tail of a pre-sidecar run). */
+
+/* Live status chip while the autopilot virtual-user is thinking /
+ * running tools.  Indigo accent matches the VU message styling. */
+/* (Swarm Panel styles consolidated in main swarm section above) */

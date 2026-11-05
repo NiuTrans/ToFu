@@ -34,7 +34,9 @@ uses that store port; policy and verification live in `docs/CONTEXT_COMPACTION.m
 `project_coordination.py` owns explicit coordinator metadata binding and the
 ordinary root role guidance; it starts no execution.
 `project_messages.py` owns passive same-project originals and consideration
-receipts; `contracts/project_messages_v1.json` is the shared tool/wire authority.
+receipts; `contracts/project_messages_v1.json` is the shared tool/wire authority
+and its `history` section the durable segment layout (verify both
+`test_project_message_history.py` suites, unit and three-authority).
 Neither module dispatches work or extends ProjectWorkItem lifecycle. Optional
 input budget and exact physical-request witnesses live in
 `lib/tasks_pkg/message_input_{budget,receipts}.py`; do not copy those policies
@@ -53,9 +55,15 @@ review, cancellation and paged status to ProjectDispatchService. No private exec
 The source/policy authority is `lib/project_dispatch/delegation.py`; verify
 `test_coordinator_workers.py` and native `test_coordinator_workers_authority.py`.
 
-`coordinator_budget.py` owns owner/project future defaults and passive request
-usage projection, using dispatch receipts. Saving defaults cannot amend a running
-request or create work. Verify the budget HTTP CAS/owner journey and native restart.
+`coordinator_progress.py` owns the Coordinator-authored task board
+(`progress*` in `project_coordination_v1.schema.json`): one CAS head per
+owner/project for the current binding, full replacement, no authority. It is
+the human's whole progress view; questions never live there (they are
+`ask_human` cards). Verify `test_coordinator_progress.py`.
+
+`coordinator_budget.py` owns the passive request usage projection from dispatch
+receipts. Requests have no spending ceiling, so there are no defaults to save.
+Verify the usage HTTP owner journey and native restart.
 
 ## Verification
 

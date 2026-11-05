@@ -119,15 +119,29 @@ def test_bound_coordinator_role_is_ordinary_root_guidance(setup, monkeypatch):
     monkeypatch.setattr(module, 'ProjectCoordinationRepository', lambda owner: repository)
     task = {'id': 'root', 'convId': 'worker', '_userId': 1, 'config': {}}
     role = module.prepare_coordinator_role('/project', 'worker', user_id=1, task=task)
-    assert 'dispatch-only' in role and 'delegate_project_work' in role
-    assert 'dispatch_project_assignment' in role and 'get_conversation' in role
-    assert 'never perform concrete file reads/edits' in role
-    assert 'current accepted human request' in role and 'await_project_workers' in role
-    assert 'never new user authority' in role
+    assert role == module.COORDINATOR_ROLE_GUIDANCE
+    assert 'dispatch-only' in role and 'never perform concrete file reads/edits' in role
+    assert 'delegate_project_work in that same turn' in role and 'await_project_workers' in role
+    assert 'no spending limit' in role and 'never new user authority' in role
+    # Session-free coordination: progress lives on the task board and every
+    # question is an ask_human card, never a report or a timed decision.
+    assert 'update_task_progress' in role and 'ask_human' in role
+    assert 'blocking=false' in role and 'blocking=true' in role
+    assert 'request_user_decision' not in role
     for changes in ({'_parentTaskId': 'parent'}, {'_userId': 2}, {'_transientRuntime': True}, {'convId': 'other'}):
         assert not module.prepare_coordinator_role('/project', 'worker', user_id=1, task={**task, **changes})
     repository.bind('/project', '', expected_revision=1, command_id='withdraw')
     assert not module.prepare_coordinator_role('/project', 'worker', user_id=1, task=task)
+
+
+@pytest.mark.parametrize('model', ['gpt-4o', 'claude-sonnet-4-5', 'glm-4.6', 'deepseek-chat'])
+def test_coordinator_role_fits_its_context_block(model):
+    # The composer truncates a block over its budget; a clipped role silently
+    # loses its last instructions (the previous role lost about a quarter).
+    from lib.conversations.project_coordination import COORDINATOR_ROLE_GUIDANCE
+    from lib.tasks_pkg.context_composer.registry import injection_spec
+    from lib.token_counter import count_text
+    assert count_text(COORDINATOR_ROLE_GUIDANCE, model=model) <= injection_spec('project_coordinator').max_tokens
 
 
 def test_historical_conversation_cannot_be_promoted(setup):

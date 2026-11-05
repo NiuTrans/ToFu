@@ -58,4 +58,5 @@ def test_postgres_source_preference_and_owner_survive_continuation(tmp_path, que
                     break
             assert cursor is None
             assert hits == [{'id': 'conversation', 'snippet': '…' + query + ' human original…',
-                             'role': 'user', 'match_field': 'originalContent'}]
+                             'role': 'user', 'match_field': 'originalContent',
+                             'turn_id': 't0521', 'ordinal': 521}]

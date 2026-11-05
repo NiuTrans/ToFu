@@ -10,6 +10,7 @@ Contains:
 import queue
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Generator
 from lib.agent_core.worker_executor import RecoverableAgentExecutor
 
@@ -238,8 +239,9 @@ class StreamingScheduler:
             logger.debug('[Scheduler] After add: pending=%d running=%d completed=%d pending_ids=%s',
                          len(self._pending), len(self._running), len(self._completed),
                          [s.id for s in self._pending])
-            self._launch_ready_locked()
-            return list(specs)
+            ready = self._reserve_ready_locked()
+        self._submit_ready(ready)
+        return list(specs)
 
     def run_until_idle(self, timeout: float | None = None) -> list[tuple[SubTaskSpec, SubAgentResult]]:
         """Block until there are no pending or running specs.
@@ -416,7 +418,7 @@ class StreamingScheduler:
                 return
             if idle and drained:
                 # Got items but now idle — loop once more to confirm
-                # nothing new arrived (e.g. from _launch_ready_locked
+                # nothing new arrived (e.g. from ready reservation
                 # triggered by our completions unblocking dependents).
                 continue
 
@@ -467,7 +469,7 @@ class StreamingScheduler:
         This used to be ``shutdown(wait=False)``, which returned while agents
         were still running. Two concrete failures followed:
 
-          * a late completion calls ``_launch_ready_locked`` to unblock its
+          * a late completion submits newly dependency-ready work to unblock its
             dependents, and submitting to a shut-down pool raises
             ``RuntimeError: cannot schedule new futures after shutdown``
             (verified on this interpreter) — killing the dependent inside
@@ -525,8 +527,8 @@ class StreamingScheduler:
                     + '\n---\n'.join(dep_results))
         return ''
 
-    def _launch_ready_locked(self):
-        """Find pending specs with satisfied deps, submit to pool.
+    def _reserve_ready_locked(self):
+        """Atomically reserve pending specs with satisfied deps.
 
         Completed dependency evidence is appended to the worker messages
         after construction, leaving the delegated user context unchanged.
@@ -534,8 +536,8 @@ class StreamingScheduler:
         Caller holds _lock.
         """
         if self._abort_check():
-            logger.debug('[Scheduler] _launch_ready_locked skipped — abort flag set')
-            return
+            logger.debug('[Scheduler] ready reservation skipped — abort flag set')
+            return []
 
         still_pending = []
         launched = []
@@ -543,8 +545,7 @@ class StreamingScheduler:
         for spec in self._pending:
             if self._deps_satisfied(spec):
                 self._running[spec.id] = spec
-                self._pool.submit(self._run_one, spec)
-                launched.append(spec.id)
+                launched.append(spec)
             else:
                 still_pending.append(spec)
                 waiting_for = [d for d in (spec.depends_on or []) if d not in self._completed]
@@ -552,9 +553,32 @@ class StreamingScheduler:
         self._pending = still_pending
 
         if launched:
-            logger.debug('[Scheduler] Launched %d agent(s): %s', len(launched), launched)
+            logger.debug('[Scheduler] Reserved %d agent(s): %s',
+                         len(launched), [spec.id for spec in launched])
         if blocked:
             logger.debug('[Scheduler] %d spec(s) still blocked on deps: %s', len(blocked), blocked)
+
+        return launched
+
+    def _submit_ready(self, ready):
+        """Start reserved work without holding the scheduler state lock.
+
+        Demand submission includes physical thread startup. Reservations remain
+        in _running until completion, so idle/shutdown cannot lose a handoff.
+        A refused submission never entered the callable and settles once through
+        the same callback/queue path, without retrying or inventing side effects.
+        """
+        pending = deque(ready)
+        while pending:
+            spec = pending.popleft()
+            try:
+                self._pool.submit(self._run_one, spec)
+            except Exception as exc:
+                result = SubAgentResult(
+                    status=SubAgentStatus.FAILED.value,
+                    error_message=f'{type(exc).__name__}: {exc}',
+                )
+                pending.extend(self._record_completion(spec, result))
 
     def _mark_admitted(self, spec: SubTaskSpec) -> None:
         """Publish physical execution only after cancellation and dependency checks allow it."""
@@ -737,6 +761,10 @@ class StreamingScheduler:
         elapsed_total = time.monotonic() - t0
         logger.debug('[Scheduler] _run_one FINISHED agent=%s final_status=%s elapsed=%.1fs',
                       spec.id, result.status if result else 'None', elapsed_total)
+        self._submit_ready(self._record_completion(spec, result))
+
+    def _record_completion(self, spec, result):
+        """Publish callback before atomic result/idle visibility; reserve dependents."""
         if self._on_complete:
             try:
                 self._on_complete(spec, result)
@@ -762,8 +790,9 @@ class StreamingScheduler:
             logger.debug('[Scheduler] Queue state after agent=%s: pending=%d running=%s completed=%d',
                          spec.id, len(self._pending),
                          list(self._running.keys()), len(self._completed))
-            # Unblock dependents
-            self._launch_ready_locked()
+            # Reserve dependents atomically with completion. Physical startup
+            # follows outside this lock, including failed-submission settlement.
+            return self._reserve_ready_locked()
 
 
 # ═══════════════════════════════════════════════════════════

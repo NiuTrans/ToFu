@@ -29,7 +29,7 @@ def route_app():
         'ACTIVE_API_MAJOR': API_MAJOR, 'API_V4_ENABLED': True,
     })
     configure_api_version_policy(app)
-    register_all(app, start_workers=False, discover_plugins=False)
+    register_all(app, discover_plugins=False)
     return app
 
 

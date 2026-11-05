@@ -52,7 +52,7 @@ def check():
                     work.operation(0)
                     before = len(chat_task_runtime.poll(work.task['id'])['events']); statuses=[]
                     result = work.port.invoke(work.task, {}, lambda *_args, **options: statuses.append(options['status']), project_root=root/'foreign')
-                    assert result[2] and statuses == ['error']
+                    assert result[2] is False and statuses == ['error']
                     events = chat_task_runtime.poll(work.task['id'])['events']
                     assert len(events) == before+1 and events[-1]['type'] == 'tool_result' and events[-1]['status'] == 'error'
                 finally:

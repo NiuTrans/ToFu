@@ -135,3 +135,59 @@ class TestFetchUrlHtmlPrimary:
         )
         assert 'x' * 120 in out and 'Coverage:' in out
         assert seen['route'] == ('test-browser', '41')
+
+
+@pytest.mark.unit
+class TestReadPageUrlReceipt:
+    """A successful text read names its accepted page on the timeline row.
+
+    The Sources footer cites that row's URL — the page the model read —
+    never the links that page contains.
+    """
+
+    def _runtime(self, payload, metadata):
+        return BrowserToolRuntime(
+            owner_user_id='41', client_id='test-browser',
+            sender=lambda *a, **k: (payload, None), display_metadata=metadata)
+
+    def test_successful_read_reports_the_accepted_page_url(self):
+        metadata = {}
+        payload = {'html': _REAL_HTML, 'htmlTruncated': False, 'meta': {},
+                   'title': 'Doc', 'url': 'https://example.com/a'}
+        out = _handle_read_page({'tabId': 1, 'mode': 'text'}, self._runtime(payload, metadata))
+        assert 'Real Heading' in out
+        assert metadata == {'url': 'https://example.com/a'}
+
+    def test_read_without_content_reports_no_page(self):
+        metadata = {}
+        payload = {'html': '', 'htmlTruncated': False, 'meta': {},
+                   'title': 'Empty', 'url': 'https://example.com/empty'}
+        _handle_read_page({'tabId': 1, 'mode': 'text'}, self._runtime(payload, metadata))
+        assert metadata == {}
+
+    @pytest.mark.parametrize('content,reported,row_url', [
+        ('Browser content: ok\nDoc\nhttps://example.com/a\nCoverage: {}\nbody',
+         'https://example.com/a', 'https://example.com/a'),
+        ('Error reading tab 1: tab closed', None, ''),
+    ])
+    def test_task_row_carries_only_a_successful_reads_url(self, content, reported, row_url):
+        from unittest.mock import patch
+        from lib.tasks_pkg.handlers.browser import _handle_browser_tool
+        captured = []
+
+        def execute(name, fn_args, **kwargs):
+            assert name == 'browser_read_page'
+            if reported:
+                kwargs['display_metadata']['url'] = reported
+            return content
+
+        def settle(task, rn, row, results, **kwargs):
+            captured.append(results)
+
+        with patch('lib.browser.dispatch.execute_browser_tool', side_effect=execute), \
+             patch('lib.tasks_pkg.handlers.browser._finalize_tool_round', side_effect=settle):
+            result = _handle_browser_tool({'_userId': 41}, None, 'browser_read_page', 'call',
+                                         {'tabId': 1}, 1, {}, {'browserClientId': 'test-browser'},
+                                         '', False)
+        assert result[2] is bool(reported)
+        assert captured[0][0]['url'] == row_url

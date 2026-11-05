@@ -76,12 +76,12 @@ def test_more_than_old_preview_maximum_survives_recreation_and_terminal_handoff(
     task = {'id': 'demand', 'convId': 'conversation', '_turnId': 'turn', '_userId': 9,
             'config': {'autoTranslate': True, 'uiLang': 'zh'}}
     calls, commits, frames = [], [], []
-    monkeypatch.setattr(incremental, '_PREVIEW_MIN_NARRATION_CHARS', 1)
     def translate(self, source, **kwargs):
         calls.append(source)
         return 'translated:' + source, 'fixture'
     monkeypatch.setattr(incremental._Accumulator, '_translate', translate)
-    monkeypatch.setattr(incremental._Accumulator, '_push', lambda self, payload: frames.append(payload))
+    monkeypatch.setattr(incremental._Accumulator, '_push',
+                        lambda self, payload, **options: frames.append(payload))
     monkeypatch.setattr('lib.translate.commit.commit_translation_to_turn',
         lambda *args, **kwargs: commits.append(capture_translation_kwargs(kwargs)))
     first = incremental._Accumulator(task)

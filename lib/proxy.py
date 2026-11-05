@@ -55,6 +55,7 @@ __all__ = [
     'get_bypass_domains', 'set_bypass_domains', 'sanitize_bypass_domains',
     'get_proxy_config', 'set_proxy_config',
     'register_no_proxy_host', 'register_no_proxy_url',
+    'lease_no_proxy_url', 'release_no_proxy_host',
     'async_proxy_for', 'resolve_async_route',
     'SUBSCRIPTION_HOSTS', 'is_subscription_host',
     'sanitize_proxy_pool', 'get_proxy_pool', 'set_proxy_pool',
@@ -673,7 +674,7 @@ def global_egress_route_specs(
         pass
 
     bypassed = (
-        host in _registered_hosts
+        _is_registered_bypass(host)
         or _host_matches_bypass(host, _bypass_domains)
     )
     if bypassed and not include_bypassed:
@@ -743,7 +744,7 @@ def subscription_route_specs(url: str) -> list:
     if not is_subscription_host(host):
         return []
     direct = Route('direct', 'direct', 'direct', priority=0)
-    if (host in _registered_hosts
+    if (_is_registered_bypass(host)
             or _host_matches_bypass(host, _bypass_domains)):
         return [direct]
 
@@ -1249,7 +1250,7 @@ def proxies_for(url: str) -> dict:
     # whose IPs live in publicly-routable space and therefore aren't matched
     # by RFC1918 detection).  We need both the literal host AND the global
     # bypass-domain suffix list to bypass the proxy.
-    if host in _registered_hosts:
+    if _is_registered_bypass(host):
         return _NO_PROXY
     if _host_matches_bypass(host, _bypass_domains):
         return _NO_PROXY
@@ -1334,7 +1335,7 @@ def describe_route(url: str, *, proxies=None, async_proxy_url=None,
     elif host in _ALWAYS_BYPASS:
         route_id = 'direct:local'
         decision_reason = 'local_bypass'
-    elif host in _registered_hosts:
+    elif _is_registered_bypass(host):
         route_id = 'direct:registered'
         decision_reason = 'registered_bypass'
     elif _host_matches_bypass(host, _bypass_domains):
@@ -1437,6 +1438,8 @@ _registered_hosts: set = set()
 def register_no_proxy_host(host: str) -> bool:
     """Mark *host* as proxy-bypass for the lifetime of this process.
 
+    For process-lifetime owners (configured providers, discovery, local
+    serving); request-scoped owners lease instead (:func:`lease_no_proxy_url`).
     Idempotent and thread-safe. Updates both the per-request ``proxies_for``
     decision AND the ``no_proxy`` env var (so any third-party library using
     ``requests`` without our wrapper still bypasses correctly).
@@ -1474,6 +1477,66 @@ def register_no_proxy_url(url: str) -> bool:
         logger.debug('[Proxy] Failed to parse URL %s: %s', url, e)
         return False
     return register_no_proxy_host(host)
+
+
+# Request-scoped exemptions: host -> live lease count. The last release ends
+# the exemption, so request input cannot grow process-lifetime proxy state; a
+# permanent registration outlives every lease.
+_host_leases: dict[str, int] = {}
+# Hosts whose ``no_proxy`` token a lease appended, and so removes again.
+_lease_env_tokens: set[str] = set()
+
+
+def _is_registered_bypass(host: str) -> bool:
+    return host in _registered_hosts or host in _host_leases
+
+
+def lease_no_proxy_url(url: str) -> str:
+    """Bypass the proxy for *url*'s host while the caller holds the lease.
+
+    Concurrent holders share one exemption. The last release removes it,
+    including the ``no_proxy`` token the first lease appended. Returns the
+    leased host ('' when *url* has none); pass it to
+    :func:`release_no_proxy_host` exactly once.
+    """
+    try:
+        host = (urlparse(url).hostname or '').lower()
+    except ValueError as e:
+        logger.debug('[Proxy] Failed to parse URL %s: %s', url, e)
+        return ''
+    if not host:
+        return ''
+    with _lock:
+        first = host not in _host_leases
+        _host_leases[host] = _host_leases.get(host, 0) + 1
+        if first and host not in _registered_hosts:
+            current = os.environ.get('no_proxy', '')
+            if host not in current.split(','):
+                _apply_to_env('no_proxy', f'{current},{host}' if current else host)
+                _lease_env_tokens.add(host)
+    if first and is_subscription_host(host):
+        _on_proxy_topology_changed()
+    return host
+
+
+def release_no_proxy_host(host: str) -> None:
+    """Return one lease taken by :func:`lease_no_proxy_url`."""
+    with _lock:
+        held = _host_leases.get(host, 0)
+        if not held:
+            return
+        if held > 1:
+            _host_leases[host] = held - 1
+            return
+        del _host_leases[host]
+        if host in _lease_env_tokens:
+            _lease_env_tokens.discard(host)
+            tokens = os.environ.get('no_proxy', '').split(',')
+            if host not in _registered_hosts and host in tokens:
+                _apply_to_env('no_proxy',
+                              ','.join(token for token in tokens if token != host))
+    if is_subscription_host(host):
+        _on_proxy_topology_changed()
 
 
 def get_bypass_domains() -> list:

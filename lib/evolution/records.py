@@ -4,8 +4,9 @@ Responsibility: key discipline, evidence-capsule bounds, complete workspaces,
 and acknowledged writes with a
 bounded retry on transient storage failure, over the existing Sidecar
 ``record.*`` operations. Entry points: ``put_record`` / ``get_record`` /
-``list_records`` / ``entity_key``. Dependencies: ``lib.identity`` and
-``lib.storage`` (imported lazily); no domain policy lives here.
+``list_records`` / ``delete_record`` / ``entity_key``. Dependencies: ``lib.identity``,
+``lib.storage`` (imported lazily) and the typed contract error of ``.contracts``;
+no domain policy lives here.
 """
 from __future__ import annotations
 
@@ -17,6 +18,8 @@ import uuid
 from lib.identity import require_user_id
 from lib.log import get_logger
 from lib.storage.errors import StorageError
+
+from .contracts import EvolutionContractError
 
 logger = get_logger(__name__)
 
@@ -36,6 +39,10 @@ NAMESPACE_GATE_POLICY = 'evolution.gate_policy.v1'
 NAMESPACE_DISTILLATIONS = 'evolution.distillations.v1'
 NAMESPACE_POLICY = 'evolution.policy.v1'
 NAMESPACE_RUNS = 'evolution.runs.v1'
+#: The run sweep's durable work list (one marker per run it may drive) and the
+#: completion flag of that list's one-time backfill. Owned by ``runs.py``.
+NAMESPACE_UNSETTLED_RUNS = 'evolution.runs.unsettled.v1'
+NAMESPACE_RUN_SWEEP = 'evolution.runs.sweep.v1'
 NAMESPACE_LIBRARIES = 'evolution.libraries.v1'
 NAMESPACE_OBSERVATIONS = 'evolution.observations.v1'
 
@@ -63,7 +70,7 @@ def _storage(*, write: bool = False):
 def entity_key(entity_id: str, user_id, *, kind: str) -> str:
     uid = require_user_id(user_id, context=f'evolution {kind} owner')
     if not isinstance(entity_id, str) or not _ID_RE.fullmatch(entity_id):
-        raise ValueError(f'invalid evolution {kind} id')
+        raise EvolutionContractError(f'invalid evolution {kind} id')
     return f'{uid}:{entity_id}'
 
 
@@ -102,12 +109,20 @@ _READ_RETRYABLE_CODES = {'database_timeout', 'database_busy', 'database_unavaila
 
 
 def is_record_page_resource_refusal(error):
-    """A bounded range can shrink under native resource pressure.
+    """A bounded range can shrink when the authority refuses its page size.
 
-    The wire can erase the specific byte-limit reason. Existing transport
-    backoff remains; callers may try fewer rows, never relax authority limits.
+    Current native engines refuse a page over its byte bound once, as
+    non-retryable ``database_resource_exhausted`` (contract reason
+    ``domain_resource_bound``). Engines that predate typed bound classes shed
+    it as retryable ``database_unavailable`` carrying the code as its message,
+    after the transport backoff. Callers may try fewer rows, never relax
+    authority limits.
     """
-    return (isinstance(error, StorageError) and error.code == 'database_unavailable'
+    if not isinstance(error, StorageError):
+        return False
+    if error.code == 'database_resource_exhausted':
+        return True
+    return (error.code == 'database_unavailable'
             and (str(error) == 'database_resource_exhausted'
                  or 'versioned document page exceeds 8 MiB' in str(error)))
 
@@ -136,6 +151,23 @@ def _read_with_retry(operation: str, payload: dict, *, kind: str, shrinkable_pag
                            kind, attempt + 1, len(_COMMIT_RETRY_DELAYS_S) + 1,
                            exc, delay)
             _sleep(delay)
+
+
+def delete_record(namespace: str, key: str, *, kind: str, expected_version: int) -> bool:
+    """Delete one record only at ``expected_version``; a newer write is kept.
+
+    Returns whether a record was removed. A version conflict is the expected
+    outcome when another writer replaced the record and reports ``False``.
+    """
+    payload = {'namespace': namespace, 'key': key, 'expected_version': int(expected_version)}
+    command_id = f'evolution:{kind}:{uuid.uuid4().hex}'
+    try:
+        result = _storage(write=True).command('record.delete', payload, command_id)
+    except StorageError as exc:
+        if exc.code == 'database_conflict':
+            return False
+        raise
+    return isinstance(result, dict) and bool(result.get('deleted'))
 
 
 def get_record(namespace: str, key: str) -> dict | None:

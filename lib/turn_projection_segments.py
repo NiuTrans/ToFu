@@ -3,8 +3,11 @@
 Responsibility: derive or repair the ordered ``segments`` document at producer
 write boundaries and for settled legacy reads. Live public reads preserve the
 exact committed patch base; normalization is not a revision-free read repair.
-This module also derives the request-local completed-turn browser view from the
-same authority without mutating it. This module is pure: storage adapters decide
+This module also derives the request-local browser reference view from the same
+authority without mutating it, and restores what that view omitted when a
+client writes an edited copy back (``projection_with_restored_browser_evidence``). Active tool documents are restored before replay;
+active normalization, private-field omission and lazy detail remain disabled.
+This module is pure: storage adapters decide
 when a normalized document is persisted, while HTTP/application adapters use
 the same functions for archived rows and snapshot representations.
 """
@@ -20,9 +23,17 @@ from urllib.parse import quote
 import orjson
 
 from lib.attachments import canonical_image_ref
+from lib.conversation_sync.settled_rows import (
+    SettledDict,
+    memo_get,
+    memo_put,
+    settle,
+    settle_unless_same,
+)
 from lib.tasks_pkg.segments import (
     assemble_segments,
     is_synthetic_inbox_round,
+    merge_injected_note_segments,
     segments_to_json,
     tool_use_segment_from_round,
 )
@@ -46,10 +57,27 @@ _BROWSER_TERMINAL_TURN_STATUSES = frozenset({
     "interrupted",
     "truncated",
 })
+# Opaque provider replay evidence. Model requests read it from storage only;
+# the browser renders none of it, and an edit restores it from authority.
 _BROWSER_PRIVATE_TOOL_ROUND_FIELDS = frozenset({
     "_responsesItems",
     "_anthropicContentBlocks",
+    "thinkingSignature",
 })
+_BROWSER_PRIVATE_THINKING_SEGMENT_FIELDS = frozenset({"signature"})
+# Closed-world consumers: the finish footer clock (``presentTurnExecutionTiming``)
+# and compaction activity durations (``activityEntryWithTiming``). The Request
+# Inspector trace reads its own task-trace endpoint, never this projection.
+_BROWSER_TIMING_TRACE_FIELDS = frozenset({
+    "version",
+    "taskId",
+    "running",
+    "tEnd",
+    "clockSource",
+    "coverage",
+    "totalMs",
+})
+_BROWSER_TIMING_TRACE_SPAN_KINDS = frozenset({"compaction"})
 _BROWSER_API_ROUND_USAGE_FIELDS = frozenset({
     "prompt_tokens",
     "input_tokens",
@@ -73,6 +101,28 @@ _BROWSER_API_ROUND_DISPATCH_FIELDS = frozenset({
     "provider_id",
 })
 _BROWSER_API_ROUND_COST_FIELDS = frozenset({"costCny"})
+# The lazily built cost popover reads only these allocation terms; the
+# recache cause duplicates the round's own ``cacheBreak``.
+_BROWSER_API_ROUND_WRITE_BREAKDOWN_FIELDS = frozenset({
+    "write",
+    "prevOutput",
+    "toolResults",
+    "contextWrite",
+    "recacheBody",
+    "envelope",
+    "readDrop",
+    "capped",
+})
+_BROWSER_API_ROUND_PROMPT_ADMISSION_FIELDS = frozenset({
+    "action",
+    "totalTokens",
+    "messageTokens",
+    "toolSchemaTokens",
+    "targetTokens",
+})
+_SHARED_TOOL_DOCUMENT_TURN_STATUSES = (
+    _BROWSER_TERMINAL_TURN_STATUSES | {"pending", "running"}
+)
 _SHARED_TOOL_DOCUMENT_FIELDS = ("toolContent", "results")
 _SHARED_TOOL_DOCUMENT_MIN_BYTES = 1024
 _SHARED_TOOL_DOCUMENT_MAX_DOCUMENTS = 256
@@ -90,7 +140,9 @@ def _preserved_notes(value: Any) -> list[dict[str, Any]]:
     notes = []
     seen = set()
     for item in value if isinstance(value, list) else []:
-        if not isinstance(item, Mapping) or item.get('type') != 'system_note':
+        if type(item) not in _DICT_KINDS and not isinstance(item, Mapping):
+            continue
+        if item.get('type') != 'system_note':
             continue
         if not isinstance(item.get('text'), str):
             continue
@@ -114,31 +166,51 @@ def _valid_segments(value: Any) -> list[dict[str, Any]] | None:
         return None
     segments: list[dict[str, Any]] = []
     for item in value:
-        if not isinstance(item, Mapping) or item.get("type") not in _SEGMENT_TYPES:
-            return None
-        segment = dict(item)
-        segment_type = segment["type"]
-        if segment_type in {"text", "thinking", "system_note"}:
-            if not isinstance(segment.get("text"), str):
-                return None
+        if type(item) is SettledDict:
+            # A settled block validates once; later steps replace, never edit.
+            segment = memo_get(item, _VALID_SEGMENT_KEY, _UNSET)
+            if segment is _UNSET:
+                segment = _valid_segment(item)
+                segment = memo_put(item, _VALID_SEGMENT_KEY, (
+                    None if segment is None else settle_unless_same(item, segment)))
         else:
-            result = segment.get("result")
-            if not isinstance(result, Mapping):
-                return None
-            # Legacy mirrors committed before the generated contract typed
-            # ``TurnToolResult.status`` as a string stamped ``status: None``
-            # on early-announced tools. The sibling round owns the verdict
-            # (the browser reconstructs it via resultFromRound), so the
-            # read boundary drops the invalid field instead of failing the
-            # whole conversation snapshot closed (2026-09-20, conv
-            # mu5p3vn9x32wcd: one null-status mirror 500'd every snapshot).
-            if "status" in result and not isinstance(result.get("status"), str):
-                segment["result"] = {
-                    key: item_value for key, item_value in result.items()
-                    if key != "status"
-                }
+            segment = _valid_segment(item)
+        if segment is None:
+            return None
         segments.append(segment)
     return segments
+
+
+_VALID_SEGMENT_KEY = ('valid-segment',)
+_UNSET = object()
+_DICT_KINDS = (dict, SettledDict)
+
+
+def _valid_segment(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, Mapping) or item.get("type") not in _SEGMENT_TYPES:
+        return None
+    segment = dict(item)
+    segment_type = segment["type"]
+    if segment_type in {"text", "thinking", "system_note"}:
+        if not isinstance(segment.get("text"), str):
+            return None
+    else:
+        result = segment.get("result")
+        if not isinstance(result, Mapping):
+            return None
+        # Legacy mirrors committed before the generated contract typed
+        # ``TurnToolResult.status`` as a string stamped ``status: None``
+        # on early-announced tools. The sibling round owns the verdict
+        # (the browser reconstructs it via resultFromRound), so the
+        # read boundary drops the invalid field instead of failing the
+        # whole conversation snapshot closed (2026-09-20, conv
+        # mu5p3vn9x32wcd: one null-status mirror 500'd every snapshot).
+        if "status" in result and not isinstance(result.get("status"), str):
+            segment["result"] = {
+                key: item_value for key, item_value in result.items()
+                if key != "status"
+            }
+    return segment
 
 
 def _fallback_block_id(segment: Mapping[str, Any], position: int) -> str:
@@ -168,20 +240,25 @@ def _stable_block_ids(
     }
     normalized: list[dict[str, Any]] = []
     for position, source in enumerate(segments):
-        segment = dict(source)
-        declared = segment.get("blockId")
+        declared = source.get("blockId")
         preferred = (
             declared.strip()
             if isinstance(declared, str) and declared.strip()
-            else _fallback_block_id(segment, position)
+            else _fallback_block_id(source, position)
         )
         occurrence = claimed.get(preferred, 0) + 1
         claimed[preferred] = occurrence
-        segment["blockId"] = (
-            preferred if occurrence == 1 else f"{preferred}~{occurrence}"
-        )
+        block_id = preferred if occurrence == 1 else f"{preferred}~{occurrence}"
+        settled = type(source) is SettledDict
+        if (settled and type(declared) is str and declared == block_id
+                and "_round" not in source):
+            # Already stable: the normalized copy would equal its source.
+            normalized.append(source)
+            continue
+        segment = dict(source)
+        segment["blockId"] = block_id
         segment.pop("_round", None)
-        normalized.append(segment)
+        normalized.append(settle(segment) if settled else segment)
     return normalized
 
 
@@ -218,11 +295,7 @@ def _segments_missing_tool_round(
             covered[call_id] = covered.get(call_id, 0) + 1
     seen_rounds: dict[str, int] = {}
     for round_record in tool_rounds:
-        if not isinstance(round_record, Mapping):
-            continue
-        if is_synthetic_inbox_round(round_record):
-            continue
-        call_id = str(round_record.get("toolCallId") or "").strip()
+        call_id = _segment_call_id(round_record)
         if not call_id:
             continue
         occurrence = seen_rounds.get(call_id, 0) + 1
@@ -230,6 +303,28 @@ def _segments_missing_tool_round(
         if occurrence > covered.get(call_id, 0):
             return True
     return False
+
+
+_SEGMENT_CALL_ID_KEY = ('segment-call-id',)
+
+
+def _round_segment_call_id(round_record: Any) -> str:
+    """A round's tool-call id when it must own a ``tool_use`` segment."""
+    if not isinstance(round_record, Mapping):
+        return ""
+    if is_synthetic_inbox_round(round_record):
+        return ""
+    return str(round_record.get("toolCallId") or "").strip()
+
+
+def _segment_call_id(round_record: Any) -> str:
+    if type(round_record) is SettledDict:
+        call_id = memo_get(round_record, _SEGMENT_CALL_ID_KEY)
+        if call_id is None:
+            call_id = memo_put(round_record, _SEGMENT_CALL_ID_KEY,
+                               _round_segment_call_id(round_record))
+        return call_id
+    return _round_segment_call_id(round_record)
 
 
 def _append_missing_live_tool_segments(
@@ -250,17 +345,15 @@ def _append_missing_live_tool_segments(
     for position, source in enumerate(tool_rounds):
         if not isinstance(source, Mapping):
             continue
-        round_record = dict(source)
-        if is_synthetic_inbox_round(round_record):
-            continue
-        call_id = str(round_record.get("toolCallId") or "").strip()
+        call_id = _segment_call_id(
+            source if type(source) is SettledDict else dict(source))
         if not call_id:
             continue
         occurrence = seen_rounds.get(call_id, 0) + 1
         seen_rounds[call_id] = occurrence
         if occurrence <= covered.get(call_id, 0):
             continue
-        appended.append(tool_use_segment_from_round(round_record, position))
+        appended.append(tool_use_segment_from_round(dict(source), position))
         covered[call_id] = covered.get(call_id, 0) + 1
     return [*segments, *segments_to_json(appended)]
 
@@ -476,7 +569,9 @@ def _synchronize_terminal_blocks(
         })
         terminal_text_index = len(segments) - 1
     if terminal_text_index is not None:
-        terminal_text = segments[terminal_text_index]
+        source = segments[terminal_text_index]
+        # A settled block is replaced copy-on-write (kept when unchanged).
+        terminal_text = dict(source) if type(source) is SettledDict else source
         terminal_text["text"] = content
         terminal_text["deliverable"] = True
         terminal_text["terminal"] = True
@@ -484,6 +579,8 @@ def _synchronize_terminal_blocks(
             terminal_text["resumable"] = True
         else:
             terminal_text.pop("resumable", None)
+        if terminal_text is not source:
+            segments[terminal_text_index] = settle_unless_same(source, terminal_text)
 
     terminal_thinking_index = next((
         index for index in range(len(segments) - 1, -1, -1)
@@ -491,7 +588,12 @@ def _synchronize_terminal_blocks(
         and segments[index].get("terminal")
     ), None)
     if terminal_thinking_index is not None:
-        segments[terminal_thinking_index]["text"] = thinking
+        source = segments[terminal_thinking_index]
+        if type(source) is SettledDict:
+            segments[terminal_thinking_index] = settle_unless_same(
+                source, {**source, "text": thinking})
+        else:
+            source["text"] = thinking
     elif thinking:
         thinking_segment = {
             "type": "thinking",
@@ -610,7 +712,7 @@ def _synchronize_compacted_tool_segment_results(
 ) -> list[dict[str, Any]]:
     """Prevent a durable compacted round's segment mirror restoring old bytes."""
     if not isinstance(tool_rounds, list) or not any(
-        isinstance(round_record, Mapping)
+        (type(round_record) in _DICT_KINDS or isinstance(round_record, Mapping))
         and _round_has_explicit_payload_compaction(round_record)
         for round_record in tool_rounds
     ):
@@ -660,8 +762,9 @@ def projection_with_stable_segments(
     *,
     actor: str = "assistant",
     status: str = "completed",
+    injected_notes: Any = None,
 ) -> dict[str, Any]:
-    """Return one projection whose render blocks all have durable identity."""
+    """Return stable blocks, folding captured notes only at producer boundaries."""
     projection = normalize_projection_document(raw_projection)
     reserved_ids = _normalize_sidecar_blocks(projection)
     normalized_actor = str(actor or "assistant")
@@ -716,16 +819,17 @@ def projection_with_stable_segments(
                     if isinstance(projection.get("toolRounds"), list) else []),
         )
         segments = segments_to_json(assembled)
-        for note in preserved_notes:
-            lr = note.get('llmRound')
-            index = next((i for i, segment in enumerate(segments)
-                          if segment.get('terminal') or (
-                              isinstance(lr, int)
-                              and isinstance(segment.get('llmRound'), int)
-                              and segment['llmRound'] > lr
-                              and (not note.get('attemptId') or
-                                   note.get('attemptId') == segment.get('attemptId')))), len(segments))
-            segments.insert(index, note)
+        # Reconstruction follows the same injection-before-round ordering as
+        # checkpoint/live assembly. Preserve any existing display metadata.
+        segments = merge_injected_note_segments(segments, [
+            {**note, 'kind': note.get('noteKind') or 'system-intervention'}
+            for note in preserved_notes
+        ])
+        preserved_by_id = {note.get('blockId'): note for note in preserved_notes
+                           if note.get('blockId')}
+        segments = [preserved_by_id.get(segment.get('blockId'), segment)
+                    if segment.get('type') == 'system_note' else segment
+                    for segment in segments]
     _synchronize_terminal_blocks(
         segments,
         projection,
@@ -738,6 +842,7 @@ def projection_with_stable_segments(
     segments = _drop_narrated_live_terminal_mirror(
         segments, projection, normalized_status,
     )
+    segments = merge_injected_note_segments(segments, injected_notes)
     projection["segments"] = _stable_block_ids(
         segments, reserved_ids=reserved_ids,
     )
@@ -804,9 +909,9 @@ def _tool_rounds_for_browser(
             projected.append(source)
             continue
         browser_source = trim_tool_round_for_persist(source)
-        has_private_replay = omit_provider_replay and any(
-            field in browser_source
-            for field in _BROWSER_PRIVATE_TOOL_ROUND_FIELDS
+        has_private_replay = (
+            omit_provider_replay
+            and not _BROWSER_PRIVATE_TOOL_ROUND_FIELDS.isdisjoint(browser_source)
         )
         source_swarm_snapshot = browser_source.get("_swarmSnapshot")
         browser_swarm_snapshot = swarm_snapshot_for_browser(
@@ -860,6 +965,35 @@ def _api_round_usage_for_browser(usage: Any) -> Any:
     return projected
 
 
+def _closed_world_mapping(value: Any, fields: frozenset[str]) -> Any:
+    """Keep only browser-consumed keys; share the source when none drop."""
+    if not isinstance(value, Mapping) or value.keys() <= fields:
+        return value
+    return {key: item for key, item in value.items() if key in fields}
+
+
+def _timing_trace_for_browser(trace: Any) -> Any:
+    """Keep the settled clock and any span list a compaction row can read.
+
+    Spans are kept or omitted as one list, never filtered: a later positional
+    patch must fail and resynchronize rather than address a shifted index.
+    """
+    if not isinstance(trace, Mapping):
+        return trace
+    spans = trace.get("spans")
+    keep_spans = isinstance(spans, list) and any(
+        isinstance(span, Mapping)
+        and span.get("kind") in _BROWSER_TIMING_TRACE_SPAN_KINDS
+        for span in spans
+    )
+    return _closed_world_mapping(
+        trace,
+        _BROWSER_TIMING_TRACE_FIELDS | {"spans"}
+        if keep_spans
+        else _BROWSER_TIMING_TRACE_FIELDS,
+    )
+
+
 def _api_rounds_for_browser(api_rounds: Any) -> Any:
     """Keep only fields consumed by the completed-round browser read model."""
     if not isinstance(api_rounds, list):
@@ -870,6 +1004,14 @@ def _api_rounds_for_browser(api_rounds: Any) -> Any:
         if not isinstance(source, Mapping):
             projected_rounds.append(source)
             continue
+        write_breakdown = source.get("writeBreakdown")
+        browser_write_breakdown = _closed_world_mapping(
+            write_breakdown, _BROWSER_API_ROUND_WRITE_BREAKDOWN_FIELDS,
+        )
+        prompt_admission = source.get("promptAdmission")
+        browser_prompt_admission = _closed_world_mapping(
+            prompt_admission, _BROWSER_API_ROUND_PROMPT_ADMISSION_FIELDS,
+        )
         usage = source.get("usage")
         browser_usage = _api_round_usage_for_browser(usage)
         cost = source.get("cost")
@@ -887,12 +1029,21 @@ def _api_rounds_for_browser(api_rounds: Any) -> Any:
                 browser_cost = cost
             else:
                 browser_cost = projected_cost or None
-        if browser_usage is usage and browser_cost is cost:
+        if (
+            browser_usage is usage
+            and browser_cost is cost
+            and browser_write_breakdown is write_breakdown
+            and browser_prompt_admission is prompt_admission
+        ):
             projected_rounds.append(source)
             continue
         round_record = dict(source)
         if browser_usage is not usage:
             round_record["usage"] = browser_usage
+        if browser_write_breakdown is not write_breakdown:
+            round_record["writeBreakdown"] = browser_write_breakdown
+        if browser_prompt_admission is not prompt_admission:
+            round_record["promptAdmission"] = browser_prompt_admission
         if browser_cost is not cost:
             if browser_cost is None:
                 round_record.pop("cost", None)
@@ -919,10 +1070,14 @@ def projection_with_reference_tool_segments(
     ``TurnToolUseSegment.result`` remains an object for backward-compatible
     generated types. ``roundRef`` makes the empty object explicit; the browser
     materializes its local full shape from the uniquely matching tool round.
-    Opaque Responses/Anthropic provider-replay bodies and per-request stream /
-    pricing evidence with no browser consumer are also server-only and omitted
-    from this completed browser view. Per-round token, cost, cache-break,
-    dispatch, quota, and trace facts remain. This function copies only changed
+    Opaque Responses/Anthropic provider-replay bodies, thinking signatures,
+    per-request stream / pricing evidence, unrendered admission and recache
+    detail, and task-trace spans with no browser consumer are also
+    server-only and omitted from this completed browser view. Per-round token,
+    cost, cache-break, dispatch, quota, trace, write-allocation and settled
+    clock facts remain. Model requests read signatures from storage, and
+    ``projection_with_restored_browser_evidence`` restores every omission
+    before a client edit is persisted. This function copies only changed
     containers and never mutates the shared snapshot returned by
     ``ConversationSnapshotQuery``.
     """
@@ -961,11 +1116,32 @@ def projection_with_reference_tool_segments(
                     segment_id_counts.get(call_id, 0) + 1
                 )
 
+    source_timing_trace = stable_projection.get("timingTrace")
+    browser_timing_trace = (
+        _timing_trace_for_browser(source_timing_trace)
+        if completed
+        else source_timing_trace
+    )
+
     segments_changed = False
     referenced_segments: list[Any] = []
     iterable_segments = segments if isinstance(segments, list) else []
     for source in iterable_segments:
-        if not isinstance(source, Mapping) or source.get("type") != "tool_use":
+        segment_type = (
+            source.get("type") if isinstance(source, Mapping) else None
+        )
+        if (
+            segment_type == "thinking"
+            and completed
+            and not _BROWSER_PRIVATE_THINKING_SEGMENT_FIELDS.isdisjoint(source)
+        ):
+            referenced_segments.append({
+                key: value for key, value in source.items()
+                if key not in _BROWSER_PRIVATE_THINKING_SEGMENT_FIELDS
+            })
+            segments_changed = True
+            continue
+        if segment_type != "tool_use":
             referenced_segments.append(source)
             continue
         call_id = str(source.get("id") or "").strip()
@@ -997,6 +1173,7 @@ def projection_with_reference_tool_segments(
         not segments_changed
         and browser_rounds is source_rounds
         and browser_api_rounds is source_api_rounds
+        and browser_timing_trace is source_timing_trace
     ):
         return stable_projection
     projection = dict(stable_projection)
@@ -1006,6 +1183,8 @@ def projection_with_reference_tool_segments(
         projection["toolRounds"] = browser_rounds
     if browser_api_rounds is not source_api_rounds:
         projection["apiRounds"] = browser_api_rounds
+    if browser_timing_trace is not source_timing_trace:
+        projection["timingTrace"] = browser_timing_trace
     return projection
 
 
@@ -1031,6 +1210,140 @@ def turns_with_reference_tool_segments(stable_turns: Any) -> Any:
     if not isinstance(stable_turns, list):
         return stable_turns
     return [turn_with_reference_tool_segments(turn) for turn in stable_turns]
+
+
+def _restored_tool_rounds(client_rounds: Any, authority_rounds: Any) -> Any:
+    if not isinstance(client_rounds, list) or not isinstance(
+        authority_rounds, list
+    ):
+        return client_rounds
+    authority_by_id = _unique_rounds_by_call_id(authority_rounds)
+    client_by_id = _unique_rounds_by_call_id(client_rounds)
+    changed = False
+    restored: list[Any] = []
+    for round_record in client_rounds:
+        call_id = (
+            str(round_record.get("toolCallId") or "").strip()
+            if isinstance(round_record, Mapping) else ""
+        )
+        source = (
+            authority_by_id.get(call_id)
+            if call_id and client_by_id.get(call_id) is round_record
+            else None
+        )
+        if source is None:
+            restored.append(round_record)
+            continue
+        additions: dict[str, Any] = {}
+        # Replay evidence (including the thinking signature) is only valid
+        # for the exact reasoning it signed.
+        if round_record.get("thinking") == source.get("thinking"):
+            additions.update({
+                field: source[field]
+                for field in _BROWSER_PRIVATE_TOOL_ROUND_FIELDS
+                if field in source and field not in round_record
+            })
+        snapshot = source.get("_swarmSnapshot")
+        client_snapshot = round_record.get("_swarmSnapshot")
+        if (
+            snapshot is not None
+            and client_snapshot is not None
+            and client_snapshot != snapshot
+            and client_snapshot == swarm_snapshot_for_browser(snapshot)
+        ):
+            additions["_swarmSnapshot"] = snapshot
+        if not additions:
+            restored.append(round_record)
+            continue
+        restored.append({**round_record, **additions})
+        changed = True
+    return restored if changed else client_rounds
+
+
+def _restored_thinking_segments(
+    client_segments: Any, authority_segments: Any,
+) -> Any:
+    if not isinstance(client_segments, list) or not isinstance(
+        authority_segments, list
+    ):
+        return client_segments
+    block_counts = Counter(
+        segment.get("blockId")
+        for segment in authority_segments
+        if isinstance(segment, Mapping) and isinstance(segment.get("blockId"), str)
+    )
+    thinking_by_block = {
+        segment["blockId"]: segment
+        for segment in authority_segments
+        if isinstance(segment, Mapping)
+        and segment.get("type") == "thinking"
+        and isinstance(segment.get("blockId"), str)
+        and block_counts[segment["blockId"]] == 1
+    }
+    changed = False
+    restored: list[Any] = []
+    for segment in client_segments:
+        source = (
+            thinking_by_block.get(segment.get("blockId"))
+            if isinstance(segment, Mapping)
+            and segment.get("type") == "thinking"
+            else None
+        )
+        additions = {
+            field: source[field]
+            for field in _BROWSER_PRIVATE_THINKING_SEGMENT_FIELDS
+            if field in source and field not in segment
+        } if source is not None and source.get("text") == segment.get("text") else {}
+        if not additions:
+            restored.append(segment)
+            continue
+        restored.append({**segment, **additions})
+        changed = True
+    return restored if changed else client_segments
+
+
+def projection_with_restored_browser_evidence(
+    projection: Any,
+    authority: Any,
+) -> Any:
+    """Restore server evidence a browser view omitted from a client edit.
+
+    Whole-projection edits are built from the browser's TurnStore copy, so a
+    completed Turn arrives without provider replay, thinking signatures,
+    unrendered diagnostics or task-trace detail, and a terminal swarm timeline
+    arrives budgeted. ``authority`` is the stored projection at the CAS-fenced
+    revision the edit was based on. A value is restored only where the client
+    left it absent or exactly equal to the browser view; replay evidence also
+    requires the signed thinking to be unchanged. Clients therefore cannot
+    mint server evidence, and an unrelated edit cannot silently drop it.
+    """
+    if not isinstance(projection, Mapping) or not isinstance(authority, Mapping):
+        return projection
+    restored = dict(projection)
+    changed = False
+    rounds = _restored_tool_rounds(
+        projection.get("toolRounds"), authority.get("toolRounds"),
+    )
+    if rounds is not projection.get("toolRounds"):
+        restored["toolRounds"] = rounds
+        changed = True
+    segments = _restored_thinking_segments(
+        projection.get("segments"), authority.get("segments"),
+    )
+    if segments is not projection.get("segments"):
+        restored["segments"] = segments
+        changed = True
+    for field, browser_view in (
+        ("apiRounds", _api_rounds_for_browser),
+        ("timingTrace", _timing_trace_for_browser),
+    ):
+        if field not in projection or field not in authority:
+            continue
+        stored = authority[field]
+        if projection[field] != stored and projection[field] == browser_view(stored):
+            restored[field] = stored
+            changed = True
+    return restored if changed else projection
 
 
 def _unique_text_segment_references(
@@ -1209,11 +1522,17 @@ def _turns_with_referenced_projection_fields(
     return projected_turns, projection_references
 
 
+def _shared_document_key(encoded: bytes) -> str:
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 def _turns_with_shared_tool_documents(
     stable_turns: Any,
 ) -> tuple[Any, dict[str, Any]]:
-    """Intern repeated large browser-only round fields within one snapshot.
+    """Intern repeated large round fields within one immutable snapshot view.
 
+    Pending/running fields are lossless because the browser restores them before
+    TurnStore or replay; this must not enable active normalization or lazy detail.
     Storage and the default/full API remain unchanged.  The reference view
     keeps a bounded request-local dictionary and shallow-copies only affected
     Turn/projection/round containers.  Full SHA-256 keys plus an equality
@@ -1223,15 +1542,18 @@ def _turns_with_shared_tool_documents(
     if not isinstance(stable_turns, list):
         return stable_turns, {}
 
-    candidates: list[tuple[int, int, str, str]] = []
-    counts: Counter[str] = Counter()
-    samples: dict[str, Any] = {}
-    collisions: set[str] = set()
+    # Equal canonical documents have equal encoded lengths, so only documents
+    # whose length repeats can ever be shared; the rest skip SHA-256 entirely.
+    # The first document of each length waits (request-local) for a second.
+    positions: list[tuple[int, int, str]] = []
+    document_keys: list[str | None] = []
+    waiting_by_size: dict[int, tuple[int, bytes]] = {}
+    shared_sizes: set[int] = set()
     for turn_index, turn in enumerate(stable_turns):
         if (
             not isinstance(turn, Mapping)
             or str(turn.get("status") or "")
-            not in _BROWSER_TERMINAL_TURN_STATUSES
+            not in _SHARED_TOOL_DOCUMENT_TURN_STATUSES
         ):
             continue
         projection = turn.get("projection")
@@ -1259,26 +1581,49 @@ def _turns_with_shared_tool_documents(
                     )
                 except TypeError:
                     continue
-                if len(encoded) < _SHARED_TOOL_DOCUMENT_MIN_BYTES:
+                size = len(encoded)
+                if size < _SHARED_TOOL_DOCUMENT_MIN_BYTES:
                     continue
-                document_key = "sha256:" + hashlib.sha256(encoded).hexdigest()
-                if (
-                    document_key in samples
-                    and samples[document_key] != round_record[field]
-                ):
-                    collisions.add(document_key)
+                position = len(positions)
+                positions.append((turn_index, round_index, field))
+                document_keys.append(None)
+                if size in shared_sizes:
+                    document_keys[position] = _shared_document_key(encoded)
+                elif size in waiting_by_size:
+                    first_position, first_encoded = waiting_by_size.pop(size)
+                    document_keys[first_position] = _shared_document_key(
+                        first_encoded
+                    )
+                    document_keys[position] = _shared_document_key(encoded)
+                    shared_sizes.add(size)
                 else:
-                    samples.setdefault(document_key, round_record[field])
-                candidates.append(
-                    (turn_index, round_index, field, document_key)
-                )
-                counts[document_key] += 1
-                if len(candidates) >= _SHARED_TOOL_DOCUMENT_MAX_REFERENCES:
+                    waiting_by_size[size] = (position, encoded)
+                if len(positions) >= _SHARED_TOOL_DOCUMENT_MAX_REFERENCES:
                     break
-            if len(candidates) >= _SHARED_TOOL_DOCUMENT_MAX_REFERENCES:
+            if len(positions) >= _SHARED_TOOL_DOCUMENT_MAX_REFERENCES:
                 break
-        if len(candidates) >= _SHARED_TOOL_DOCUMENT_MAX_REFERENCES:
+        if len(positions) >= _SHARED_TOOL_DOCUMENT_MAX_REFERENCES:
             break
+    waiting_by_size.clear()
+
+    candidates: list[tuple[int, int, str, str]] = []
+    counts: Counter[str] = Counter()
+    samples: dict[str, Any] = {}
+    collisions: set[str] = set()
+    for (turn_index, round_index, field), document_key in zip(
+        positions, document_keys,
+    ):
+        if document_key is None:
+            continue
+        value = stable_turns[turn_index]["projection"]["toolRounds"][
+            round_index
+        ][field]
+        if document_key in samples and samples[document_key] != value:
+            collisions.add(document_key)
+        else:
+            samples.setdefault(document_key, value)
+        candidates.append((turn_index, round_index, field, document_key))
+        counts[document_key] += 1
 
     eligible: set[str] = set()
     for _turn_index, _round_index, _field, document_key in candidates:
@@ -1492,6 +1837,7 @@ def snapshot_with_reference_tool_segments(
 
 __all__ = [
     "projection_with_reference_tool_segments",
+    "projection_with_restored_browser_evidence",
     "projection_with_stable_segments",
     "public_turn_with_stable_segments",
     "public_value_with_stable_segments",

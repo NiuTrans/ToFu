@@ -53,8 +53,8 @@ export function createConversationsEndpoints(ports: EndpointPorts) {
       patch(`/api/v4/conversations/${encodeURIComponent(convId)}/title`,
             { title }, { onError: 'null' }),
     // LLM-generated title. Returns parsed {ok, title} or null on failure.
-    // `lang` ('zh'|'en') forces the title language to match the UI; defaults
-    // to the current interface language.
+    // `lang` (a UI language code) forces the title language to match the UI;
+    // defaults to the current interface language.
     generateTitle: (convId: string, lang: string) =>
       post(`/api/v4/conversations/${encodeURIComponent(convId)}/generate-title`,
            { lang: lang || readLanguage() },
@@ -75,9 +75,17 @@ export function createConversationsEndpoints(ports: EndpointPorts) {
       post(`/api/v4/conversations/${encodeURIComponent(convId)}/clone`,
            { conversationId, title },
            { headers: { 'Idempotency-Key': newIdempotencyKey() } }),
+    // Complete Markdown transcript. Answers `text/markdown`, so it parses as
+    // text rather than the JSON envelope; the clone command is bounded and a
+    // conversation too large to copy still has to be downloadable as a record.
+    exportMarkdown: (convId: string, opts?: EndpointOptions) =>
+      get<string>(`/api/v4/conversations/${encodeURIComponent(convId)}/export`,
+                  Object.assign({ parse: 'text', query: { format: 'markdown' } }, opts || {})),
+    exportMarkdownUrl: (convId: string) =>
+      `/api/v4/conversations/${encodeURIComponent(convId)}/export?format=markdown`,
     // Full-text + title search across the user's conversations. Returns
-    // an array of {id, matchField, matchSnippet, matchRole} or [] on
-    // error/timeout. Pass {signal} for cancellation.
+    // an array of {id, matchField, matchSnippet, matchRole, matchTurnId,
+    // matchTurnOrdinal} or [] on error/timeout. Pass {signal} for cancellation.
     // The catalog owns items; the search facade retains its empty fallback.
     searchPage: (query: string, cursor: number, opts?: EndpointOptions) => get('/api/v4/conversations/search',
       Object.assign({}, opts || {}, { query: { q: query, ...(cursor ? { cursor } : {}) }, onError: 'throw' })),
@@ -107,12 +115,12 @@ export function createConversationsEndpoints(ports: EndpointPorts) {
      * before submitting a turn; the transport only enforces a declared
      * timeout, so an unbounded stalled POST latched the composer send lock
      * until the page was reloaded. */
-    resolveConfig: (payload: JsonObject) => _resolveAcrossWorkerRecovery(
-      (timeout) => post('/api/v4/conversations/config/resolve', payload, { timeout }),
-      'conversation config resolution'),
-    resolveSettings: (payload: JsonObject) => _resolveAcrossWorkerRecovery(
-      (timeout) => post('/api/v4/conversations/settings/resolve', payload, { timeout }),
-      'conversation settings resolution'),
+    resolveConfig: (payload: JsonObject, opts: { signal?: AbortSignal } = {}) => _resolveAcrossWorkerRecovery(
+      (timeout, signal) => post('/api/v4/conversations/config/resolve', payload, { timeout, signal }),
+      'conversation config resolution', opts.signal),
+    resolveSettings: (payload: JsonObject, opts: { signal?: AbortSignal } = {}) => _resolveAcrossWorkerRecovery(
+      (timeout, signal) => post('/api/v4/conversations/settings/resolve', payload, { timeout, signal }),
+      'conversation settings resolution', opts.signal),
     // Boot-scoped hint: conversations interrupted by the last server stop.
     // Consumed once by the PendingResume prompter at page load; a null result
     // (offline / 503) simply shows no prompt.

@@ -8,6 +8,7 @@ import pytest
 from lib.swarm.integration import _logs, _tools
 from lib.swarm.master import MasterOrchestrator
 from lib.swarm.protocol import SubTaskSpec
+from lib.tools.poll import POLL_WAIT_CAP_S
 from lib.tools.result_envelope import tool_result_error
 
 pytestmark = pytest.mark.unit
@@ -301,7 +302,7 @@ def test_running_and_timeout_guidance_names_explicit_poll_handles(monkeypatch):
         timed_out=True, note='', awaited_ids=['child'])
     for text in (running['message'], timeout['note']):
         assert 'await_agents' not in text
-        assert 'poll' in text and 'wait_s' in text and '60' in text
+        assert 'poll' in text and 'wait_s' in text and str(POLL_WAIT_CAP_S) in text
         assert 'snapshot' in text
     assert "id='child'" in running['message']
     assert 'agent handles in ids' in timeout['note']

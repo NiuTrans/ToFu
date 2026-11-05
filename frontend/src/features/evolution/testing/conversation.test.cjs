@@ -11,7 +11,7 @@ const run=id=>({run_id:id,objective:'Goal '+id,status:'executing'});
 const state=(updates=[],extra={})=>({updates,revision:updates.at(-1)?.seq||0,before_seq:updates[0]?.seq||0,has_earlier:false,delivery:{},coordinator:{status:'idle'},...extra});
 const entry=(seq,content)=>({seq,content,kind:'message',origin:'user',references:[]});
 function setup(api={}){
- const d=new JSDOM('<section></section>');Object.assign(global,{document:d.window.document,Element:d.window.Element});const host=document.querySelector('section'),navigations=[];
+ const d=new JSDOM('<section></section>');Object.assign(global,{window:d.window,document:d.window.document,Element:d.window.Element});const host=document.querySelector('section'),navigations=[];
  const mounted=load('conversation.ts').mountGoalConversation(host,{api,copy:key=>key,refresh:async()=>{},navigate:p=>navigations.push(p)});
  mounted.update(run('a'),state());const input=host.querySelector('textarea');const submit=()=>host.querySelector('form').dispatchEvent(new d.window.Event('submit',{bubbles:true,cancelable:true}));
  return {d,host,mounted,input,submit,navigations,close:()=>{mounted.dispose();d.window.close();}};

@@ -33,23 +33,17 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 import sys
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 REGISTRY = os.path.join(ROOT, 'frontend', 'src', 'action-registry.ts')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 # Imports the real registry compiled with the supported Node/esbuild toolchain
@@ -178,9 +172,8 @@ process.exit(0);
 """
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_nested_call_grammar_contract():
+    require_node_modules('jsdom', 'esbuild')
     harness = os.path.join(HERE, '_action_registry_harness.mjs')
     snapshot = os.path.join(HERE, '_action_registry_snapshot.mjs')
     subprocess.run([

@@ -7,11 +7,14 @@ import subprocess
 
 import pytest
 
+from tests._jsdom import require_node_modules
+
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.unit
 
 
 def test_completion_join_and_lifecycle_wakes():
+    require_node_modules('vite')
     script = r"""
 const assert = require('node:assert/strict');
 (async () => {

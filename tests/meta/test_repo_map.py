@@ -95,7 +95,7 @@ def test_large_sources_keep_references_without_extracting_definitions(tmp_path):
 
 
 @pytest.mark.parametrize('personalized', [False, True])
-def test_rank_preserves_multigraph_multiplicity(personalized, monkeypatch):
+def test_rank_preserves_multigraph_multiplicity(personalized):
     import networkx as nx
     from networkx.algorithms.link_analysis.pagerank_alg import _pagerank_python
     from lib.repo_map.outline import RepoMap
@@ -115,9 +115,8 @@ def test_rank_preserves_multigraph_multiplicity(personalized, monkeypatch):
     expected = {node[5:]: value for node, value in
                 _pagerank_python(graph, personalization=personal).items()
                 if node.startswith('file:')}
-    # Exercise the production graph assembly against an independent PageRank
-    # oracle even in slim installations without optional SciPy.
-    monkeypatch.setattr(nx, 'pagerank', _pagerank_python)
+    # Production ranking needs no SciPy; NetworkX's pure-Python reference is an
+    # independent oracle for its graph assembly and iteration.
     assert sumbd(repo, {'a.py'} if personalized else None) == pytest.approx(expected)
 
 

@@ -16,7 +16,9 @@ to ``MODEL_PRICING`` when the provider is unknown or has no override.
 ``PROVIDER_PRICING`` and ``_provider_pricing_lock`` are the shared mutable
 state; they must live together in this one module so all mutators
 (set/clear) and readers (lookup/snapshot) share the same objects by
-reference.
+reference. Mutators serialize on the lock and replace a provider's row map
+copy-on-write, so a published map is never edited and ``lookup_pricing``
+reads without the lock; every replacement stamps the pricing revision.
 """
 
 import math
@@ -25,6 +27,7 @@ import threading
 from lib.log import get_logger
 
 from lib.pricing._peak import peak_multiplier
+from lib.pricing._revision import RevisionedTable
 from lib.pricing._tables import MODEL_PRICING, QWEN_PRICING_CNY, pricing_for_model
 
 logger = get_logger(__name__)
@@ -36,7 +39,7 @@ logger = get_logger(__name__)
 
 # Per-provider pricing overrides: PROVIDER_PRICING[provider_id][model_id] = {input, output, ...}
 # Populated at server-config load time from each provider template's per-model `pricing` field.
-PROVIDER_PRICING = {}
+PROVIDER_PRICING = RevisionedTable()
 _provider_pricing_lock = threading.Lock()
 
 
@@ -252,10 +255,13 @@ def set_provider_pricing(provider_id, model_id, info):
     if not provider_id or not model_id:
         return
     with _provider_pricing_lock:
+        current = PROVIDER_PRICING.get(provider_id)
         if info is None:
-            PROVIDER_PRICING.get(provider_id, {}).pop(model_id, None)
+            if current is not None and model_id in current:
+                PROVIDER_PRICING[provider_id] = {
+                    key: row for key, row in current.items() if key != model_id}
             return
-        PROVIDER_PRICING.setdefault(provider_id, {})[model_id] = dict(info)
+        PROVIDER_PRICING[provider_id] = {**(current or {}), model_id: dict(info)}
 
 
 def clear_provider_pricing(provider_id):
@@ -285,11 +291,10 @@ def lookup_pricing(model_id, provider_id=None, at=None, prompt_tokens=None):
     info = None
     source = ''
     if provider_id:
-        with _provider_pricing_lock:
-            prov = PROVIDER_PRICING.get(provider_id)
-            if prov and model_id in prov:
-                info = dict(prov[model_id])
-                source = 'provider_override'
+        prov = PROVIDER_PRICING.get(provider_id)
+        if prov and model_id in prov:
+            info = dict(prov[model_id])
+            source = 'provider_override'
     if info is None:
         row = pricing_for_model(model_id)
         info = dict(row) if row else None

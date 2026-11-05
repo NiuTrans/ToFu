@@ -3,7 +3,7 @@
 //! This module owns physical pack files; `payload_manifest` and `CONTROL` own
 //! membership publication. Normal engine open never scans this directory.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -15,10 +15,11 @@ use crate::generated_tofudb_ir::{
     MAX_AUTHORITY_GC_PAYLOAD_SEGMENT_FILES_SCANNED, MAX_PAYLOAD_SEGMENT_CACHE_RECENCY_RECORDS,
     MAX_PAYLOAD_SEGMENT_CACHE_SEGMENTS, MAX_PAYLOAD_SEGMENT_FILTER_BYTES,
     MIN_PAYLOAD_SEGMENT_FILTER_BITS, PAYLOAD_SEGMENT_CACHE_BYTES,
-    PAYLOAD_SEGMENT_MEMBERSHIP_BUDGET_DIVISOR, PAYLOAD_SEGMENT_FILTER_BITS_PER_BLOCK, PAYLOAD_SEGMENT_FILTER_HASH_ROUNDS,
+    PAYLOAD_SEGMENT_FILTER_BITS_PER_BLOCK, PAYLOAD_SEGMENT_FILTER_HASH_ROUNDS,
 };
 use crate::vfs::{
-    sync_all_barrier, sync_directory_barrier, FileKind, OpenRequest, RealVfs, Vfs, VfsFile,
+    sync_all_barrier, sync_directory_barrier, DirectoryEntry, FileKind, OpenRequest, RealVfs, Vfs,
+    VfsFile,
 };
 use crate::FORMAT_VERSION;
 
@@ -208,6 +209,11 @@ fn open_segment_cache_bytes() -> usize {
 /// Count bound beside the byte budget: an all-tiny-segments catalog would
 /// otherwise hold one entry per catalog slot with negligible byte pressure.
 const OPEN_SEGMENT_CACHE_MAX_SEGMENTS: usize = MAX_PAYLOAD_SEGMENT_CACHE_SEGMENTS;
+/// Negative witnesses cover a full catalog plus segments verified for a
+/// publication that has not installed yet, so an in-flight publication never
+/// displaces a catalogued witness. Every catalog install trims them back to
+/// the installed catalog.
+const MAX_MEMBERSHIP_WITNESSES: usize = 2 * crate::payload_manifest::MAX_PAYLOAD_SEGMENTS;
 const _: () =
     assert!(OPEN_SEGMENT_CACHE_MAX_SEGMENTS <= crate::payload_manifest::MAX_PAYLOAD_SEGMENTS);
 const _: () = assert!(MAX_PAYLOAD_SEGMENT_CACHE_RECENCY_RECORDS > OPEN_SEGMENT_CACHE_MAX_SEGMENTS);
@@ -231,8 +237,11 @@ struct OpenSegmentCache {
     resident_bytes: usize,
     tick: u64,
     budget_bytes: usize,
-    // Retain cheap negative witnesses independently of full-index eviction.
-    // One quarter of the existing byte budget, never an extra cache budget.
+    // Negative witnesses outlive full-index eviction and cover the whole
+    // installed catalog: every packed segment spans the content-ID space, so
+    // a segment without a witness costs a complete index read on each cold
+    // miss. Bounded by `MAX_MEMBERSHIP_WITNESSES`, not by the index byte
+    // budget; catalog installation forgets dropped ones.
     memberships: HashMap<Uuid, VerifiedSegmentMembership>,
     membership_order: VecDeque<Uuid>,
     membership_bytes: usize,
@@ -257,14 +266,12 @@ impl OpenSegmentCache {
         if self.memberships.contains_key(&id) {
             return;
         }
-        let bytes = segment.membership_filter.allocated_bytes();
-        let budget = self.budget_bytes / PAYLOAD_SEGMENT_MEMBERSHIP_BUDGET_DIVISOR;
-        if bytes > budget {
+        // An explicit zero budget disables all segment caching, witnesses too.
+        if self.budget_bytes == 0 {
             return;
         }
-        while self.membership_bytes + bytes > budget
-            || self.memberships.len() >= OPEN_SEGMENT_CACHE_MAX_SEGMENTS
-        {
+        let bytes = segment.membership_filter.allocated_bytes();
+        while self.memberships.len() >= MAX_MEMBERSHIP_WITNESSES {
             let Some(oldest) = self.membership_order.pop_front() else { break; };
             if let Some(old) = self.memberships.remove(&oldest) {
                 self.membership_bytes -= old.filter.allocated_bytes();
@@ -278,6 +285,18 @@ impl OpenSegmentCache {
         });
         self.membership_order.push_back(id);
         self.membership_bytes += bytes;
+    }
+
+    /// Keep only witnesses of the installed catalog. Dropped segments can
+    /// never be read through the catalog again.
+    fn retain_memberships(&mut self, referenced: &HashSet<Uuid>) {
+        self.memberships.retain(|segment_id, _| referenced.contains(segment_id));
+        let memberships = &self.memberships;
+        self.membership_order.retain(|segment_id| memberships.contains_key(segment_id));
+        self.membership_bytes = memberships
+            .values()
+            .map(|membership| membership.filter.allocated_bytes())
+            .sum();
     }
 
     fn may_contain(
@@ -317,6 +336,12 @@ impl OpenSegmentCache {
         self.lru.push_back((segment_id, tick));
     }
 
+    /// A resident verified index without refreshing its recency: one
+    /// whole-store pass must not reorder the read path's working set.
+    fn peek(&self, segment_id: Uuid) -> Option<Arc<PayloadSegment>> {
+        self.entries.get(&segment_id).map(|(segment, _)| Arc::clone(segment))
+    }
+
     fn get(&mut self, segment_id: Uuid) -> Option<Arc<PayloadSegment>> {
         let (segment, _) = self.entries.get(&segment_id)?;
         let segment = Arc::clone(segment);
@@ -332,7 +357,7 @@ impl OpenSegmentCache {
         self.remember_membership(&segment);
         let segment_id = segment.metadata.segment_id;
         let bytes = Self::entry_bytes(&segment);
-        if bytes > self.budget_bytes - self.budget_bytes / PAYLOAD_SEGMENT_MEMBERSHIP_BUDGET_DIVISOR {
+        if bytes > self.budget_bytes {
             return;
         }
         if let Some((existing, _)) = self.entries.remove(&segment_id) {
@@ -341,6 +366,8 @@ impl OpenSegmentCache {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
         self.resident_bytes += bytes;
+        #[cfg(test)]
+        read_path_counters::note_index_admission();
         self.entries.insert(segment_id, (segment, tick));
         self.note_recency(segment_id, tick);
         self.evict_to_budget();
@@ -357,7 +384,7 @@ impl OpenSegmentCache {
     }
 
     fn evict_to_budget(&mut self) {
-        while self.resident_bytes > self.budget_bytes - self.budget_bytes / PAYLOAD_SEGMENT_MEMBERSHIP_BUDGET_DIVISOR
+        while self.resident_bytes > self.budget_bytes
             || self.entries.len() > OPEN_SEGMENT_CACHE_MAX_SEGMENTS
         {
             let Some((candidate, candidate_tick)) = self.lru.pop_front() else {
@@ -375,56 +402,147 @@ impl OpenSegmentCache {
     }
 }
 
-/// At most this many segment read handles stay open at once. Catalogued
-/// segments are sealed and content-addressed, so one handle serves every
-/// later point read; reopening the file per block multiplies network- and
-/// FUSE-filesystem round trips (WAL recovery replays thousands of block
-/// fetches, and each `open` is a remote metadata round trip there). The
-/// bound is small and independent of the index cache: desktop process file
-/// descriptor budgets (macOS 256) must absorb it beside the existing
-/// working set, and handles hold no payload bytes.
-const MAX_OPEN_SEGMENT_READ_HANDLES: usize = 32;
+/// Idle segment read handles kept open at once. Catalogued segments are
+/// sealed and content-addressed, so one handle serves every later point
+/// read; reopening the file per block multiplies network- and
+/// FUSE-filesystem round trips (each `open` plus its `statx` is a remote
+/// metadata round trip of roughly 1-2 ms there, and a live 20k-segment
+/// catalog made those round trips the daemon's dominant blocking I/O). The
+/// floor keeps desktop descriptor budgets (macOS 256) safe beside the
+/// existing working set; above it the bound follows the process descriptor
+/// limit, never memory, and handles hold no payload bytes.
+const MIN_OPEN_SEGMENT_READ_HANDLES: usize = 32;
+const MAX_OPEN_SEGMENT_READ_HANDLES: usize = 4096;
+/// Idle handles may hold at most this fraction of the soft descriptor limit.
+const OPEN_SEGMENT_READ_HANDLE_DESCRIPTOR_DIVISOR: u64 = 16;
+/// Recently retired IDs whose in-flight leases must not be re-cached.
+const RETIRED_READ_HANDLE_IDS: usize = 1024;
 
-/// Tiny LRU of open segment read handles, keyed by segment ID. Segment IDs
-/// are fresh per creation and bytes are immutable per ID, so a cached
-/// handle can never observe different content; retirement evicts by ID.
+fn open_segment_read_handle_capacity() -> usize {
+    read_handle_capacity_for_descriptor_limit(soft_descriptor_limit())
+}
+
+fn read_handle_capacity_for_descriptor_limit(limit: Option<u64>) -> usize {
+    let Some(limit) = limit else {
+        return MIN_OPEN_SEGMENT_READ_HANDLES;
+    };
+    usize::try_from(limit / OPEN_SEGMENT_READ_HANDLE_DESCRIPTOR_DIVISOR)
+        .unwrap_or(usize::MAX)
+        .clamp(MIN_OPEN_SEGMENT_READ_HANDLES, MAX_OPEN_SEGMENT_READ_HANDLES)
+}
+
+#[cfg(unix)]
+fn soft_descriptor_limit() -> Option<u64> {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // The kernel fills the caller-owned structure only on success.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return None;
+    }
+    if limit.rlim_cur == libc::RLIM_INFINITY {
+        return Some(u64::MAX);
+    }
+    u64::try_from(limit.rlim_cur).ok()
+}
+
+#[cfg(not(unix))]
+fn soft_descriptor_limit() -> Option<u64> {
+    None
+}
+
+/// LRU of open segment read handles, keyed by segment ID. Segment IDs are
+/// fresh per creation and bytes are immutable per ID, so a cached handle can
+/// never observe different content; retirement evicts by ID. Recency uses
+/// ticks with lazy deletion so a lease/return pair stays O(1) at thousands
+/// of handles.
 struct ReadHandleCache {
-    handles: HashMap<Uuid, Box<dyn VfsFile>>,
-    lru: VecDeque<Uuid>,
+    handles: HashMap<Uuid, (Box<dyn VfsFile>, u64)>,
+    recency: VecDeque<(Uuid, u64)>,
+    tick: u64,
+    capacity: usize,
+    // A reader may hold a leased handle while its segment is removed; the
+    // late return must close it instead of pinning an unlinked file.
+    retired: HashSet<Uuid>,
+    retired_order: VecDeque<Uuid>,
 }
 
 impl ReadHandleCache {
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             handles: HashMap::new(),
-            lru: VecDeque::new(),
+            recency: VecDeque::new(),
+            tick: 0,
+            capacity: capacity.max(1),
+            retired: HashSet::new(),
+            retired_order: VecDeque::new(),
         }
     }
 
     fn take(&mut self, segment_id: Uuid) -> Option<Box<dyn VfsFile>> {
-        self.lru.retain(|id| *id != segment_id);
-        self.handles.remove(&segment_id)
+        self.handles.remove(&segment_id).map(|(handle, _)| handle)
     }
 
     fn put(&mut self, segment_id: Uuid, handle: Box<dyn VfsFile>) {
-        self.lru.retain(|id| *id != segment_id);
-        self.handles.insert(segment_id, handle);
-        self.lru.push_back(segment_id);
-        while self.handles.len() > MAX_OPEN_SEGMENT_READ_HANDLES {
-            if let Some(evicted) = self.lru.pop_front() {
-                self.handles.remove(&evicted);
+        if self.retired.contains(&segment_id) {
+            return;
+        }
+        self.tick = self.tick.wrapping_add(1);
+        let tick = self.tick;
+        self.handles.insert(segment_id, (handle, tick));
+        if self.recency.len() >= self.capacity.saturating_mul(4).max(64) {
+            let handles = &self.handles;
+            self.recency.retain(|(id, recorded)| {
+                handles.get(id).is_some_and(|(_, current)| current == recorded)
+            });
+        }
+        self.recency.push_back((segment_id, tick));
+        while self.handles.len() > self.capacity {
+            let Some((candidate, recorded)) = self.recency.pop_front() else {
+                break;
+            };
+            if self
+                .handles
+                .get(&candidate)
+                .is_some_and(|(_, current)| *current == recorded)
+            {
+                self.handles.remove(&candidate);
             }
         }
     }
 
     fn remove(&mut self, segment_id: Uuid) {
         self.handles.remove(&segment_id);
-        self.lru.retain(|id| *id != segment_id);
+        if self.retired.insert(segment_id) {
+            self.retired_order.push_back(segment_id);
+            while self.retired_order.len() > RETIRED_READ_HANDLE_IDS {
+                if let Some(oldest) = self.retired_order.pop_front() {
+                    self.retired.remove(&oldest);
+                }
+            }
+        }
     }
 
-    fn clear(&mut self) {
-        self.handles.clear();
-        self.lru.clear();
+    fn retain(&mut self, keep: impl Fn(&Uuid) -> bool) {
+        self.handles.retain(|segment_id, _| keep(segment_id));
+        if self.handles.is_empty() {
+            self.recency.clear();
+        }
+    }
+
+    #[cfg(test)]
+    fn set_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity.max(1);
+        while self.handles.len() > self.capacity {
+            let Some((candidate, recorded)) = self.recency.pop_front() else {
+                break;
+            };
+            if self
+                .handles
+                .get(&candidate)
+                .is_some_and(|(_, current)| *current == recorded)
+            {
+                self.handles.remove(&candidate);
+            }
+        }
     }
 }
 
@@ -538,7 +656,7 @@ impl PayloadSegmentStore {
             root,
             vfs,
             open_cache: RwLock::new(OpenSegmentCache::new()),
-            read_handles: Mutex::new(ReadHandleCache::new()),
+            read_handles: Mutex::new(ReadHandleCache::new(open_segment_read_handle_capacity())),
             deferred_retirement: Mutex::new(DeferredRetirement::default()),
         })
     }
@@ -556,7 +674,7 @@ impl PayloadSegmentStore {
             root,
             vfs,
             open_cache: RwLock::new(OpenSegmentCache::new()),
-            read_handles: Mutex::new(ReadHandleCache::new()),
+            read_handles: Mutex::new(ReadHandleCache::new(open_segment_read_handle_capacity())),
             deferred_retirement: Mutex::new(DeferredRetirement::default()),
         })
     }
@@ -576,8 +694,9 @@ impl PayloadSegmentStore {
         };
         // Lease a handle out of the cache. Opening and reading a cold file
         // must not serialize unrelated reads behind a global cache mutex.
-        // Idle handles are capped at 32; leased handles are bounded by the
-        // admitted request/maintenance workers and close on every error path.
+        // Idle handles follow the descriptor-derived bound; leased handles are
+        // bounded by the admitted request/maintenance workers and close on
+        // every error path.
         let cached = self.read_handles.lock()
             .map_err(|_| io::Error::other("segment read-handle lock was poisoned"))?
             .take(segment.metadata.segment_id);
@@ -594,12 +713,19 @@ impl PayloadSegmentStore {
         Ok(Some(payload))
     }
 
-    /// Drop every cached handle (segment files may have been retired outside
-    /// `remove_segment`, e.g. manifest replacement followed by orphan GC).
-    pub(crate) fn close_read_handles(&self) {
+    /// Close idle handles of segments the installed catalog no longer
+    /// references: a manifest replacement may be followed by orphan GC that
+    /// unlinks them outside `remove_segment`. Handles of still-referenced
+    /// segments name the same immutable bytes and stay warm.
+    pub(crate) fn retain_read_handles(&self, referenced: &HashSet<Uuid>) {
         if let Ok(mut handles) = self.read_handles.lock() {
-            handles.clear();
+            handles.retain(|segment_id| referenced.contains(segment_id));
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_read_handle_capacity(&self, capacity: usize) {
+        self.read_handles.lock().unwrap().set_capacity(capacity);
     }
 
     pub fn create<F>(
@@ -713,75 +839,142 @@ impl PayloadSegmentStore {
         self.open_segment(segment_id)
     }
 
+    /// Verifying open for GC admission, compaction, packing and integrity
+    /// tooling: the path is re-checked and the on-disk framing re-verified on
+    /// every call. An idle cached handle for the same immutable ID saves the
+    /// open round trip; a freshly opened handle is not cached, so whole-catalog
+    /// maintenance scans never evict the read path's hot handles.
     pub fn open_segment(&self, segment_id: Uuid) -> io::Result<PayloadSegment> {
-        let path = self.path(segment_id);
-        if self.vfs.metadata(&path)? != FileKind::File {
-            return Err(invalid_data("payload segment is not a regular file"));
-        }
-        let mut file = open_read(self.vfs.as_ref(), &path)?;
-        let file_bytes = file.len()?;
-        if file_bytes < (HEADER_BYTES + INDEX_ENTRY_BYTES + TRAILER_BYTES) as u64
-            || file_bytes > MAX_SEGMENT_FILE_BYTES
-        {
-            return Err(invalid_data(
-                "payload segment file size is outside its bound",
-            ));
-        }
-        let mut header = [0_u8; HEADER_BYTES];
-        file.read_exact_at(0, &mut header)?;
-        let (stored_id, block_count, payload_bytes) = decode_header(&header)?;
-        if stored_id != segment_id || block_count == 0 || block_count as usize > MAX_SEGMENT_BLOCKS
-        {
-            return Err(invalid_data(
-                "payload segment header identity or count mismatch",
-            ));
-        }
+        self.open_verified_segment(segment_id, SegmentHandleUse::Verification)
+    }
 
-        let mut trailer = [0_u8; TRAILER_BYTES];
-        file.read_exact_at(file_bytes - TRAILER_BYTES as u64, &mut trailer)?;
-        let index_offset = u64::from_le_bytes(trailer[8..16].try_into().unwrap());
-        let index_bytes = u64::from_le_bytes(trailer[16..24].try_into().unwrap());
-        let expected_index_bytes = block_count as u64 * INDEX_ENTRY_BYTES as u64;
-        let expected_index_offset = (HEADER_BYTES as u64)
-            .checked_add(payload_bytes)
-            .ok_or_else(|| invalid_data("payload segment layout overflow"))?;
-        let expected_file_bytes = index_offset
-            .checked_add(index_bytes)
-            .and_then(|value| value.checked_add(TRAILER_BYTES as u64))
-            .ok_or_else(|| invalid_data("payload segment layout overflow"))?;
-        if &trailer[..8] != TRAILER_MAGIC
-            || index_bytes != expected_index_bytes
-            || index_bytes > MAX_SEGMENT_INDEX_BYTES as u64
-            || payload_bytes > MAX_SEGMENT_PAYLOAD_BYTES
-            || index_offset != expected_index_offset
-            || expected_file_bytes != file_bytes
-        {
-            return Err(invalid_data("payload segment trailer layout mismatch"));
-        }
-        let mut index = vec![0_u8; index_bytes as usize];
-        file.read_exact_at(index_offset, &mut index)?;
-        let stored_crc = u32::from_le_bytes(trailer[24..28].try_into().unwrap());
-        if stored_crc != crc32c::crc32c(&index)
-            || trailer[28..] != trailer_digest(&header, &index, &trailer[..28])
-        {
-            return Err(invalid_data("payload segment index integrity mismatch"));
-        }
-        let entries = decode_index(&index, payload_bytes)?;
+    fn open_verified_segment(
+        &self,
+        segment_id: Uuid,
+        purpose: SegmentHandleUse,
+    ) -> io::Result<PayloadSegment> {
+        let (path, metadata, entries) = self.read_verified_index(segment_id, purpose)?;
         let membership_filter = SegmentMembershipFilter::from_entries(&entries);
         Ok(PayloadSegment {
             path,
             vfs: Arc::clone(&self.vfs),
-            metadata: PayloadSegmentMetadata {
-                segment_id,
-                block_count,
-                payload_bytes,
-                file_bytes,
-            },
+            metadata,
             entries,
             membership_filter,
         })
     }
 
+    /// Reads and fully verifies one segment's framing and index; see
+    /// `open_segment` for the path check and handle-cache participation.
+    fn read_verified_index(
+        &self,
+        segment_id: Uuid,
+        purpose: SegmentHandleUse,
+    ) -> io::Result<(PathBuf, PayloadSegmentMetadata, Vec<IndexEntry>)> {
+        let path = self.path(segment_id);
+        let leased = self
+            .read_handles
+            .lock()
+            .map_err(|_| io::Error::other("segment read-handle lock was poisoned"))?
+            .take(segment_id);
+        let reused = leased.is_some();
+        if !(reused && purpose == SegmentHandleUse::PointRead)
+            && self.vfs.metadata(&path)? != FileKind::File
+        {
+            return Err(invalid_data("payload segment is not a regular file"));
+        }
+        let mut file = match leased {
+            Some(handle) => handle,
+            None => open_read(self.vfs.as_ref(), &path)?,
+        };
+        let (metadata, entries) = verify_segment_framing(segment_id, file.as_mut())?;
+        #[cfg(test)]
+        read_path_counters::note_index_read(entries.len() * INDEX_ENTRY_BYTES);
+        if reused || purpose == SegmentHandleUse::PointRead {
+            self.read_handles
+                .lock()
+                .map_err(|_| io::Error::other("segment read-handle lock was poisoned"))?
+                .put(segment_id, file);
+        }
+        Ok((path, metadata, entries))
+    }
+}
+
+/// Why a verified segment open runs; decides handle-cache participation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SegmentHandleUse {
+    /// Maintenance and integrity paths: re-check the path every time and
+    /// never let a scan displace the read path's hot handles.
+    Verification,
+    /// The verified-index cache miss of a point read, immediately followed by
+    /// a payload fetch through the same handle.
+    PointRead,
+}
+
+fn verify_segment_framing(
+    segment_id: Uuid,
+    file: &mut dyn VfsFile,
+) -> io::Result<(PayloadSegmentMetadata, Vec<IndexEntry>)> {
+    let file_bytes = file.len()?;
+    if file_bytes < (HEADER_BYTES + INDEX_ENTRY_BYTES + TRAILER_BYTES) as u64
+        || file_bytes > MAX_SEGMENT_FILE_BYTES
+    {
+        return Err(invalid_data(
+            "payload segment file size is outside its bound",
+        ));
+    }
+    let mut header = [0_u8; HEADER_BYTES];
+    file.read_exact_at(0, &mut header)?;
+    let (stored_id, block_count, payload_bytes) = decode_header(&header)?;
+    if stored_id != segment_id || block_count == 0 || block_count as usize > MAX_SEGMENT_BLOCKS
+    {
+        return Err(invalid_data(
+            "payload segment header identity or count mismatch",
+        ));
+    }
+
+    let mut trailer = [0_u8; TRAILER_BYTES];
+    file.read_exact_at(file_bytes - TRAILER_BYTES as u64, &mut trailer)?;
+    let index_offset = u64::from_le_bytes(trailer[8..16].try_into().unwrap());
+    let index_bytes = u64::from_le_bytes(trailer[16..24].try_into().unwrap());
+    let expected_index_bytes = block_count as u64 * INDEX_ENTRY_BYTES as u64;
+    let expected_index_offset = (HEADER_BYTES as u64)
+        .checked_add(payload_bytes)
+        .ok_or_else(|| invalid_data("payload segment layout overflow"))?;
+    let expected_file_bytes = index_offset
+        .checked_add(index_bytes)
+        .and_then(|value| value.checked_add(TRAILER_BYTES as u64))
+        .ok_or_else(|| invalid_data("payload segment layout overflow"))?;
+    if &trailer[..8] != TRAILER_MAGIC
+        || index_bytes != expected_index_bytes
+        || index_bytes > MAX_SEGMENT_INDEX_BYTES as u64
+        || payload_bytes > MAX_SEGMENT_PAYLOAD_BYTES
+        || index_offset != expected_index_offset
+        || expected_file_bytes != file_bytes
+    {
+        return Err(invalid_data("payload segment trailer layout mismatch"));
+    }
+    let mut index = vec![0_u8; index_bytes as usize];
+    file.read_exact_at(index_offset, &mut index)?;
+    let stored_crc = u32::from_le_bytes(trailer[24..28].try_into().unwrap());
+    if stored_crc != crc32c::crc32c(&index)
+        || trailer[28..] != trailer_digest(&header, &index, &trailer[..28])
+    {
+        return Err(invalid_data("payload segment index integrity mismatch"));
+    }
+    let entries = decode_index(&index, payload_bytes)?;
+    Ok((
+        PayloadSegmentMetadata {
+            segment_id,
+            block_count,
+            payload_bytes,
+            file_bytes,
+        },
+        entries,
+    ))
+}
+
+impl PayloadSegmentStore {
     /// Read-path open with a verified-segment cache. Behaves exactly like
     /// `open_segment` on a miss; a hit replays the previously verified
     /// metadata and index without touching the disk. Payload fetches through
@@ -796,14 +989,33 @@ impl PayloadSegmentStore {
         Ok(())
     }
 
-    pub(crate) fn cached_segment_may_contain(
+    /// Candidates not excluded by a retained negative witness, in their
+    /// original order, under one read-lock acquisition. Unknown segments stay
+    /// candidates; a witness that disagrees with its reference is an error.
+    pub(crate) fn segments_that_may_contain(
         &self,
-        reference: &crate::payload_manifest::PayloadSegmentReference,
+        references: &[crate::payload_manifest::PayloadSegmentReference],
         block_id: BlockId,
-    ) -> io::Result<bool> {
-        self.open_cache.read()
+    ) -> io::Result<Vec<crate::payload_manifest::PayloadSegmentReference>> {
+        let cache = self.open_cache.read()
+            .map_err(|_| io::Error::other("open segment cache lock was poisoned"))?;
+        #[cfg(test)]
+        read_path_counters::note_witness_checks(references.len());
+        let mut candidates = Vec::new();
+        for reference in references {
+            if cache.may_contain(reference, block_id)? {
+                candidates.push(*reference);
+            }
+        }
+        Ok(candidates)
+    }
+
+    /// Forget witnesses of segments outside the installed catalog.
+    pub(crate) fn retain_segment_memberships(&self, referenced: &HashSet<Uuid>) -> io::Result<()> {
+        self.open_cache.write()
             .map_err(|_| io::Error::other("open segment cache lock was poisoned"))?
-            .may_contain(reference, block_id)
+            .retain_memberships(referenced);
+        Ok(())
     }
 
     /// Probe-derived open-segment cache budget applied at authority open
@@ -831,7 +1043,7 @@ impl PayloadSegmentStore {
         {
             return Ok(segment);
         }
-        let segment = Arc::new(self.open_segment(segment_id)?);
+        let segment = Arc::new(self.open_verified_segment(segment_id, SegmentHandleUse::PointRead)?);
         self.open_cache
             .write()
             .map_err(|_| io::Error::other("open segment cache lock was poisoned"))?
@@ -1050,13 +1262,482 @@ impl PayloadSegmentStore {
         if file_bytes != candidate.file_bytes || file_bytes > MAX_SEGMENT_FILE_BYTES {
             return Err(invalid_data("payload segment orphan size changed"));
         }
+        if let Some(segment_id) = candidate.segment_id {
+            if let Ok(mut handles) = self.read_handles.lock() {
+                handles.remove(segment_id);
+            }
+        }
         self.vfs.remove_file(&path)?;
         sync_directory_barrier(self.vfs.as_ref(), &self.root)?;
         Ok(file_bytes)
     }
 
+    /// Every orphan in the payload directory, for the online collector's
+    /// two-observation confirmation. Unlike the offline round's single
+    /// [`Self::plan_orphan_file`] candidate, this observation runs outside
+    /// the authority mutex: a file that vanishes while being sized is
+    /// skipped, and the removal hold re-validates every reference before
+    /// [`Self::unlink_orphan_file`]. The whole directory is observed (its
+    /// listing is the only thing held), and each candidate is still
+    /// classified and sized by its own stat and open. `before_entry` runs
+    /// ahead of each entry's stat and open, so a caller can stop between
+    /// file operations.
+    pub(crate) fn observe_orphan_files(
+        &self,
+        referenced_segment_ids: &BTreeSet<Uuid>,
+        skip_temporary: bool,
+        mut before_entry: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<Vec<PayloadSegmentOrphanCandidate>> {
+        let listed = self.vfs.read_directory_entries(&self.root)?;
+        let mut candidates = Vec::new();
+        for DirectoryEntry { path, .. } in &listed {
+            before_entry()?;
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| invalid_data("payload segment filename is not UTF-8"))?;
+            let segment_id = parse_complete_segment_name(file_name)?;
+            let is_temporary = parse_temporary_segment_name(file_name)?;
+            if segment_id.is_none() && !is_temporary {
+                return Err(invalid_data(
+                    "payload segment directory has an unknown entry",
+                ));
+            }
+            if (is_temporary && skip_temporary)
+                || segment_id.is_some_and(|id| referenced_segment_ids.contains(&id))
+            {
+                continue;
+            }
+            if let Some(file_bytes) = self.orphan_file_bytes(path)? {
+                candidates.push(PayloadSegmentOrphanCandidate {
+                    file_name: file_name.to_owned(),
+                    segment_id,
+                    file_bytes,
+                });
+            }
+        }
+        Ok(candidates)
+    }
+
+    /// Size of one orphan file, or `None` when it no longer exists.
+    fn orphan_file_bytes(&self, path: &Path) -> io::Result<Option<u64>> {
+        match self.vfs.metadata(path) {
+            Ok(FileKind::File) => {}
+            Ok(FileKind::Directory) => {
+                return Err(invalid_data("payload segment orphan is not a regular file"));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        let file_bytes = match open_read(self.vfs.as_ref(), path) {
+            Ok(file) => file.len()?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if file_bytes > MAX_SEGMENT_FILE_BYTES {
+            return Err(invalid_data("payload segment orphan exceeds the file bound"));
+        }
+        Ok(Some(file_bytes))
+    }
+
+    /// Unlinks one observed orphan whose name and size are unchanged, or
+    /// returns `None` when it vanished or changed. The caller re-validated
+    /// every reference under its authority hold; one [`Self::sync_root`]
+    /// barrier then makes a whole batch of unlinks durable.
+    pub(crate) fn unlink_orphan_file(
+        &self,
+        candidate: &PayloadSegmentOrphanCandidate,
+    ) -> io::Result<Option<u64>> {
+        let path = self.root.join(&candidate.file_name);
+        if path.parent() != Some(self.root.as_path())
+            || (parse_complete_segment_name(&candidate.file_name)? != candidate.segment_id)
+            || (candidate.segment_id.is_none()
+                && !parse_temporary_segment_name(&candidate.file_name)?)
+        {
+            return Err(invalid_data("payload segment orphan identity changed"));
+        }
+        if self.orphan_file_bytes(&path)? != Some(candidate.file_bytes) {
+            return Ok(None);
+        }
+        if let Some(segment_id) = candidate.segment_id {
+            self.open_cache
+                .write()
+                .map_err(|_| io::Error::other("open segment cache lock was poisoned"))?
+                .remove(segment_id);
+            if let Ok(mut handles) = self.read_handles.lock() {
+                handles.remove(segment_id);
+            }
+        }
+        match self.vfs.remove_file(&path) {
+            Ok(()) => Ok(Some(candidate.file_bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Durability barrier for the unlinks made by [`Self::unlink_orphan_file`].
+    pub(crate) fn sync_root(&self) -> io::Result<()> {
+        sync_directory_barrier(self.vfs.as_ref(), &self.root)
+    }
+
     fn path(&self, segment_id: Uuid) -> PathBuf {
         self.root.join(format!("{}.pseg", segment_id.simple()))
+    }
+}
+
+/// Packed [`CatalogLocationTable`] entry: the leading block-ID bits, then the
+/// segment's catalog ordinal and the entry's index position. The ordinal and
+/// position widths are the catalog and segment-format bounds; the ID prefix
+/// keeps the remaining 36 bits, so sorting entries sorts them by prefix.
+const LOCATION_POSITION_BITS: u32 = 16;
+const LOCATION_ORDINAL_BITS: u32 = 12;
+const LOCATION_PREFIX_MASK: u64 = u64::MAX << (LOCATION_ORDINAL_BITS + LOCATION_POSITION_BITS);
+const _: () = assert!(MAX_SEGMENT_BLOCKS <= 1 << LOCATION_POSITION_BITS);
+const _: () = assert!(crate::payload_manifest::MAX_PAYLOAD_SEGMENTS <= 1 << LOCATION_ORDINAL_BITS);
+
+/// Exact block locations of one payload catalog for a single whole-store pass
+/// (docs/TOFUDB_BLOCK_READ_PATH.md, "Catalog location table for whole-store
+/// passes"). One 8-byte entry per catalogued block, sorted by ID prefix, so a
+/// lookup is a binary search whose cost does not depend on the segment count.
+/// An entry is only a position: the reader confirms the full ID against the
+/// segment index and the payload by CRC32C and content hash, so a prefix
+/// collision or a stale entry costs reads, never wrong bytes. Segments whose
+/// index could not be verified are absent; their blocks take the exact path.
+pub(crate) struct CatalogLocationTable {
+    segments: Vec<crate::payload_manifest::PayloadSegmentReference>,
+    entries: Vec<u64>,
+    /// Start of each leading-ID-byte run in `entries`, then the end.
+    byte_starts: Vec<usize>,
+    unindexed_segments: usize,
+}
+
+impl CatalogLocationTable {
+    fn prefix(block_id: BlockId) -> u64 {
+        u64::from_be_bytes(block_id.0[..8].try_into().unwrap()) & LOCATION_PREFIX_MASK
+    }
+
+    /// Every catalogued position whose ID prefix matches `block_id`.
+    pub(crate) fn candidates(
+        &self,
+        block_id: BlockId,
+    ) -> impl Iterator<Item = (&crate::payload_manifest::PayloadSegmentReference, u32)> + '_ {
+        let prefix = Self::prefix(block_id);
+        let leading = usize::from(block_id.0[0]);
+        let run = &self.entries[self.byte_starts[leading]..self.byte_starts[leading + 1]];
+        let start = run.partition_point(|entry| entry & LOCATION_PREFIX_MASK < prefix);
+        run[start..]
+            .iter()
+            .take_while(move |entry| *entry & LOCATION_PREFIX_MASK == prefix)
+            .map(|entry| {
+                let ordinal = (entry >> LOCATION_POSITION_BITS) as usize & ((1 << LOCATION_ORDINAL_BITS) - 1);
+                let position = (entry & ((1 << LOCATION_POSITION_BITS) - 1)) as u32;
+                (&self.segments[ordinal], position)
+            })
+    }
+
+    pub(crate) fn located_blocks(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn unindexed_segments(&self) -> usize {
+        self.unindexed_segments
+    }
+
+    pub(crate) fn resident_bytes(&self) -> usize {
+        self.entries.capacity() * std::mem::size_of::<u64>()
+            + self.byte_starts.capacity() * std::mem::size_of::<usize>()
+            + self.segments.capacity()
+                * std::mem::size_of::<crate::payload_manifest::PayloadSegmentReference>()
+    }
+
+    /// Points every entry with `block_id`'s prefix at the next position of
+    /// its segment, as a damaged table would.
+    #[cfg(test)]
+    pub(crate) fn misplace_for_test(&mut self, block_id: BlockId) -> usize {
+        let prefix = Self::prefix(block_id);
+        let mut misplaced = 0;
+        for entry in self.entries.iter_mut().filter(|entry| **entry & LOCATION_PREFIX_MASK == prefix) {
+            let ordinal = (*entry >> LOCATION_POSITION_BITS) as usize & ((1 << LOCATION_ORDINAL_BITS) - 1);
+            let count = u64::from(self.segments[ordinal].block_count);
+            let position = *entry & ((1 << LOCATION_POSITION_BITS) - 1);
+            *entry = (*entry & !((1 << LOCATION_POSITION_BITS) - 1)) | ((position + 1) % count);
+            misplaced += 1;
+        }
+        misplaced
+    }
+}
+
+impl PayloadSegmentStore {
+    /// Streams the verified index of every segment of `catalog` once into a
+    /// [`CatalogLocationTable`]. An index resident in the verified-index cache
+    /// is reused without refreshing its recency; any other index is read and
+    /// fully verified like `open_segment`, and admitted to none of the index,
+    /// witness or handle caches. A segment whose index cannot be read,
+    /// verified or matched to its reference is left out of the table: the
+    /// exact catalog path serves its blocks and reports that same failure if
+    /// a traversal needs one of them. `check` runs before each segment and
+    /// between sort steps; its error aborts the build.
+    pub(crate) fn build_location_table(
+        &self,
+        catalog: &[crate::payload_manifest::PayloadSegmentReference],
+        mut check: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<CatalogLocationTable> {
+        if catalog.len() > 1 << LOCATION_ORDINAL_BITS {
+            return Err(invalid_data("payload catalog exceeds its segment bound"));
+        }
+        let capacity = catalog.iter().map(|reference| reference.block_count as usize).sum();
+        let mut entries = Vec::with_capacity(capacity);
+        let mut unindexed_segments = 0;
+        for (ordinal, reference) in catalog.iter().enumerate() {
+            check()?;
+            let indexed = self.with_verified_index(reference, |index| {
+                entries.extend(index.iter().enumerate().map(|(position, entry)| {
+                    CatalogLocationTable::prefix(entry.block_id)
+                        | (ordinal as u64) << LOCATION_POSITION_BITS
+                        | position as u64
+                }));
+            });
+            if indexed.is_err() {
+                unindexed_segments += 1;
+            }
+        }
+        let byte_starts = sort_locations(&mut entries, &mut check)?;
+        Ok(CatalogLocationTable {
+            segments: catalog.to_vec(),
+            entries,
+            byte_starts,
+            unindexed_segments,
+        })
+    }
+
+    /// Reads `block_id` from the index position a [`CatalogLocationTable`]
+    /// attributed to `reference`, without `open_segment_cached`'s whole-index
+    /// read or cache admission. The entry comes from a resident verified index
+    /// (recency untouched) or from one positioned read of the on-disk entry,
+    /// bounded to the payload region; the payload passes CRC32C and the
+    /// content hash. `None` means the position holds another block (an ID
+    /// prefix collision). An error is no verdict about the block: the caller
+    /// resolves it through the exact catalog path.
+    pub(crate) fn read_located(
+        &self,
+        reference: &crate::payload_manifest::PayloadSegmentReference,
+        position: u32,
+        block_id: BlockId,
+    ) -> io::Result<Option<Vec<u8>>> {
+        #[cfg(test)]
+        read_path_counters::note_location_candidate();
+        if position >= reference.block_count {
+            return Err(invalid_data("payload segment location exceeds its index"));
+        }
+        let mut leased = None;
+        let entry = match self.resident_index(reference)? {
+            Some(segment) => segment.entries[position as usize],
+            None => {
+                let file = leased.insert(self.lease_read_handle(reference.segment_id)?);
+                read_index_entry(file.as_mut(), reference, position)?
+            }
+        };
+        if entry.block_id != block_id {
+            if let Some(file) = leased {
+                self.return_read_handle(reference.segment_id, file)?;
+            }
+            return Ok(None);
+        }
+        let mut file = match leased {
+            Some(file) => file,
+            None => self.lease_read_handle(reference.segment_id)?,
+        };
+        let mut payload = vec![0_u8; entry.payload_len as usize];
+        file.read_exact_at(entry.payload_offset, &mut payload)?;
+        let payload = verify_entry_payload(entry, block_id, payload)?;
+        self.return_read_handle(reference.segment_id, file)?;
+        Ok(Some(payload))
+    }
+
+    fn with_verified_index<R>(
+        &self,
+        reference: &crate::payload_manifest::PayloadSegmentReference,
+        visit: impl FnOnce(&[IndexEntry]) -> R,
+    ) -> io::Result<R> {
+        if let Some(segment) = self.resident_index(reference)? {
+            return Ok(visit(&segment.entries));
+        }
+        let (_, metadata, entries) =
+            self.read_verified_index(reference.segment_id, SegmentHandleUse::Verification)?;
+        if !index_matches_reference(&metadata, &entries, reference) {
+            return Err(invalid_data("payload segment differs from its manifest witness"));
+        }
+        Ok(visit(&entries))
+    }
+
+    /// The resident verified index of `reference`'s segment, recency
+    /// untouched. One that disagrees with the reference is an error, exactly
+    /// as `validate_open_segment` reports it on the exact path.
+    fn resident_index(
+        &self,
+        reference: &crate::payload_manifest::PayloadSegmentReference,
+    ) -> io::Result<Option<Arc<PayloadSegment>>> {
+        let resident = self
+            .open_cache
+            .read()
+            .map_err(|_| io::Error::other("open segment cache lock was poisoned"))?
+            .peek(reference.segment_id);
+        match resident {
+            Some(segment) if !index_matches_reference(&segment.metadata, &segment.entries, reference) => {
+                Err(invalid_data("payload segment differs from its manifest witness"))
+            }
+            resident => Ok(resident),
+        }
+    }
+
+    /// Leases a catalogued segment's idle read handle or opens a new one. A
+    /// leased handle closes on every error path; `return_read_handle` makes
+    /// it idle again under the descriptor-derived bound, as point reads do.
+    fn lease_read_handle(&self, segment_id: Uuid) -> io::Result<Box<dyn VfsFile>> {
+        let cached = self
+            .read_handles
+            .lock()
+            .map_err(|_| io::Error::other("segment read-handle lock was poisoned"))?
+            .take(segment_id);
+        match cached {
+            Some(handle) => Ok(handle),
+            None => open_read(self.vfs.as_ref(), &self.path(segment_id)),
+        }
+    }
+
+    fn return_read_handle(&self, segment_id: Uuid, handle: Box<dyn VfsFile>) -> io::Result<()> {
+        self.read_handles
+            .lock()
+            .map_err(|_| io::Error::other("segment read-handle lock was poisoned"))?
+            .put(segment_id, handle);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resident_index_ids_for_test(&self) -> BTreeSet<Uuid> {
+        self.open_cache.read().unwrap().entries.keys().copied().collect()
+    }
+}
+
+/// Sorts packed locations in place and returns where each leading ID byte's
+/// run starts. A counting pass and an in-place (American flag) partition by
+/// the leading byte precede 256 independent run sorts, so `check` runs between
+/// bounded steps rather than only after one catalog-wide sort.
+fn sort_locations(
+    entries: &mut [u64],
+    check: &mut impl FnMut() -> io::Result<()>,
+) -> io::Result<Vec<usize>> {
+    let mut starts = vec![0_usize; 257];
+    for entry in entries.iter() {
+        starts[(entry >> 56) as usize + 1] += 1;
+    }
+    for byte in 0..256 {
+        starts[byte + 1] += starts[byte];
+    }
+    let mut next = starts.clone();
+    for byte in 0..256 {
+        check()?;
+        while next[byte] < starts[byte + 1] {
+            let target = (entries[next[byte]] >> 56) as usize;
+            if target == byte {
+                next[byte] += 1;
+            } else {
+                entries.swap(next[byte], next[target]);
+                next[target] += 1;
+            }
+        }
+    }
+    for byte in 0..256 {
+        check()?;
+        entries[starts[byte]..starts[byte + 1]].sort_unstable();
+    }
+    Ok(starts)
+}
+
+fn index_matches_reference(
+    metadata: &PayloadSegmentMetadata,
+    entries: &[IndexEntry],
+    reference: &crate::payload_manifest::PayloadSegmentReference,
+) -> bool {
+    metadata.segment_id == reference.segment_id
+        && metadata.block_count == reference.block_count
+        && metadata.payload_bytes == reference.payload_bytes
+        && metadata.file_bytes == reference.file_bytes
+        && entries.first().map(|entry| entry.block_id) == Some(reference.first_block_id)
+        && entries.last().map(|entry| entry.block_id) == Some(reference.last_block_id)
+}
+
+/// One index entry read at its position. The whole index was verified when
+/// the position was learned; this re-read is bounded to the payload region so
+/// later damage can address nothing outside it, and the payload checks reject
+/// any other change.
+fn read_index_entry(
+    file: &mut dyn VfsFile,
+    reference: &crate::payload_manifest::PayloadSegmentReference,
+    position: u32,
+) -> io::Result<IndexEntry> {
+    let index_offset = HEADER_BYTES as u64 + reference.payload_bytes;
+    let mut encoded = [0_u8; INDEX_ENTRY_BYTES];
+    file.read_exact_at(index_offset + u64::from(position) * INDEX_ENTRY_BYTES as u64, &mut encoded)?;
+    let entry = decode_index_entry(&encoded);
+    if entry.payload_len as usize > MAX_BLOCK_BYTES
+        || entry.payload_offset < HEADER_BYTES as u64
+        || entry
+            .payload_offset
+            .checked_add(u64::from(entry.payload_len))
+            .is_none_or(|end| end > index_offset)
+    {
+        return Err(invalid_data("payload segment index entry has an invalid extent"));
+    }
+    Ok(entry)
+}
+
+/// Per-thread read-path work counters for executable cost specifications.
+#[cfg(test)]
+pub(crate) mod read_path_counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static WITNESS_CHECKS: Cell<u64> = const { Cell::new(0) };
+        static LOCATION_CANDIDATES: Cell<u64> = const { Cell::new(0) };
+        static INDEX_READS: Cell<u64> = const { Cell::new(0) };
+        static INDEX_READ_BYTES: Cell<u64> = const { Cell::new(0) };
+        static INDEX_ADMISSIONS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn note_witness_checks(checks: usize) {
+        WITNESS_CHECKS.with(|count| count.set(count.get() + checks as u64));
+    }
+
+    pub(crate) fn note_location_candidate() {
+        LOCATION_CANDIDATES.with(|count| count.set(count.get() + 1));
+    }
+
+    pub(crate) fn note_index_read(index_bytes: usize) {
+        INDEX_READS.with(|count| count.set(count.get() + 1));
+        INDEX_READ_BYTES.with(|count| count.set(count.get() + index_bytes as u64));
+    }
+
+    pub(crate) fn note_index_admission() {
+        INDEX_ADMISSIONS.with(|count| count.set(count.get() + 1));
+    }
+
+    /// (whole segment indexes read and verified, their index bytes,
+    /// verified-index cache admissions) since the last call.
+    pub(crate) fn take_index_work() -> (u64, u64, u64) {
+        (
+            INDEX_READS.with(|count| count.replace(0)),
+            INDEX_READ_BYTES.with(|count| count.replace(0)),
+            INDEX_ADMISSIONS.with(|count| count.replace(0)),
+        )
+    }
+
+    /// (segment witness checks, location-table candidates) since the last call.
+    pub(crate) fn take() -> (u64, u64) {
+        (
+            WITNESS_CHECKS.with(|count| count.replace(0)),
+            LOCATION_CANDIDATES.with(|count| count.replace(0)),
+        )
     }
 }
 
@@ -1141,16 +1822,20 @@ fn encode_index(entries: &[IndexEntry]) -> Vec<u8> {
     index
 }
 
+fn decode_index_entry(encoded: &[u8; INDEX_ENTRY_BYTES]) -> IndexEntry {
+    IndexEntry {
+        block_id: BlockId(encoded[..32].try_into().unwrap()),
+        payload_offset: u64::from_le_bytes(encoded[32..40].try_into().unwrap()),
+        payload_len: u32::from_le_bytes(encoded[40..44].try_into().unwrap()),
+        payload_crc32c: u32::from_le_bytes(encoded[44..48].try_into().unwrap()),
+    }
+}
+
 fn decode_index(index: &[u8], payload_bytes: u64) -> io::Result<Vec<IndexEntry>> {
     let mut entries = Vec::with_capacity(index.len() / INDEX_ENTRY_BYTES);
     let mut expected_offset = HEADER_BYTES as u64;
     for encoded in index.as_chunks::<INDEX_ENTRY_BYTES>().0 {
-        let entry = IndexEntry {
-            block_id: BlockId(encoded[..32].try_into().unwrap()),
-            payload_offset: u64::from_le_bytes(encoded[32..40].try_into().unwrap()),
-            payload_len: u32::from_le_bytes(encoded[40..44].try_into().unwrap()),
-            payload_crc32c: u32::from_le_bytes(encoded[44..48].try_into().unwrap()),
-        };
+        let entry = decode_index_entry(encoded);
         if entry.payload_len as usize > MAX_BLOCK_BYTES || entry.payload_offset != expected_offset {
             return Err(invalid_data("payload segment index has an invalid extent"));
         }
@@ -1298,11 +1983,147 @@ mod tests {
         assert_eq!(count_opens(), 1);
     }
 
+    fn count(vfs: &DeterministicVfs, wanted: Operation) -> usize {
+        vfs.trace()
+            .unwrap()
+            .iter()
+            .filter(|operation| **operation == wanted)
+            .count()
+    }
+
+    #[test]
+    fn read_handle_capacity_follows_the_descriptor_limit() {
+        assert_eq!(read_handle_capacity_for_descriptor_limit(None), MIN_OPEN_SEGMENT_READ_HANDLES);
+        // macOS's default 256 keeps the historical desktop bound.
+        assert_eq!(read_handle_capacity_for_descriptor_limit(Some(256)), MIN_OPEN_SEGMENT_READ_HANDLES);
+        assert_eq!(read_handle_capacity_for_descriptor_limit(Some(1024)), 64);
+        assert_eq!(read_handle_capacity_for_descriptor_limit(Some(1 << 20)), MAX_OPEN_SEGMENT_READ_HANDLES);
+        assert_eq!(read_handle_capacity_for_descriptor_limit(Some(u64::MAX)), MAX_OPEN_SEGMENT_READ_HANDLES);
+        let capacity = open_segment_read_handle_capacity();
+        assert!((MIN_OPEN_SEGMENT_READ_HANDLES..=MAX_OPEN_SEGMENT_READ_HANDLES).contains(&capacity));
+    }
+
+    #[test]
+    fn point_read_miss_reuses_the_verifying_open_handle() {
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        let (segment_id, ids, payloads) = fixture();
+        store
+            .create(segment_id, ids.clone(), |id| Ok(payloads[&id].clone()))
+            .unwrap();
+        // Creation re-verifies through a fresh handle without caching it.
+        assert!(!store.read_handles.lock().unwrap().handles.contains_key(&segment_id));
+        vfs.arm_fault(None).unwrap();
+        let segment = store.open_segment_cached(segment_id).unwrap();
+        for id in &ids {
+            assert_eq!(store.get_with_handle(&segment, *id).unwrap().as_ref(), Some(&payloads[id]));
+        }
+        assert_eq!(count(&vfs, Operation::Open), 1, "the index verification handle serves the payload reads");
+        // One path check before the cold open plus the handle's length probe.
+        assert_eq!(count(&vfs, Operation::Metadata), 2);
+    }
+
+    #[test]
+    fn verification_open_reuses_idle_handles_but_never_caches_scans() {
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        let (segment_id, ids, payloads) = fixture();
+        let segment = store
+            .create(segment_id, ids.clone(), |id| Ok(payloads[&id].clone()))
+            .unwrap();
+        store.get_with_handle(&segment, ids[0]).unwrap().unwrap();
+        vfs.arm_fault(None).unwrap();
+        let reverified = store.open_segment(segment_id).unwrap();
+        assert_eq!(reverified.metadata(), segment.metadata());
+        assert_eq!(count(&vfs, Operation::Open), 0, "an idle handle names the same immutable bytes");
+        assert_eq!(
+            count(&vfs, Operation::Metadata),
+            2,
+            "verification still re-checks the path, then measures the handle"
+        );
+        assert!(count(&vfs, Operation::Read) >= 3, "framing is re-read and re-verified");
+        assert!(store.read_handles.lock().unwrap().handles.contains_key(&segment_id));
+
+        let payload = b"scanned-only".to_vec();
+        let scanned_id = Uuid::from_bytes([9; 16]);
+        store
+            .create(scanned_id, vec![BlockId::for_payload(&payload)], |_| Ok(payload.clone()))
+            .unwrap();
+        store.open_segment(scanned_id).unwrap();
+        assert!(
+            !store.read_handles.lock().unwrap().handles.contains_key(&scanned_id),
+            "a maintenance scan must not displace the read path's hot handles"
+        );
+    }
+
+    #[test]
+    fn verification_open_detects_a_corrupt_file_behind_a_cached_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = PayloadSegmentStore::initialize(directory.path()).unwrap();
+        let (segment_id, ids, payloads) = fixture();
+        let segment = store
+            .create(segment_id, ids.clone(), |id| Ok(payloads[&id].clone()))
+            .unwrap();
+        store.get_with_handle(&segment, ids[0]).unwrap().unwrap();
+        // Rewrite in place so the cached handle's inode observes the damage.
+        let path = store.path(segment_id);
+        let mut bytes = std::fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() ^= 0xff;
+        let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all(&bytes).unwrap();
+        file.sync_all().unwrap();
+        match store.open_segment(segment_id) {
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::InvalidData),
+            Ok(_) => panic!("a damaged trailer must fail verification through a reused handle"),
+        }
+    }
+
+    #[test]
+    fn retired_segment_lease_is_closed_instead_of_recached() {
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        let (segment_id, ids, payloads) = fixture();
+        let segment = store
+            .create(segment_id, ids.clone(), |id| Ok(payloads[&id].clone()))
+            .unwrap();
+        store.get_with_handle(&segment, ids[0]).unwrap().unwrap();
+        let leased = store.read_handles.lock().unwrap().take(segment_id).unwrap();
+        store.remove_segment(segment_id).unwrap();
+        store.read_handles.lock().unwrap().put(segment_id, leased);
+        assert!(
+            !store.read_handles.lock().unwrap().handles.contains_key(&segment_id),
+            "a late lease return must not pin an unlinked segment"
+        );
+    }
+
+    #[test]
+    fn catalog_replacement_keeps_referenced_handles_warm() {
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        let mut segments = Vec::new();
+        for index in 0..2_u8 {
+            let payload = format!("catalog-retain-{index}").into_bytes();
+            let id = BlockId::for_payload(&payload);
+            let segment_id = Uuid::from_bytes([index + 40; 16]);
+            let segment = store
+                .create(segment_id, vec![id], |_| Ok(payload.clone()))
+                .unwrap();
+            store.get_with_handle(&segment, id).unwrap().unwrap();
+            segments.push(segment_id);
+        }
+        let referenced: HashSet<Uuid> = [segments[1]].into_iter().collect();
+        store.retain_read_handles(&referenced);
+        let handles = store.read_handles.lock().unwrap();
+        assert!(!handles.handles.contains_key(&segments[0]));
+        assert!(handles.handles.contains_key(&segments[1]));
+    }
+
     #[test]
     fn read_handles_stay_bounded_and_evict_lru() {
         let vfs = DeterministicVfs::new(None);
         let store = simulated_store(&vfs);
-        let total = MAX_OPEN_SEGMENT_READ_HANDLES + 1;
+        store.set_read_handle_capacity(MIN_OPEN_SEGMENT_READ_HANDLES);
+        let total = MIN_OPEN_SEGMENT_READ_HANDLES + 1;
         let mut segments = Vec::new();
         for index in 0..total {
             let payload = format!("handle-eviction-{index}").into_bytes();
@@ -1320,7 +2141,7 @@ mod tests {
             );
         }
         let handles = store.read_handles.lock().unwrap();
-        assert_eq!(handles.handles.len(), MAX_OPEN_SEGMENT_READ_HANDLES);
+        assert_eq!(handles.handles.len(), MIN_OPEN_SEGMENT_READ_HANDLES);
         assert!(
             !handles
                 .handles
@@ -1475,18 +2296,18 @@ mod tests {
     }
 
     #[test]
-    fn largest_indexes_and_filters_share_the_existing_cache_byte_budget() {
+    fn largest_indexes_and_their_filters_share_the_index_byte_budget() {
         let largest = cache_test_segment(1, MAX_SEGMENT_BLOCKS);
         assert!(largest.membership_filter.allocated_bytes() <= MAX_PAYLOAD_SEGMENT_FILTER_BYTES);
         assert!(largest.block_ids().all(|id| largest.contains(id)));
         let bytes = OpenSegmentCache::entry_bytes(&largest);
         assert!(bytes > largest.entries.len() * INDEX_ENTRY_BYTES);
-        let admitted = (OPEN_SEGMENT_CACHE_BYTES - OPEN_SEGMENT_CACHE_BYTES / PAYLOAD_SEGMENT_MEMBERSHIP_BUDGET_DIVISOR) / bytes;
+        let admitted = OPEN_SEGMENT_CACHE_BYTES / bytes;
         let mut cache = OpenSegmentCache::new();
         cache.insert(largest);
         for id in 2..=admitted as u128 + 2 {
             cache.insert(cache_test_segment(id, MAX_SEGMENT_BLOCKS));
-            assert!(cache.resident_bytes + cache.membership_bytes <= OPEN_SEGMENT_CACHE_BYTES);
+            assert!(cache.resident_bytes <= OPEN_SEGMENT_CACHE_BYTES);
         }
         assert_eq!(cache.entries.len(), admitted);
         assert!(cache.get(Uuid::from_u128(1)).is_none());
@@ -1511,17 +2332,17 @@ mod tests {
             }
             assert!(cache.get(segment_id).is_none());
             assert!(cache.memberships.contains_key(&segment_id));
-            assert!(cache.resident_bytes + cache.membership_bytes <= cache.budget_bytes);
+            assert!(cache.resident_bytes <= cache.budget_bytes);
         }
         vfs.arm_fault(None).unwrap();
         for id in ids {
-            assert!(store.cached_segment_may_contain(&reference, id).unwrap());
+            assert_eq!(store.segments_that_may_contain(&[reference], id).unwrap(), vec![reference]);
         }
-        assert!(!store.cached_segment_may_contain(&reference, BlockId::for_payload(b"never written")).unwrap());
+        assert!(store.segments_that_may_contain(&[reference], BlockId::for_payload(b"never written")).unwrap().is_empty());
         assert!(vfs.trace().unwrap().is_empty());
         let mut wrong = reference;
         wrong.file_bytes += 1;
-        assert!(store.cached_segment_may_contain(&wrong, BlockId::for_payload(b"never written")).is_err());
+        assert!(store.segments_that_may_contain(&[wrong], BlockId::for_payload(b"never written")).is_err());
         let mut cache = store.open_cache.write().unwrap();
         cache.remove(segment_id);
         assert!(cache.may_contain(&reference, BlockId::for_payload(b"never written")).unwrap());
@@ -1529,18 +2350,42 @@ mod tests {
         assert!(!cache.membership_order.contains(&segment_id));
     }
 
+    /// Negative witnesses cover the installed catalog whatever the index byte
+    /// budget: a segment without one costs a full index read on every cold
+    /// miss. A count bound with room for in-flight publications, not the
+    /// budget, bounds them; installing a catalog forgets the segments it no
+    /// longer references.
     #[test]
-    fn independent_membership_cache_stays_within_partition_under_pressure() {
+    fn membership_witnesses_cover_the_catalog_outside_the_index_byte_budget() {
         let mut cache = OpenSegmentCache::new();
         cache.budget_bytes = 4096;
         for id in 1..100 {
             cache.insert(cache_test_segment(id, 128));
-            assert!(cache.resident_bytes + cache.membership_bytes <= cache.budget_bytes);
-            assert!(cache.membership_bytes <= cache.budget_bytes / PAYLOAD_SEGMENT_MEMBERSHIP_BUDGET_DIVISOR);
+            assert!(cache.resident_bytes <= cache.budget_bytes);
+            assert_eq!(cache.memberships.len(), id as usize);
             assert_eq!(cache.memberships.len(), cache.membership_order.len());
         }
-        assert!(!cache.memberships.contains_key(&Uuid::from_u128(1)));
+        assert!(cache.entries.len() < 99, "full indexes still obey the byte budget");
+        let filter_bytes = cache_test_segment(1, 128).membership_filter.allocated_bytes();
+        assert_eq!(cache.membership_bytes, 99 * filter_bytes);
+        let referenced: HashSet<Uuid> = [Uuid::from_u128(7), Uuid::from_u128(99)].into_iter().collect();
+        cache.retain_memberships(&referenced);
+        assert_eq!(cache.memberships.len(), 2);
+        assert_eq!(cache.membership_order.len(), 2);
+        assert_eq!(cache.membership_bytes, 2 * filter_bytes);
+        assert!(cache.memberships.contains_key(&Uuid::from_u128(7)));
+        // A full catalog plus a publication in flight keeps every witness.
+        let catalog = crate::payload_manifest::MAX_PAYLOAD_SEGMENTS as u128;
+        for id in 1000..1000 + catalog {
+            cache.remember_membership(&cache_test_segment(id, 1));
+        }
+        assert!(cache.memberships.contains_key(&Uuid::from_u128(7)));
         assert!(cache.memberships.contains_key(&Uuid::from_u128(99)));
+        for id in 1000 + catalog..1000 + MAX_MEMBERSHIP_WITNESSES as u128 {
+            cache.remember_membership(&cache_test_segment(id, 1));
+        }
+        assert_eq!(cache.memberships.len(), MAX_MEMBERSHIP_WITNESSES);
+        assert!(!cache.memberships.contains_key(&Uuid::from_u128(7)), "the count bound evicts the oldest");
     }
 
     #[test]
@@ -1676,6 +2521,91 @@ mod tests {
         // Zero keeps its documented "cache disabled" meaning.
         store.set_open_segment_cache_budget_bytes(0).unwrap();
         assert_eq!(store.open_cache.read().unwrap().budget_bytes, 0);
+    }
+
+    #[test]
+    fn location_sort_equals_a_full_sort_and_records_leading_byte_runs() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut entries: Vec<u64> = (0..10_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            })
+            .collect();
+        let unsorted = entries.clone();
+        let mut expected = entries.clone();
+        expected.sort_unstable();
+        let mut checks = 0;
+        let starts = sort_locations(&mut entries, &mut || {
+            checks += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(entries, expected);
+        assert_eq!(checks, 512, "one check per partition and per run sort");
+        assert_eq!((starts[0], starts[256]), (0, entries.len()));
+        for byte in 0..256 {
+            assert!(entries[starts[byte]..starts[byte + 1]].iter().all(|entry| (entry >> 56) as usize == byte));
+        }
+        let mut calls = 0;
+        let stopped = sort_locations(&mut unsorted.clone(), &mut || {
+            calls += 1;
+            if calls == 300 { Err(io::Error::from(io::ErrorKind::WouldBlock)) } else { Ok(()) }
+        });
+        assert_eq!(stopped.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+
+    /// Entries are keyed by a 36-bit ID prefix, so two blocks can share one.
+    /// Every candidate is confirmed by the full ID in the segment index; a
+    /// position holding another block yields nothing, never its bytes.
+    #[test]
+    fn location_candidates_resolve_prefix_collisions_by_the_full_index_id() {
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        let (first_id, ids, payloads) = fixture();
+        let first = store.create(first_id, ids.clone(), |id| Ok(payloads[&id].clone())).unwrap();
+        let neighbour_payload = b"colliding-neighbour".to_vec();
+        let neighbour = BlockId::for_payload(&neighbour_payload);
+        let second_id = Uuid::from_bytes([8; 16]);
+        let second = store.create(second_id, vec![neighbour], |_| Ok(neighbour_payload.clone())).unwrap();
+        let reference = |segment: &PayloadSegment| {
+            crate::payload_manifest::PayloadSegmentReference::new(
+                segment.metadata(), segment.first_block_id(), segment.last_block_id()).unwrap()
+        };
+        let target = ids[1];
+        let target_position = first.entries.iter().position(|entry| entry.block_id == target).unwrap() as u64;
+        // The neighbour's entry is filed under the target's prefix and sorts first.
+        let prefix = CatalogLocationTable::prefix(target);
+        let mut entries = vec![prefix | 1 << LOCATION_POSITION_BITS | target_position, prefix];
+        let byte_starts = sort_locations(&mut entries, &mut || Ok(())).unwrap();
+        let table = CatalogLocationTable {
+            segments: vec![reference(&second), reference(&first)],
+            entries,
+            byte_starts,
+            unindexed_segments: 0,
+        };
+        let candidates: Vec<_> = table
+            .candidates(target)
+            .map(|(reference, position)| (reference.segment_id, position))
+            .collect();
+        assert_eq!(candidates, vec![(second_id, 0), (first_id, target_position as u32)]);
+        read_path_counters::take();
+        assert_eq!(store.read_located(&reference(&second), 0, target).unwrap(), None);
+        assert_eq!(
+            store.read_located(&reference(&first), target_position as u32, target).unwrap(),
+            Some(payloads[&target].clone())
+        );
+        assert_eq!(read_path_counters::take(), (0, 2));
+        let absent = BlockId::for_payload(b"absent from both segments");
+        assert_eq!(store.read_located(&reference(&first), target_position as u32, absent).unwrap(), None);
+        assert_eq!(
+            store.read_located(&reference(&first), 3, target).unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+            "a position outside the index is an error, never a guess"
+        );
+        assert!(store.resident_index_ids_for_test().is_empty(), "located reads admit no index");
     }
 
     #[test]
@@ -1821,5 +2751,86 @@ mod budget_override_tests {
             Some(16 * 1024 * 1024 * 1024)
         );
         assert_eq!(super::segment_cache_budget_override(Some("99999999999999999999")), None);
+    }
+}
+
+/// Paired-volume measurement for the descriptor-derived read-handle cache:
+/// run the ignored test with `TOFU_DB_SEGMENT_BENCH_DIR` on the volume under
+/// study (and the same binary built from the previous source for the
+/// baseline). Figures live in `docs/TOFUDB_FASTPATH.md`.
+#[cfg(test)]
+mod segment_read_bench {
+    use super::*;
+    use std::time::Instant;
+
+    fn env_usize(name: &str, default: usize) -> usize {
+        std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
+    }
+
+    #[test]
+    #[ignore]
+    fn segment_point_read_bench() {
+        let Some(root) = std::env::var_os("TOFU_DB_SEGMENT_BENCH_DIR") else { return; };
+        let segments = env_usize("TOFU_DB_SEGMENT_BENCH_SEGMENTS", 1024);
+        let reads = env_usize("TOFU_DB_SEGMENT_BENCH_READS", 20_000);
+        let directory = PathBuf::from(root).join(format!("bench-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut catalog = Vec::with_capacity(segments);
+        {
+            let store = PayloadSegmentStore::initialize(&directory).unwrap();
+            let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+            for segment_number in 0..segments {
+                let payloads: std::collections::BTreeMap<BlockId, Vec<u8>> = (0..64)
+                    .map(|block_number| {
+                        let mut bytes = vec![0_u8; 4096];
+                        for chunk in bytes.chunks_mut(8) {
+                            seed ^= seed << 13;
+                            seed ^= seed >> 7;
+                            seed ^= seed << 17;
+                            chunk.copy_from_slice(&seed.to_le_bytes()[..chunk.len()]);
+                        }
+                        bytes[..8].copy_from_slice(&(segment_number as u64 * 64 + block_number).to_le_bytes());
+                        (BlockId::for_payload(&bytes), bytes)
+                    })
+                    .collect();
+                let segment_id = Uuid::new_v4();
+                store
+                    .create(segment_id, payloads.keys().copied().collect(), |id| Ok(payloads[&id].clone()))
+                    .unwrap();
+                catalog.push((segment_id, payloads.keys().copied().collect::<Vec<_>>()));
+            }
+        }
+        let store = PayloadSegmentStore::open(&directory).unwrap();
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let started = Instant::now();
+        for _ in 0..reads {
+            let (segment_id, ids) = &catalog[(next() % catalog.len() as u64) as usize];
+            let id = ids[(next() % ids.len() as u64) as usize];
+            let segment = store.open_segment_cached(*segment_id).unwrap();
+            assert!(store.get_with_handle(&segment, id).unwrap().is_some());
+        }
+        let point_reads = started.elapsed();
+        let started = Instant::now();
+        for _ in 0..2 {
+            for (segment_id, _) in &catalog {
+                store.open_segment(*segment_id).unwrap();
+            }
+        }
+        let verification = started.elapsed();
+        eprintln!(
+            "segment_read_bench segments={} reads={} point_read_us={:.1} verification_open_us={:.1}",
+            segments,
+            reads,
+            point_reads.as_secs_f64() * 1e6 / reads as f64,
+            verification.as_secs_f64() * 1e6 / (2 * catalog.len()) as f64,
+        );
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }

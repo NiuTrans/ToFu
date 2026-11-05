@@ -15,16 +15,16 @@ import re
 import uuid
 from urllib.parse import unquote, urlparse
 
-import lib as _lib
 from lib.browser.log_safety import text_for_log, url_for_log
 from lib.log import get_logger
-from lib.search.search_runtime import ensure_search_runtime
+from lib.search.search_runtime import ensure_search_runtime, submit_search_worker
 
 ensure_search_runtime()
 
 from tofu_search import (
     fetch_page_content,
     fetch_url_bytes,
+    get_config,
     looks_like_text_asset,
     perform_web_search,
 )
@@ -131,64 +131,46 @@ def resolve_vertical(query: str, vertical: str = 'auto'):
 
 def _web_search_one(query: str, user_question: str, freshness: str = '',
                     vertical: str = 'auto'):
-    """Run one web search — returns (results_list, search_diag, engine_breakdown, vertical_result).
+    """Return web results, diagnostics, engine breakdown and vertical results.
 
-    Vertical domain search (when ``vertical`` resolves) runs concurrently
-    with the main web pipeline so it adds zero latency. ``vertical='auto'``
-    keeps the legacy phrase-detection path; an explicit domain forces a
-    fan-out across every sub-source in that domain.
+    Eligible vertical work overlaps the main search, retaining the same explicit
+    task inputs. Both branches settle before the caller closes its task scope.
+    Transport deadlines and cancellation remain owned by their existing ports.
     """
-    from concurrent.futures import ThreadPoolExecutor as _TPE
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import ExitStack
 
     vertical_result = None
-    vertical_future = None
-    _vertical_pool = None
     plan = resolve_vertical(query, vertical)
-    if plan is not None:
-        _vertical_pool = _TPE(max_workers=1)
-        vertical_future = _vertical_pool.submit(plan)
+    with ExitStack() as stack:
+        vertical_future = None
+        if plan is not None:
+            pool = stack.enter_context(ThreadPoolExecutor(max_workers=1))
+            vertical_future = submit_search_worker(pool, plan)
 
-    try:
-        results = perform_web_search(
-            query,
-            user_question=user_question,
-            freshness=freshness,
-        )
-    except Exception as e:
-        logger.error('[Executor] web_search failed for query=%r: %s', query, e, exc_info=True)
-        results = []
-        if vertical_future:
-            try:
-                vertical_result = vertical_future.result(timeout=10)
-            except Exception as ve:
-                logger.warning('[Search] Vertical query also failed: %s', ve)
-            if _vertical_pool:
-                _vertical_pool.shutdown(wait=False)
-        return (
-            results,
-            {
+        try:
+            results = perform_web_search(
+                query, user_question=user_question, freshness=freshness)
+        except Exception as e:
+            logger.error('[Executor] web_search failed for query=%r: %s', query, e, exc_info=True)
+            results = []
+            search_diag = {
                 'reason': 'exception',
                 'reason_detail': 'Search failed due to an internal error: %s' % str(e)[:200],
                 'engine_errors': {}, 'engine_empty': [], 'engine_ok': [],
-            },
-            None,
-            vertical_result,
-        )
+            }
+            engine_breakdown = None
+        else:
+            search_diag = getattr(results, '_search_diag', None)
+            engine_breakdown = getattr(results, '_engine_breakdown', None)
 
-    if vertical_future:
-        try:
-            vertical_result = vertical_future.result(timeout=5)
-        except Exception as ve:
-            logger.warning('[Search] Vertical query failed: %s', ve)
-        if _vertical_pool:
-            _vertical_pool.shutdown(wait=False)
+        if vertical_future is not None:
+            try:
+                vertical_result = vertical_future.result()
+            except Exception as error:
+                logger.warning('[Search] Vertical query failed: %s', error)
 
-    return (
-        results,
-        getattr(results, '_search_diag', None),
-        getattr(results, '_engine_breakdown', None),
-        vertical_result,
-    )
+        return results, search_diag, engine_breakdown, vertical_result
 
 
 def _ext_for_asset(target_url: str, content_type: str) -> str:
@@ -274,10 +256,11 @@ def _stage_binary_asset(
         # never invoke chrome.downloads (whose destination is the client).
         try:
             from lib.search.search_bridge import fetch_bound_browser_file
+            config = get_config()
             browser_receipt = fetch_bound_browser_file(
                 target_url,
-                max_bytes=_lib.FETCH_MAX_BYTES,
-                timeout=_lib.FETCH_TIMEOUT,
+                max_bytes=config.fetch_max_bytes,
+                timeout=config.fetch_timeout,
             )
         except Exception as exc:
             logger.info('[Fetch] browser file-transfer seam failed for %s: %s',
@@ -348,12 +331,19 @@ def _stage_binary_asset(
         if transport == 'browser_authenticated'
         else 'directly into server staging'
     )
+    if ct.lower().startswith('video/'):
+        reader = (f'Watch it with inspect_video(path="{dest}") — timestamped key '
+                  f'frames plus the audio transcript.')
+    elif ct.lower().startswith('audio/'):
+        reader = (f'Listen to it with inspect_video(path="{dest}") — probe facts '
+                  f'plus the transcript.')
+    else:
+        reader = (f'Read it with read_files(path="{dest}") — read_files handles '
+                  f'images, PDFs and Office documents natively.')
     note = (
         f'[fetch_url] This URL is a file asset ({ct or "unknown type"}, '
         f'{size_bytes:,} bytes), not a readable web page. It was transferred '
-        f'{acquisition}:\n\n  {dest}\n\n'
-        f'Read it with read_files(path="{dest}") — read_files handles images, '
-        f'PDFs and Office documents natively.'
+        f'{acquisition}:\n\n  {dest}\n\n{reader}'
     )
     return {'page_content': note, 'raw_chars': size_bytes,
             'filtered_chars': len(note), 'saved_path': dest,
@@ -750,7 +740,6 @@ def _fetch_url_one(target_url: str, user_question: str, fetch_reason: str = ''):
             page_content = fetch_page_content(
                 target_url,
                 max_chars=0,  # source capture; the tool-result layer bounds preview
-                pdf_max_chars=_lib.FETCH_MAX_CHARS_PDF,
                 diag=_fetch_diag,
             )
     except BrowserFileHandoffReady as handoff:

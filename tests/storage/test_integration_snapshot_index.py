@@ -1,6 +1,7 @@
 """Private-index acceleration must retain full snapshot and isolation semantics."""
 import os
 import subprocess
+import time
 
 import pytest
 
@@ -84,3 +85,68 @@ def test_snapshot_reseed_matches_fresh_index(repository, tmp_path, mutation):
     assert actual == expected
     assert (root / '.git' / 'index').read_bytes() == real_index
     assert git(root, 'rev-parse', 'HEAD') == parent
+
+
+def _settle_stat_cache(root):
+    """Record old mtimes so no entry is racily clean (Git would rehash it)."""
+    past = time.time() - 600
+    for path in root.glob('*.txt'):
+        os.utime(path, (past, past))
+    git(root, 'update-index', '-q', '--refresh')
+
+
+def test_first_observation_hashes_only_changed_files(repository, tmp_path):
+    root = repository
+    for number in range(20):
+        (root / f'stable-{number}.txt').write_text(f'stable {number}\n')
+    git(root, 'add', '.')
+    git(root, 'commit', '-qm', 'unchanged tracked tree')
+    hashed = tmp_path / 'hashed.log'
+    # A clean filter runs exactly when Git reads a file's bytes to hash them,
+    # which on a network volume is the cost that grows with the whole tree.
+    (root / '.gitattributes').write_text('*.txt filter=observe\n')
+    git(root, 'config', 'filter.observe.clean', f"echo %f >> '{hashed}'; cat")
+    _settle_stat_cache(root)
+    hashed.write_text('')
+    (root / 'changed.txt').write_text('modified\n')
+    (root / 'borrowed.txt').write_text('untracked input\n')
+    parent = git(root, 'rev-parse', 'HEAD')
+    actual = ic._alternate_index_tree(root, parent, str(tmp_path / 'private-index'))
+    assert set(hashed.read_text().split()) == {'changed.txt', 'borrowed.txt'}
+    env = {**os.environ, 'GIT_INDEX_FILE': str(tmp_path / 'reference-index')}
+    git(root, 'read-tree', parent, env=env)
+    git(root, 'add', '-A', '--', '.', env=env)
+    assert actual == git(root, 'write-tree', env=env)
+
+
+def test_capture_never_rewrites_the_writer_index(repository, tmp_path):
+    root = repository
+    _settle_stat_cache(root)
+    # A stat-only change makes porcelain diff refresh, i.e. rewrite, the index
+    # it reads; in a shared checkout that index belongs to other sessions.
+    now = time.time()
+    os.utime(root / 'stable.txt', (now, now))
+    (root / 'changed.txt').write_text('modified\n')
+    index = root / '.git' / 'index'
+    before = index.read_bytes(), index.stat().st_mtime_ns
+    ic._alternate_index_tree(root, git(root, 'rev-parse', 'HEAD'), str(tmp_path / 'private-index'))
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+@pytest.mark.parametrize('flag', ['--assume-unchanged', '--skip-worktree'])
+def test_borrowed_stat_cache_never_hides_working_bytes(repository, tmp_path, flag):
+    root = repository
+    git(root, 'update-index', flag, 'changed.txt')
+    (root / 'changed.txt').write_text('locally modified\n')
+    parent = git(root, 'rev-parse', 'HEAD')
+    actual = ic._alternate_index_tree(root, parent, str(tmp_path / 'private-index'))
+    env = {**os.environ, 'GIT_INDEX_FILE': str(tmp_path / 'reference-index')}
+    git(root, 'read-tree', parent, env=env)
+    git(root, 'add', '-A', '--', '.', env=env)
+    assert actual == git(root, 'write-tree', env=env)
+    assert git(root, 'cat-file', '-p', actual + ':changed.txt') == 'locally modified'
+
+@pytest.mark.parametrize('flag', ['--assume-unchanged', '--skip-worktree'])
+def test_clean_snapshot_rejects_flagged_index(repository, flag):
+    root = repository
+    git(root, 'update-index', flag, 'changed.txt')
+    assert ic._clean_input_tree(root, git(root, 'rev-parse', 'HEAD'), cancel=None) == ''

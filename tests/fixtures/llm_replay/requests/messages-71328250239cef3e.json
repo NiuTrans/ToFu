@@ -1,0 +1,10 @@
+[
+ {
+  "content": "You are Tofu, a coding assistant running an LLM replay scenario. Answer the user directly and use the available tools when asked.",
+  "role": "system"
+ },
+ {
+  "content": "Answer after the rate limit clears.",
+  "role": "user"
+ }
+]

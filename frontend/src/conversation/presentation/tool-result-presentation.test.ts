@@ -7,6 +7,9 @@ const { JSDOM } = await vi.importActual<{
 }>('jsdom');
 const messages: Record<string, string> = {
   'tool.failed': 'failed',
+  'tool.failedTip': 'Tool failed — did not complete successfully.',
+  'tool.notStartedTip': 'The tool was not started. Expand the details to review the reason.',
+  'tool.effectUnknown': 'Operation outcome unknown',
   'tool.editFailureUnavailable': 'Error details were not retained for this edit.',
   'tool.resultDeferred': 'Full output loads when expanded',
 };
@@ -205,5 +208,53 @@ describe('generic failed result evidence', () => {
       else expect(details.querySelector('.ptool-result-body')?.textContent).toContain('trq1.private');
     });
     expect(JSON.stringify(value)).toBe(before);
+  });
+});
+
+describe('command admission and uncertain result summaries', () => {
+  it('shows the admission cause rather than the embedded command JSON', () => {
+    const raw = JSON.stringify({ code: 'tool_execution_failed', status: 'error', retryable: false,
+      message: 'Error: tool "run_command" execution failed with CommandAdmissionRefusal: '
+        + 'Error [git-inspection-preparation]: Git worktree lifecycle requires literal operands. '
+        + 'Command was not started.. Arguments received: {"command":"git worktree remove \\"$WT\\""}',
+      nextAction: 'Do not repeat the same call.' });
+    const round = { toolName: 'run_command', status: 'error', roundNum: 103,
+      executionEffect: { operationId: 'a'.repeat(32), state: 'not_started', recovery: 'reconcile', scope: 'attempt' },
+      toolContent: raw };
+    inspect(presentation.renderGenericResultHtml(round, {}, header), document => {
+      const summary = document.querySelector('summary')!;
+      expect(summary.textContent).toContain('Git worktree lifecycle requires literal operands. Command was not started.');
+      expect(summary.textContent).not.toContain('Arguments received');
+      expect(summary.textContent).not.toContain('nextAction');
+      expect(document.querySelector('details')!.open).toBe(false);
+      expect(document.querySelector('.ptool-result-body')?.textContent).toContain('Arguments received');
+      expect(document.querySelector('.ptool-result-body')?.textContent).toContain('nextAction');
+    });
+  });
+
+  it.each(['not_started', 'unknown'] as const)('preserves %s on live and deferred cards', state => {
+    const raw = JSON.stringify({ code: state === 'unknown' ? 'tool_effect_unknown' : 'tool_execution_failed',
+      status: 'error', retryable: false,
+      message: 'WorkspaceBusyError: Workspace tree lifecycle write is active [holder: pid=123] Arguments: {"command":"git status"}',
+    });
+    for (const deferred of [false, true]) {
+      const value = { toolName: 'run_command', status: 'error', roundNum: 28,
+        executionEffect: { operationId: 'a'.repeat(32), state, recovery: 'reconcile', scope: 'attempt' },
+        ...(deferred ? { _snapshotToolResult: { preview: raw, chars: raw.length + 1000 } } : { toolContent: raw }) };
+      const before = JSON.stringify(value);
+      inspect(presentation.renderGenericResultHtml(value, {}, header), document => {
+        const summary = document.querySelector('summary')!;
+        // The unknown state is named once, by the header chip (not part of
+        // this fixture's header) and explained by the effect notice.
+        if (state === 'not_started') expect(summary.textContent).toContain(messages['tool.notStartedTip']);
+        else expect(summary.querySelector('.ptool-artifact-failure')).toBeNull();
+        expect(document.querySelector('details')!.dataset.toolFailureEvidence).toBe('collapsed');
+        expect(summary.textContent).not.toContain(messages['tool.failedTip']);
+        expect(summary.textContent).not.toContain('pid=123');
+        expect(document.querySelector('details')!.open).toBe(false);
+        if (!deferred) expect(document.querySelector('.ptool-result-body')?.textContent).toContain('WorkspaceBusyError');
+      });
+      expect(JSON.stringify(value)).toBe(before);
+    }
   });
 });

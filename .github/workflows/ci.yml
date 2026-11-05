@@ -232,10 +232,8 @@ jobs:
         run: |
           uv lock --check && uv sync --frozen --extra test
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
-      - name: Type-check and build TypeScript modules
+      - name: Check frontend contracts, owner tests, types and build
         run: npm run check:frontend
-      - name: Run co-located frontend unit tests
-        run: npx vitest run
       - name: Enforce compressed frontend budgets
         run: python3 scripts/frontend_budget.py
       - name: Publish the verified frontend graph for browser lanes

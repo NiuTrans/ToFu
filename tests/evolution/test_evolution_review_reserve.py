@@ -187,9 +187,8 @@ def test_program_refuses_reserve_that_remaining_cannot_fund(program_runtime):
 
 @pytest.fixture
 def durable_runtime(monkeypatch, request):
-    from lib.storage import storage_status
-    if not storage_status().get('ready'):
-        request.getfixturevalue('chat_sidecar')
+    from tests._chat_sidecar import require_authority_for_owner
+    require_authority_for_owner(request, OWNER)
     from tests.conftest import _assert_isolated_storage
     _assert_isolated_storage('review reserve original stage durability')
     from lib.evolution import runs

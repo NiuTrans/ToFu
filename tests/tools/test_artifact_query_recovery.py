@@ -45,21 +45,24 @@ def test_expired_continuation_is_not_reported_as_malformed_input(repo):
     assert raised.value.code == 'tool_result_continuation_unavailable'
 
 
-@pytest.mark.parametrize('storage_code,retryable', [
-    ('database_integrity', False), ('database_forbidden', False),
-    ('database_protocol_error', False), ('database_busy', True),
+@pytest.mark.parametrize('storage_code,wire_retryable,retryable', [
+    ('database_integrity', False, False), ('database_forbidden', False, False),
+    ('database_protocol_error', False, False), ('database_busy', True, True),
+    ('database_busy', False, True), ('database_timeout', False, True),
+    ('database_unavailable', False, True), ('database_integrity', True, False),
 ])
-def test_storage_failure_keeps_its_retryability_without_guessing_cursor_fault(
-        storage_code, retryable):
+def test_storage_failure_uses_its_code_without_guessing_cursor_fault(
+        storage_code, wire_retryable, retryable):
     class Repository:
         def read_range(self, **kwargs):
             raise StorageError(storage_code, 'private diagnostic must not reach the model',
-                               retryable=retryable)
+                               retryable=wire_retryable, retry_after_ms=1250)
 
     result = handler._execute_one('read_tool_artifact',
         {'artifact_ref': 'tool-result:' + 'a' * 64}, user_id=1, repository=Repository())
     assert result['error']['code'] == 'artifact_store_unavailable'
     assert result['error']['retryable'] is retryable
+    assert ('1250 milliseconds' in result['error']['nextAction']) is retryable
     assert 'private diagnostic' not in str(result)
     assert result['error']['nextAction']
 

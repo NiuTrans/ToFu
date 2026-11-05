@@ -246,8 +246,10 @@ def test_real_git_delivery_wakes_other_lane_only_after_receipt_ack(context, repo
     f.repository.bind_execution(row['id'], 'worker-turn', 'worker-attempt')
     trusted = admission.TrustedDispatch(f.repository.admission(row['id']))
     cfg = trusted.capture({}, f.owner, trusted.principal, 'recipient')
+    cfg.update(_turnOwnerUserId=f.owner, _turnId='worker-turn', _attemptId='worker-attempt')
     task = {'id': 'automatic', 'convId': 'recipient', 'config': cfg, '_userId': f.owner,
-            '_principalContext': trusted.principal.to_payload(), 'status': 'running'}
+            '_principalContext': trusted.principal.to_payload(), '_attended': False,
+            '_turnId': 'worker-turn', '_attemptId': 'worker-attempt', 'status': 'running'}
     bind_worker_workspace(task)
     (Path(task['config']['projectPath']) / 'allowed').mkdir()
     (Path(task['config']['projectPath']) / 'allowed' / 'result.txt').write_text('delivered bytes\n')

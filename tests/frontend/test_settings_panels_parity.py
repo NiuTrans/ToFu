@@ -37,8 +37,8 @@ PANELS_DIR = os.path.join(PROJECT_ROOT, 'static', 'settings_panels')
 # running in an opensource build (same build-awareness contract as
 # tests/mcp_protocol/test_mcp_catalog_internal_only.py).
 _EXPECTED_TABS = frozenset({
-    'general', 'api', 'models', 'preset', 'search', 'translate', 'speech',
-    'network', 'devices', 'feishu', 'oauth', 'mcp', 'skills', 'tools',
+    'general', 'api', 'models', 'preset', 'knowledge', 'search', 'translate', 'speech',
+    'network', 'devices', 'feishu', 'dx', 'github', 'oauth', 'mcp', 'skills', 'tools',
     'preferences', 'database', 'advanced', 'experiments',
 })
 

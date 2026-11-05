@@ -288,16 +288,7 @@ where
     VisitBlock: FnMut(BlockId, &[u8]) -> io::Result<()>,
 {
     let manifest_bytes = read_block(reference.manifest_block_id)?;
-    let manifest = Manifest::decode(&manifest_bytes)?;
-    if manifest.tenant_id != tenant_id || manifest.owner_user_id != owner_user_id {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "blob reachability crosses its owner scope",
-        ));
-    }
-    if manifest.blob_id != reference.blob_id || manifest.logical_bytes != reference.logical_bytes {
-        return Err(invalid_data("blob reference does not match its manifest"));
-    }
+    let manifest = decode_reachable_manifest(tenant_id, owner_user_id, &reference, &manifest_bytes)?;
     visit_block(reference.manifest_block_id, &manifest_bytes)?;
     let mut metrics = BlobReachabilityMetrics {
         block_count: 1,
@@ -316,6 +307,48 @@ where
         visit_block(chunk.block_id, &payload)?;
     }
     Ok(metrics)
+}
+
+/// Reachability by identity. Only the manifest holds references, so chunks
+/// are visited without reading their payloads; the manifest's owner scope
+/// and blob identity are checked exactly as `visit_blob_graph` does.
+pub(crate) fn visit_blob_references<ReadBlock, VisitReference>(
+    tenant_id: u64,
+    owner_user_id: u64,
+    reference: BlobReference,
+    mut read_block: ReadBlock,
+    mut visit_reference: VisitReference,
+) -> io::Result<()>
+where
+    ReadBlock: FnMut(BlockId) -> io::Result<Vec<u8>>,
+    VisitReference: FnMut(BlockId) -> io::Result<()>,
+{
+    let manifest_bytes = read_block(reference.manifest_block_id)?;
+    let manifest = decode_reachable_manifest(tenant_id, owner_user_id, &reference, &manifest_bytes)?;
+    visit_reference(reference.manifest_block_id)?;
+    for chunk in &manifest.chunks {
+        visit_reference(chunk.block_id)?;
+    }
+    Ok(())
+}
+
+fn decode_reachable_manifest(
+    tenant_id: u64,
+    owner_user_id: u64,
+    reference: &BlobReference,
+    manifest_bytes: &[u8],
+) -> io::Result<Manifest> {
+    let manifest = Manifest::decode(manifest_bytes)?;
+    if manifest.tenant_id != tenant_id || manifest.owner_user_id != owner_user_id {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "blob reachability crosses its owner scope",
+        ));
+    }
+    if manifest.blob_id != reference.blob_id || manifest.logical_bytes != reference.logical_bytes {
+        return Err(invalid_data("blob reference does not match its manifest"));
+    }
+    Ok(manifest)
 }
 
 impl StagedBlob {

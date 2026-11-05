@@ -183,8 +183,9 @@ check('body_interaction_snapshot_preserves_collapsible_state',
   && longRunningHtml.includes('_cmdBodyToggle(this,event)')
   && longRunningHtml.includes('fold-cmd-local')
   && longRunningHtml.includes('aria-expanded="true"'));
-check('running_card_without_collapsible_body_renders_no_fold_chip',
-  !runningHtml.includes('ptool-cmd-fold')
+check('single_command_has_the_same_inline_evidence_control_as_long_commands',
+  runningHtml.includes('ptool-cmd-fold-cmd')
+  && runningHtml.includes('aria-expanded="false"')
   && !hostileHtml.includes('ptool-cmd-fold-output'));
 check('live_output_is_a_localized_bounded_tail_window',
   longRunningHtml.includes('live-elided:18')
@@ -247,15 +248,15 @@ check('settled_success_preserves_status_output_and_disclosure_contract',
   && !settledHtml.includes('finished-local')
   && settledHtml.includes('ptool-cmd-verdict')
   && settledHtml.indexOf('ptool-cmd-verdict') > settledHtml.indexOf('ptool-cmd-right')
-  && settledHtml.includes('ok-local')
+  && settledHtml.includes('exit 0')
   && settledHtml.includes('ptool-cmd-hasoutput output-open')
   && settledHtml.includes('ptool-cmd-fold-output')
   && settledHtml.includes('_cmdOutputOpenToggle(this,event)')
   && settledHtml.includes('fold-output-local')
   && settledHtml.includes('<code>ok</code>'));
-check('settled_header_is_inert_and_short_command_has_no_cmd_fold',
+check('settled_header_is_inert_and_short_command_has_explicit_evidence_control',
   !settledHtml.includes('role="button"')
-  && !settledHtml.includes('ptool-cmd-fold-cmd')
+  && settledHtml.includes('ptool-cmd-fold-cmd')
   && !settledHtml.includes('ptool-cmd-desc-toggle'));
 check('settled_metadata_precedes_args_and_query',
   settledHtml.includes('$ printf ok')
@@ -264,6 +265,32 @@ check('settled_metadata_precedes_args_and_query',
 check('settled_owner_preserves_trusted_controls_and_inputs',
   settledHtml.includes('data-slot="controls"')
   && JSON.stringify([settledRound, settledMetadata]) === settledBefore);
+
+const undescribedHtml = presentation.renderSettledCommandHtml({
+  toolName: 'run_command', toolCallId: 'undescribed-1',
+  toolArgs: { command: '  git grep -n "<x>" src\nsecond line' },
+}, { exitCode: 0, output: 'ok' }, header, closed);
+const undescribedRunningHtml = presentation.renderRunningCommandHtml({
+  toolName: 'run_command', toolCallId: 'undescribed-2', query: 'sleep 5\necho done',
+}, header, closed);
+check('missing_description_falls_back_to_escaped_first_command_line',
+  undescribedHtml.includes('<span class="ptool-cmd-desc-inline ptool-cmd-desc-command">git grep -n &quot;&lt;x&gt;&quot; src</span>')
+  && undescribedRunningHtml.includes('ptool-cmd-desc-command">sleep 5</span>')
+  && !settledHtml.includes('ptool-cmd-desc-command'));
+
+const lazyRound = Object.freeze({
+  toolName: 'run_command', toolCallId: 'lazy-1', toolArgs: { command: 'ls', description: 'list' },
+  _snapshotToolResult: { preview: 'a\nb' },
+});
+const lazyClosedHtml = presentation.renderSettledCommandHtml(lazyRound, { exitCode: 0 }, header, closed);
+const lazyOpenHtml = presentation.renderSettledCommandHtml(lazyRound, { exitCode: 0 }, header,
+  Object.freeze({ bodyExpanded: false, outputExpanded: true }));
+check('lazy_output_is_driven_by_the_header_output_chip',
+  lazyClosedHtml.includes('ptool-cmd-fold-output')
+  && lazyClosedHtml.includes('data-output-key="lazy-1"')
+  && lazyClosedHtml.includes('data-lazy-tool-result="" data-tool-result-authority="deferred">')
+  && lazyOpenHtml.includes('data-tool-result-authority="deferred" open>')
+  && lazyOpenHtml.includes('output-open'));
 
 const backgroundHtml = presentation.renderSettledCommandHtml({
   toolName: 'run_command', query: 'slow upload',
@@ -307,7 +334,7 @@ const legacyHtml = presentation.renderSettledCommandHtml({
 check('legacy_content_recovers_query_output_and_exit_without_full_scan',
   legacyHtml.includes('$ echo ok')
   && legacyHtml.includes('legacy output')
-  && legacyHtml.includes('ok-local')
+  && legacyHtml.includes('exit 0')
   && !legacyHtml.includes('[exit code: 0]'));
 
 const longOutputHtml = presentation.renderSettledCommandHtml({
@@ -437,7 +464,7 @@ check('settled_owner_reaches_retained_dispatch',
   && settledHtml.includes('printf ok')
   && !settledHtml.includes('已结束')
   && settledHtml.includes('ptool-cmd-verdict')
-  && settledHtml.includes('成功'));
+  && settledHtml.includes('exit 0'));
 
 check('settled_dispatch_puts_directory_inside_code_tray',
   settledHtml.includes('<code><span class="ptool-cmd-cwd">working_dir: /work/project</span>\n$ printf ok</code></pre>'));
@@ -511,7 +538,7 @@ def test_tool_command_execution_presentation_owner_contract() -> None:
         line for line in process.stdout.splitlines()
         if line.startswith('PASS ')
     ]
-    assert len(passes) == 37, process.stdout
+    assert len(passes) == 39, process.stdout
 
 
 def test_retained_dispatch_wires_command_execution_owner() -> None:

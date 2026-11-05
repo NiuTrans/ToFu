@@ -408,6 +408,34 @@ def test_exception_after_handler_presentation_is_failed_everywhere(mode, observa
 
 
 @pytest.mark.parametrize('mode', ['legacy', 'v2'])
+@pytest.mark.parametrize('refusal', ['EventDeliveryCancelled', 'EventDeliveryError'])
+def test_refused_presentation_frame_keeps_the_returned_outcome(
+        mode, refusal, observations, monkeypatch):
+    from lib.tasks_pkg import event_delivery
+
+    def refuse(task, event):
+        # What manager._events does when the lane's owner stops admission
+        # (server shutdown, Stop): the task is aborted and the frame refused.
+        task['_eventDeliveryAdmissionError'] = refusal
+        task['aborted'] = True
+        raise getattr(event_delivery, refusal)(
+            'Task event delivery admission previously failed')
+
+    monkeypatch.setattr('lib.tasks_pkg.executor._finalize.append_event', refuse)
+
+    def handler(task, tc, name, call_id, arguments, number, row, *rest):
+        _finalize_tool_round(task, number, row, [{'content': 'git land output'}])
+        return call_id, 'git land output\n[exit code: 0]', False
+
+    row, messages, settled = dispatch(task_for(handler, mode))
+    assert row['executionEffect']['state'] == 'returned'
+    assert row['results'] == [{'content': 'git land output'}]
+    assert 'git land output' in messages[0]['content']
+    assert 'tool_effect_unknown' not in messages[0]['content']
+    assert settled[0].execution_status != 'error'
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'v2'])
 @pytest.mark.parametrize('failure_path', ['raise', 'return_error'])
 def test_failed_read_does_not_poison_a_later_authorized_retry(
         mode, failure_path, observations):
@@ -481,7 +509,9 @@ def test_declared_timeout_overrules_early_success_and_is_not_cached(monkeypatch,
 
     monkeypatch.setattr(
         'lib.tasks_pkg.tool_dispatch._heartbeat.threading.Timer', ImmediateTimer)
-    monkeypatch.setattr('lib.tools.registry.declared_tool_timeout_ms', lambda name: 1)
+    monkeypatch.setattr(
+        'lib.tools.registry.declared_tool_timeout_ms',
+        lambda name, arguments=None, tool_schemas=None: 1)
 
     def handler(task, tc, name, call_id, arguments, number, row, *rest):
         calls.append(call_id)
@@ -568,6 +598,35 @@ def test_returned_failure_agrees_across_settlement_and_retry(mode, kind, observa
                 assert json.loads(messages[0]['content']) == json.loads(
                     returned_failure(kind))
     assert calls == ['returned-0', 'returned-1']
+    complete = [event for event in observations[0]
+                if event['type'] == 'tool_complete']
+    assert [event['status'] for event in complete] == ['error', 'error']
+    assert [audit['outcome'] for audit in observations[1]] == ['error', 'error']
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'v2'])
+def test_returned_typed_error_object_settles_as_its_envelope_text(mode, observations):
+    from lib.tools.result_envelope import tool_result_error, typed_tool_error
+
+    error = typed_tool_error('rate_limited', retryable=True, next_action='Wait')
+
+    def settle(content):
+        def handler(task, tc, name, call_id, arguments, number, row, *rest):
+            _finalize_tool_round(task, number, row, [{'content': error.to_model_text()}],
+                                 status='error')
+            return call_id, content, False
+        return dispatch(task_for(handler, mode))
+
+    row, messages, settled = settle(error)
+    expected_row, expected, expected_settled = settle(error.to_envelope_text())
+    assert row['status'] == expected_row['status'] == 'error'
+    assert row['_runtimeState'] == expected_row['_runtimeState'] == 'error'
+    assert settled[0].execution_status == expected_settled[0].execution_status == 'error'
+    assert settled[0].parts == expected_settled[0].parts
+    assert messages[0]['content'] == expected[0]['content']
+    assert row['toolContent'] == expected_row['toolContent']
+    typed = tool_result_error(messages[0]['content'])
+    assert typed.code == 'rate_limited' and typed.retryable is True
     complete = [event for event in observations[0]
                 if event['type'] == 'tool_complete']
     assert [event['status'] for event in complete] == ['error', 'error']

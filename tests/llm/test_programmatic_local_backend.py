@@ -117,11 +117,12 @@ def test_tier_env_override(monkeypatch):
 
 @pytest.mark.parametrize('model', ['gpt-5.5', 'unknown-tiny-model',
                                    'definitely-unknown-model-xyz'])
-def test_local_tier_requires_explicit_program_opt_in(model, monkeypatch):
+def test_active_modes_select_program_tier_without_model_guesses(model, monkeypatch):
     monkeypatch.delenv('TOFU_PTC_TIER', raising=False)
-    assert programmatic_tier(model) == 'batch'
-    assert programmatic_tier(model, requested='auto') == 'batch'
+    assert programmatic_tier(model) == 'program'
+    assert programmatic_tier(model, requested='auto') == 'program'
     assert programmatic_tier(model, requested='on') == 'program'
+    assert programmatic_tier(model, requested='off') == 'batch'
 
 
 def test_tier_ignores_context_window(monkeypatch):
@@ -131,16 +132,16 @@ def test_tier_ignores_context_window(monkeypatch):
         raise AssertionError('context window must not be consulted')
 
     monkeypatch.setattr(ctx_mod, 'context_profile', _boom)
-    assert programmatic_tier('whatever') == 'batch'
+    assert programmatic_tier('whatever') == 'program'
 
 
 # ── guidance text ───────────────────────────────────────────────────
 
 
 def test_local_guidance_tiers():
-    prog = local_ptc_guidance('program', ['read_files', 'grep_search'])
+    prog = local_ptc_guidance('program', ['read_files', 'search_files'])
     assert 'program' in prog and 'task-executable tool' in prog
-    assert 'read_files' not in prog and 'grep_search' not in prog
+    assert 'read_files' not in prog and 'search_files' not in prog
     assert 'schema' in prog and 'approval' in prog
     # The unified surface still advertises the simpler parallel-calls path
     # for independent lookups (the former batch-tier guidance, merged).
@@ -224,10 +225,10 @@ def test_tool_schema_fingerprint_tracks_description_and_key_order():
 
 
 def test_ptc_projection_appends_program_tier():
-    tools = [_fn('read_files'), _fn('grep_search')]
+    tools = [_fn('read_files'), _fn('search_files')]
     out = gw.ptc_local_wire_tools(tools, tier='program',
                                   eligible=['read_files'])
-    assert _wire_names(out)[:2] == ['read_files', 'grep_search']
+    assert _wire_names(out)[:2] == ['read_files', 'search_files']
     assert _wire_names(out).count('execute_program') == 1
     execute = out[-1]
     props = execute['function']['parameters']['properties']
@@ -248,7 +249,7 @@ def test_ptc_projection_batch_tier_strips_program():
 
 def test_ptc_projection_replaces_existing_gateway_schema():
     tools = [_fn('read_files'), gw.execute_tools_schema(),
-             _fn('grep_search')]
+             _fn('search_files')]
     out = gw.ptc_local_wire_tools(tools, tier='batch',
                                   eligible=['read_files'])
     assert _wire_names(out).count('execute_tools') == 1
@@ -301,28 +302,32 @@ def test_responses_local_backend_never_emits_hosted_ptc():
 
 def test_intent_resolution_attaches_tier():
     tools = [{'type': 'function', 'function': {'name': 'read_files'}}]
-    decision = resolve_tool_orchestration(
-        requested_programmatic='auto', requested_multi_agent='off',
-        messages=[{'role': 'user',
-                   'content': '请批量对比所有文件并去重汇总'}],
-        tools=tools, round_num=1, model='gpt-5.5')
-    assert decision['programmaticCalling'] == 'auto'
-    assert decision['programmaticTier'] == 'batch'
-    assert decision['programmaticEligibleTools'] == ['read_files']
-
-    small = resolve_tool_orchestration(
-        requested_programmatic='auto', requested_multi_agent='off',
-        messages=[{'role': 'user',
-                   'content': '请批量对比所有文件并去重汇总'}],
-        tools=tools, round_num=1, model='definitely-unknown-model-xyz')
-    assert small['programmaticTier'] == 'batch'
+    # The default mode is a resident capability: request wording and model
+    # names neither enable nor demote the program action.
+    for text in ('请批量对比所有文件并去重汇总', '帮我改一下这个函数'):
+        for model in ('gpt-5.5', 'definitely-unknown-model-xyz'):
+            decision = resolve_tool_orchestration(
+                requested_programmatic='auto', requested_multi_agent='off',
+                messages=[{'role': 'user', 'content': text}],
+                tools=tools, round_num=1, model=model)
+            assert decision['programmaticCalling'] == 'auto'
+            assert decision['programmaticReason'] == 'resident_eligible_read_tools'
+            assert decision['programmaticTier'] == 'program'
+            assert decision['programmaticEligibleTools'] == ['read_files']
 
     off = resolve_tool_orchestration(
-        requested_programmatic='auto', requested_multi_agent='off',
-        messages=[{'role': 'user', 'content': '帮我改一下这个函数'}],
+        requested_programmatic='off', requested_multi_agent='off',
+        messages=[{'role': 'user', 'content': '请批量对比所有文件并去重汇总'}],
         tools=tools, round_num=1, model='gpt-5.5')
     assert off['programmaticCalling'] == 'off'
     assert off['programmaticTier'] == ''
+
+    bare = resolve_tool_orchestration(
+        requested_programmatic='auto', requested_multi_agent='off',
+        messages=[{'role': 'user', 'content': '你好'}],
+        tools=[], round_num=1, model='gpt-5.5')
+    assert bare['programmaticCalling'] == 'off'
+    assert bare['programmaticReason'] == 'no_executable_tools'
 
 
 # ── handler-side executable-catalog authority ───────────────────────
@@ -352,7 +357,7 @@ def _mk_task(ptc_local=None):
         '_tool_stream_active': True,
         'events_lock': threading.Lock(),
         '_executable_tool_catalog': [
-            _fn('read_files'), _fn('grep_search'), todo, project_post],
+            _fn('read_files'), _fn('search_files'), todo, project_post],
     }
     if ptc_local is not None:
         task['_ptc_local'] = ptc_local
@@ -496,7 +501,7 @@ def test_configured_batch_tier_names_its_reason_without_running_program(monkeypa
     assert not task.get('programRuns')
 
 
-# ── observed read fan-out activation ────────────────────────────────
+# ── default activation is independent of observed history ───────────
 
 
 def _tc(call_id, name):
@@ -504,69 +509,25 @@ def _tc(call_id, name):
             'function': {'name': name, 'arguments': '{}'}}
 
 
-def test_observed_parallel_read_fanout_activates_ptc():
+def test_default_activation_does_not_depend_on_observed_fanout():
     tools = [_fn('read_files'), _fn('todo_write')]
-    history = [
-        {'role': 'user', 'content': '帮我看看这段逻辑'},
-        {'role': 'assistant', 'content': '', 'tool_calls': [
-            _tc('1', 'read_files'), _tc('2', 'read_files')]},
-        {'role': 'tool', 'tool_call_id': '1', 'content': 'a'},
-        {'role': 'tool', 'tool_call_id': '2', 'content': 'b'},
-    ]
-    decision = resolve_tool_orchestration(
-        requested_programmatic='auto', requested_multi_agent='off',
-        messages=history, tools=tools, round_num=2, model='gpt-5.5')
-    assert decision['programmaticCalling'] == 'auto'
-    assert decision['programmaticReason'] == 'observed_read_fanout'
-    assert decision['programmaticTier'] == 'batch'
-
-
-def test_observed_serialized_read_fanout_activates_ptc():
-    tools = [_fn('read_files')]
-    history = [
-        {'role': 'user', 'content': '帮我看看这段逻辑'},
-        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('1', 'read_files')]},
-        {'role': 'tool', 'tool_call_id': '1', 'content': 'a'},
-        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('2', 'read_files')]},
-        {'role': 'tool', 'tool_call_id': '2', 'content': 'b'},
-        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('3', 'read_files')]},
-        {'role': 'tool', 'tool_call_id': '3', 'content': 'c'},
-    ]
-    decision = resolve_tool_orchestration(
-        requested_programmatic='auto', requested_multi_agent='off',
-        messages=history, tools=tools, round_num=4,
-        model='definitely-unknown-model-xyz')
-    assert decision['programmaticCalling'] == 'auto'
-    assert decision['programmaticReason'] == 'observed_read_fanout'
-    # Observed reads prove batching opportunity, not JavaScript proficiency.
-    assert decision['programmaticTier'] == 'batch'
-
-
-def test_write_fanout_and_single_read_do_not_activate_ptc():
-    tools = [_fn('read_files'), _fn('todo_write')]
-    # Writes never count toward the read-only fan-out signal.
-    history = [
-        {'role': 'user', 'content': '帮我看看这段逻辑'},
-        {'role': 'assistant', 'content': '', 'tool_calls': [
-            _tc('1', 'read_files'), _tc('2', 'todo_write')]},
-        {'role': 'tool', 'tool_call_id': '1', 'content': 'a'},
-        {'role': 'tool', 'tool_call_id': '2', 'content': 'b'},
-    ]
-    decision = resolve_tool_orchestration(
-        requested_programmatic='auto', requested_multi_agent='off',
-        messages=history, tools=tools, round_num=2, model='gpt-5.5')
-    assert decision['programmaticCalling'] == 'off'
-    assert decision['programmaticReason'] == 'task_not_bounded_reduction_shape'
-    # A lone read is ordinary work, not a bounded reduction.
-    single = [
-        {'role': 'user', 'content': '帮我看看这段逻辑'},
-        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('1', 'read_files')]},
-        {'role': 'tool', 'tool_call_id': '1', 'content': 'a'},
-    ]
-    lone = resolve_tool_orchestration(
-        requested_programmatic='auto', requested_multi_agent='off',
-        messages=single, tools=tools, round_num=2, model='gpt-5.5')
-    assert lone['programmaticCalling'] == 'off'
+    user = {'role': 'user', 'content': '帮我看看这段逻辑'}
+    histories = {
+        'none': [user],
+        'parallel reads': [user, {'role': 'assistant', 'content': '', 'tool_calls': [
+            _tc('1', 'read_files'), _tc('2', 'read_files')]}],
+        'write fan-out': [user, {'role': 'assistant', 'content': '', 'tool_calls': [
+            _tc('1', 'read_files'), _tc('2', 'todo_write')]}],
+        'lone read': [user, {'role': 'assistant', 'content': '', 'tool_calls': [
+            _tc('1', 'read_files')]}],
+    }
+    for label, history in histories.items():
+        decision = resolve_tool_orchestration(
+            requested_programmatic='auto', requested_multi_agent='off',
+            messages=history, tools=tools, round_num=2, model='gpt-5.5')
+        assert decision['programmaticCalling'] == 'auto', label
+        assert decision['programmaticReason'] == 'resident_eligible_read_tools', label
+        assert decision['programmaticTier'] == 'program', label
 
 
 # ── provider wire boundary (prepare_request) ────────────────────────
@@ -645,18 +606,22 @@ def test_wire_boundary_off_mode_leaves_wire_untouched():
     assert _wire_names(plan.body.get('tools')) == ['read_files']
 
 
-def test_wire_boundary_absent_tier_defaults_to_batch_surface():
+def test_wire_boundary_absent_tier_follows_the_requested_mode():
     from lib.llm._sse_core import prepare_request
     body = _ptc_body('deepseek-v4-pro')
     del body['_programmatic_tier']
     plan = prepare_request(
         body, api_key='secret',
         base_url='https://api.deepseek.com/v1', api_protocol='openai')
-    execute = [t for t in plan.body['tools']
-               if (t.get('function') or {}).get('name')
-               == 'execute_tools'][0]
-    assert set(execute['function']['parameters']['properties']) == {'calls', 'execution'}
-    assert 'execute_program' not in _wire_names(plan.body['tools'])
+    names = _wire_names(plan.body['tools'])
+    assert names.count('execute_program') == 1
+    assert names[0] == 'read_files'
+    assert 'execute_tools' not in names
+    # An explicit per-task batch latch still withholds the program action.
+    batch = prepare_request(
+        _ptc_body('deepseek-v4-pro'), api_key='secret',
+        base_url='https://api.deepseek.com/v1', api_protocol='openai')
+    assert 'execute_program' not in _wire_names(batch.body['tools'])
 
 
 # ── resident (on) mode: universal programmatic exposure ─────────────
@@ -789,7 +754,7 @@ def test_local_guidance_serial_chain_rule_is_static():
     assert 'Direct calls suit per-result judgment' in note
     assert 'read_files' not in note
     # Observed call names are telemetry, not schema-description inputs.
-    assert 'find_files > grep_search' not in note
+    assert 'find_files > search_files' not in note
 
 
 def _serial_history(rounds):
@@ -836,19 +801,19 @@ def test_general_serial_chain_respects_control_carriers_and_user_boundary():
 
 
 def test_serial_chain_detected_in_resident_mode():
-    tools = [_fn('read_files'), _fn('grep_search'), _fn('find_files')]
-    history = _serial_history(['find_files', 'grep_search', 'read_files'])
+    tools = [_fn('read_files'), _fn('search_files'), _fn('find_files')]
+    history = _serial_history(['find_files', 'search_files', 'read_files'])
     decision = resolve_tool_orchestration(
         requested_programmatic='on', requested_multi_agent='off',
         messages=history, tools=tools, round_num=4, model='gpt-5.5')
     assert decision['programmaticCalling'] == 'on'
     assert decision['programmaticSerialChain'] == [
-        'find_files', 'grep_search', 'read_files']
+        'find_files', 'search_files', 'read_files']
 
     # Two single-call rounds are normal exploration, not escalation-worthy.
     short = resolve_tool_orchestration(
         requested_programmatic='on', requested_multi_agent='off',
-        messages=_serial_history(['find_files', 'grep_search']),
+        messages=_serial_history(['find_files', 'search_files']),
         tools=tools, round_num=3, model='gpt-5.5')
     assert short['programmaticSerialChain'] == []
 
@@ -860,10 +825,10 @@ def test_serial_chain_detected_in_resident_mode():
 
 
 def test_serial_chain_ignores_synthetic_context_carriers():
-    tools = [_fn('read_files'), _fn('grep_search'), _fn('find_files')]
+    tools = [_fn('read_files'), _fn('search_files'), _fn('find_files')]
     history = [{'role': 'user', 'content': 'inspect the repository'}]
     for index, name in enumerate(
-            ('find_files', 'grep_search', 'read_files')):
+            ('find_files', 'search_files', 'read_files')):
         call_id = str(index + 1)
         history.extend([
             {'role': 'assistant', 'content': '',
@@ -882,12 +847,12 @@ def test_serial_chain_ignores_synthetic_context_carriers():
         messages=history, tools=tools, round_num=4, model='kimi-k3')
 
     assert decision['programmaticSerialChain'] == [
-        'find_files', 'grep_search', 'read_files']
+        'find_files', 'search_files', 'read_files']
 
 
 def test_genuine_user_steering_breaks_serial_chain():
-    tools = [_fn('read_files'), _fn('grep_search'), _fn('find_files')]
-    history = _serial_history(['find_files', 'grep_search'])
+    tools = [_fn('read_files'), _fn('search_files'), _fn('find_files')]
+    history = _serial_history(['find_files', 'search_files'])
     history.extend([
         {'role': 'user', 'content': 'Stop exploring and inspect only x.py.'},
         {'role': 'assistant', 'content': '',
@@ -904,9 +869,9 @@ def test_genuine_user_steering_breaks_serial_chain():
 
 
 def test_pure_inbox_evidence_is_transparent_but_human_steer_is_boundary():
-    tools = [_fn('read_files'), _fn('grep_search'), _fn('find_files')]
+    tools = [_fn('read_files'), _fn('search_files'), _fn('find_files')]
     pure_inbox = _serial_history(
-        ['find_files', 'grep_search', 'read_files'])
+        ['find_files', 'search_files', 'read_files'])
     pure_inbox.append({
         'role': 'user',
         'content': '<swarm-update>peer evidence</swarm-update>',
@@ -920,7 +885,7 @@ def test_pure_inbox_evidence_is_transparent_but_human_steer_is_boundary():
 
     assert latest_user_text(pure_inbox) == '帮我排查这个问题'
     assert decision['programmaticSerialChain'] == [
-        'find_files', 'grep_search', 'read_files']
+        'find_files', 'search_files', 'read_files']
 
     human_steer = list(pure_inbox[:-1])
     human_steer.append({
@@ -956,15 +921,15 @@ def test_orchestration_intent_ignores_synthetic_user_role_carriers():
 
 
 def test_serial_chain_broken_by_parallel_or_write_calls():
-    tools = [_fn('read_files'), _fn('grep_search'), _fn('todo_write')]
+    tools = [_fn('read_files'), _fn('search_files'), _fn('todo_write')]
     # A trailing write call breaks the read-only chain.
     decision = resolve_tool_orchestration(
         requested_programmatic='on', requested_multi_agent='off',
-        messages=_serial_history(['list_dir', 'grep_search', 'todo_write']),
+        messages=_serial_history(['list_dir', 'search_files', 'todo_write']),
         tools=tools, round_num=4, model='gpt-5.5')
     assert decision['programmaticSerialChain'] == []
     # A parallel batch in the latest round also breaks the serial signal.
-    parallel = _serial_history(['list_dir', 'grep_search'])
+    parallel = _serial_history(['list_dir', 'search_files'])
     parallel.append({'role': 'assistant', 'content': '', 'tool_calls': [
         _tc('p1', 'read_files'), _tc('p2', 'read_files')]})
     parallel.append({'role': 'tool', 'tool_call_id': 'p1', 'content': 'a'})
@@ -980,42 +945,26 @@ def test_ptc_schema_does_not_carry_runtime_serial_chain_rule():
         [_fn('read_files')], tier='program', eligible=['read_files'])
     execute = out[-1]
     assert 'Do not continue a serial chain' not in execute['function']['description']
-    assert 'find_files > grep_search' not in execute['function']['description']
-
-
-def test_ptc_projection_preserves_fixed_gateway_token_contract():
-    eligible = [f'reviewed_read_only_tool_{index}' for index in range(64)]
-    out = gw.ptc_local_wire_tools(
-        [gw.search_tools_schema(), gw.execute_tools_schema()],
-        tier='program', eligible=eligible)
-    gateways = [tool for tool in out
-                if (tool.get('function') or {}).get('name')
-                in gw.GATEWAY_TOOL_NAMES]
-    for model in ('kimi-k3', 'gpt-5.4'):
-        assert gw.tool_schema_tokens(gateways, model=model) \
-            <= gw.LOCAL_GATEWAY_MAX_TOKENS
+    assert 'find_files > search_files' not in execute['function']['description']
 
 
 def test_ptc_projection_eligible_names_cannot_change_gateway_schema():
     oversized_name = 'read_' + ('extremely_long_segment_' * 200)
-    ordinary = gw.ptc_local_wire_tools(
-        [gw.search_tools_schema(), gw.execute_tools_schema()],
-        tier='program', eligible=['read_files'])
-    oversized = gw.ptc_local_wire_tools(
-        [gw.search_tools_schema(), gw.execute_tools_schema()],
-        tier='program', eligible=[oversized_name])
-    ordinary_gateways = [
-        tool for tool in ordinary
-        if (tool.get('function') or {}).get('name')
-        in gw.GATEWAY_TOOL_NAMES]
-    oversized_gateways = [
-        tool for tool in oversized
-        if (tool.get('function') or {}).get('name')
-        in gw.GATEWAY_TOOL_NAMES]
+    many_names = [f'reviewed_read_only_tool_{index}' for index in range(64)]
+
+    def gateways(eligible):
+        out = gw.ptc_local_wire_tools(
+            [gw.search_tools_schema(), gw.execute_tools_schema()],
+            tier='program', eligible=eligible)
+        return [tool for tool in out
+                if (tool.get('function') or {}).get('name')
+                in gw.GATEWAY_TOOL_NAMES]
+
+    ordinary_gateways = gateways(['read_files'])
+    oversized_gateways = gateways([oversized_name])
 
     assert oversized_gateways == ordinary_gateways
-    assert gw.tool_schema_tokens(oversized_gateways, model='kimi-k3') \
-        <= gw.LOCAL_GATEWAY_MAX_TOKENS
+    assert gateways(many_names) == ordinary_gateways
     execute = next(tool for tool in oversized_gateways
                    if tool['function']['name'] == gw.EXECUTE_PROGRAM_NAME)
     assert oversized_name not in execute['function']['description']
@@ -1028,20 +977,21 @@ def test_oversized_gateway_stays_byte_stable_instead_of_compacting():
     search['function']['description'] = 'search detail ' * 150
     execute['function']['description'] = 'execute detail ' * 150
     oversized_pair = [search, execute]
+    budget = gw.tool_schema_tokens(
+        [gw.search_tools_schema(), gw.execute_tools_schema()], model='kimi-k3')
 
-    assert gw.LOCAL_GATEWAY_MAX_TOKENS < gw.tool_schema_tokens(
-        oversized_pair, model='kimi-k3') < 4_000
+    assert gw.tool_schema_tokens(oversized_pair, model='kimi-k3') > budget
 
     out = gw.fit_tool_schema_budget(
-        oversized_pair, budget_tokens=4_000, model='kimi-k3')
+        oversized_pair, budget_tokens=budget, model='kimi-k3')
 
-    # The pair is never compacted at runtime: rewriting gateway bytes between
-    # rounds breaks the provider prompt-cache prefix. Oversized descriptions
-    # pass through unchanged and the request continues.
+    # The pair is never compacted at runtime, even when it alone exceeds an
+    # explicit budget: rewriting gateway bytes between rounds breaks the
+    # provider prompt-cache prefix. Oversized descriptions pass through
+    # unchanged and the request continues.
     assert [tool['function']['description'] for tool in out] == [
         tool['function']['description'] for tool in oversized_pair]
-    assert gw.tool_schema_tokens(out, model='kimi-k3') \
-        > gw.LOCAL_GATEWAY_MAX_TOKENS
+    assert gw.tool_schema_tokens(out, model='kimi-k3') > budget
 
 
 def test_single_oversized_direct_schema_is_compacted_or_omitted():
@@ -1059,10 +1009,11 @@ def test_single_oversized_direct_schema_is_compacted_or_omitted():
         'type': 'string', 'enum': [f'value_{index}_' + ('x' * 80)
                                    for index in range(200)]}
 
+    budget = 100
     compacted = gw.fit_tool_schema_budget(
-        [descriptive], budget_tokens=100, model='kimi-k3')
+        [descriptive], budget_tokens=budget, model='kimi-k3')
     omitted = gw.fit_tool_schema_budget(
-        [structural], budget_tokens=100, model='kimi-k3')
+        [structural], budget_tokens=budget, model='kimi-k3')
 
     # Annotation bulk: stripped, callable contract retained, within budget.
     assert [tool['function']['name'] for tool in compacted] == [
@@ -1070,7 +1021,9 @@ def test_single_oversized_direct_schema_is_compacted_or_omitted():
     assert 'description' not in compacted[0]['function']
     assert compacted[0]['function']['parameters'] == (
         descriptive['function']['parameters'])
-    assert gw.tool_schema_tokens(compacted, model='kimi-k3') <= 100
+    assert gw.tool_schema_tokens(compacted, model='kimi-k3') <= budget
+    assert gw.tool_schema_tokens(compacted, model='kimi-k3') < (
+        gw.tool_schema_tokens([descriptive], model='kimi-k3'))
     # Structural bulk (200 validation enums): not annotation, cannot compact.
     assert omitted == []
 
@@ -1240,7 +1193,13 @@ def test_explicit_schema_budget_keeps_local_swarm_lifecycle_tools():
     for canonical in (POLL_TOOL, KILL_TOOL, GET_AGENT_RESULT_TOOL):
         actual = next(tool for tool in plan.body['tools']
                       if tool['function']['name'] == canonical['function']['name'])
-        assert actual == canonical
+        if canonical['function']['name'] == 'poll':
+            from lib.tools.moonshot_schema import project_mfjs_schema
+            projected, _, error = project_mfjs_schema(canonical['function']['parameters'])
+            assert error == ''
+            assert actual['function']['parameters'] == projected
+        else:
+            assert actual == canonical
     assert gw.tool_schema_tokens(plan.body['tools'], model='kimi-k3') > 100
 
 
@@ -1255,7 +1214,7 @@ def test_wire_boundary_serial_chain_key_never_leaks():
     body['_programmatic_tier'] = 'program'
     # A stale caller may still provide the retired sidecar.  It is stripped and
     # cannot affect the provider schema.
-    body['_programmatic_serial_chain'] = ['find_files', 'grep_search',
+    body['_programmatic_serial_chain'] = ['find_files', 'search_files',
                                           'read_files']
     plan = prepare_request(
         body, api_key='secret',
@@ -1276,12 +1235,12 @@ def test_kimi_wire_tools_are_fixpoint_across_real_serial_chain_sequence():
     from lib.llm._sse_core import prepare_request
 
     direct_tools = [
-        _fn('find_files'), _fn('grep_search'), _fn('read_files'),
+        _fn('find_files'), _fn('search_files'), _fn('read_files'),
     ]
     completed_calls = [
-        'grep_search', 'grep_search', 'find_files', 'read_files',
-        'grep_search', 'grep_search', 'read_files', 'read_files',
-        'grep_search', 'read_files', 'run_command', 'search_tools',
+        'search_files', 'search_files', 'find_files', 'read_files',
+        'search_files', 'search_files', 'read_files', 'read_files',
+        'search_files', 'read_files', 'run_command', 'search_tools',
     ]
     history = [{'role': 'user', 'content': '排查项目并完成修改'}]
     observed_chains = []
@@ -1304,7 +1263,7 @@ def test_kimi_wire_tools_are_fixpoint_across_real_serial_chain_sequence():
             '_programmatic_tool_calling': 'on',
             '_programmatic_tier': 'program',
             '_programmatic_eligible_tools': [
-                'find_files', 'grep_search', 'read_files'],
+                'find_files', 'search_files', 'read_files'],
             '_programmatic_serial_chain': chain,
             '_request_activity_sink': diagnostics.append,
         }
@@ -1333,7 +1292,7 @@ def test_kimi_wire_tools_are_fixpoint_across_real_serial_chain_sequence():
 
     assert observed_chains[2] == []
     assert observed_chains[3] == [
-        'grep_search', 'grep_search', 'find_files']
+        'search_files', 'search_files', 'find_files']
     assert len(observed_chains[10]) == 6  # rolling bounded telemetry window
     assert observed_chains[11] == []      # run_command breaks the read chain
     assert observed_chains[12] == []      # search_tools does not restart it

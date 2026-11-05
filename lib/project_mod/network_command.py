@@ -32,10 +32,15 @@ from lib.project_mod.proxy_connect import (
     ProxyConnectError,
     open_http_connect_tunnel,
 )
+from lib.runtime.pinned_helper_source import PinnedHelperSource
 from lib.subscription_routes import ProbeResult, Route, RouteManager
 
 
 logger = get_logger(__name__)
+# ssh runs the connector in Git's cwd, where ``-m lib...`` resolves to whatever
+# checkout (or nothing) that directory offers. Run the source loaded here.
+_PROXY_CONNECTOR = PinnedHelperSource(
+    os.path.join(os.path.dirname(__file__), "proxy_connect.py"))
 
 __all__ = [
     "NetworkTarget",
@@ -571,13 +576,20 @@ def _http_command_targets(words: list[str]) -> list[NetworkTarget]:
     return targets
 
 
-def detect_network_target(command: str) -> "NetworkTarget | None":
-    """Return one unambiguous eligible target, else leave shell semantics."""
+def detect_network_target(
+    command: str, *, child_env: "dict | None" = None, cwd: "str | None" = None
+) -> "NetworkTarget | None":
+    """Return one eligible target, else preserve configuration/shell semantics."""
+    groups = [_split_command_words(segment) for segment in _split_pipeline(command or "")]
+    groups = [(words, assignments) for words, assignments in groups if words]
+    from .package_network import prepare_package_registry
+
+    handled, kind, index_url = prepare_package_registry(
+        command, groups, child_env or {}, cwd=cwd)
+    if handled:
+        return _sanitized_http_probe_url(index_url, kind) if kind else None
     targets: dict[str, NetworkTarget] = {}
-    for segment in _split_pipeline(command or ""):
-        words, assignments = _split_command_words(segment)
-        if not words:
-            continue
+    for words, assignments in groups:
         if _contains_explicit_route(words, assignments):
             return None
         target, ssh_configured = _git_target(words, assignments)
@@ -596,15 +608,16 @@ def detect_network_target(command: str) -> "NetworkTarget | None":
 
 
 def prepare_network_command(
-    command: str, child_env: dict, task=None
+    command: str, child_env: dict, task=None, *, cwd: "str | None" = None
 ) -> "PreparedNetworkCommand | None":
     """Select a route without ever launching or replaying ``command``."""
     mode = _effective_mode()
     if mode == "inherit":
         return None
-    target = detect_network_target(command)
+    target = detect_network_target(command, child_env=child_env, cwd=cwd)
     if target is None:
         return None
+    is_package = target.command_kind.startswith('package:')
     if target.scheme == "ssh":
         inherited_ssh_command = str(child_env.get("GIT_SSH_COMMAND") or "")
         inherited_lower = inherited_ssh_command.lower()
@@ -640,7 +653,7 @@ def prepare_network_command(
     ).strip().lower() in ("1", "true", "yes", "on")
     routes = global_egress_route_specs(
         target.probe_url,
-        include_bypassed=not respect_no_proxy,
+        include_bypassed=(not respect_no_proxy and not is_package),
         limit=4,
     )
     _observe_proxy_topology(routes)
@@ -743,18 +756,20 @@ def apply_network_environment(
         if route.mode == "direct":
             for name in _PROXY_ENV_NAMES:
                 child_env.pop(name, None)
-            for name in _NO_PROXY_ENV_NAMES:
-                child_env[name] = "*"
+            if not target.command_kind.startswith('package:'):
+                for name in _NO_PROXY_ENV_NAMES:
+                    child_env[name] = "*"
         else:
             for name in _PROXY_ENV_NAMES:
                 child_env[name] = route.proxy_url
-            for name in _NO_PROXY_ENV_NAMES:
-                child_env[name] = ""
+            if not target.command_kind.startswith('package:'):
+                for name in _NO_PROXY_ENV_NAMES:
+                    child_env[name] = ""
         return
 
     if target.scheme == "ssh" and route.mode == "proxy":
         connector = (
-            f"{shlex.quote(sys.executable)} -m lib.project_mod.proxy_connect %h %p"
+            shlex.join([sys.executable, "-I", "-S", _PROXY_CONNECTOR.path()]) + " %h %p"
         )
         existing = str(child_env.get("GIT_SSH_COMMAND") or "ssh").strip()
         child_env["GIT_SSH_COMMAND"] = (
@@ -872,19 +887,23 @@ def finalize_network_command(
     assert route is not None
     outcome = _classify_network_output(output)
     route_ok = outcome not in _NETWORK_FAILURE_OUTCOMES
-    try:
-        _route_manager.report(
-            prepared.target.probe_url,
-            route,
-            route_ok,
-            failure_kind=outcome if not route_ok else "network_fail",
-        )
-        if route.pool_id:
-            from lib.proxy import pool_note_outcome
+    is_package = prepared.target.command_kind.startswith('package:')
+    # Index preparation cannot attribute a resolver/CDN/build-backend failure
+    # to that origin. The lightweight probe remains its health evidence.
+    if not is_package:
+        try:
+            _route_manager.report(
+                prepared.target.probe_url,
+                route,
+                route_ok,
+                failure_kind=outcome if not route_ok else "network_fail",
+            )
+            if route.pool_id:
+                from lib.proxy import pool_note_outcome
 
-            pool_note_outcome(route.pool_id, route_ok)
-    except Exception as error:
-        logger.debug("[CommandNet] outcome report failed (%s)", type(error).__name__)
+                pool_note_outcome(route.pool_id, route_ok)
+        except Exception as error:
+            logger.debug("[CommandNet] outcome report failed (%s)", type(error).__name__)
 
     annotations = [
         "[network route: mode=%s route=%s target=%s decision=%s probe_ms=%d]"
@@ -896,6 +915,8 @@ def finalize_network_command(
             round(prepared.probe_ms),
         ),
     ]
+    if is_package:
+        annotations.append('[network scope: package-index probe; artifact/build destinations unverified]')
     if outcome != "success":
         annotations.append(
             "[network outcome: %s; command_attempts=1; automatic_replay=false]"

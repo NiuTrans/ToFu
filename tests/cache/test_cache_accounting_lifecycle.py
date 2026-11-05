@@ -128,7 +128,6 @@ def test_child_lanes_never_borrow_or_publish_root_baselines(fields, monkeypatch)
     monkeypatch.setattr(persist, 'read_persisted_boundary', lambda *a, **k: 500)
     with state.cache_tracking_scope(task('child', **fields)):
         assert state.get_prev_turn_cache_read('isolated-cache-conv', user_id=1) == 0
-        assert state.get_warm_cache_read('isolated-cache-conv', user_id=1) == 0
         assert get_cache_prefix_count('isolated-cache-conv', user_id=1) == 0
         detect(80000)
     with state.cache_tracking_scope(task('next-root')):
@@ -140,6 +139,25 @@ def test_zero_read_completed_predecessor_is_not_replaced_by_older_warm_read():
     complete('cold', 0)
     with state.cache_tracking_scope(task('next')):
         assert state.get_prev_turn_cache_read('isolated-cache-conv', user_id=1) == 0
+
+
+def test_same_task_and_conversation_names_keep_owner_baselines_separate(monkeypatch):
+    complete('shared-task-id', 34304)
+    reads = []
+    monkeypatch.setattr(
+        persist, 'read_last_turn_cache_read',
+        lambda conv_id, *, user_id: reads.append((conv_id, user_id)) or 8000,
+    )
+    with state.cache_tracking_scope(task('shared-task-id', _userId=2)):
+        assert state.get_prev_turn_cache_read('isolated-cache-conv', user_id=2) == 8000
+        detect_cache_break(
+            'isolated-cache-conv', messages(), None, 'claude-test', usage(12000),
+            user_id=2, durable=False,
+        )
+        assert state.get_prev_turn_cache_read('isolated-cache-conv', user_id=2) == 8000
+    with state.cache_tracking_scope(task('next-owner-one')):
+        assert state.get_prev_turn_cache_read('isolated-cache-conv', user_id=1) == 34304
+    assert reads == [('isolated-cache-conv', 2)]
 
 
 def test_exception_releases_context_and_cleanup_drops_metadata():
@@ -240,7 +258,6 @@ def test_cold_concurrent_roots_freeze_durable_baseline_once(monkeypatch):
     with state.cache_tracking_scope(task('cold-root')):
         durable['read'] = 99999  # a sibling must not change this turn's baseline
         assert state.get_prev_turn_cache_read('isolated-cache-conv', user_id=1) == 34304
-        assert state.get_warm_cache_read('isolated-cache-conv', user_id=1) == 34304
     assert len(reads) == 1
 
 

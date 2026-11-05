@@ -59,3 +59,54 @@ The adopted local mechanisms and reproducible regression measurements are
 specified in [Search evidence quality](relevance-quality.md). A future live
 provider comparison must fix the agent/model, task set and budget, retain source
 provenance, and report failures and coverage gaps alongside successes.
+
+## Keyed search gateway (optional paid sources)
+
+Free search stays the default: without gateway configuration nothing below
+runs. A deployment that owns a billing key for a search gateway (one JSON
+endpoint fronting several commercial search APIs) can add those indexes as
+first-class engines. `search/engines/gateway.py` speaks the gateway's
+"universal-search v1" wire format: `POST {query, isFast, timeout, sources, topK}`
+with `Authorization: Bearer <key>`, answering
+`{status, data: {code, msg, results[]}}`.
+
+**Observed protocol facts (probed 2026-10-27, eight sources).**
+
+- Failures are HTTP 200 with a nonzero `data.code`: 400 (invalid query,
+  sources or key), 1029 (requests-per-minute limit), 500 (upstream failure,
+  detail in `data.internal_err_map`). `data.searchParameters` echoes the key,
+  so bodies are never logged or copied into errors.
+- A request naming several sources returns one merged list truncated to
+  `topK`; a four-source request returned ten rows, all from the first source.
+- `isFast=true` returns snippets in 0.5–1.3 s per source. `isFast=false` asks
+  the gateway to crawl result pages: 1–10 s per source, and a source that
+  misses the request `timeout` returns empty bodies rather than an error.
+- Rows carry `publish_time` in several spellings (`2025-04-07`,
+  `2026/04/02 00:00:00`, ISO 8601 with offsets or seven fractional digits).
+  Bing-backed rows wrap links in `bing.com/ck/a` redirects.
+
+**Decisions.**
+
+| Problem | Decision | Alternative rejected |
+|---|---|---|
+| Merged multi-source requests lose all but one source and wait for the slowest | One request per configured source, each its own engine tagged `API:<id>` | One merged request: fewer calls, but no per-source rank evidence for reciprocal-rank fusion and no partial results |
+| Every search waits for all engines; in recent host logs the free engines averaged 9.6 s (Marginalia), 4.1 s (SearXNG) and 3.7 s (Brave) | `free_engines` policy: `fallback` (default) runs DDG/Brave/Bing/SearXNG/Marginalia only when the gateway produced no query-relevant candidate or failed; `parallel` always runs them; `off` never does, including the DDG/Brave retry and the browser-search fallback | Always parallel: the slowest free engine sets the latency floor even when the gateway already answered |
+| The protocol has no time filter | Normalize `publish_time` to `published_date` (shown to the model) and drop rows whose known date is outside the freshness window; undated rows stay | Ignoring freshness, or dropping undated rows and silently losing recall |
+| Our own page fetch is the slowest stage and fails on anti-bot sites | Opt-in `gateway_full_content`: a provider body of at least 200 characters that exceeds its snippet replaces our fetch and counts toward Race-to-N; other rows are fetched as before | Trusting every provider body: one source answered with 65-character placeholders |
+| Rate-limited sources (code 1029) would cost every query a round trip | 60 s per-source cooldown reported as `engine_unavailable: rate_limited`; repeated transport failures trip the shared engine circuit | Retrying immediately, which spends quota the limit is protecting |
+
+**Measured end to end (2026-10-27, four sources, four queries, behind a
+corporate proxy, LLM filter off, five results).** Mean wall time was 18.9 s
+with free engines only, 14.3 s with gateway sources plus free-engine fallback
+(the fallback never triggered), and 10.1 s with `gateway_full_content`, which
+returned page bodies for all results. On a Chinese finance query the free
+engines all failed (0 results after 40.8 s) while full-content gateway search
+answered in 9.3 s. Full content is still opt-in because its per-call cost is
+set by the gateway operator, not measured here.
+
+The gateway URL, key and source ids are configuration, never code: a host
+supplies them through `configure()` or `TOFU_SEARCH_GATEWAY_*` variables, and
+the Tofu host keeps company endpoints in release-tiered bundles. Responses are
+bounded at 8 MiB and `topK` at 50. An explicit `engines=[...]` selection is
+honoured exactly; gateway sources and the free-engine policy apply only to the
+default Web selection.

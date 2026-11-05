@@ -1,39 +1,40 @@
-"""One Git observation preserves canonical/linked identity and typed failures."""
+"""Incomplete Git metadata/configuration observations never authorize a workspace."""
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
 import pytest
+from lib.project_mod import activity_supervised_process as supervised
 from lib.tasks_pkg import workspace_delivery as delivery
 
 pytestmark = pytest.mark.unit
 
 
-@pytest.mark.parametrize('linked', [False, True])
-def test_repository_identity_uses_one_observation(tmp_path, monkeypatch, linked):
-    canonical = tmp_path / 'canonical'
-    canonical.mkdir()
-    common = canonical / '.git'
+@pytest.mark.parametrize('returncode,stdout,stderr', [
+    (2, '', 'config read failed'), (1, '', 'config read failed'),
+    (1, 'unexpected output', ''), (0, '', ''), (0, 'first\nsecond\n', ''),
+])
+def test_failed_config_read_never_authorizes_workspace(
+        tmp_path, monkeypatch, returncode, stdout, stderr):
+    common = tmp_path / '.git'
     common.mkdir()
-    checkout = tmp_path / 'linked' if linked else canonical
-    if linked:
-        checkout.mkdir()
-        (checkout / '.git').write_text(f'gitdir: {common}/worktrees/linked')
-    nested = checkout / 'nested'
-    nested.mkdir()
+
     calls = []
 
-    def run(command, **kwargs):
+    def run(command, *, cwd, env, stall_seconds, cancellation=None):
         calls.append(command)
-        assert command[-2:] == ['--show-toplevel', '--git-common-dir']
-        assert kwargs['check'] is False and kwargs['timeout'] == 10
-        return subprocess.CompletedProcess(command, 0,
-            stdout=f'{checkout}\n{common}\n', stderr='')
+        # A slow volume decides how long a healthy read takes; only the shared
+        # no-progress window, never a wall-clock deadline, may end it.
+        assert stall_seconds == delivery.GIT_STALL_SECONDS
+        if 'rev-parse' in command:
+            return subprocess.CompletedProcess(command, 0,
+                stdout=f'false\n{common}\n', stderr='')
+        return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
 
     monkeypatch.setattr(delivery, 'git_executable', lambda: '/synthetic/git')
-    monkeypatch.setattr(delivery.subprocess, 'run', run)
-    assert delivery._checkout(str(nested)) == (str(checkout), str(canonical))
-    assert len(calls) == 1
+    monkeypatch.setattr(supervised, 'run_activity_supervised', run)
+    with pytest.raises(delivery.WorkspaceBindingError):
+        delivery._checkout(str(tmp_path))
+    assert [command[-1] for command in calls] == ['--git-common-dir', 'core.worktree']
 
 
 @pytest.mark.parametrize('returncode, stdout', [(1, ''), (0, '/only-one-line\n')])
@@ -41,7 +42,7 @@ def test_failed_or_incomplete_observation_never_authorizes_workspace(
         tmp_path, monkeypatch, returncode, stdout):
     (tmp_path / '.git').mkdir()
     monkeypatch.setattr(delivery, 'git_executable', lambda: '/synthetic/git')
-    monkeypatch.setattr(delivery.subprocess, 'run', lambda command, **kwargs:
+    monkeypatch.setattr(supervised, 'run_activity_supervised', lambda command, **kwargs:
         subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr='failed'))
     with pytest.raises(delivery.WorkspaceBindingError):
         delivery._checkout(str(tmp_path))

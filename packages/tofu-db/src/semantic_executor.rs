@@ -60,8 +60,14 @@ const DESKTOP_PREFERENCE_KEY: &[u8] = b"preference";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SemanticExecutionError {
     InvalidPayload,
+    /// Deterministic validation fence raised through [`validation_fence`].
+    /// The literal travels as the response `error_message` (same wire code as
+    /// `InvalidPayload`) so client logs name the fence; being a compile-time
+    /// literal, it can never echo request bytes.
+    InvalidPayloadFence(&'static str),
     ToolResultQuery(&'static str, bool),
     DiagnosticInvalidPayload,
+    SearchCursorInvalidPayload,
     DiagnosticUnsupported,
     NotFound,
     AuthorityScopeMismatch,
@@ -80,7 +86,16 @@ pub enum SemanticExecutionError {
     Integrity(String),
     StorageUnavailable,
     PayloadTooLarge,
-    ResourceExhausted,
+    /// Retryable `database_resource_exhausted`: transient capacity, quota or
+    /// memory refusal. Only `crate::resource_exhaustion` can build the token,
+    /// after it read the class the construction site declared.
+    ResourceExhausted(crate::resource_exhaustion::TransientRefusal),
+    /// Same `database_resource_exhausted` wire code as `ResourceExhausted`,
+    /// but non-retryable: a deterministic bound (resource-exhaustion reason
+    /// `domain_resource_bound`) re-fires on the identical replay, so the
+    /// caller must shrink the request instead. Its fixed literal travels as
+    /// the response `error_message`.
+    ResourceBound(crate::resource_exhaustion::BoundRefusal),
     CapacityBusy,
     PluginStorageIncompatible,
 }
@@ -88,9 +103,9 @@ pub enum SemanticExecutionError {
 impl SemanticExecutionError {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::InvalidPayload => "database_protocol_error",
+            Self::InvalidPayload | Self::InvalidPayloadFence(_) => "database_protocol_error",
             Self::ToolResultQuery(code, _) => code,
-            Self::DiagnosticInvalidPayload => "database_invalid_payload",
+            Self::DiagnosticInvalidPayload | Self::SearchCursorInvalidPayload => "database_invalid_payload",
             Self::DiagnosticUnsupported => "database_unsupported",
             Self::NotFound => "database_not_found",
             Self::AuthorityScopeMismatch => "authority_scope_mismatch",
@@ -105,7 +120,7 @@ impl SemanticExecutionError {
             Self::Integrity(_) => "database_integrity",
             Self::StorageUnavailable => "database_unavailable",
             Self::PayloadTooLarge => "storage_payload_too_large",
-            Self::ResourceExhausted => "database_resource_exhausted",
+            Self::ResourceExhausted(_) | Self::ResourceBound(_) => "database_resource_exhausted",
             Self::CapacityBusy => "database_busy",
             Self::PluginStorageIncompatible => "plugin_storage_incompatible",
         }
@@ -114,7 +129,7 @@ impl SemanticExecutionError {
     pub fn retryable(&self) -> bool {
         matches!(
             self,
-            Self::StorageUnavailable | Self::ResourceExhausted | Self::CapacityBusy
+            Self::StorageUnavailable | Self::ResourceExhausted(_) | Self::CapacityBusy
                 | Self::ToolResultQuery(_, true)
         )
     }
@@ -135,6 +150,25 @@ fn bounded_integrity_message(message: &str) -> String {
         end -= 1;
     }
     format!("{}...", &single_line[..end])
+}
+
+/// Literal reason of a caller-correctable storage validation failure.
+#[derive(Debug)]
+struct ValidationFence(&'static str);
+
+impl fmt::Display for ValidationFence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for ValidationFence {}
+
+/// `InvalidInput` storage error whose literal reason reaches the client.
+/// Ordinary `InvalidInput` messages may be formatted from request values and
+/// keep the bare code; only this typed literal is forwarded.
+pub(crate) fn validation_fence(reason: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, ValidationFence(reason))
 }
 
 /// Build the integrity variant with a bounded diagnostic message.
@@ -179,18 +213,26 @@ pub(crate) fn map_storage_error(error: io::Error) -> SemanticExecutionError {
     if error.to_string().starts_with("storage_payload_too_large:") {
         return SemanticExecutionError::PayloadTooLarge;
     }
+    if let Some(refusal) = crate::resource_exhaustion::semantic_refusal(&error) {
+        return refusal;
+    }
     match error.kind() {
-        io::ErrorKind::InvalidInput => SemanticExecutionError::InvalidPayload,
+        io::ErrorKind::InvalidInput => match error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<ValidationFence>())
+        {
+            Some(fence) if fence.0 == "invalid conversation search cursor" => {
+                SemanticExecutionError::SearchCursorInvalidPayload
+            }
+            Some(fence) => SemanticExecutionError::InvalidPayloadFence(fence.0),
+            None => SemanticExecutionError::InvalidPayload,
+        },
         io::ErrorKind::NotFound => SemanticExecutionError::NotFound,
         io::ErrorKind::InvalidData => integrity_failure(error.to_string()),
         io::ErrorKind::PermissionDenied => SemanticExecutionError::AuthorityScopeMismatch,
         io::ErrorKind::WouldBlock | io::ErrorKind::AlreadyExists => {
             SemanticExecutionError::Conflict
         }
-        io::ErrorKind::OutOfMemory => {
-            crate::fsync_stats::note_resource_exhaustion(&error);
-            SemanticExecutionError::ResourceExhausted
-        },
         io::ErrorKind::TimedOut => SemanticExecutionError::DeadlineElapsed,
         _ => SemanticExecutionError::StorageUnavailable,
     }
@@ -921,7 +963,9 @@ fn compile_artifact(
                 crate::generated_tofudb_ir::MAX_TOOL_RESULT_ARTIFACT_BYTES,
             )?;
             if content.len() > crate::generated_tofudb_ir::MAX_TOOL_RESULT_ARTIFACT_BYTES {
-                return Err(SemanticExecutionError::ResourceExhausted);
+                return Err(crate::resource_exhaustion::semantic_bound(
+                    "tool result artifact content exceeds its byte bound",
+                ));
             }
             (
                 vec![TransactionIrStep::ToolResultArtifactPut {
@@ -1050,6 +1094,196 @@ fn compile_artifact(
         result,
         command_effects: effects,
     })
+}
+
+/// Compile one ordinary `turn.event.record` payload. The single command and
+/// every `turn.event.record_batch` entry share this exact admission.
+fn compile_turn_event_record_request(
+    payload: &Map<String, Value>,
+    now_unix_ms: u64,
+) -> Result<crate::turn::EventRecordRequest, SemanticExecutionError> {
+    let attempt_id = required_text(payload, "attempt_id", 128)?.to_owned();
+    let terminal = payload
+        .get("terminal")
+        .is_some_and(|value| !is_python_falsy_json(value));
+    let slim = payload
+        .get("slim")
+        .is_some_and(|value| !is_python_falsy_json(value));
+    let status = match payload.get("status") {
+        None | Some(Value::Null) => if terminal { "failed" } else { "running" }.to_owned(),
+        Some(Value::String(value)) if !value.is_empty() && value.chars().count() <= 128 => {
+            value.clone()
+        }
+        _ => return Err(SemanticExecutionError::InvalidPayload),
+    };
+    let task_id = match payload.get("task_id") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(value)) if value.chars().count() <= 256 => value.clone(),
+        _ => return Err(SemanticExecutionError::InvalidPayload),
+    };
+    let projection_patch = match payload.get("projection_patch") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(value)) => Some(value.clone()),
+        _ => return Err(SemanticExecutionError::InvalidPayload),
+    };
+    let projection_segments_stable = match payload.get("projection_segments_stable") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        _ => return Err(SemanticExecutionError::InvalidPayload),
+    };
+    if (projection_segments_stable && projection_patch.is_none())
+        || (slim && projection_patch.is_some())
+    {
+        return Err(SemanticExecutionError::InvalidPayload);
+    }
+    let object_or_empty = |field: &str| match payload.get(field) {
+        None | Some(Value::Null) => Ok(Map::new()),
+        Some(Value::Object(value)) => Ok(value.clone()),
+        Some(value) if is_python_falsy_json(value) => Ok(Map::new()),
+        _ => Err(SemanticExecutionError::InvalidPayload),
+    };
+    let settlement = object_or_empty("settlement")?;
+    let error = object_or_empty("error")?;
+    let event_payload = object_or_empty("event_payload")?;
+    let event_type = match payload.get("event_type") {
+        None | Some(Value::Null) => "projection_updated".to_owned(),
+        Some(Value::String(value)) if !value.is_empty() && value.chars().count() <= 128 => {
+            value.clone()
+        }
+        _ => return Err(SemanticExecutionError::InvalidPayload),
+    };
+    let content = match payload.get("content") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(value)) => value.clone(),
+        _ => return Err(SemanticExecutionError::InvalidPayload),
+    };
+    let thinking = match payload.get("thinking") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(value)) => value.clone(),
+        _ => return Err(SemanticExecutionError::InvalidPayload),
+    };
+    let projection = payload.get("projection").cloned().unwrap_or(Value::Null);
+    let logical_now = match payload.get("now") {
+        None | Some(Value::Null) => now_unix_ms,
+        Some(value) if is_python_falsy_json(value) => now_unix_ms,
+        Some(value) => value
+            .as_u64()
+            .filter(|value| *value > 0)
+            .ok_or(SemanticExecutionError::InvalidPayload)?,
+    };
+    let task_event = payload
+        .get("task_event")
+        .map(|value| {
+            value
+                .as_object()
+                .ok_or(SemanticExecutionError::InvalidPayload)
+                .and_then(|event| compile_event_item(event, logical_now))
+        })
+        .transpose()?;
+    let preceding_task_events = match payload.get("task_event").and_then(Value::as_object)
+        .and_then(|event| event.get("preceding_events")) {
+        None => Vec::new(),
+        Some(Value::Array(events)) if events.len() < crate::generated_task_event_delivery::PROGRESS_BATCH_MAX_FRAMES => events.iter().map(|event| {
+            event.as_object().ok_or(SemanticExecutionError::InvalidPayload)
+                .and_then(|event| compile_event_item(event, logical_now))
+        }).collect::<Result<Vec<_>, _>>()?,
+        _ => return Err(SemanticExecutionError::InvalidPayload),
+    };
+    // Flow phase attempts declare their root here; the engine must prove
+    // it against the immutable attempt config inside the transaction,
+    // exactly like the SQL sidecar fence. Dropping this field used to
+    // leave native authority without any flow-root fence.
+    let flow_root_attempt_id = match payload.get("flow_root_attempt_id") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(value)) if value.chars().count() <= 128 => value.clone(),
+        _ => return Err(SemanticExecutionError::InvalidPayload),
+    };
+    Ok(crate::turn::EventRecordRequest {
+        model_continuation: payload
+            .get("model_continuation")
+            .cloned()
+            .unwrap_or(Value::Null),
+        attempt_id,
+        task_id,
+        terminal,
+        status,
+        slim,
+        content,
+        thinking,
+        projection,
+        projection_patch,
+        projection_segments_stable,
+        settlement,
+        error,
+        event_type,
+        event_payload,
+        background_command_ack: payload.get("background_command_ack").cloned(),
+        task_event,
+        preceding_task_events,
+        flow_root_attempt_id,
+        now_ms: logical_now,
+    })
+}
+
+/// Compile `turn.event.record_batch` into ordinary records of one task
+/// attempt. Terminal, interaction, background-acknowledgement and tool-effect
+/// entries keep their own transaction; rows must ascend and stay within the
+/// existing storage-event RPC composition bound.
+fn compile_turn_event_record_batch(
+    payload: &Map<String, Value>,
+    user_id: u64,
+    now_unix_ms: u64,
+) -> Result<Vec<crate::turn::EventRecordRequest>, SemanticExecutionError> {
+    use crate::generated_task_event_delivery::{
+        STRUCTURAL_BATCH_MAX_EVENTS, STRUCTURAL_BATCH_MAX_WIRE_BYTES,
+    };
+    use SemanticExecutionError::InvalidPayloadFence as Fence;
+    let entries = payload
+        .get("entries")
+        .and_then(Value::as_array)
+        .filter(|entries| !entries.is_empty())
+        .ok_or(Fence("turn event batch needs entries"))?;
+    let mut requests: Vec<crate::turn::EventRecordRequest> = Vec::with_capacity(entries.len());
+    let mut previous_sequence = None;
+    let (mut rows, mut wire_bytes) = (0_usize, 0_usize);
+    for entry in entries {
+        let entry = entry
+            .as_object()
+            .ok_or(Fence("turn event batch entries must be objects"))?;
+        if positive_identity(entry, "user_id")? != user_id {
+            return Err(Fence("turn event batch entries must name the batch owner"));
+        }
+        let request = compile_turn_event_record_request(entry, now_unix_ms)?;
+        let carried_structural = request.task_event.as_ref().is_some_and(|item| item.event_type != "tool_effect")
+            && !request.terminal
+            && request.background_command_ack.as_ref().map_or(true, Value::is_null)
+            && request.event_type == "projection_updated"
+            && request.event_payload.get("updateKind").and_then(Value::as_str) != Some("tool_effect");
+        if !carried_structural {
+            return Err(Fence("turn event batch entries must be carried structural events"));
+        }
+        if requests.first().is_some_and(|first| {
+            (&first.attempt_id, &first.task_id, &first.flow_root_attempt_id)
+                != (&request.attempt_id, &request.task_id, &request.flow_root_attempt_id)
+        }) {
+            return Err(Fence("turn event batch spans tasks or attempts"));
+        }
+        for item in request.preceding_task_events.iter().chain(request.task_event.as_ref()) {
+            if item.task_id != request.task_id
+                || previous_sequence.is_some_and(|previous| item.application_sequence <= previous)
+            {
+                return Err(Fence("turn event batch rows must form one ascending task stream"));
+            }
+            previous_sequence = Some(item.application_sequence);
+            rows += 1;
+            wire_bytes = wire_bytes.saturating_add(item.payload_json.len());
+        }
+        requests.push(request);
+    }
+    if rows > STRUCTURAL_BATCH_MAX_EVENTS || wire_bytes > STRUCTURAL_BATCH_MAX_WIRE_BYTES {
+        return Err(Fence("turn event batch exceeds the storage event RPC bound"));
+    }
+    Ok(requests)
 }
 
 fn compile_turn(
@@ -1549,7 +1783,9 @@ fn compile_turn(
             _ => return Err(SemanticExecutionError::InvalidPayload),
         };
         if values.len() > crate::turn::MAX_RELATED_TURNS_PER_ANNOUNCEMENT {
-            return Err(SemanticExecutionError::ResourceExhausted);
+            return Err(crate::resource_exhaustion::semantic_bound(
+                "related Turn announcement exceeds its Turn bound",
+            ));
         }
         let mut turn_ids = Vec::with_capacity(values.len());
         for value in values {
@@ -1590,139 +1826,32 @@ fn compile_turn(
         });
     }
     if admitted.operation.name == "turn.event.record" {
-        let attempt_id = required_text(&payload, "attempt_id", 128)?.to_owned();
-        let terminal = payload
-            .get("terminal")
-            .is_some_and(|value| !is_python_falsy_json(value));
-        let slim = payload
-            .get("slim")
-            .is_some_and(|value| !is_python_falsy_json(value));
-        let status = match payload.get("status") {
-            None | Some(Value::Null) => if terminal { "failed" } else { "running" }.to_owned(),
-            Some(Value::String(value)) if !value.is_empty() && value.chars().count() <= 128 => {
-                value.clone()
-            }
-            _ => return Err(SemanticExecutionError::InvalidPayload),
-        };
-        let task_id = match payload.get("task_id") {
-            None | Some(Value::Null) => String::new(),
-            Some(Value::String(value)) if value.chars().count() <= 256 => value.clone(),
-            _ => return Err(SemanticExecutionError::InvalidPayload),
-        };
-        let projection_patch = match payload.get("projection_patch") {
-            None | Some(Value::Null) => None,
-            Some(Value::Object(value)) => Some(value.clone()),
-            _ => return Err(SemanticExecutionError::InvalidPayload),
-        };
-        let projection_segments_stable = match payload.get("projection_segments_stable") {
-            None => false,
-            Some(Value::Bool(value)) => *value,
-            _ => return Err(SemanticExecutionError::InvalidPayload),
-        };
-        if (projection_segments_stable && projection_patch.is_none())
-            || (slim && projection_patch.is_some())
-        {
-            return Err(SemanticExecutionError::InvalidPayload);
-        }
-        let object_or_empty = |field: &str| match payload.get(field) {
-            None | Some(Value::Null) => Ok(Map::new()),
-            Some(Value::Object(value)) => Ok(value.clone()),
-            Some(value) if is_python_falsy_json(value) => Ok(Map::new()),
-            _ => Err(SemanticExecutionError::InvalidPayload),
-        };
-        let settlement = object_or_empty("settlement")?;
-        let error = object_or_empty("error")?;
-        let event_payload = object_or_empty("event_payload")?;
-        let event_type = match payload.get("event_type") {
-            None | Some(Value::Null) => "projection_updated".to_owned(),
-            Some(Value::String(value)) if !value.is_empty() && value.chars().count() <= 128 => {
-                value.clone()
-            }
-            _ => return Err(SemanticExecutionError::InvalidPayload),
-        };
-        let content = match payload.get("content") {
-            None | Some(Value::Null) => String::new(),
-            Some(Value::String(value)) => value.clone(),
-            _ => return Err(SemanticExecutionError::InvalidPayload),
-        };
-        let thinking = match payload.get("thinking") {
-            None | Some(Value::Null) => String::new(),
-            Some(Value::String(value)) => value.clone(),
-            _ => return Err(SemanticExecutionError::InvalidPayload),
-        };
-        let projection = payload.get("projection").cloned().unwrap_or(Value::Null);
-        let logical_now = match payload.get("now") {
-            None | Some(Value::Null) => now_unix_ms,
-            Some(value) if is_python_falsy_json(value) => now_unix_ms,
-            Some(value) => value
-                .as_u64()
-                .filter(|value| *value > 0)
-                .ok_or(SemanticExecutionError::InvalidPayload)?,
-        };
-        let task_event = payload
-            .get("task_event")
-            .map(|value| {
-                value
-                    .as_object()
-                    .ok_or(SemanticExecutionError::InvalidPayload)
-                    .and_then(|event| compile_event_item(event, logical_now))
-            })
-            .transpose()?;
-        let preceding_task_events = match payload.get("task_event").and_then(Value::as_object)
-            .and_then(|event| event.get("preceding_events")) {
-            None => Vec::new(),
-            Some(Value::Array(events)) if events.len() < crate::generated_task_event_delivery::PROGRESS_BATCH_MAX_FRAMES => events.iter().map(|event| {
-                event.as_object().ok_or(SemanticExecutionError::InvalidPayload)
-                    .and_then(|event| compile_event_item(event, logical_now))
-            }).collect::<Result<Vec<_>, _>>()?,
-            _ => return Err(SemanticExecutionError::InvalidPayload),
-        };
-        // Flow phase attempts declare their root here; the engine must prove
-        // it against the immutable attempt config inside the transaction,
-        // exactly like the SQL sidecar fence. Dropping this field used to
-        // leave native authority without any flow-root fence.
-        let flow_root_attempt_id = match payload.get("flow_root_attempt_id") {
-            None | Some(Value::Null) => String::new(),
-            Some(Value::String(value)) if value.chars().count() <= 128 => value.clone(),
-            _ => return Err(SemanticExecutionError::InvalidPayload),
-        };
+        let request = compile_turn_event_record_request(&payload, now_unix_ms)?;
         return Ok(TransactionIr {
             tenant_id,
             owner_user_id: user_id,
             operation: admitted.operation.name.to_owned(),
             operation_kind: admitted.operation.kind,
-            steps: vec![TransactionIrStep::TurnEventRecord {
-                request: crate::turn::EventRecordRequest {
-                    model_continuation: payload
-                        .get("model_continuation")
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                    attempt_id,
-                    task_id,
-                    terminal,
-                    status,
-                    slim,
-                    content,
-                    thinking,
-                    projection,
-                    projection_patch,
-                    projection_segments_stable,
-                    settlement,
-                    error,
-                    event_type,
-                    event_payload,
-                    background_command_ack: payload.get("background_command_ack").cloned(),
-                    task_event,
-                    preceding_task_events,
-                    flow_root_attempt_id,
-                    now_ms: logical_now,
-                },
-                slot: 0,
-            }],
+            steps: vec![TransactionIrStep::TurnEventRecord { request, slot: 0 }],
             result: TransactionIrResult::SlotOrLiteral {
                 slot: 0,
                 missing: b"null".to_vec(),
             },
+            command_effects: Some(command_effects(admitted, &payload, now_unix_ms)?),
+        });
+    }
+    if admitted.operation.name == "turn.event.record_batch" {
+        let requests = compile_turn_event_record_batch(&payload, user_id, now_unix_ms)?;
+        let slots = (0..requests.len()).collect();
+        return Ok(TransactionIr {
+            tenant_id,
+            owner_user_id: user_id,
+            operation: admitted.operation.name.to_owned(),
+            operation_kind: admitted.operation.kind,
+            steps: requests.into_iter().enumerate()
+                .map(|(slot, request)| TransactionIrStep::TurnEventRecord { request, slot })
+                .collect(),
+            result: TransactionIrResult::SlotArray { slots },
             command_effects: Some(command_effects(admitted, &payload, now_unix_ms)?),
         });
     }
@@ -1934,7 +2063,9 @@ fn compile_turn(
                     .unwrap_or(true)
             })
         {
-            return Err(SemanticExecutionError::ResourceExhausted);
+            return Err(crate::resource_exhaustion::semantic_bound(
+                "Turn attempt request document exceeds 8 MiB",
+            ));
         }
         let attempt_id =
             deterministic_attempt_id(admitted, &conversation_id, &turn_id, &command_id)?;
@@ -2338,6 +2469,11 @@ fn compile_turn(
             let attempt_id = required_text(&payload, "attempt_id", 128)?.to_owned();
             let command_id = required_text(&payload, "command_id", 256)?.to_owned();
             let text = required_text(&payload, "text", 1024 * 1024)?.to_owned();
+            let author = match payload.get("author") {
+                None | Some(Value::Null) => None,
+                Some(value @ Value::Object(_)) => Some(value.clone()),
+                Some(_) => return Err(SemanticExecutionError::InvalidPayload),
+            };
             (
                 vec![TransactionIrStep::TurnSteerCommit {
                     request: crate::turn::SteerCommitRequest {
@@ -2345,6 +2481,7 @@ fn compile_turn(
                         attempt_id,
                         command_id,
                         text,
+                        author,
                         updated_at_ms: now_unix_ms,
                         committed_at_ms: now_unix_ms,
                     },
@@ -2382,7 +2519,9 @@ fn compile_turn(
                 _ => return Err(SemanticExecutionError::InvalidPayload),
             };
             if raw_messages.len() > crate::turn::MAX_VISIBLE_TURNS_PER_SYNCHRONIZATION {
-                return Err(SemanticExecutionError::ResourceExhausted);
+                return Err(crate::resource_exhaustion::semantic_bound(
+                    "visible sync message list exceeds its Turn bound",
+                ));
             }
             let messages = if live {
                 // A live admission carries in-flight phase shells; the ghost
@@ -2539,10 +2678,16 @@ fn compile_turn(
         }
         "turn.get" => {
             let turn_id = required_text(&payload, "turn_id", 128)?.to_owned();
+            let include_projection = match payload.get("include_projection") {
+                None => true,
+                Some(Value::Bool(value)) => *value,
+                _ => return Err(SemanticExecutionError::InvalidPayload),
+            };
             (
                 vec![TransactionIrStep::TurnGet {
                     conversation_id,
                     turn_id,
+                    include_projection,
                     slot: 0,
                 }],
                 TransactionIrResult::SlotOrLiteral {
@@ -5866,6 +6011,7 @@ fn compile_integration_workspace(
         "integration.workspace.claim_next"
             | "integration.workspace.peek_ready"
             | "integration.workspace.delivery_page"
+            | "integration.workspace.delivery_action_page"
             | "integration.workspace.get_integrating"
             | "integration.workspace.quarantine"
             | "integration.workspace.requeue"
@@ -6386,7 +6532,11 @@ fn compile_project_brain(
             tenant_id,
             owner_user_id: admitted.request.owner_id,
             operation: admitted.operation.name.to_owned(),
-            operation_kind: admitted.operation.kind,
+            // The wire operation remains maintenance (including command-ID
+            // admission), but this plan only reads. Query IR also validates
+            // that no future step can silently add writes or receipts, and
+            // permits execution on the same pinned replicas as normal reads.
+            operation_kind: crate::generated_storage_operations::StorageOperationKind::Query,
             steps: vec![TransactionIrStep::ProjectBrainRecoverySnapshot {
                 cursor: payload
                     .get("cursor")
@@ -6402,7 +6552,7 @@ fn compile_project_brain(
                 slot: 0,
                 missing: Vec::new(),
             },
-            command_effects: Some(command_effects(admitted, &payload, now_unix_ms)?),
+            command_effects: None,
         });
     }
     let owner_user_id = positive_identity(&payload, "owner_user_id")?;
@@ -6829,6 +6979,12 @@ fn compile_event(
         }
         "event.list" => {
             let (types, type_prefixes) = event_type_filters(&payload)?;
+            let inspector_projection = match payload.get("payload_projection") {
+                None => false,
+                Some(Value::String(value)) if value == "full" => false,
+                Some(Value::String(value)) if value == crate::generated_request_inspector_projection::PROJECTION => true,
+                _ => return Err(SemanticExecutionError::InvalidPayload),
+            };
             let payload_types = match payload.get("payload_types") {
                 None | Some(Value::Null) => None,
                 Some(Value::Array(values)) if values.len() <= 64 => Some(values.iter()
@@ -6856,6 +7012,7 @@ fn compile_event(
                     types,
                     type_prefixes,
                     payload_types,
+                    inspector_projection,
                     slot: 0,
                 }],
                 TransactionIrResult::SlotOrLiteral {
@@ -7164,12 +7321,26 @@ fn compile_conversation(
             {
                 return Err(SemanticExecutionError::InvalidPayload);
             }
+            // An anchor positions the window around one main-lane Turn; it
+            // replaces the explicit cursor and needs a transcript window.
+            let anchor_turn_id = match payload.get("anchor_turn_id") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(value))
+                    if (1..=128).contains(&value.chars().count())
+                        && message_window != 0
+                        && before_sequence.is_none() =>
+                {
+                    Some(value.clone())
+                }
+                _ => return Err(SemanticExecutionError::InvalidPayload),
+            };
             (
                 vec![TransactionIrStep::ConversationGet {
                     conversation_id,
                     include_messages,
                     message_window: message_window as usize,
                     before_sequence,
+                    anchor_turn_id,
                     slot: 0,
                 }],
                 TransactionIrResult::SlotOrLiteral {
@@ -8381,6 +8552,28 @@ fn compile_automation_run(
     })
 }
 
+/// The explicit, de-duplicated kind filter shared by a claim and its horizon.
+fn worker_job_claim_kinds(
+    payload: &Map<String, Value>,
+) -> Result<Vec<String>, SemanticExecutionError> {
+    let raw_kinds = payload
+        .get("task_kinds")
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty() && values.len() <= MAX_WORKER_JOB_CLAIM_KINDS)
+        .ok_or(SemanticExecutionError::InvalidPayload)?;
+    let mut task_kinds: Vec<String> = Vec::with_capacity(raw_kinds.len());
+    for value in raw_kinds {
+        let kind = value
+            .as_str()
+            .filter(|kind| !kind.is_empty() && kind.chars().count() <= 128)
+            .ok_or(SemanticExecutionError::InvalidPayload)?;
+        if !task_kinds.iter().any(|existing| existing == kind) {
+            task_kinds.push(kind.to_owned());
+        }
+    }
+    Ok(task_kinds)
+}
+
 fn compile_worker_job(
     admitted: AdmittedRequest<'_>,
     authority_now_ms: u64,
@@ -8462,22 +8655,18 @@ fn compile_worker_job(
                 },
             )
         }
+        "worker_job.claim_horizon" => (
+            vec![TransactionIrStep::WorkerJobClaimHorizon {
+                task_kinds: worker_job_claim_kinds(&payload)?,
+                slot: 0,
+            }],
+            TransactionIrResult::SlotOrLiteral {
+                slot: 0,
+                missing: b"null".to_vec(),
+            },
+        ),
         "worker_job.claim_next" => {
-            let raw_kinds = payload
-                .get("task_kinds")
-                .and_then(Value::as_array)
-                .filter(|values| !values.is_empty() && values.len() <= MAX_WORKER_JOB_CLAIM_KINDS)
-                .ok_or(SemanticExecutionError::InvalidPayload)?;
-            let mut task_kinds = Vec::with_capacity(raw_kinds.len());
-            for value in raw_kinds {
-                let kind = value
-                    .as_str()
-                    .filter(|kind| !kind.is_empty() && kind.chars().count() <= 128)
-                    .ok_or(SemanticExecutionError::InvalidPayload)?;
-                if !task_kinds.iter().any(|existing| existing == kind) {
-                    task_kinds.push(kind.to_owned());
-                }
-            }
+            let task_kinds = worker_job_claim_kinds(&payload)?;
             let lease_ms = optional_nonnegative_integer(&payload, "lease_ms", 60_000)?;
             if !(10_000..=300_000).contains(&lease_ms) {
                 return Err(SemanticExecutionError::InvalidPayload);
@@ -9065,7 +9254,9 @@ fn compile_tenant_user(
                 .checked_add(limit)
                 .is_none_or(|rows| rows > MAX_TENANT_USER_LIST_SCAN_ROWS)
             {
-                return Err(SemanticExecutionError::ResourceExhausted);
+                return Err(crate::resource_exhaustion::semantic_bound(
+                    "tenant user list scan exceeds its row bound",
+                ));
             }
             (
                 vec![TransactionIrStep::TenantUserList {
@@ -9493,7 +9684,9 @@ fn compile_billing(
                 .checked_add(limit)
                 .is_none_or(|v| v > crate::generated_tofudb_ir::MAX_BILLING_LIST_SCAN_ROWS)
             {
-                return Err(SemanticExecutionError::ResourceExhausted);
+                return Err(crate::resource_exhaustion::semantic_bound(
+                    "billing ledger list scan exceeds its row bound",
+                ));
             }
             let raw = match payload.get("kinds") {
                 None | Some(Value::Null) | Some(Value::Bool(false)) => Vec::new(),
@@ -9559,7 +9752,9 @@ fn compile_billing(
                 .checked_add(limit)
                 .is_none_or(|value| value > crate::generated_tofudb_ir::MAX_BILLING_LIST_SCAN_ROWS)
             {
-                return Err(SemanticExecutionError::ResourceExhausted);
+                return Err(crate::resource_exhaustion::semantic_bound(
+                    "billing payment list scan exceeds its row bound",
+                ));
             }
             (
                 vec![TransactionIrStep::BillingPaymentList {
@@ -9577,7 +9772,7 @@ fn compile_billing(
         }
         "billing.payment.record" => {
             let provider = text("provider", 100, true)?;
-            let provider_id = text("provider_id", 300, true)?;
+            let provider_id = text("provider_id", 300, false)?;
             let payload_json = serde_json::to_vec(&Value::Object(payload.clone()))
                 .map_err(|_| SemanticExecutionError::InvalidPayload)?;
             (
@@ -9586,6 +9781,20 @@ fn compile_billing(
                     provider_id,
                     payload_json,
                     created_at: now,
+                    physical_updated_at_ms: authority_now_ms,
+                    slot: 0,
+                }],
+                result(),
+            )
+        }
+        "billing.payment.bind" => {
+            let payment_id = text("payment_id", 200, true)?;
+            let payload_json = serde_json::to_vec(&Value::Object(payload.clone()))
+                .map_err(|_| SemanticExecutionError::InvalidPayload)?;
+            (
+                vec![TransactionIrStep::BillingPaymentBind {
+                    payment_id,
+                    payload_json,
                     physical_updated_at_ms: authority_now_ms,
                     slot: 0,
                 }],
@@ -9639,7 +9848,9 @@ fn compile_billing(
                 .checked_add(limit)
                 .is_none_or(|value| value > crate::generated_tofudb_ir::MAX_BILLING_LIST_SCAN_ROWS)
             {
-                return Err(SemanticExecutionError::ResourceExhausted);
+                return Err(crate::resource_exhaustion::semantic_bound(
+                    "billing redeem-code list scan exceeds its row bound",
+                ));
             }
             (
                 vec![TransactionIrStep::BillingRedeemCodesList {
@@ -10355,7 +10566,11 @@ fn compile_admitted_transaction(
 }
 
 /// Only explicitly certified transactional steps enter optimistic preparation.
-/// Maintenance and future IR variants keep the exclusive execution path.
+/// Point-delete retention (sync replay, Attempt events, task events) prepares
+/// its cold scans outside the writer and commits through ordinary OCC; a
+/// refused commit falls back to exclusive execution. Range-retiring
+/// maintenance is structural: any concurrent commit refuses it after the
+/// commit-time overlay merge, so it and future IR variants stay exclusive.
 pub(crate) fn compile_parallel_transaction(
     admitted: AdmittedRequest<'_>,
     now_unix_ms: u64,
@@ -10397,9 +10612,12 @@ pub(crate) fn compile_parallel_transaction(
                 | TransactionIrStep::TurnAttemptBind { .. }
                 | TransactionIrStep::TurnAttemptStart { .. }
                 | TransactionIrStep::TurnProjectionUpdate { .. }
+                | TransactionIrStep::TurnSyncPrune { .. }
+                | TransactionIrStep::TurnEventsPrune { .. }
                 | TransactionIrStep::StreamAppend { .. }
                 | TransactionIrStep::IndexedStreamAppend { .. }
                 | TransactionIrStep::IndexedStreamAppendBatch { .. }
+                | TransactionIrStep::IndexedStreamPrune { .. }
         )
     });
     Ok(safe.then_some(ir))
@@ -10507,6 +10725,7 @@ mod tests {
     include!("paper_build_artifact_tests.rs");
     include!("paper_document_tests.rs");
     include!("semantic_executor_tests.rs");
+    include!("semantic_request_inspector_projection_tests.rs");
 
     #[test]
     fn response_proof_keeps_semantic_integrity_errors_at_envelope_depth_boundaries() {
@@ -10544,5 +10763,7 @@ mod tests {
     }
 
     include!("turn_settlement_regression_tests.rs");
+    include!("turn_dispatchable_index_tests.rs");
     include!("semantic_event_batch_composition_tests.rs");
+    include!("semantic_turn_event_batch_tests.rs");
 }

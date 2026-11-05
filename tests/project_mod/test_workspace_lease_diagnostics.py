@@ -88,9 +88,44 @@ def test_invalid_identifiers_are_not_echoed_or_retained(repo):
             assert 'bad' not in text
             assert 'SECRET' not in text
             holders = next(iter(leases._registry.values()))['holders']
-            assert all(set(item) == {'pid', 'thread', 'tool', 'task', 'conversation', 'since'}
+            assert all(set(item) == {'pid', 'thread', 'thread_name', 'tool', 'task',
+                                     'conversation', 'owner', 'request', 'mode', 'since'}
                        for item in holders.values())
+            # The request names claims and an explicit caller summary only;
+            # nothing is read from the task's own payload.
+            assert all(item['request'].purpose == '' for item in holders.values())
+            # The registry keeps no reference to the task; the scope's own
+            # strong reference is what keeps it alive here.
+            assert ref() is not None
     assert ref() is None
+    assert not leases._registry
+
+
+def test_holder_outside_any_tool_scope_is_named_by_its_thread(repo):
+    """Settlement/delivery leases carry no tool or task; the thread names them."""
+    def acquire_on(thread_name):
+        acquired, release = threading.Event(), threading.Event()
+
+        def hold():
+            with leases.workspace_write_lease(repo):
+                acquired.set()
+                release.wait(5)
+
+        worker = threading.Thread(target=hold, name=thread_name)
+        worker.start()
+        assert acquired.wait(5)
+        try:
+            return conflict(lambda: leases.workspace_write_lease(repo).__enter__())
+        finally:
+            release.set()
+            worker.join(5)
+
+    text = acquire_on('commit-round-0123abcd')
+    assert 'thread_name=commit-round-0123abcd' in text
+    assert 'tool=' not in text and 'task=' not in text
+    # Names outside the bounded identifier alphabet are omitted, never echoed.
+    text = acquire_on('Thread-9 (secret payload)')
+    assert 'thread_name=' not in text and 'secret' not in text
     assert not leases._registry
 
 
@@ -153,6 +188,68 @@ def test_initial_publication_fault_releases_physical_and_logical_claim(repo, mon
         with pytest.raises(RuntimeError, match='publication fault'):
             with api(repo):
                 pytest.fail('publication fault ignored')
+    assert not leases._registry
+    assert not leases._active_descriptors
+    with leases.workspace_write_lease(repo):
+        pass
+
+
+@pytest.mark.parametrize('contended', [False, True])
+def test_admission_phases_distinguish_io_from_local_wait(repo, monkeypatch, contended):
+    from lib.tools import execution_timing as timing
+
+    evidence = []
+    monkeypatch.setattr(timing, 'TOOL_EXECUTION_BUDGETS_MS', {'write_file': -1})
+    monkeypatch.setattr(timing, 'log_event', lambda *args, **kwargs: evidence.append(kwargs))
+    target = repo / 'a.txt'
+
+    def admit():
+        with timing.tool_execution_timing('write_file'):
+            if contended:
+                with pytest.raises(leases.WorkspaceBusyError):
+                    with leases.workspace_file_write_lease(target, timeout=0.03):
+                        pytest.fail('same-file holder was ignored')
+            else:
+                with leases.workspace_file_write_lease(target):
+                    pass
+
+    if contended:
+        with leases.workspace_file_write_lease(target):
+            worker = threading.Thread(target=admit)
+            worker.start()
+            worker.join(5)
+            assert not worker.is_alive()
+    else:
+        admit()
+    assert len(evidence) == 1
+    phases = evidence[0]['phases']
+    assert phases['workspace_registry_wait']['calls'] > 0
+    if contended:
+        assert phases['workspace_local_wait']['calls'] > 0
+        assert 'workspace_flock_wait' not in phases
+    else:
+        assert phases['workspace_lock_io']['calls'] > 0
+        assert 'workspace_local_wait' not in phases
+        assert 'workspace_flock_wait' not in phases
+    assert not leases._registry
+    assert not leases._active_descriptors
+
+
+def test_registry_timer_finalizer_fault_cannot_strand_admission(repo, monkeypatch):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def broken_timer(*args, **kwargs):
+        yield
+        raise RuntimeError('timer finalizer fault')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(leases, 'timing_phase', broken_timer)
+        with pytest.raises(RuntimeError, match='timer finalizer fault'):
+            with leases.workspace_write_lease(repo):
+                pytest.fail('timer fault ignored')
+    assert leases._registry_lock.acquire(blocking=False)
+    leases._registry_lock.release()
     assert not leases._registry
     assert not leases._active_descriptors
     with leases.workspace_write_lease(repo):

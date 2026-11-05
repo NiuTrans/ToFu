@@ -1,9 +1,14 @@
-"""Cancellation must retire inherited leases even when the session leader exits."""
+"""Cancellation must retire inherited leases even when the session leader exits.
+
+A finished command's result is never replaced by its group's retirement:
+members left running are stopped and reported, and a group that outlives
+SIGKILL becomes a typed warning while its record stays for the boot sweep.
+"""
 from contextlib import contextmanager
 import ctypes
 import os
 from pathlib import Path
-import select
+import re
 import shlex
 import signal
 import subprocess
@@ -66,13 +71,18 @@ def _spawn(children):
                             start_new_session=True, pass_fds=workspace_lease_fds())
     proc._tofu_owned_pgid = proc.pid
     output = b''
-    deadline = time.monotonic() + 5
-    while b'CHILD_READY ' not in output or b'PARENT_READY ' not in output or output.count(b'\n') < 2:
-        if not select.select([proc.stdout], [], [], max(0, deadline - time.monotonic()))[0]:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-            raise AssertionError('Owned test child did not become ready')
-        output += os.read(proc.stdout.fileno(), 4096)
+    try:
+        while b'CHILD_READY ' not in output or b'PARENT_READY ' not in output or output.count(b'\n') < 2:
+            # Wait for the child's own readiness, never a host-speed deadline:
+            # EOF means it exited first, and the per-test hang guard bounds a hang.
+            chunk = os.read(proc.stdout.fileno(), 4096)
+            if not chunk:
+                raise AssertionError('Owned test child exited before becoming ready')
+            output += chunk
+    except BaseException:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        raise
     lines = output.decode().splitlines()
     child = int(next(line.split()[1] for line in lines if line.startswith('CHILD_READY')))
     children.append(child)
@@ -149,70 +159,6 @@ def test_reattached_group_retirement_waits_for_descendants(tmp_path):
             pass
 
 
-@pytest.mark.parametrize('interactive', [False, True])
-@pytest.mark.parametrize('close_output', [False, True])
-def test_success_waits_for_writer_descendants_after_leader_exit(tmp_path, interactive, close_output):
-    import threading
-    from lib.project_mod.workspace_lease import WorkspaceBusyError
-    (tmp_path / '.git').mkdir()
-    ready = tmp_path / 'descendant.pid'
-    release = tmp_path / 'release-owned-descendant'
-    code = '''import os, pathlib, sys, time
-if os.fork() == 0:
-    ready = pathlib.Path(sys.argv[1])
-    pending = ready.with_suffix('.pending')
-    pending.write_text(str(os.getpid()))
-    pending.replace(ready)
-    if sys.argv[3] == 'True':
-        os.close(1)
-        os.close(2)
-    while not pathlib.Path(sys.argv[2]).exists():
-        time.sleep(0.01)
-    os._exit(0)
-os._exit(0)
-'''
-    task = {'id': 'owned-success-test', 'aborted': False}
-    groups, output, failures = [], [], []
-    def on_spawn(_start_ms, _deadline_ms):
-        groups.append(task['_subprocess_pgid'])
-    def run():
-        try:
-            command = 'touch admitted.txt && ' + shlex.join([sys.executable, '-c', code, str(ready), str(release), str(close_output)])
-            output.append(tool_run_command(str(tmp_path), command, task=task, on_spawn=on_spawn,
-                stdin_callback=(lambda _prompt: None) if interactive else None))
-        except BaseException as error:
-            failures.append(error)
-    with _reap_owned_descendants() as children:
-        worker = threading.Thread(target=run)
-        worker.start()
-        try:
-            deadline = time.monotonic() + 5
-            while not ready.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert ready.exists() and groups
-            children.append(int(ready.read_text()))
-            while _running(groups[0]) and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert not _running(groups[0]), 'The direct session leader should have exited'
-            assert worker.is_alive(), 'Success must await admitted descendants, not orphan their lease'
-            with pytest.raises(WorkspaceBusyError):
-                with workspace_write_lease(tmp_path):
-                    pytest.fail('An admitted inheriting writer still owns this checkout')
-            release.touch()
-            worker.join(5)
-            assert not worker.is_alive() and not failures
-            assert output and '[exit code: 0]' in output[0]
-            with workspace_write_lease(tmp_path):
-                pass
-        finally:
-            release.touch()
-            task['aborted'] = True
-            worker.join(5)
-            if worker.is_alive() and groups:
-                os.killpg(groups[0], signal.SIGKILL)
-                worker.join(3)
-
-
 def test_stale_reattach_record_is_never_signal_authority():
     from lib.tasks_pkg.background_commands import _kill_record_tree
     with patch('lib.tasks_pkg.background_commands._record_pid_alive', return_value=False), patch('os.killpg') as kill:
@@ -226,6 +172,88 @@ def test_missing_or_invalid_linux_recovered_birth_token_cannot_signal(token):
     with patch('lib.tasks_pkg.background_commands._record_pid_alive', return_value=True), patch('os.killpg') as kill:
         assert _kill_record_tree({'pid': 12345, 'pgid': 12345, 'pid_starttime': token}) is False
         kill.assert_not_called()
+
+
+LINGERING = {
+    'responds_to_term': 'sleep 300 & echo "child=$!"; echo main-done',
+    'ignores_term': '(trap "" TERM; exec sleep 300) & echo "child=$!"; echo main-done',
+}
+
+
+def _shell_pid(output, name):
+    return int(re.search(rf'^{name}=(\d+)$', output, re.M).group(1))
+
+
+@pytest.mark.parametrize('interactive', [False, True])
+@pytest.mark.parametrize('member', sorted(LINGERING))
+def test_finished_command_keeps_its_result_and_stops_what_it_left_running(
+        tmp_path, monkeypatch, interactive, member):
+    from lib.background_command_projection import command_result_status
+    from lib.project_mod import foreground_command_records as records
+    monkeypatch.setattr(records, '_records_root', lambda: str(tmp_path / 'records'))
+    with _reap_owned_descendants() as children:
+        output = tool_run_command(
+            str(tmp_path), LINGERING[member],
+            stdin_callback=(lambda prompt: None) if interactive else None)
+        child = _shell_pid(output, 'child')
+        children.append(child)
+        assert re.search(r'^main-done$', output, re.M)
+        assert command_result_status(output) == {
+            'exitCode': 0, 'timedOut': False, 'interrupted': False}
+        assert output.rstrip().endswith(
+            '\n[warning process-group-lingering-stopped: the command exited but '
+            'left processes running in its process group; they were stopped '
+            '(SIGTERM, then SIGKILL). Start long-lived processes with '
+            'run_command background=true.]\n[exit code: 0]')
+        assert not _running(child), 'A finished command must not leak its group members'
+    assert not list((tmp_path / 'records').glob('*.json'))
+
+
+@pytest.mark.parametrize('interactive', [False, True])
+def test_unconfirmed_retirement_keeps_the_result_and_the_record(
+        tmp_path, monkeypatch, interactive):
+    """A member blocked in an uninterruptible wait (D state on a stalled network
+    filesystem) stays observable after SIGKILL until that wait ends; the group
+    observation seam models it."""
+    from lib.background_command_projection import command_result_status
+    from lib.project_mod import foreground_command_records as records, process_group
+    monkeypatch.setattr(records, '_records_root', lambda: str(tmp_path / 'records'))
+    stuck = set()
+    observe = process_group.group_has_live_members
+    monkeypatch.setattr(process_group, 'group_has_live_members',
+                        lambda pgid: pgid in stuck or observe(pgid))
+    task = {'aborted': False}
+    seen = []
+
+    def on_chunk(_stream, text):
+        seen.append(text)
+        received = ''.join(seen)
+        match = re.search(r'^pgid=(\d+)$', received, re.M)
+        if match and re.search(r'^part1$', received, re.M) and not stuck:
+            stuck.add(int(match.group(1)))
+            task['_cmd_interrupt'] = {'source': 'watchdog', 'ts': time.time(),
+                                      'note': 'no output for 1822s'}
+
+    with _reap_owned_descendants() as children:
+        output = tool_run_command(
+            str(tmp_path), 'echo "pgid=$$"; echo part1; sleep 300', task=task,
+            on_chunk=on_chunk,
+            stdin_callback=(lambda prompt: None) if interactive else None)
+        pgid = _shell_pid(output, 'pgid')
+        children.append(pgid)
+        assert re.search(r'^part1$', output, re.M), 'collected output must survive'
+        status = command_result_status(output)
+        assert status['interrupted'] is True and status['exitCode'] == -1
+        warning = output.index(
+            f"[warning process-group-retirement-incomplete: processes of this "
+            f"command's process group {pgid} were still running after SIGTERM and SIGKILL")
+        assert warning < output.index('[Command interrupted by stall-watchdog: no output for 1822s')
+        assert f'pgrep -a -g {pgid}' in output
+        assert 'Error executing command' not in output
+        assert 'Error during interactive execution' not in output
+        assert not _running(pgid), 'SIGKILL still reached the group'
+    retained = list((tmp_path / 'records').glob(f'*-{pgid}.json'))
+    assert len(retained) == 1, 'an unconfirmed group stays recorded for the boot sweep'
 
 
 def test_current_process_group_is_refused():

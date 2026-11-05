@@ -50,9 +50,13 @@ so nobody "restores" it by grepping.
 import json
 import re
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
+
+from tests._browser_extension_probe import run_extension_probe
+from tests.support.browser_extension_bundle import build_extension_bundle
 
 pytestmark = pytest.mark.unit
 
@@ -68,17 +72,14 @@ def _json(p: Path) -> dict:
     return json.loads(p.read_text(encoding='utf-8'))
 
 
-def _ext_sources() -> str:
-    """Concatenated JS the store build actually ships.
+def _extension_scripts():
+    return [*(EXT_DIR / n for n in ('background.js', 'origin_marker.js', 'popup.js')),
+            *sorted((EXT_DIR / 'worker').glob('*.js'))]
 
-    Mirrors the copy list in scripts/package_extension.sh — if that script
-    starts shipping another file, this scan must follow it, which is why the
-    file list is asserted separately below.
-    """
-    return '\n'.join(
-        (EXT_DIR / n).read_text(encoding='utf-8')
-        for n in ('background.js', 'origin_marker.js', 'popup.js')
-        if (EXT_DIR / n).exists())
+
+def _ext_sources() -> str:
+    """Every shipped script participates in the permission audit."""
+    return '\n'.join(path.read_text(encoding='utf-8') for path in _extension_scripts())
 
 
 def _called_namespaces() -> set[str]:
@@ -319,29 +320,34 @@ def test_the_store_build_tool_survives_git_and_export():
         f'first-class acceptance target).')
 
 
-def test_package_script_ships_exactly_the_files_we_scanned():
-    """These guards scan background.js + popup.js. If the store build starts
-    shipping another JS file, the permission scan above goes blind to it —
-    so the file list is itself an invariant."""
-    sh = PACKAGE_SH.read_text(encoding='utf-8')
-    # Match the copy SOURCE only up to the filename — `\.js` alone also
-    # matched inside `manifest.json`, inventing a `manifest.js` that does not
-    # exist. Anchor on a word boundary so `.json` cannot be truncated to `.js`.
-    copied_js = set(re.findall(r'\$SRC_DIR/([A-Za-z0-9_-]+\.js)\b', sh))
-    scanned = {'background.js', 'origin_marker.js', 'popup.js'}
-    assert copied_js == scanned, (
-        f"package_extension.sh ships JS {sorted(copied_js)} but the "
-        f"permission scan in this file only reads {sorted(scanned)}. Update "
-        f"_ext_sources() or the scan misses whatever the new file calls.")
+@pytest.fixture(scope='module', params=[False, True], ids=['dev', 'store'])
+def built_extension(request, tmp_path_factory):
+    checkout = tmp_path_factory.mktemp('extension-package')
+    archive = build_extension_bundle(ROOT, checkout, store=request.param)
+    unpacked = checkout / 'unpacked'
+    with zipfile.ZipFile(archive) as bundle:
+        bundle.extractall(unpacked)
+        names = bundle.namelist()
+    return {'root': unpacked, 'names': names, 'store': request.param}
 
 
-def test_package_script_swaps_in_the_audited_store_manifest():
-    """The whole audit is worthless if --store does not actually use the file
-    these tests check."""
-    sh = PACKAGE_SH.read_text(encoding='utf-8')
-    assert 'manifest.store.json' in sh, (
-        "package_extension.sh no longer references manifest.store.json — the "
-        "audited manifest is not what gets shipped")
+def test_package_ships_exactly_the_scripts_we_audit(built_extension):
+    shipped = {name for name in built_extension['names'] if name.endswith('.js')}
+    scanned = {p.relative_to(EXT_DIR).as_posix() for p in _extension_scripts()}
+    assert shipped == scanned
+    assert not any(name.endswith('.md') for name in built_extension['names'])
+
+
+def test_package_executes_its_bundled_worker_graph(built_extension):
+    probe = run_extension_probe('protocol426', background_path=built_extension['root'] / 'background.js')
+    assert probe['state']['queue'] == ['completed-result']
+    assert probe['state']['connected'] is False
+    assert 'upgrade required' in probe['state']['lastError']
+
+
+def test_package_uses_the_selected_manifest(built_extension):
+    expected = STORE_MANIFEST if built_extension['store'] else DEV_MANIFEST
+    assert _json(built_extension['root'] / 'manifest.json') == _json(expected)
 
 
 def test_the_store_manifest_is_tracked_by_git():
