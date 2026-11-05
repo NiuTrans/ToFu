@@ -10774,6 +10774,7 @@ mod tests {
 
     include!("turn_settlement_regression_tests.rs");
     include!("turn_dispatchable_index_tests.rs");
+    include!("turn_recovery_bytes_tests.rs");
     include!("semantic_event_batch_composition_tests.rs");
     include!("semantic_turn_event_batch_tests.rs");
 }

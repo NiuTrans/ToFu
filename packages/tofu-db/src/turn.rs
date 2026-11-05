@@ -22,6 +22,7 @@ pub(crate) mod event_retirement;
 mod metadata_read;
 mod metadata_summary;
 pub(crate) mod dispatchable_index;
+mod recovery_index;
 
 #[path = "turn/snapshot_phase.rs"]
 mod snapshot_phase;
@@ -5806,22 +5807,7 @@ pub(crate) fn answer_guidance(
             .ok_or_else(|| invalid_data("Malformed guidance revision"))?,
         updated_at_ms: now_ms, committed_at_ms: now_ms,
     };
-    let result = update_projection_mode(database, transaction, &request, ProjectionUpdateMode::FencedLiveSteer)?;
-    if let Some(attempt_id) = turn.get("currentAttemptId").and_then(Value::as_str) {
-        if let Some(loaded) = load_attempt_for_update(database, transaction, attempt_id)? {
-            if attempt_is_live(&loaded.document) {
-                let created_at = loaded.document.get("createdAt").and_then(Value::as_u64)
-                    .ok_or_else(|| invalid_data("Malformed guidance recovery timestamp"))?;
-                let reply: Value = serde_json::from_slice(&result)
-                    .map_err(|_| invalid_data("Malformed guidance reply"))?;
-                let projection_bytes = serde_json::to_vec(&reply["turn"]["projection"])
-                    .map_err(|_| invalid_data("Guidance projection encoding failed"))?.len();
-                put_legacy_recovery_index(database, transaction,
-                    created_at, &loaded.document, projection_bytes)?;
-            }
-        }
-    }
-    Ok(result)
+    update_projection_mode(database, transaction, &request, ProjectionUpdateMode::FencedLiveSteer)
 }
 
 fn complete_guidance_round(question: &mut Map<String, Value>, response: &str, command_id: &str) {
@@ -5939,17 +5925,8 @@ pub(crate) fn steer_commit(
         .iter()
         .any(|record| record.get("blockId").and_then(Value::as_str) == Some(block_id.as_str()))
     {
-        let mut record = json!({
-            "blockId": block_id,
-            "commandId": request.command_id,
-            "count": 1,
-            "previews": [{"text": request.text.chars().take(1200).collect::<String>()}],
-            "deliveryState": "pending"
-        });
-        if let (Some(author), Some(fields)) = (&request.author, record.as_object_mut()) {
-            fields.insert("author".to_owned(), author.clone());
-        }
-        records.push(record);
+        records.push(recovery_index::pending_steer_record(
+            &request.command_id, &request.text, request.author.as_ref()));
     }
     next_projection.insert("_userSteerInjects".to_owned(), Value::Array(records));
     let projection_request = ProjectionUpdateRequest {
@@ -8013,6 +7990,7 @@ fn stage_projection_update(
         Value::from(next_projection_revision),
     );
     document.insert("updatedAt".to_owned(), Value::from(request.updated_at_ms));
+    recovery_index::refresh_live_projection(database, transaction, &document, &next_projection)?;
     retire_projection_head(
         database,
         transaction,
@@ -14730,8 +14708,24 @@ pub(crate) fn recover(
             .map_err(|_| invalid_data("turn projection cannot be encoded"))?
             .len();
         if row_bytes != indexed_projection_bytes {
-            return Err(invalid_data(
-                "attempt recovery projection byte evidence differs",
+            if !recovery_index::witnessed_legacy_steer_suffix(database, transaction,
+                &attempt_id, &loaded_turn, &projection, indexed_projection_bytes)?
+            {
+                return Err(invalid_data(&format!(
+                    "attempt recovery projection byte evidence differs: attemptId={attempt_id} \
+                     indexedBytes={indexed_projection_bytes} actualBytes={row_bytes}"
+                )));
+            }
+            // The old index undercounts the appended suffix. Keep the actual
+            // hydration budget and the existing one-oversized-Turn progress rule.
+            if recovered > 0 && projection_bytes.saturating_add(row_bytes) > request.max_bytes {
+                remaining += 1;
+                continue;
+            }
+            crate::engine_log::warn("integrity_fence", &format!(
+                "operation=turn.recover staged_repair=attempt_recovery_bytes \
+                 attemptId={attempt_id} reason=verified_steer_suffix \
+                 indexedBytes={indexed_projection_bytes} actualBytes={row_bytes}"
             ));
         }
 

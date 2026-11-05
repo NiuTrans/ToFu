@@ -28,6 +28,11 @@ Verify `turn_dispatchable_index_tests.rs`, including corruption, foreign-owner
 isolation, queue activation and commit-fault replay. Operations and growth
 measurement live in `docs/STORAGE_OPERATIONS.md`.
 
+`turn/recovery_index.rs` keeps live direct edits and recovery byte evidence
+atomic. Legacy steer repair requires the latest retained event, exact revision
+gap and canonical pending suffix; verify `turn_recovery_bytes_tests.rs` and
+the steer commit-fault campaign. Unexplained mismatches remain integrity errors.
+
 native_checkpoint_store.rs reserves journal namespaces. Standard builds include
 native-runtime-checkpoints; --no-default-features omits this capability. It exposes NativeCheckpointStore over a supplied
 shared authority; native_checkpoint_store_adapter.rs owns scoped CAS/byte bounds,
