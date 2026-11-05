@@ -14,6 +14,7 @@ import {
 import type { CoordinatorProgressBoard, CoordinatorReportState } from '../api/project-coordination.generated';
 import { coordinationText } from './project-coordination-board';
 import { createRouterWorkerModel, type RouterWorkerModelControl } from './router-worker-model';
+import { createCoordinatorConversationId } from './coordinator-conversation-id';
 import type { ProjectCoordinationPorts } from './project-coordination';
 import type { CoordinationBinding } from '../api/project-coordination.generated';
 import '../styles/application/33-project-coordination.css';
@@ -279,6 +280,7 @@ export function createProjectCoordinationSurface(ports: {
           const open = () => navigate(binding!.conversationId);
           row.addEventListener('click', open);
           row.addEventListener('keydown', event => {
+            if (event.target !== row) return;
             if (event.key !== 'Enter' && event.key !== ' ') return;
             event.preventDefault(); open();
           });
@@ -311,6 +313,7 @@ export function createProjectCoordinationSurface(ports: {
         }
         body.append(meta); row.append(mark, body);
         if (available) {
+          row.append(createCoordinatorConversationId(() => binding!.conversationId));
           const go = document.createElement('span'); go.className = 'coordination-leader-go';
           go.setAttribute('aria-hidden', 'true'); go.textContent = '›'; row.append(go);
         } else {

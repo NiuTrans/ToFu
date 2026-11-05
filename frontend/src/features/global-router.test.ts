@@ -41,6 +41,46 @@ function setup(read: RouterState | Error, ensure: RouterState | Error = availabl
 const settle = () => new Promise(resolve => setTimeout(resolve, 0));
 
 describe('Global Router entry (the main coordinator)', () => {
+  it('copies the bound conversation ID without opening or provisioning a conversation', async () => {
+    const writeText = vi.fn(async (_value: string) => {});
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const { ports, entry, card } = setup(available);
+    try {
+      await settle();
+      const copy = card.querySelector<HTMLButtonElement>('[data-coordination-focus="copy-coordinator-id"]')!;
+      expect(copy).not.toBeNull();
+      expect(copy.getAttribute('aria-label')).toBe('sidebar.copyConvId');
+      copy.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      copy.click();
+      await settle();
+      expect(writeText).toHaveBeenCalledWith('coordinator-router');
+      expect(ports.ensure).not.toHaveBeenCalled();
+      expect(ports.open).not.toHaveBeenCalled();
+
+      vi.mocked(ports.ensure).mockResolvedValue({ ...available, conversationId: 'replacement', revision: 2 });
+      card.click(); await settle();
+      copy.click(); await settle();
+      expect(writeText).toHaveBeenLastCalledWith('replacement');
+      expect(ports.ensure).toHaveBeenCalledTimes(1);
+      entry.destroy();
+      copy.click(); await settle();
+      expect(writeText).toHaveBeenCalledTimes(2);
+    } finally {
+      entry.destroy();
+      if (original) Object.defineProperty(navigator, 'clipboard', original);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  it('offers no copy action before a router binding is available', async () => {
+    const { card, entry } = setup(unbound);
+    try {
+      await settle();
+      expect(card.querySelector('[data-coordination-focus="copy-coordinator-id"]:not([hidden])')).toBeNull();
+    } finally { entry.destroy(); }
+  });
+
   it('is a coordinator card that names its role, then ensures and opens the router', async () => {
     const { ports, entry, card, view } = setup(unbound);
     // Same card as a project coordinator: mark, label, one-line role, chevron.
