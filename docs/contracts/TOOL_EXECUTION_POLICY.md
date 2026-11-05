@@ -707,9 +707,11 @@ only defers the call; the pipeline then refuses it and fails the turn.
 
 The one task-local tool port that is not a custom environment is a swarm
 worker's `lib.swarm.agent.RunArtifactTools`: it serves only its run's artifact
-tools from the run's in-process store and resolves every other name through
-the parent's own environment. Admission pins its exact type and refuses it
-when it inherits any environment. `scope.granted_tools(profile)` is the single
+tools from the run's in-process store, resolves every other name through the
+parent's own environment and passes that environment's flag and handoff
+attributes through unchanged ([custom tools](../CUSTOM_TOOLS.md#3-the-inverted-handler-lookup-the-one-core-change)).
+Admission pins its exact type and refuses it when it inherits any environment.
+`scope.granted_tools(profile)` is the single
 admitted-name set of the executor admission, the live tool ledger
 (`admission.bind_account`) and stored-record validation: a grant that holds
 `spawn_agents` also holds the artifact tools its runs give their children

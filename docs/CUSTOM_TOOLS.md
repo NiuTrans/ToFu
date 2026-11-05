@@ -71,11 +71,28 @@ found, so a misbehaving custom tool returns an error to the LLM instead of
 aborting the task — identical to built-in tools.
 
 The **swarm inherits this for free**: `SubAgent` gives its child a
-`RunArtifactTools` port that serves the run's artifact tools and resolves every
-other name through the parent's `_tool_env`, so a spawned sub-agent resolves
-the same per-request tools (subject to its role-scoped schema allow-list). A
-project-dispatch task refuses every custom environment, including one a
-sub-agent inherits.
+`RunArtifactTools` port that serves the run's artifact tools and decorates the
+parent's `_tool_env`. `resolve` falls through to it, and the flag and handoff
+attributes dispatch reads from `task['_tool_env']` (`write_names`,
+`idempotent_names`, `confirmation_names`, and the client handoff's `handle_id`
+and `limits`) are the parent environment's own, absence included. A spawned sub-agent therefore
+resolves, partitions, confirms, reuses and hands off the same per-request tools
+exactly as its parent, subject to its role-scoped schema allow-list: the port's
+`schemas` is empty, so the child's scoped invocation catalog stays its tool
+membership. A project-dispatch task refuses every custom environment, including
+one a sub-agent inherits.
+
+Problem: the port exposed only `resolve`. A child treated an inherited custom
+write as a bounded read (no write partition, no attended confirmation, no
+write-sensitive cache fence), re-ran declared-idempotent tools, and recorded no
+environment handle on its client handoffs, so disposing the request's
+environment left them blocked until their timeout. Decision: explicit
+pass-through properties on the typed port; it merges or rewrites no inherited
+value. Alternatives rejected: `__getattr__` forwarding (implicit, and it would
+forward lifecycle fields and `schemas` too); passing `schemas` through (the
+known-name oracle `_known_tool_names` would accept, by name, a tool the worker's
+role or spawn allowlist removed); installing the parent's environment on the
+child directly (loses the run's artifact tools).
 
 ---
 
@@ -261,7 +278,7 @@ POST /api/v4/tasks/{task_id}/tool_result
 | `lib/tools/registry/_build.py` | `ToolSpec('custom', _build_custom, …)` registered last |
 | `lib/tasks_pkg/executor/_execute.py` | per-task resolver consulted before global lookup in `_execute_tool_one` |
 | `lib/tasks_pkg/tool_dispatch/_flags.py` | `_task_partitions(task)` — per-task write/idempotent union |
-| `lib/swarm/agent.py` | `RunArtifactTools`: the run's artifact tools in front of the parent's `_tool_env` |
+| `lib/swarm/agent.py` | `RunArtifactTools`: the run's artifact tools in front of the parent's `_tool_env`, whose flag and handoff attributes it passes through |
 | `routes/api_v1/agent_run.py` | parse `tools`, mint env, attach to task, dispose on terminal + every error path |
 | `routes/api_v1/tasks.py` | `POST /api/v4/tasks/{id}/tool_result` callback |
 | `tests/tools/test_custom_tool_isolation.py` | Isolation guards |
@@ -282,6 +299,9 @@ POST /api/v4/tasks/{task_id}/tool_result
 * `_task_partitions` unions env write/idempotent names;
 * client-handoff: `resolve_client_tool_result` unblocks a pending
   `request_client_tool_result`;
+* a swarm worker applies the request environment's write, confirmation and
+  reuse partitions, handoff disposal and result bound exactly as the request
+  task, and gains no inherited tool outside its scoped catalog;
 * AST guard: no `/api/v1` request module imports/calls `register_tool_spec`
   or `tool_registry.register`.
 

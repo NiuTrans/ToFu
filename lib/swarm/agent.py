@@ -225,9 +225,13 @@ class RunArtifactTools:
 
     First-party, unlike a custom tool environment: it serves only
     ``ARTIFACT_TOOL_NAMES`` from the run's in-process ``ArtifactStore`` and
-    resolves every other name through ``inherited``, the parent's own
-    task-local tools. Project dispatch admits it only while ``inherited`` is
-    None (``project_dispatch.scope.admit_tool``).
+    decorates ``inherited``, the parent's own task-local tools. The flag and
+    handoff attributes dispatch reads from ``task['_tool_env']`` are
+    ``inherited``'s own, absence included, so a worker partitions, confirms,
+    reuses and hands off an inherited tool exactly as its parent does. The
+    artifact tools add no flags (the registry's swarm family declares them)
+    and the port adds no schemas. Project dispatch admits it only while
+    ``inherited`` is None (``project_dispatch.scope.admit_tool``).
     """
     __slots__ = ('_handlers', 'inherited')
 
@@ -242,6 +246,34 @@ class RunArtifactTools:
         if handler is not None:
             return handler
         return self.inherited.resolve(name) if self.inherited is not None else None
+
+    @property
+    def schemas(self) -> list[dict]:
+        # The worker's scoped invocation catalog is its tool membership. The
+        # inherited list would admit, by name, tools its role or allowlist removed.
+        return []
+
+    @property
+    def write_names(self) -> frozenset[str]:
+        return frozenset() if self.inherited is None else self.inherited.write_names
+
+    @property
+    def idempotent_names(self) -> frozenset[str]:
+        return frozenset() if self.inherited is None else self.inherited.idempotent_names
+
+    @property
+    def confirmation_names(self) -> frozenset[str]:
+        return frozenset() if self.inherited is None else self.inherited.confirmation_names
+
+    @property
+    def handle_id(self) -> str:
+        # A client handoff records this handle, so disposing the inherited
+        # environment also ends the worker's pending handoffs.
+        return '' if self.inherited is None else self.inherited.handle_id
+
+    @property
+    def limits(self):
+        return None if self.inherited is None else self.inherited.limits
 
 
 class SubAgent:
