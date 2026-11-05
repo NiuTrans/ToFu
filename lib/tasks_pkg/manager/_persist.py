@@ -385,8 +385,10 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
     """CAS-write one durable task checkpoint through the storage authority.
 
     Recovery-owned ``interrupted`` rows and every terminal row fence stale
-    running writers. A conversation-backed task is also owner-scoped and is
-    discarded when its parent was deleted; inline tasks need no parent.
+    running writers. A row another Attempt wrote admits only the writer's
+    Turn's current Attempt bound to this task id (``docs/STORAGE.md``). A
+    conversation-backed task is also owner-scoped and is discarded when its
+    parent was deleted; inline tasks need no parent.
 
     ``fresh_birth`` declares a task id minted in this process and never
     written: its expected version is 0 without a witness read.
@@ -503,14 +505,22 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
         # and status without hydrating cumulative content/tool-result blobs.
         # Abort tombstones are preserved by the atomic checkpoint itself.
         current_value = current_record or {}
-        if current_value.get('status') == 'interrupted':
-            logger.warning('[Task %s] task result fenced after recovery',
-                           task['id'][:8])
-            return None
-        if status in ('pending', 'running') and current_value.get(
-                'status') not in (None, 'pending', 'running'):
+        current_status = current_value.get('status')
+        if current_status == 'interrupted':
+            if not is_conversation_attempt(task):
+                logger.warning('[Task %s] task result fenced after recovery',
+                               task['id'][:8])
+                return None
+            # A reused task id (a resumed Worker) presents its Attempt; the
+            # authority admits only its Turn's current Attempt bound to this
+            # id, never the interrupted Attempt's own late writes.
+            logger.info('[Task %s] attempt %s claims the task result recovery '
+                        'interrupted', task['id'][:8],
+                        str(task.get('_attemptId'))[:8])
+        elif status in ('pending', 'running') and current_status not in (
+                None, 'pending', 'running'):
             logger.warning('[Task %s] nonterminal checkpoint cannot regress %s',
-                           task['id'][:8], current_value.get('status'))
+                           task['id'][:8], current_status)
             return None
         return int((current_record or {}).get('version') or 0), current_value
 

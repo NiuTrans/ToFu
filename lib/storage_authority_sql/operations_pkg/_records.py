@@ -770,6 +770,33 @@ def _record_put_owned(session: Session, payload: Mapping[str, Any]) -> Any:
     return {"key": key, "version": version, "updated_at_ms": now}
 
 
+def _task_result_writer_attempt(value: Mapping[str, Any]) -> str:
+    """The conversation Attempt one task-result value names as its writer."""
+    metadata = _hydrated_task_result_value(
+        value, fields={"metadata"}).get("metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = orjson.loads(metadata)
+        except (orjson.JSONDecodeError, ValueError):
+            return ""
+    attempt_id = metadata.get("attemptId") if isinstance(metadata, Mapping) else None
+    return attempt_id if isinstance(attempt_id, str) else ""
+
+
+def _current_attempt_bound_to_task(
+    session: Session, *, attempt_id: str, task_id: str, user_id: int,
+) -> bool:
+    """Worker-entry evidence: the owned Turn's current Attempt bound to ``task_id``."""
+    row = session.fetch_one(
+        "SELECT a.task_id, t.current_attempt_id FROM storage_generation_attempts AS a "
+        "JOIN storage_conversation_turns AS t ON t.turn_id=a.turn_id "
+        "WHERE a.attempt_id=? AND t.user_id=?",
+        (attempt_id, user_id),
+    )
+    return (row is not None and row["task_id"] == task_id
+            and row["current_attempt_id"] == attempt_id)
+
+
 def _task_results_checkpoint(session: Session, payload: Mapping[str, Any]) -> Any:
     """CAS one task snapshot with natural ambiguous-ACK replay semantics.
 
@@ -1003,9 +1030,23 @@ def _task_results_checkpoint(session: Session, payload: Mapping[str, Any]) -> An
             return guarded_result(owned=False)
         current_status = current_value.get("status")
         incoming_status = checkpoint_value.get("status")
-        if current_status == "interrupted" or (
+        writer = _task_result_writer_attempt(checkpoint_value)
+        holder = _task_result_writer_attempt(current_value) if writer else ""
+        # A reused task id (a resumed Worker keeps its workspace identity) is
+        # written by successive Attempts. Writing over another Attempt's
+        # record, or taking over a recovery-interrupted one, needs the Turn's
+        # current Attempt bound to this id; the predecessor stays fenced.
+        takeover = bool(writer) and writer != holder and (
+            bool(holder) or current_status == "interrupted")
+        if takeover and not _current_attempt_bound_to_task(
+                session, attempt_id=writer, task_id=key,
+                user_id=incoming_user_id):
+            return guarded_result(owned=False)
+        recovered = current_status == "interrupted"
+        if (recovered and not takeover) or (
             incoming_status in ("pending", "running")
             and current_status not in (None, "pending", "running")
+            and not (recovered and takeover)
         ):
             return guarded_result(owned=False)
         for tombstone_key in ("abort_requested_at", "abort_source"):

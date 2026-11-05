@@ -13,6 +13,7 @@ import time
 import uuid
 
 from lib.agent_core.execution_session import ExecutionSession
+from lib.conversation_sync.attempt_identity import is_conversation_attempt
 from lib.error_envelope import to_json as _err_to_json
 from lib.log import get_logger
 
@@ -504,6 +505,11 @@ def _create_chat_task(
                 _birth_meta['userId'] = str(task['_userId'])
             if task.get('_requestId'):
                 _birth_meta['requestId'] = task['_requestId']
+            if is_conversation_attempt(task):
+                # The row names its writer from birth, so a recovered birth
+                # still fences its own Attempt against a reused-id takeover.
+                _birth_meta['turnId'] = task['_turnId']
+                _birth_meta['attemptId'] = task['_attemptId']
             with _registration_stage('checkpoint'):
                 _upsert_task_row(
                     task, conv_id or '', content='', thinking='', status='pending',

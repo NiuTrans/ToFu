@@ -1562,7 +1562,10 @@ workspace task. Every physical attempt uses that identity, so the existing
 isolated checkout, its uncommitted bytes,
 checkpoint lineage and delivery receipt continue instead of being recreated.
 Its task event stream likewise continues after the predecessor's durable cursor
-([Task event delivery](TASK_EVENT_DELIVERY.md#reused-task-identities-continue-their-durable-stream)).
+([Task event delivery](TASK_EVENT_DELIVERY.md#reused-task-identities-continue-their-durable-stream)),
+and the resumed attempt, as its Turn's current bound Attempt, takes over the task
+result recovery left `interrupted` while the predecessor stays fenced
+([Storage](STORAGE.md#restart-readiness-and-recovery)).
 A trusted continuation revalidates the live grant, requires an exact settled,
 unreviewed predecessor and its accepted successor, then advances the association
 to that successor. The accepted `_resumeSource` of a restart Continue also restores
