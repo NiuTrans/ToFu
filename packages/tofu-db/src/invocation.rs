@@ -64,6 +64,7 @@ pub(crate) enum Request {
         child_task_id: String,
         created_at: i64,
         updated_at_ms: u64,
+        worker_claim: Option<crate::worker_job::PublicationClaim>,
     },
     ResolveChild {
         archive_scope: String,
@@ -80,6 +81,7 @@ impl Request {
                 child_task_id,
                 created_at,
                 updated_at_ms,
+                worker_claim,
             } => {
                 if !valid_text(conversation_id, MAX_IDENTITY_TEXT)
                     || !valid_text(parent_task_id, MAX_IDENTITY_TEXT)
@@ -89,7 +91,9 @@ impl Request {
                 {
                     return Err(invalid_input("invalid invocation registration step"));
                 }
-                Ok(conversation_id.len() + parent_task_id.len() + child_task_id.len())
+                if let Some(claim) = worker_claim { claim.validate()?; }
+                Ok(conversation_id.len() + parent_task_id.len() + child_task_id.len()
+                    + worker_claim.as_ref().map_or(0, |claim| claim.worker_id.len()))
             }
             Self::ResolveChild { archive_scope } => {
                 if !valid_text(archive_scope, MAX_ARCHIVE_SCOPE) {
@@ -109,7 +113,11 @@ fn register_child(
     child_task_id: &str,
     created_at: i64,
     updated_at_ms: u64,
+    worker_claim: Option<&crate::worker_job::PublicationClaim>,
 ) -> io::Result<Vec<u8>> {
+    if child_task_id == parent_task_id || child_task_id.starts_with("conversation-attempt:") {
+        return Err(conflict("child identity conflicts with its ancestry"));
+    }
     let owner_user_id = transaction.owner_user_id();
     if !crate::conversation_header::is_active(database, transaction, conversation_id)? {
         return Err(not_found("Conversation not found"));
@@ -131,6 +139,12 @@ fn register_child(
         )?
     {
         return Err(not_found("Parent task not found"));
+    }
+    let worker_root = crate::task_result::worker_root_for_task(database, transaction, parent_task_id)?;
+    if worker_root.is_some() || worker_claim.is_some() {
+        let root = worker_root.as_deref().unwrap_or(parent_task_id);
+        crate::worker_job::require_conversation_publication_claim(database, transaction,
+            root.strip_prefix("conversation-attempt:").unwrap_or(""), root, worker_claim, false, false)?;
     }
     let identity = identity_object(owner_user_id, conversation_id, parent_task_id, child_task_id);
     // The child task ID itself is the immutable global identity, independent
@@ -231,6 +245,7 @@ pub(crate) fn execute(
             child_task_id,
             created_at,
             updated_at_ms,
+            worker_claim,
         } => register_child(
             database,
             transaction,
@@ -239,6 +254,7 @@ pub(crate) fn execute(
             child_task_id,
             *created_at,
             *updated_at_ms,
+            worker_claim.as_ref(),
         )
         .map(Some),
         Request::ResolveChild { archive_scope } => {

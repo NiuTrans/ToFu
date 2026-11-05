@@ -895,8 +895,7 @@ impl PublicationClaim {
     }
 }
 
-/// Read the bound job inside the publishing transaction so its version joins
-/// OCC validation. A heartbeat/claim read in another transaction is not a fence.
+/// Initial tool entry is admission; subsequent evidence may drain cancellation.
 pub(crate) fn starts_tool_effect(event_type: &str, payload: &[u8]) -> io::Result<bool> {
     if event_type != "tool_effect" { return Ok(false); }
     let event: Value = serde_json::from_slice(payload)
@@ -906,7 +905,8 @@ pub(crate) fn starts_tool_effect(event_type: &str, payload: &[u8]) -> io::Result
         && effect.get("reconciliation").is_none_or(Value::is_null))
 }
 
-/// Cancellation drainage never admits a new tool effect, even in a terminal frame.
+/// Read the bound job inside the publishing transaction so its version joins
+/// OCC validation. A heartbeat/claim read in another transaction is not a fence.
 pub(crate) fn require_conversation_publication_claim(
     database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
     attempt_id: &str, task_id: &str, proof: Option<&PublicationClaim>, terminal: bool,

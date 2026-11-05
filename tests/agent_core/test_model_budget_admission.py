@@ -34,6 +34,40 @@ def reserve(account, owner, input_tokens=20, output_tokens=30):
 
 
 @pytest.mark.unit
+def test_execution_authority_is_checked_after_observation_before_each_physical_dispatch():
+    from lib.llm.llm_errors import ModelAdmissionRefused
+    root = task(None)
+    calls = []
+    stopped = False
+    def authority(actor):
+        calls.append(('authority', actor['id']))
+        if stopped:
+            raise ModelAdmissionRefused('execution ownership ended')
+    root['_executionModelDispatchAuthority'] = authority
+    account = ExecutionBudget(root)
+    root['_executionBudget'] = account
+    account.bind_model_attempt_observer(lambda event: calls.append((event['phase'], event['attempt_task_id'])))
+    child = task(None)
+    child['id'] = 'child-dispatch-authority'
+    inherit_execution_budget(root, child)
+    first = reserve(account, child)
+    first.mark_dispatched()
+    first.mark_dispatched()
+    first.settle({'prompt_tokens': 10, 'completion_tokens': 2})
+    stopped = True
+    second = reserve(account, root)
+    with pytest.raises(ModelAdmissionRefused):
+        second.mark_dispatched()
+    second.settle(unsent=True)
+    assert calls == [('dispatch_intent', child['id']), ('authority', child['id']),
+                     ('settled', child['id']), ('dispatch_intent', root['id']),
+                     ('authority', root['id']), ('voided', root['id'])]
+    assert account.consumption_snapshot() == (12, 0, False)
+    close_execution_budget(child)
+    assert account.consumption_snapshot() == (12, 0, True)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize('limit', [None, 100])
 @pytest.mark.parametrize('restored_after_creation', [False, True])
 def test_restored_unknown_usage_refuses_models_without_erasing_paid_lower_bound(
@@ -453,6 +487,56 @@ def request(owner):
     return {'model': 'gpt-4o', 'messages': [{'role': 'user', 'content': 'observe'}],
             'max_tokens': 100, 'stream': True,
             '_model_budget_admit': model_budget_admission(owner)}
+
+
+@pytest.mark.parametrize('asynchronous', [False, True])
+@pytest.mark.api
+def test_execution_authority_refusal_never_retries_or_sends_http(provider, asynchronous):
+    from lib.llm import stream, astream
+    from lib.llm.llm_errors import ModelAdmissionRefused
+    url, bodies, _ = provider
+    owner = task(None)
+    active = True
+    def authority(actor):
+        assert actor is owner
+        if not active:
+            raise ModelAdmissionRefused('execution owner was replaced')
+    owner['_executionModelDispatchAuthority'] = authority
+    def call():
+        if asynchronous:
+            return asyncio.run(astream.async_stream_chat(request(owner), base_url=url, owner_user_id=7))
+        return stream.stream_chat(request(owner), base_url=url, owner_user_id=7)
+    assert call().is_verified_complete
+    active = False
+    with pytest.raises(ModelAdmissionRefused):
+        call()
+    assert len(bodies) == 1
+    assert derive_actuals(owner)['tokens'] == 25
+    assert owner['_executionBudget'].consumption_snapshot() == (25, 0, True)
+
+
+@pytest.mark.unit
+def test_late_provider_usage_is_settled_after_execution_authority_ends():
+    from lib.llm.llm_errors import ModelAdmissionRefused
+    owner, events = task(None), []
+    active = True
+    def authority(actor):
+        if not active:
+            raise ModelAdmissionRefused('execution ownership ended')
+    owner['_executionModelDispatchAuthority'] = authority
+    account = ExecutionBudget(owner)
+    account.bind_model_attempt_observer(events.append)
+    paid = reserve(account, owner)
+    paid.mark_dispatched()
+    active = False
+    refused = reserve(account, owner)
+    with pytest.raises(ModelAdmissionRefused):
+        refused.mark_dispatched()
+    refused.settle(unsent=True)
+    paid.settle({'prompt_tokens': 20, 'completion_tokens': 7})
+    assert events[-1]['phase'] == 'settled'
+    assert events[-1]['reported_tokens'] == 27
+    assert account.consumption_snapshot() == (27, 0, True)
 
 
 @pytest.mark.parametrize('asynchronous', [False, True])

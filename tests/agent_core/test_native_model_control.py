@@ -24,6 +24,8 @@ class ModelControlTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.executor=ThreadPoolExecutor(max_workers=1);self.addCleanup(self.executor.shutdown)
         self.root={'id':'parent','_userId':7,'config':{'executionLimits':dict(max_tokens=50,max_tool_calls=None,deadline=None)}}
+        self.authority = lambda actor: None
+        self.root['_executionModelDispatchAuthority'] = lambda actor: self.authority(actor)
         self.account=ExecutionBudget(self.root)
         self.task={'id':'task','_userId':7,'config':{},'abort_event':threading.Event(),'_executionBudget':self.account}
         self.account.attach(self.task)
@@ -55,6 +57,31 @@ class ModelControlTests(unittest.IsolatedAsyncioTestCase):
         await self.control.abandon()
         self.assertEqual(self.account.consumption_snapshot(),(0,0,False))
         with self.assertRaises(ModelBudgetExceeded):self.account.reserve_model(self.task,input_tokens=1,max_output_tokens=1)
+
+    async def test_worker_authority_refusal_does_not_acknowledge_native_dispatch(self):
+        from lib.llm.llm_errors import ModelAdmissionRefused
+        def refuse(actor):
+            self.assertIs(actor, self.task)
+            raise ModelAdmissionRefused('worker ownership ended')
+        await self.control.handle(self.frame('reserve'), self.process)
+        self.authority = refuse
+        await self.control.handle(self.frame('dispatch'), self.process)
+        self.assertFalse(self.process.stdin.frames[-1]['accepted'])
+        await self.control.abandon()
+        self.account.close(self.task)
+        self.assertEqual(self.account.consumption_snapshot(), (0, 0, True))
+
+    async def test_native_usage_can_arrive_after_worker_authority_ends(self):
+        await self.control.handle(self.frame('reserve'), self.process)
+        await self.control.handle(self.frame('dispatch'), self.process)
+        def refuse(actor):
+            raise AssertionError('late settlement tried to acquire new execution authority')
+        self.authority = refuse
+        await self.control.handle(self.frame('settle', usage={
+            'prompt_tokens': 20, 'completion_tokens': 7}), self.process)
+        self.assertTrue(self.process.stdin.frames[-1]['accepted'])
+        self.account.close(self.task)
+        self.assertEqual(self.account.consumption_snapshot(), (27, 0, True))
 
     async def test_before_dispatch_cleanup_is_proven_unsent(self):
         await self.control.handle(self.frame('reserve'),self.process)

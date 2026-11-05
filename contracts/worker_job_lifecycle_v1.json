@@ -70,12 +70,20 @@
     "flow": "Visible phases and their progress/terminal events borrow the immutable root attempt's worker claim; caller-supplied root hints never grant authority.",
     "batch": "Each entry carries the proof. Any refusal rolls back the entire batch including a valid prefix.",
     "legacy": "An attempt with a non-durable binding retains its existing authority and accepts no worker claim.",
-    "scope": "Publication authority only. This does not authorize external effects or crash replay, and does not qualify conversation-attempt as a production worker kind."
+    "scope": "Publication authority and the existing durable entry barrier. Tool entry and model dispatch must explicitly revalidate the current uncancelled claim at their shared boundaries; this grants no crash replay and alone does not qualify a production worker kind."
+  },
+  "conversationModelAdmission": {
+    "owner": "ExecutionBudget.mark_model_dispatched, shared by root, descendants, Python and native model transports",
+    "composition": "An explicit root invocation port is captured before account creation; configuration cannot install authority. Existing domain model/account observers remain installed.",
+    "barrier": "After domain intent observers, revalidate the already-entered root through turn.attempt.start in its current Turn/worker transaction, then recheck local cancellation before permitting the physical send. Idempotent start revalidates proof and Stop; no cached receipt or new accounting row grants permission.",
+    "refusal": "Human Stop is AbortedError; lost or refused authority is ModelAdmissionRefused. Neither permits credential rotation, model fallback or HTTP retry.",
+    "settlement": "Already dispatched requests still settle observed usage through their original ExecutionBudget and domain observer after authority ends. Live children and unknown provider usage keep completeness false. No new ledger, refund or effect replay is introduced.",
+    "crash": "The committed root entry proves external effects are possible. It cannot prove a particular provider call happened or completed; entered work requires domain recovery evidence and is never replayed from a fresh lease alone."
   },
   "conversationReplayPublication": {
     "operations": ["event.append", "event.append_batch"],
     "proofField": "worker_claim",
-    "binding": "A conversation-attempt:{attemptId} task stream always requires its current worker claim, even when require_attempts_live is omitted.",
+    "binding": "A conversation-attempt:{attemptId} stream and every descendant resolved through immutable invocation births require the current root claim, even when require_attempts_live or worker_claim is omitted. Pure legacy batches retain their bulk append path only after ancestry resolution.",
     "owner": "Standalone replay producers carry explicit user_id alongside worker_claim; batching retains each row's owner.",
     "atomic": "Validate the same worker authority inside the append transaction. Turn-carried replay rows use the enclosing Turn publication proof.",
     "stale": "Return inserted=false,rejected=worker_claim_stale for that row; preserve independent sibling results. Invalid proof shape refuses the transaction.",

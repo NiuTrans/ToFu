@@ -444,6 +444,8 @@ def create_child_invocation(
     try:
         if requirements is not None:
             child['_turnRequirementSource'] = requirements.validate(child)
+        from lib.tasks_pkg.worker_binding import inherit_conversation_worker
+        inherit_conversation_worker(parent, child)
         inherit_execution_budget(parent, child)
         from lib.project_dispatch.admission import share_dispatch_root
         share_dispatch_root(parent, child)

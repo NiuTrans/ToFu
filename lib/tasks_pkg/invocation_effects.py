@@ -78,10 +78,18 @@ def persist_child_effect(task, row):
         value['tool_rounds'] = json.dumps(rows, ensure_ascii=False, separators=(',', ':'))
         payload = dict(key=task['id'], value=value, expected_version=record['version'],
                        guard_contract=TASK_RESULT_CHECKPOINT_GUARD_CONTRACT, require_parent=True)
+        from lib.tasks_pkg.worker_binding import publication_arguments
+        proof = publication_arguments(task)
+        payload.update(proof)
+        initial_entry = bool(proof and receipt['executionEffect']['state'] == 'entered'
+                             and receipt['executionEffect'].get('reconciliation') is None)
+        if initial_entry:
+            payload['tool_effect_intent'] = operation
         result = wait_for_persistence(task, lambda: client.command(
             'task_results.checkpoint', payload, None), label='child tool effect receipt')
         if (not isinstance(result, dict) or result.get('owned') is not True
                 or result.get('guard_contract') != TASK_RESULT_CHECKPOINT_GUARD_CONTRACT
+                or (initial_entry and result.get('tool_effect_intent') != operation)
                 or type(result.get('version')) is not int or result['version'] < record['version']):
             raise ToolEffectDurabilityError('Child tool receipt was not durably acknowledged')
 
