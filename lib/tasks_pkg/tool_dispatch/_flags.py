@@ -119,11 +119,15 @@ def _safe_count_tokens(text: str, model: str = '') -> int:
 # plugins that omit it retain the historical idempotent=>cacheable default.
 _CACHEABLE_TOOLS_BASE = frozenset({
     'web_search', 'fetch_url',
-    'read_files', 'list_dir', 'grep_search', 'find_files',
+    'read_files', 'list_dir', 'search_files', 'grep_search', 'find_files',
 })
 
 # Read-like protocol actions can still require provider occurrence order.
 ORDERED_STATE_TOOLS = frozenset({'todo_write'})
+
+# The only tools whose settled results can be web evidence for the no-prose
+# fallback; ``_pipeline._record_round_search_evidence`` admits nothing else.
+SEARCH_EVIDENCE_TOOLS = frozenset({'web_search', 'fetch_url', 'browser_read_page'})
 
 
 def _resolve_tool_result_cache_capacity(
@@ -353,12 +357,12 @@ def _store_tool_call_id_receipt(
         _record_tool_call_id_receipt_evictions(task, evicted, capacity)
         return receipts
 
-# ── Concurrency safety partitioning ──
-# Per-tool concurrency-safety flags.
-# Write tools run SERIALLY (even when auto_apply=True) to prevent
-# filesystem race conditions.  Read-only tools run in parallel.
-# This is separate from _CACHEABLE_TOOLS (dedup) — a tool can be
-# concurrent-safe (run in parallel) but not idempotent (don't cache).
+# ── Effect partitioning ──
+# Write tools are approval-eligible effects: Manual-mode approval, project
+# cache invalidation, no pool ceiling, and their own receipt after Stop. They
+# start concurrently with the rest of the round (owner decision 2026-10-28);
+# _ordering keeps only same-target call order. This is separate from
+# _CACHEABLE_TOOLS (dedup) — a read can still be non-idempotent (never cached).
 _WRITE_TOOLS_BASE = frozenset({
     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
@@ -456,11 +460,13 @@ def _task_partitions(task: dict[str, Any]) -> tuple[frozenset, frozenset]:
         else _IDEMPOTENT_TOOLS)
     # ── MCP tools: conservative write classification ──
     # External MCP tools carry no built-in safety partition, so by default we
-    # treat every discovered MCP tool as a WRITE tool (serial dispatch +
+    # treat every discovered MCP tool as a WRITE tool (an effect,
     # approval-eligible in Manual mode). A tool whose MCP ``readOnlyHint``
-    # annotation is explicitly True is exempted (stays in the parallel pool).
-    # This closes the hole where an arbitrary remote-mutating MCP tool ran in
-    # parallel with no approval. Computed per-task because the MCP bridge may
+    # annotation is explicitly True, or that its curated catalog entry lists
+    # as a reviewed read for that exact endpoint, is exempted (a bounded
+    # read; the bridge folds both into ``read_only_hint``). This closes
+    # the hole where an arbitrary remote-mutating MCP tool ran with no
+    # approval. Computed per-task because the MCP bridge may
     # connect after this module is imported.
     try:
         from lib.mcp import get_bridge
@@ -516,7 +522,8 @@ def _make_cache_key(fn_name: str, fn_args: dict[str, Any]) -> str:
 
 # Project tools whose cache entries become stale after a write operation
 _PROJECT_CACHEABLE_TOOLS = frozenset({
-    'read_files', 'list_dir', 'grep_search', 'find_files', 'inspect_image',
+    'read_files', 'list_dir', 'search_files', 'grep_search', 'find_files',
+    'inspect_image',
 })
 
 
@@ -524,7 +531,7 @@ def _invalidate_project_cache(task: dict, trigger: str = 'write_op') -> None:
     """Remove all project-tool cache entries after a write operation.
 
     Called after write_file / apply_diff / code_exec so that subsequent
-    read_files / grep_search calls re-read the (now-modified) filesystem.
+    read_files / search_files calls re-read the (now-modified) filesystem.
 
     Args:
         task: Owner of the per-task dedup cache and publication lock.

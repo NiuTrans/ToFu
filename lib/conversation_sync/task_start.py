@@ -21,6 +21,7 @@ from lib.tasks_pkg.manager import (
 )
 from lib.conversation_sync.dispatch_contract import (
     AttemptDispatchCancelled,
+    DEFERRED_INPUT_TRANSLATION_CONFIG_KEY,
     RESUME_MODEL_SWITCH_FROM_CONFIG_KEY,
 )
 
@@ -29,13 +30,24 @@ logger = get_logger(__name__)
 
 # The serving-loop runtime already sweeps finished tasks on its periodic
 # reaper (lib/server/server_loop_runtime.py). These per-request calls are only a
-# best-effort side-effect sweep, so throttle them so the hot start path is
-# usually free. ``cleanup_old_tasks`` is resolved through THIS module's global
-# (not a captured local) so tests that monkeypatch
+# best-effort side-effect sweep: throttle them, and run the sweep on its own
+# thread. Interactive starts are usually more than _CLEANUP_TTL apart, so an
+# inline sweep (which also reaps queue leases) cost 1-7s on nearly every
+# accepted attempt before its executor could start.
+# ``cleanup_old_tasks`` is resolved through THIS module's global (not a
+# captured local) so tests that monkeypatch
 # ``lib.conversation_sync.task_start.cleanup_old_tasks`` keep steering the sweep.
 _CLEANUP_TTL = 60.0
 _last_cleanup_ts = 0.0
 _cleanup_lock = threading.Lock()
+
+
+def _run_cleanup_sweep():
+    try:
+        cleanup_old_tasks()
+    except Exception:
+        logger.warning('[TaskStart] background task cleanup sweep failed',
+                       exc_info=True)
 
 
 def _throttled_cleanup_old_tasks():
@@ -45,7 +57,8 @@ def _throttled_cleanup_old_tasks():
         if now - _last_cleanup_ts < _CLEANUP_TTL:
             return
         _last_cleanup_ts = now
-    cleanup_old_tasks()
+    threading.Thread(target=_run_cleanup_sweep,
+                     name='turn-start-task-cleanup', daemon=True).start()
 
 
 def _announce_resume_model_switch(
@@ -80,11 +93,14 @@ def _announce_resume_model_switch(
     ))
 
 
-def _discard_unstarted_task(task_id: str, conv_id: str) -> None:
+def _discard_unstarted_task(task: dict[str, Any], conv_id: str) -> None:
     """Best-effort registry rollback while no worker owns the task."""
+    task_id = task['id']
     try:
+        from lib.tasks_pkg.memory_listing import release_early_memory_listing
         from lib.tasks_pkg.manager import discard_task
 
+        release_early_memory_listing(task)
         discard_task(task_id, conv_id)
     except Exception:
         # Preserve the original preparation/submission failure. A failed
@@ -187,33 +203,59 @@ def start_conversation_attempt_executor(
     principal, attended = restore_execution_identity(config)
     from lib.tasks_pkg.plan_mode import normalize_interaction_mode_runtime_config
     config = normalize_interaction_mode_runtime_config(config)
+    from lib.tasks_pkg.coordinator_policy import pin_coordinator_request_policy
+    config = pin_coordinator_request_policy(conv_id, config, owner_user_id)
 
     timing_identity = {
         'conversation_id': conv_id, 'turn_id': config.get('_turnId'),
         'attempt_id': config.get('_attemptId'), 'user_id': owner_user_id,
     }
-    with measure_task_startup('cleanup', identity=timing_identity):
-        _throttled_cleanup_old_tasks()
+    input_translation = None
+    if config.get(DEFERRED_INPUT_TRANSLATION_CONFIG_KEY):
+        # Starts before model-context assembly so it overlaps the rest of the
+        # executor start, worker entry and workspace binding.
+        from lib.chat.turn_builder import start_deferred_input_translation
+        input_translation = start_deferred_input_translation(
+            conv_id, config.get('_turnId') or '', dict(config),
+            user_id=owner_user_id)
+    # The memory-prefetch corpus listing needs only the attempt's roots, so it
+    # overlaps the same stretch; the task owns it once registered.
+    from lib.tasks_pkg.memory_listing import (
+        EARLY_MEMORY_LISTING_KEY,
+        start_early_memory_listing,
+    )
+    memory_listing = start_early_memory_listing(config)
+    task = None
+    try:
+        with measure_task_startup('cleanup', identity=timing_identity):
+            _throttled_cleanup_old_tasks()
 
-    from lib.turn_lifecycle import build_api_messages
-    with measure_task_startup('context', identity=timing_identity):
-        api_messages = build_api_messages(
-            conv_id,
-            config.get('_turnId') or '',
-            config,
-            user_id=owner_user_id,
-        )
-    if api_messages is None:
-        return None, 'conversation_not_found'
-    if not api_messages:
-        return None, 'empty_model_context'
+        from lib.turn_lifecycle import build_api_messages
+        with measure_task_startup('context', identity=timing_identity):
+            api_messages = build_api_messages(
+                conv_id,
+                config.get('_turnId') or '',
+                config,
+                user_id=owner_user_id,
+            )
+        if api_messages is None:
+            return None, 'conversation_not_found'
+        if not api_messages:
+            return None, 'empty_model_context'
 
-    with measure_task_startup('registration', identity=timing_identity):
-        task = create_task(
-            conv_id, api_messages, config,
-            user_id=owner_user_id,principal=principal,
-            supersede=False, execution_clock=execution_clock)
+        with measure_task_startup('registration', identity=timing_identity):
+            task = create_task(
+                conv_id, api_messages, config,
+                user_id=owner_user_id,principal=principal,
+                supersede=False, execution_clock=execution_clock)
+    finally:
+        if task is None and memory_listing is not None:
+            memory_listing.release()
     task['_attended'] = attended
+    if input_translation is not None:
+        task['_deferredInputTranslation'] = input_translation
+    if memory_listing is not None:
+        task[EARLY_MEMORY_LISTING_KEY] = memory_listing
     task_id = task['id']
     _cfg_model = config.get('model', '?')
 
@@ -245,13 +287,17 @@ def start_conversation_attempt_executor(
         if on_task_registered is not None:
             with measure_task_startup('binding', identity=timing_identity):
                 on_task_registered(task_id)
-        from lib.project_dispatch.request_budget import bind_source_account
-        bind_source_account(task)
+        if input_translation is None:
+            # An attempt that owes a deferred translation binds at worker
+            # entry instead (lib.tasks_pkg.spawn): its verdict still rewrites
+            # the input Turn, superseding any revision pinned here.
+            from lib.project_dispatch.request_budget import bind_source_account
+            bind_source_account(task)
     except AttemptDispatchCancelled:
-        _discard_unstarted_task(task_id, conv_id)
+        _discard_unstarted_task(task, conv_id)
         raise
     except BaseException:
-        _discard_unstarted_task(task_id, conv_id)
+        _discard_unstarted_task(task, conv_id)
         logger.exception(
             '[Chat] Pre-spawn task preparation/binding failed task=%s conv=%s',
             task_id[:8], conv_id[:8],
@@ -286,7 +332,7 @@ def start_conversation_attempt_executor(
         except Exception as _spawn_err:
             logger.exception('[Chat] Failed to start flow thread for task %s conv=%s',
                              task_id[:8], conv_id[:8])
-            _discard_unstarted_task(task_id, conv_id)
+            _discard_unstarted_task(task, conv_id)
             return None, 'executor_start_failed'
     else:
         logger.info('[Chat] Queueing task %s for conv %s model=%s',
@@ -298,7 +344,7 @@ def start_conversation_attempt_executor(
         except Exception as _spawn_err:
             logger.exception('[Chat] Failed to start thread for task %s conv=%s',
                              task_id[:8], conv_id[:8])
-            _discard_unstarted_task(task_id, conv_id)
+            _discard_unstarted_task(task, conv_id)
             return None, 'executor_start_failed'
 
     return task_id, None

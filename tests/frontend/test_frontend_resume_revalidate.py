@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests._runtime_sections import runtime_section
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -17,8 +18,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(scope='module')
 def frame_identity_bundle(tmp_path_factory):
-    if not shutil.which('node'):
-        pytest.skip('node is required')
+    require_node_modules('vite')
     root = Path(__file__).resolve().parents[2]
     bundle = tmp_path_factory.mktemp('resume-frames') / 'frames.cjs'
     subprocess.run([str(root / 'scripts/vite_test_bundle.mjs'),
@@ -29,8 +29,7 @@ def frame_identity_bundle(tmp_path_factory):
 
 
 def _run_node(bundle: Path, source: str) -> dict:
-    if not shutil.which("node"):
-        pytest.skip("node is required")
+    require_node_modules('vite')
     source = f"const {{narrowConvCatalogFrame}} = require({json.dumps(str(bundle))});\n" + source
     script = f"""
 const run = new Function({json.dumps(source)});

@@ -29,7 +29,6 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -42,12 +41,6 @@ JS_DIR = os.path.join(ROOT, 'static', 'js')
 ZH_LOCALE = os.path.join(
     ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json',
 )
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 # argv[2] = i18n.js, argv[3] = finish_info.js, argv[4] = finish_info_rich.js,
@@ -175,8 +168,6 @@ def _run(neuter: bool) -> str:
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_offset_batch_correspondence_is_explicit():
     output = _run(neuter=False)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -184,8 +175,6 @@ def test_offset_batch_correspondence_is_explicit():
     assert output.count('PASS') >= 6, f'expected >=6 PASS lines, got:\n{output}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NEUTER_without_batchref_the_guard_fails():
     # Remove the batch-ref annotation → the batch-correspondence checks MUST
     # fail, proving the guard has teeth (it is the annotation, not incidental

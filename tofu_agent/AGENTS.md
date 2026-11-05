@@ -26,7 +26,7 @@ sidecar, including its small model-routing setup page. Read
 
 `native_runtime.py` owns optional trusted Rust SDK composition, borrowing the
 admitted host/loop/callback executor. Request JSON cannot select these owners.
-CLI run/serve/doctor may own the local archive/profile, serving loop and launch-sized
+CLI run/serve/doctor may own the local archive/profile, serving loop and demand-driven
 callback executor; join runtime/host before callback retirement. Never fall back
 to Python after native admission fails. Native result/close waits for worker and client cleanup; same-loop sync calls
 refuse. Python and native SDK results retain admission and borrowed resources
@@ -38,8 +38,10 @@ MCP selectors remain task-local for transient named conversations.
 ## Verification
 
 Run the focused `test_tofu_agent*` and developer-runtime tests, then
-`python3 scripts/check_developer_runtime_artifacts.py`. Build the package for
-changes to exports, entry points, setup assets, or distribution metadata.
+`python3 scripts/check_developer_runtime_artifacts.py dist/tofu_agent-*.whl`.
+The validator requires artifact paths; use the isolated build instructions in
+`docs/DEVELOPER_RUNTIME.md` to produce them. Build the package for changes to
+exports, entry points, setup assets, or distribution metadata.
 
 `native_repository.py` defines optional trusted repository configuration for
 AgentRuntime/local and native application composition. Construction is lazy; task scopes use the shared execution

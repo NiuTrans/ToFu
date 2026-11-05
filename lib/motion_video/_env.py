@@ -375,11 +375,15 @@ def ensure_ffmpeg(*, install: bool = True, timeout: int = 300) -> str:
         return existing
     if not install:
         return ''
-    logger.info('[MotionVideo] installing imageio-ffmpeg into %s '
-                '(one-time ffmpeg bootstrap)', sys.prefix)
+    from serverctl_pkg.runtime_replica import (
+        authoritative_interpreter, source_package_directories,
+    )
+    installer = authoritative_interpreter()
+    logger.info('[MotionVideo] installing imageio-ffmpeg with %s '
+                '(one-time ffmpeg bootstrap)', installer)
     try:
         proc = subprocess.run(
-            [sys.executable, '-m', 'pip', 'install', 'imageio-ffmpeg'],
+            [installer, '-m', 'pip', 'install', 'imageio-ffmpeg'],
             capture_output=True, text=True, timeout=timeout,
             env={**os.environ, 'PIP_REQUIRE_VIRTUALENV': 'false'})
         if proc.returncode != 0:
@@ -394,8 +398,14 @@ def ensure_ffmpeg(*, install: bool = True, timeout: int = 300) -> str:
         return ''
     # The install landed in site-packages WHILE this process is running —
     # the import system's directory caches must be invalidated or the new
-    # package stays invisible to ``import imageio_ffmpeg``.
+    # package stays invisible to ``import imageio_ffmpeg``. A process running
+    # from a runtime replica appends the source package directories, where
+    # the install landed, after its own.
     import importlib
+    import site
+    for directory in source_package_directories():
+        if directory not in sys.path:
+            site.addsitedir(directory)
     importlib.invalidate_caches()
     path = ffmpeg_bin()
     if path:

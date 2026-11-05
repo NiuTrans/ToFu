@@ -23,6 +23,7 @@ OPENCODE_TRIAL_IDENTITY_FIELD = 'trial_id_sha256'
 OPENCODE_PROVIDER_NPM = "@ai-sdk/openai-compatible"
 OPENCODE_PROVIDER_NPM_VERSION = "3.0.44"
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_REGISTRY_PROXY_ENV_KEYS = frozenset({"http_proxy", "https_proxy", "no_proxy", "all_proxy"})
 
 
 def prepare_cache_seed(path: str | Path) -> dict[str, str]:
@@ -46,13 +47,17 @@ def prepare_cache_seed(path: str | Path) -> dict[str, str]:
                 },
             }, indent=2) + "\n", encoding="utf-8")
             manifest.chmod(0o600)
+        env = {"PATH": os.environ.get("PATH", os.defpath),
+               "HOME": os.environ.get("HOME", ""),
+               "LANG": "C", "LC_ALL": "C"}
+        # The registry is reachable only through the host's egress proxy on
+        # proxied hosts; proxy routing is the sole inherited setting.
+        env.update({key: value for key, value in os.environ.items()
+                    if key.lower() in _REGISTRY_PROXY_ENV_KEYS})
         subprocess.run(
             ["bun", "add", "--exact",
              f"{OPENCODE_PROVIDER_NPM}@{OPENCODE_PROVIDER_NPM_VERSION}"],
-            cwd=root, check=True, timeout=300,
-            env={"PATH": os.environ.get("PATH", os.defpath),
-                 "HOME": os.environ.get("HOME", ""),
-                 "LANG": "C", "LC_ALL": "C"},
+            cwd=root, check=True, timeout=300, env=env,
         )
     return verify_cache_seed(root)
 
@@ -162,7 +167,8 @@ def guest_command(*, binary: str, model: str, instruction: str) -> list[str]:
             "--model", f"benchmark/{model}", "--", instruction]
 
 
-_CONTINUATION_NUDGE = (
+# Shared by every native-runner arm that resumes after an output-limit stop.
+CONTINUATION_NUDGE = (
     "Your previous response was cut off at the model output-token limit "
     "before any tool call or final answer. Continue working on the original "
     "task now: prefer concrete tool actions (write the required artifact "
@@ -211,7 +217,7 @@ def guest_shell_command(
     nxt = shlex.join([
         binary, "run", "--pure", "--auto", "--format=json",
         "--model", f"benchmark/{model}", "--continue", "--",
-        _CONTINUATION_NUDGE,
+        CONTINUATION_NUDGE,
     ])
     raw = shlex.quote(raw_output_path)
     err = shlex.quote(stderr_path)

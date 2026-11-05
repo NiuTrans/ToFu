@@ -43,6 +43,7 @@ import pytest
 from lib.tasks_pkg.segments import is_synthetic_inbox_round
 from lib.tasks_pkg.stream_handler._intent_stall import NUDGE_TEXT
 from lib.turn_lifecycle import _task_projection
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -225,8 +226,7 @@ def test_a_real_tool_round_is_not_wire_excluded():
 
 def _node() -> str:
     node = shutil.which('node')
-    if not node:
-        pytest.skip('node not available')
+    require_node_modules('vite')
     return node
 
 

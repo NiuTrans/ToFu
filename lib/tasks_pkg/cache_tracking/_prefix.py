@@ -1,8 +1,9 @@
 """Cache prefix-count gate and diagnostics.
 
-``get_cache_prefix_count`` reads the shared ``_cache_states`` singleton and
-the single-source ``EDITABLE_TAIL_COUNT`` bound; ``get_cache_diagnostics``
-snapshots both ``_cache_states`` and the TTL-latch table. The historical
+``get_cache_prefix_count`` reads the shared ``_cache_states`` singleton (plus
+the invocation snapshot and durable high-water fallbacks) and returns the
+whole previously sent api-form count; ``get_cache_diagnostics`` snapshots both
+``_cache_states`` and the TTL-latch table. The historical
 ``sort_tool_results`` entry point is a compatibility no-op.
 """
 
@@ -19,7 +20,6 @@ from lib.tasks_pkg.cache_tracking._state import (
     _current_invocation,
     _allows_conversation_baseline,
 )
-from lib.tasks_pkg.cache_tracking._detect import EDITABLE_TAIL_COUNT
 from lib.tasks_pkg.cache_tracking._ttl import _ttl_latch
 
 logger = get_logger(__name__)
@@ -38,15 +38,18 @@ def sort_tool_results(
 def get_cache_prefix_count(
     conv_id: str, current_msg_count: int | None = None, *, user_id: int,
 ) -> int:
-    """Get the number of messages in the cache prefix for this conversation.
+    """Return how many api-form messages the previous request already sent.
 
-    Microcompact should skip editing messages[0:N] where N is this count,
-    to keep cached content byte-identical for automatic prefix caching
-    providers (OpenAI, Qwen, etc.).
-
-    Returns the message count from the previous call if cache was active.
-    For Anthropic (explicit breakpoints), this is less critical since
-    add_cache_breakpoints places markers at the conversation tail.
+    messages[0:N] are the provider-cached prefix: the previous request's
+    tail marker (Anthropic) or automatic prefix caching (OpenAI, Qwen, ...)
+    cached all of them, so every edit inside them is paid on the next
+    request. L1 keeps them byte-identical and may rewrite only the last tool
+    step inside them, and only when its exact next-request price admission
+    says the edit is cheaper (``compaction._layer1``). N is the whole sent
+    count, not ``N - EDITABLE_TAIL_COUNT``: that diagnosis tolerance counts
+    api-form messages, so with parallel tool calls it split one wire message
+    (several tool results become one Anthropic user message) and let L1
+    re-bill all of it to remove a few tokens.
 
     CLAMP TO THE CURRENT PREFIX (the history-shrink guard). The boundary
     sources below (in-memory sibling / durable HWM) are MONOTONIC high-water
@@ -58,10 +61,11 @@ def get_cache_prefix_count(
     would be permanently disabled for that conv → unbounded context growth (an
     OOM-context regression, worse than the miss this whole fix targets). So when
     the caller passes ``current_msg_count`` (the live wire message count) the
-    returned boundary is CLAMPED to ``current_msg_count - EDITABLE_TAIL_COUNT``:
-    the monotonic value acts only as a FLOOR that can never exceed the messages
-    that actually exist this round. Freeze holds for the prefix that still
-    exists; a legit shrink lets the boundary fall so compaction keeps working.
+    returned boundary is CLAMPED to ``current_msg_count``: the monotonic value
+    acts only as a FLOOR that can never exceed the messages that actually
+    exist this round. Freeze holds for the prefix that still exists; a legit
+    shrink lets the boundary fall, and once the shrunk request is sent the
+    current thread's own state (its real sent count) takes over again.
     When ``current_msg_count`` is None (for example diagnostics) the
     raw boundary is returned unchanged (back-compat).
 
@@ -98,13 +102,13 @@ def get_cache_prefix_count(
         # a cold-open buys (~a hundred tokens/round of stale thinking) never
         # outweigh one full-prefix re-bill. A truly dead cache costs exactly
         # one ordinary write of the same bytes — not a loop — while a wrongly
-        # opened guard costs a re-bill per round forever. Keep the last
-        # EDITABLE_TAIL_COUNT messages editable (single-sourced bound); the
+        # opened guard costs a re-bill per round forever. The whole sent count
+        # is protected; L1 prices any edit of its last step separately. The
         # streak itself still feeds detector/display classification.
         if st:
             # (message_count is 0 until this thread's first call completes, so
             # a never-called state yields 0 without a separate call_count gate.)
-            return max(0, st.message_count - EDITABLE_TAIL_COUNT)
+            return max(0, st.message_count)
         return 0
 
     def _clamp(boundary: int) -> int:
@@ -113,7 +117,7 @@ def get_cache_prefix_count(
         # no live count available ⇒ return raw (back-compat).
         if current_msg_count is None:
             return boundary
-        return min(boundary, max(0, current_msg_count - EDITABLE_TAIL_COUNT))
+        return min(boundary, max(0, current_msg_count))
 
     with _cache_lock:
         own = _boundary(_cache_states.get(

@@ -54,6 +54,7 @@ from lib.swarm.presentation_budget import (
     SWARM_TOOL_TIMELINE_ROW_LIMIT,
 )
 from lib.swarm.scheduler import StreamingScheduler
+from lib.tools.poll import POLL_WAIT_CAP_S
 
 logger = get_logger(__name__)
 
@@ -167,11 +168,14 @@ def bind_assignment_contexts(specs: list[SubTaskSpec], *, parent_task: dict,
             context = deepcopy(templates[selected_model])
             context['assignment_id'] = spec.id
             prepared.append(context)
+    from lib.tasks_pkg.native_parent import native_parent_binding
+    native = native_parent_binding(parent_task) if prepared else None
     for spec, context in zip(specs, prepared):
         spec.retained_execution_context = context
         spec.retained_assignment_parent = parent_task
         spec.retained_assignment_abort_check = abort_check
         spec.retained_assignment_usage = on_agent_usage
+        spec.retained_assignment_native = native
     return templates
 
 
@@ -188,8 +192,19 @@ def _prepare_assignment_context(*, parent_task: dict, parent_config: dict,
     principal = PrincipalContext.from_payload(parent_task['_principalContext'])
     if principal.require_owner(context='retained assignment') != parent_task['_userId']:
         raise PermissionError('Retained assignment owner mismatch')
-    source = dict(parent_task)
-    source['config'] = {**(parent_task.get('config') or {}), **parent_config}
+    # A Delegate Mode root is narrowed to orchestration tools; workers inherit
+    # the ordinary policy captured before that narrowing. Identity below still
+    # comes from the live parent task.
+    from lib.tasks_pkg.delegate_mode import (
+        delegation_config_view, delegation_policy_view,
+    )
+    source = dict(delegation_policy_view(parent_task))
+    source['config'] = {**(source.get('config') or {}),
+                        **delegation_config_view(parent_task, parent_config)}
+    # A copy holding the issued port is not the live execution task; native
+    # child-model admission must borrow that exact task instead.
+    from lib.tasks_pkg.native_parent import share_native_parent
+    share_native_parent(parent_task, source)
 
     tools = deepcopy(all_tools)
     names = [tool_schema_name(tool) for tool in tools]
@@ -327,8 +342,10 @@ def _retained_assignment_proxy(spec: SubTaskSpec, session_parent: dict) -> tuple
             raise PermissionError('Retained assignment current principal changed')
         from lib.agent_core.execution_budget import share_execution_budget
         share_execution_budget(current, parent)
-        from lib.tasks_pkg.native_parent import share_native_parent
-        share_native_parent(current, parent)
+        # Bound while the caller was live: its port may since have retired,
+        # which child entry refuses rather than treating as a Python parent.
+        from lib.tasks_pkg.native_parent import bind_native_parent
+        bind_native_parent(spec.retained_assignment_native, parent)
         if '_tool_env' in current:
             parent['_tool_env'] = current['_tool_env']
         documents = current.get('_toolContractDocumentsByName')
@@ -360,6 +377,8 @@ def _checkpoint_outcome(checkpoint: dict) -> str:
 def _result_output_fields(result: SubAgentResult, *, answer_key: str) -> dict:
     """Keep non-success evidence out of successful output field names."""
     if result.status == SubAgentStatus.COMPLETED.value and not result.error_message:
+        if result.contract_error:
+            return {answer_key: result.final_answer, 'contract_error': result.contract_error}
         return {answer_key: result.final_answer}
     return {answer_key: '', 'partial_output': result.final_answer}
 
@@ -535,7 +554,8 @@ def _build_sub_agent(spec: SubTaskSpec, *,
                      project_path: str,
                      artifact_store: ArtifactStore | None,
                      output_file: str = '',
-                     swarm_key: str = '') -> SubAgent:
+                     swarm_key: str = '',
+                     swarm_run_id: str = '') -> SubAgent:
     """Construct a SubAgent. Does not start execution."""
     logger.info('[Master:Spawn] id=%s role=%s model=%s objective=%.80s deps=%s',
                 spec.id, spec.role, model or '(default)',
@@ -558,6 +578,7 @@ def _build_sub_agent(spec: SubTaskSpec, *,
     if swarm_key:
         # Enables the SubAgent's round-boundary DB checkpoint (durable resume).
         agent.swarm_key = swarm_key
+        agent.swarm_run_id = swarm_run_id
     return agent
 
 
@@ -694,20 +715,14 @@ class MasterOrchestrator:
 
         # Listeners woken when ANY agent completes (used by await_agents).
         self._completion_event = threading.Event()
-        # One no-progress timeout per logical wait-set is enough. Models often
-        # retry an identical await immediately; without this receipt the second
-        # call burns the entire hard cap despite learning no new fact. Values
-        # are the completed-id snapshot observed at the last timeout. The map is
-        # session-local and explicitly bounded.
-        self._await_timeout_progress: dict[
-            tuple[str, tuple[str, ...]], frozenset[str]
-        ] = {}
-        self._await_timeout_progress_capacity = 64
         # Results already shown to the parent model, either synchronously by
         # await/get_result or asynchronously through an inbox injection. This
         # set is bounded by the finite session spec list. Explicit-id reads may
         # still replay a result; no-id awaits consume only completion deltas.
         self._delivered_result_ids: set[str] = set()
+        # Settled results already recorded as durable run results (keyed by
+        # swarm_run_id). Teardown records the rest before reclaiming rows.
+        self._recorded_result_ids: set[str] = set()
 
         # Detached parent identity and input policy for child creation.
         # ``config`` MUST carry through fields that
@@ -751,10 +766,14 @@ class MasterOrchestrator:
             # account onto THIS session-lifetime proxy, which stays 'running'
             # until abort()/suspend_for_restart() marks it terminal, so queued
             # agents admit whenever they unblock while explicit cancel fences.
+            # A natively executed parent keeps the root: its issued port
+            # retires with the turn, so no child is issued after it settles,
+            # and native child routes and fee transfer admit only that exact
+            # live execution task (tasks_pkg/native_parent.py).
+            from lib.tasks_pkg.native_parent import resolve_native_parent, share_native_parent
             budget = self._parent_task_proxy.get('_executionBudget')
-            if budget is not None:
+            if budget is not None and resolve_native_parent(parent_task)[0] is None:
                 self._promote_proxy_to_budget_root(budget, parent_task)
-            from lib.tasks_pkg.native_parent import share_native_parent
             share_native_parent(parent_task, self._parent_task_proxy)
             from lib.tasks_pkg.requirement_source import requirement_source
             source = requirement_source(parent_task)
@@ -925,13 +944,16 @@ class MasterOrchestrator:
             model=model,
             thinking_enabled=thinking,
             on_event=self.on_progress,
-            # Owner Stop only. The child's shared beacon stamps silence before
-            # aborting provider/tools; forwarding _stop_stalled races that stamp.
+            # Owner Stop only. A wedged child receives the shared liveness
+            # verdict as its own typed stall stamp before provider/tools abort
+            # (reaper, or the driver backstop below); forwarding _stop_stalled
+            # here would race that stamp and read as cancellation.
             abort_check=abort,
             project_path=project_path,
             artifact_store=self.artifact_store,
             output_file=out_path,
             swarm_key=self.inbox_key,
+            swarm_run_id=self.task_id,
         )
 
         if ((spec.retained_agent_id or spec.retained_execution_context is not None)
@@ -939,7 +961,7 @@ class MasterOrchestrator:
             from lib.swarm.run_messages import binding_for
             # Mailbox identity is the existing swarm run, not the current caller.
             agent._assignment_message_binding = binding_for(
-                self._parent_task_proxy, spec, self.inbox_key)
+                self._parent_task_proxy, spec, self.inbox_key, run_id=self.task_id)
         # ── Durable resume: seed the conversation from the checkpoint so the
         #    agent continues from its last completed round instead of starting
         #    over. The interrupted (uncheckpointed) round is naturally re-run.
@@ -1053,6 +1075,9 @@ class MasterOrchestrator:
                     'status':        status,
                     'elapsed':       round(result.elapsed_seconds, 1),
                     'tokens':        result.total_tokens,
+                    # Model rounds, the same `round` live progress and
+                    # get_status report, so a reloaded row keeps its count.
+                    'round':         result.rounds_used,
                     # FULL final answer — the durable snapshot is the
                     # authoritative terminal record a reloaded panel renders
                     # from, so slicing here would permanently destroy the tail
@@ -1084,6 +1109,7 @@ class MasterOrchestrator:
                 _live_omitted = 0
                 _live_files = 0
                 _live_tokens = 0
+                _live_rounds = 0
                 _live_agent = self._agents.get(spec.id)
                 if live == 'running' and _live_agent is not None:
                     _live_result = getattr(_live_agent, 'result', None)
@@ -1101,6 +1127,8 @@ class MasterOrchestrator:
                         _live_files = _count_file_writes(_live_log)
                         _live_tokens = int(
                             getattr(_live_result, 'total_tokens', 0) or 0)
+                        _live_rounds = int(
+                            getattr(_live_result, 'rounds_used', 0) or 0)
                 agents.append({
                     'id':            spec.id,
                     'role':          spec.role,
@@ -1111,6 +1139,7 @@ class MasterOrchestrator:
                     **self._pending_status_fields(spec, live, results),
                     'elapsed':       '',
                     'tokens':        _live_tokens,
+                    'round':         _live_rounds,
                     'preview':       '',
                     'modifiedFiles': _live_files,
                     'error':         '',
@@ -1316,7 +1345,8 @@ class MasterOrchestrator:
             try:
                 if not (self._parent_task_proxy.get('_transientRuntime') or self._parent_task_proxy.get('_invocationStorageFree')):
                     from lib.swarm.run_messages import binding_for, RunMessageRepository
-                    RunMessageRepository(binding_for(self._parent_task_proxy, spec, self.inbox_key)).close()
+                    RunMessageRepository(binding_for(self._parent_task_proxy, spec, self.inbox_key,
+                                                     run_id=self.task_id)).close()
             except Exception:
                 logger.warning('[Master:%s] terminal mailbox fence uncertain agent=%s',
                                self.task_id, spec.id, exc_info=True)
@@ -1347,6 +1377,9 @@ class MasterOrchestrator:
                 logger.warning('[Master:%s] child usage rollup failed for %s: %s',
                                self.task_id, spec.id, e)
 
+        # Durable before the model is told: a <swarm-update> names this run,
+        # and the run result must outlive the conversation-keyed session rows.
+        self._record_run_result(spec, result)
         self._publish_completion_inbox(spec, result)
         self._completion_event.set()
         try:
@@ -1366,6 +1399,7 @@ class MasterOrchestrator:
             spec.retained_assignment_parent = None
             spec.retained_assignment_abort_check = None
             spec.retained_assignment_usage = None
+            spec.retained_assignment_native = None
     def _emit_agent_complete(self, spec: SubTaskSpec,
                             result: SubAgentResult, terminal_status: str) -> None:
         # 1) UI event (kept identical to legacy schema for the swarm panel)
@@ -1436,6 +1470,7 @@ class MasterOrchestrator:
                 output_file = os.path.join(self.output_dir, f'{spec.id}.log')
             payload = format_swarm_update(
                 agent_id=spec.id,
+                swarm_run_id=self.task_id,
                 role=spec.role,
                 status=result.status,
                 elapsed_seconds=result.elapsed_seconds,
@@ -1444,7 +1479,8 @@ class MasterOrchestrator:
                 output_file=output_file,
                 remaining_running=running,
                 remaining_pending=pending,
-                error=(result.error_message or '') if result.status != SubAgentStatus.COMPLETED.value else '',
+                error=((result.error_message or '') if result.status != SubAgentStatus.COMPLETED.value
+                       else result.contract_error),
             )
             # Only the bounded, callback-free inbox operation runs under the
             # result lock. Await/get/inbox acknowledgements use this same lock:
@@ -1572,9 +1608,10 @@ class MasterOrchestrator:
             finally:
                 # iter_completions returns on a liveness verdict, but returning
                 # alone does not stop a worker already blocked inside a tool.
-                # Publish the distinct internal stop BEFORE shutdown waits;
-                # SubAgent mirrors it into run_command's cooperative aborted
-                # field, which kills the whole subprocess tree. Previously the
+                # Deliver the typed stall to each stalled child BEFORE shutdown
+                # waits: its abort reaches run_command's cooperative aborted
+                # field, which kills the whole subprocess tree, and its own
+                # invocation owner settles it inside the wait. Previously the
                 # pool merely waited 30s and abandoned the still-live thread.
                 try:
                     if (self._scheduler.running_count > 0
@@ -1584,6 +1621,7 @@ class MasterOrchestrator:
                             '%s propagating stall verdict to %d running '
                             'agent(s) before scheduler shutdown',
                             log_prefix, self._scheduler.running_count)
+                        self._deliver_stall_verdicts()
                 except Exception as e:
                     logger.warning('%s stall cancellation probe failed: %s',
                                    log_prefix, e)
@@ -1773,7 +1811,7 @@ class MasterOrchestrator:
         """Resume a swarm from persisted per-agent checkpoints after a restart.
 
         ``persisted_agents`` is the ``agents`` list from
-        ``persistence.load_resumable_sessions`` — each dict has agent_id,
+        ``persistence.load_session`` — each dict has agent_id,
         status, messages, result, delivered. Behaviour by agent status:
 
           * terminal / unknown → preloaded with their actual outcome
@@ -1784,7 +1822,9 @@ class MasterOrchestrator:
             and its dependency ancestry are safe. Unsafe descendants become
             failed reconciliation-required results without a worker launch.
             Safe checkpoints seed the new SubAgent's conversation (round-level
-            resume); children without checkpoints start fresh from their spec.
+            resume); an open tool round is first closed with recovery notices
+            (``restart_recovery.settle_interrupted_tool_round``), never re-run.
+            Children without checkpoints start fresh from their spec.
 
         Only safe non-terminal specs are handed to the scheduler, so finished
         agents are NOT re-executed.
@@ -1813,14 +1853,33 @@ class MasterOrchestrator:
                     and not spec.retained_agent_id):
                 status = 'running'
             if status in ('pending', 'running', 'retrying'):
-                from lib.swarm.restart_recovery import checkpoint_recovery_error
+                from lib.swarm.restart_recovery import (
+                    checkpoint_recovery_error, settle_interrupted_tool_round,
+                    surviving_command_error)
                 blocker = checkpoint_recovery_error(a)
-                if blocker:
+                error_message = (
+                    blocker + ': inspect the prior tool outcome before retrying' if blocker
+                    else surviving_command_error(a, conv_id=self.conv_id))
+                if error_message:
+                    blocker = error_message.split(':', 1)[0]
                     a = {**a, 'status': 'failed', 'result': {
                         **(a.get('result') or {}), 'status': 'failed',
-                        'error_message': blocker + ': inspect the prior tool outcome before retrying',
-                        'recovery_reason': blocker}}
+                        'error_message': error_message, 'recovery_reason': blocker}}
                     status = 'failed'
+                else:
+                    # The agent that issued the open round reconciles it, as
+                    # after a timeout; nothing is re-run on its behalf.
+                    settled = settle_interrupted_tool_round(a)
+                    if settled is not None:
+                        rounds = a.get('rounds_used')
+                        if ((a.get('result') or {}).get('checkpoint_phase') == 'tools_in_flight'
+                                and type(rounds) is int):
+                            rounds += 1  # The open round is now closed.
+                        a = {**a, 'messages': settled, 'rounds_used': rounds}
+                        logger.info('[Master:%s] Rehydrate — agent %s resumes after an '
+                                    'interrupted tool round (recovery_reason=%s)',
+                                    self.task_id, spec.id,
+                                    (a.get('result') or {}).get('recovery_reason') or 'unknown')
             if status not in ('pending', 'running', 'retrying'):
                 result = self._result_from_dict(a.get('result') or {})
                 result.status = _checkpoint_outcome(a)
@@ -1859,8 +1918,11 @@ class MasterOrchestrator:
         # prose cannot authorize dependent work against an unknown tool outcome.
         # Traverse the full DAG (even finished intermediates), but replace only
         # unfinished descendants so terminal evidence and delivery ACKs survive.
+        # ``restart_tool_outcome_unknown`` is no longer produced; rows that
+        # already carry it keep fencing their unfinished descendants.
         unsafe_reasons = ('restart_tool_outcome_unknown',
                           'restart_checkpoint_invalid',
+                          'restart_command_still_running',
                           'restart_dependency_reconciliation_required')
         blocked_by: dict[str, tuple[str, str]] = {}
         from lib.swarm.restart_recovery import checkpoint_recovery_error
@@ -1987,10 +2049,12 @@ class MasterOrchestrator:
             output_file = (os.path.join(self.output_dir, f'{spec.id}.log')
                            if self.output_dir else '')
             payload = format_swarm_update(
-                agent_id=spec.id, role=spec.role, status=result.status,
+                agent_id=spec.id, swarm_run_id=self.task_id,
+                role=spec.role, status=result.status,
                 elapsed_seconds=result.elapsed_seconds, tokens=result.total_tokens,
                 result=result.final_answer or '', output_file=output_file,
-                error=result.error_message if result.status != SubAgentStatus.COMPLETED.value else '',
+                error=(result.error_message if result.status != SubAgentStatus.COMPLETED.value
+                       else result.contract_error),
             )
             with self._lock:
                 if spec.id not in self._delivered_result_ids:
@@ -2024,6 +2088,56 @@ class MasterOrchestrator:
         """Release live presentation reservations after an interrupted parent call."""
         with self._lock:
             self._delivered_result_ids.difference_update(agent_ids)
+
+    # ── Durable run results ────────────────────────────────
+
+    def _record_run_result(self, spec: SubTaskSpec, result: SubAgentResult) -> bool:
+        """Record one settled outcome under this run; True once durable.
+
+        Storage-free (embedded/headless) sessions own no durable state, so
+        there is nothing to record and nothing teardown could delete.
+        """
+        if (self._parent_task_proxy.get('_transientRuntime')
+                or self._parent_task_proxy.get('_invocationStorageFree')):
+            return True
+        from lib.swarm import persistence
+        try:
+            recorded = persistence.save_run_result(
+                owner_id=self.user_id,
+                tenant_id=self._parent_task_proxy.get('_tenant_id'),
+                conversation_id=self.conv_id or '',
+                swarm_key=self.inbox_key,
+                swarm_run_id=self.task_id,
+                agent_id=spec.id,
+                role=spec.role,
+                objective=spec.objective,
+                status=result.status,
+                result=result.to_dict(),
+            )
+        except Exception:
+            # Completion must proceed; teardown retries before any deletion.
+            logger.error('[Master:%s] run result for agent %s not recorded',
+                         self.task_id, spec.id, exc_info=True)
+            return False
+        if recorded:
+            with self._lock:
+                self._recorded_result_ids.add(spec.id)
+        return recorded
+
+    def record_run_results(self) -> bool:
+        """Record every settled result not yet durable; True when all are.
+
+        Session teardown calls this before it reclaims the conversation-keyed
+        resumable rows, so a failed completion-time write (or a result restored
+        at rehydrate) can never be deleted unrecorded. Agents still settling
+        record themselves through the completion callback.
+        """
+        with self._lock:
+            unrecorded = [entry for agent_id, entry in self._results_by_id.items()
+                          if agent_id not in self._recorded_result_ids]
+        outcomes = [self._record_run_result(spec, result)
+                    for spec, result in unrecorded]
+        return all(outcomes)
 
     def await_agents(self, *,
                      ids: list[str] | None = None,
@@ -2096,11 +2210,6 @@ class MasterOrchestrator:
             to_wait = (requested & known_ids) - done_ids
             unknown = requested - known_ids - done_ids
 
-            await_signature = (mode, tuple(sorted(requested)))
-            prior_timeout_progress = self._await_timeout_progress.get(
-                await_signature)
-            current_progress = frozenset(requested & done_ids)
-
         # Critical trace: WHAT this await is blocking on, plus a snapshot of
         # the swarm state. When an await later reports timed_out, this ENTER
         # line is the anchor that explains why (e.g. mode=all but agents are
@@ -2166,8 +2275,6 @@ class MasterOrchestrator:
         # asked for "all in flight" but none are running. Return now with
         # a clear note so the LLM doesn't think the call was a no-op.
         if not to_wait:
-            with self._lock:
-                self._await_timeout_progress.pop(await_signature, None)
             note = ''
             # When caller asks for ALL (no ids) and no agents are running,
             # return EVERY completed agent (not just already_done snapshot)
@@ -2206,32 +2313,8 @@ class MasterOrchestrator:
                 awaited_ids=sorted(requested),
             )
 
-        # Do not spend another full wait window until the underlying result set
-        # changes. Completion callbacks remain active and will deliver an inbox
-        # update; this only suppresses a redundant synchronous block.
-        if (
-            prior_timeout_progress is not None
-            and current_progress == prior_timeout_progress
-        ):
-            note = (
-                'An identical await already timed out and no requested agent '
-                'has completed since then. The redundant wait was skipped; '
-                'agents are still running in the background and their '
-                '<swarm-update> will arrive when progress occurs. Continue '
-                'useful local work instead of repeating this await unchanged.'
-            )
-            return self._build_await_response(
-                delivery_ack=delivery_ack,
-                completed_ids=sorted(already_done),
-                still_running=sorted(to_wait),
-                unknown=sorted(unknown),
-                mode=mode,
-                timed_out=True,
-                note=note,
-                awaited_ids=sorted(requested),
-                wait_suppressed=True,
-            )
-
+        # A repeated wait after a timeout blocks again: waiting costs no model
+        # request and still returns on completion, pending input or Stop.
         # ── Wait loop ──────────────────────────────────────────────────
         # ``swarm_terminated`` distinguishes the two ways the loop can exit
         # without the mode condition being met: a genuine wall-clock timeout
@@ -2304,20 +2387,6 @@ class MasterOrchestrator:
                 f'(cancelled/aborted or dropped before running) and will NOT '
                 f'complete. Not waiting further. Re-spawn them with '
                 f'spawn_agents if you still need that work.')
-        with self._lock:
-            if timed_out:
-                if (
-                    await_signature not in self._await_timeout_progress
-                    and len(self._await_timeout_progress)
-                    >= self._await_timeout_progress_capacity
-                ):
-                    oldest = next(iter(self._await_timeout_progress))
-                    self._await_timeout_progress.pop(oldest, None)
-                self._await_timeout_progress[await_signature] = frozenset(
-                    requested & done_now
-                )
-            else:
-                self._await_timeout_progress.pop(await_signature, None)
         response = self._build_await_response(
                 delivery_ack=delivery_ack,
             completed_ids=sorted(completed_set),
@@ -2337,7 +2406,6 @@ class MasterOrchestrator:
                                still_running: list[str],
                                unknown: list[str],
                                mode: str, timed_out: bool, note: str,
-                               wait_suppressed: bool = False,
                                awaited_ids: list[str] | None = None,
                                delivery_ack: Callable | None = None) -> dict:
         """Materialize completed payloads from ``_results_by_id``.
@@ -2415,8 +2483,8 @@ class MasterOrchestrator:
                 'The running agents are NOT cancelled — they keep going in the '
                 'background and you will receive their <swarm-update> on a later '
                 'round. Continue with other work, or call poll with explicit '
-                'agent handles in ids and wait_s between 0 and 60 to wait. '
-                'No-ID poll() is a snapshot, not a wait for all agents.'
+                f'agent handles in ids and wait_s between 0 and {POLL_WAIT_CAP_S} '
+                'to wait. No-ID poll() is a snapshot, not a wait for all agents.'
             )
 
         out = {
@@ -2435,8 +2503,6 @@ class MasterOrchestrator:
             'mode':          mode,
             'timed_out':     timed_out,
         }
-        if wait_suppressed:
-            out['wait_suppressed'] = True
         if unknown:
             out['unknown'] = unknown
         if note:
@@ -2446,12 +2512,7 @@ class MasterOrchestrator:
         # logged at WARNING (it's the symptom the user reports) and names the
         # agents that out-ran the window so the cause is grep-able without a
         # debugger; a clean satisfy is INFO.
-        if wait_suppressed:
-            logger.info(
-                '[Master:%s] await_agents SKIPPED redundant no-progress wait '
-                'mode=%s still_running=%s',
-                self.task_id, mode, still_running or 'none')
-        elif timed_out:
+        if timed_out:
             # Per-stuck-agent live state so the timeout line is SELF-CONTAINED:
             # an operator can see WHAT each still-running agent is doing (its
             # round count + model) without cross-referencing the LLM stream
@@ -2526,7 +2587,7 @@ class MasterOrchestrator:
             try:
                 from lib.swarm import persistence
                 if delivery_ack is None:
-                    persistence.mark_delivered(self.inbox_key, _delivered_ids)
+                    persistence.mark_delivered(self.inbox_key, _delivered_ids, task_id=self.task_id)
             except Exception as e:
                 logger.debug('[Master:%s] mark_delivered after await failed: %s',
                              self.task_id, e)
@@ -2569,7 +2630,7 @@ class MasterOrchestrator:
                 try:
                     from lib.swarm import persistence
                     if delivery_ack is None:
-                        persistence.mark_delivered(self.inbox_key, [agent_id])
+                        persistence.mark_delivered(self.inbox_key, [agent_id], task_id=self.task_id)
                 except Exception as e:
                     logger.debug('[Master:%s] mark_delivered after get_agent_result '
                                  'failed: %s', self.task_id, e)
@@ -2587,8 +2648,8 @@ class MasterOrchestrator:
                 'message': (
                     f'Agent {agent_id} is still running — '
                     f'wait for the next <swarm-update> or call '
-                    f'poll(id={agent_id!r}, wait_s=30). '
-                    'wait_s is bounded to 60 seconds; no-ID poll() is only a snapshot.'),
+                    f'poll(id={agent_id!r}, wait_s={POLL_WAIT_CAP_S}), which '
+                    'returns as soon as it finishes; no-ID poll() is only a snapshot.'),
             }
         if agent_id in pending_ids:
             return {
@@ -2627,6 +2688,21 @@ class MasterOrchestrator:
                     self.specs.append(s)
 
     # ── Status / artifacts / abort (kept for /api/v1/swarm/status route) ──
+
+    def _deliver_stall_verdicts(self) -> None:
+        """Stop each stalled running child with the shared typed stall verdict.
+
+        The beacon judged them by the rule the stuck-task reaper applies to
+        every task, so this delivers the reaper's verdict without waiting for
+        its next sweep. An owner Stop or deadline already observed keeps its
+        own cause (``stop_stalled_invocation`` checks them first).
+        """
+        from lib.tasks_pkg.invocation import stop_stalled_invocation
+        for agent_id, silent, _note in self._beacon.stalled_agents():
+            child = getattr(self._agents.get(agent_id), '_child', None)
+            if isinstance(child, dict) and child.get('status') in ('pending', 'running'):
+                stop_stalled_invocation(child, silent_seconds=silent,
+                                        stall_timeout=self._beacon.stall_timeout)
 
     def _unsettled_status(self, agent_id: str, started_at: dict, terminated: bool) -> str:
         """One projection for uncommitted attempts, including stranded children."""

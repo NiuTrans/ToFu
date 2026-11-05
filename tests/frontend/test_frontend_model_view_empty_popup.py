@@ -29,23 +29,17 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
 
 from tests._runtime_sections import runtime_section_path
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -107,6 +101,7 @@ process.exit(0);
 
 
 def _run(mode: str = '') -> str:
+    require_node_modules('jsdom')
     harness = os.path.join(HERE, '_model_view_empty_popup_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
@@ -135,8 +130,6 @@ def _status(output: str, name: str):
     return None
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_empty_model_view_renders_placeholder_not_single_bar():
     output = _run()
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -144,8 +137,6 @@ def test_empty_model_view_renders_placeholder_not_single_bar():
     assert _status(output, 'l1_body_nonempty') == 'PASS', output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_nc_layer1_empty_body_collapses():
     """NEUTER L1: pre-fix openTextPreview escapes the empty text directly →
     the <pre> is empty (the single-bar popup). Proves L1 is load-bearing."""

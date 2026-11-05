@@ -37,7 +37,6 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -59,12 +58,6 @@ REPORT_RUNTIME_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'report-runtime.ts')
 
 
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
-
-
 _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
@@ -81,6 +74,8 @@ const dom = new JSDOM(
 const win = dom.window;
 global.window = win;
 global.document = win.document;
+global.Element = win.Element;
+global.AbortController = win.AbortController;
 global.localStorage = win.localStorage;
 global.console = console;
 
@@ -222,8 +217,6 @@ def _run_harness(
             pass
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_report_and_review_tab_open_does_not_autostart():
     proc = _run_harness(PAPER_JS)
     out = proc.stdout.strip()
@@ -233,8 +226,6 @@ def test_report_and_review_tab_open_does_not_autostart():
     assert out.count('PASS') >= 10, f'expected >=10 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_source_level_negative_control_step4_autostart_reintroduces_bug():
     """Revert step 4 to the old auto-start and prove the guard FAILS.
 

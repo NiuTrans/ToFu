@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from collections import UserDict
+import json
+import math
+from pathlib import Path
+import random
+from types import MappingProxyType
+
 import pytest
 
 from lib.conversation_sync import validation as contract_validation
@@ -191,6 +198,89 @@ def test_fast_success_predicate_matches_diagnostic_validator():
             assert contract_validation._SUCCESS_PREDICATES[schema_name](
                 candidate
             ) is diagnostic_valid, (schema_name, candidate)
+
+
+_WIRE_FIXTURES = Path(__file__).resolve().parents[2] / "contracts/fixtures/sync_v3"
+_REPLACEMENTS = (
+    None, True, False, 0, 1, -1, 1.5, float("nan"), float("inf"), "", "x",
+    "sha256:" + "a" * 64, [], [None], {}, {"undeclared": None},
+)
+
+
+def _document_paths(value, path=()):
+    yield path
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _document_paths(item, (*path, key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _document_paths(item, (*path, index))
+
+
+def _value_at(value, path):
+    for step in path:
+        value = value[step]
+    return value
+
+
+def _with_replacement(value, path, replacement):
+    if not path:
+        return replacement
+    copy = dict(value) if isinstance(value, dict) else list(value)
+    copy[path[0]] = _with_replacement(value[path[0]], path[1:], replacement)
+    return copy
+
+
+def _mutations(original, rng):
+    yield rng.choice(_REPLACEMENTS)
+    if isinstance(original, dict):
+        yield UserDict(original)
+        yield MappingProxyType(original)
+        yield {**original, "undeclaredMutationField": True}
+        if original:
+            dropped = rng.choice(list(original))
+            yield {key: item for key, item in original.items() if key != dropped}
+    elif isinstance(original, list):
+        yield tuple(original)
+        yield original[1:]
+        yield original + original[:1]
+    elif isinstance(original, bool):
+        yield int(original)
+    elif isinstance(original, int):
+        yield float(original)
+        yield bool(original % 2)
+        yield -original - 1
+        yield original + 2**63
+    elif isinstance(original, float):
+        yield int(original) if math.isfinite(original) else 0
+    elif isinstance(original, str):
+        yield original[:-1]
+        yield original + "!"
+        yield original + "x" * 4097
+
+
+@pytest.mark.parametrize("schema_name", ["ConversationSyncSnapshot", "ConversationTurnPage"])
+def test_specialized_predicates_match_diagnostics_on_mutated_wire_fixtures(schema_name):
+    """Mutated nodes of a real-shaped document get the diagnostic verdict.
+
+    Covers exact dict/int/float fast paths against bool, float-for-integer,
+    out-of-range, missing-required, undeclared-field, pattern/length and
+    non-dict Mapping values at every depth of the generated schema.
+    """
+    document = json.loads((_WIRE_FIXTURES / f"{schema_name}.json").read_text())
+    schema = OPENAPI_SCHEMAS[schema_name]
+    check = contract_validation._SUCCESS_PREDICATES[schema_name]
+    assert check(document) and not contract_validation._validate(schema, document, "$")
+    rng = random.Random(f"compiled-validation:{schema_name}")
+    verdicts = set()
+    # A fixed sample keeps the full-document diagnostic walk within unit time.
+    for path in rng.sample(list(_document_paths(document)), 160):
+        for mutated in _mutations(_value_at(document, path), rng):
+            candidate = _with_replacement(document, path, mutated)
+            diagnostic_valid = not contract_validation._validate(schema, candidate, "$")
+            assert check(candidate) is diagnostic_valid, (path, mutated)
+            verdicts.add(diagnostic_valid)
+    assert verdicts == {True, False}
 
 
 def test_failed_fast_predicate_preserves_every_diagnostic_violation():

@@ -89,7 +89,7 @@ canonical implementation; drift from it is caught by a guard test (§5).
 |---|-------|--------------------------|-------|
 | 1 | Frontend endpoint seam | typed domain clients in `frontend/src/api/` and `window.Api` in retained `frontend/src/runtime/sections/api.js` | `tests/frontend/test_frontend_api_contract.py` |
 | 2 | Transport + correlation | `frontend/src/api/transport.ts`; it mints `X-Request-ID`, which `server.py::_assign_req_id_and_log` honours and echoes | `tests/frontend/test_frontend_api_transport_vite.py` + server request-log |
-| 3 | Request parsing | `lib/request_parser.py` (`parse_body` / `require_str` / `optional_int` / …; raises `BadRequest` → auto-400) | `tests/diagnostics/test_request_parser.py` |
+| 3 | Request parsing | `lib/request_parser.py` (`parse_body` / `require_str` / `optional_int` / …; raises `BadRequest`, the one typed client fault owned by `lib/error_envelope` → auto-400) | `tests/diagnostics/test_request_parser.py` |
 | 4 | Response envelope | `lib/api_response.py` (`api_ok` / `api_error` / `api_not_found` / …, `sse_response`) | `tests/api/test_api_contract_drift.py` + `tests/api/test_api_response.py` |
 | 5 | Framework error boundary | `server.py` `@app.errorhandler(404/413/405/500/Exception)` — API paths always get the JSON envelope, never an HTML error page | `tests/api/test_api_response.py` |
 
@@ -116,20 +116,20 @@ route is a contract violation — the ratchets in §5 exist to reject it.
 
 ### Conversation sidebar search
 
-[`contracts/conversation_search_v2.json`](../../contracts/conversation_search_v2.json) owns `GET /api/v4/conversations/search?q=...&cursor=...`: bounded `items`, `nextCursor`, `coverage` (`ready`, `indexing`, `partial`) and non-sensitive `coverageReasons`. Hits contain match field/role/snippet and standalone metadata, never transcripts. Owner filtering precedes matching and metadata loading; foreign/deleted hits are withheld.
+[`contracts/conversation_search_v2.json`](../../contracts/conversation_search_v2.json) owns `GET /api/v4/conversations/search?q=...&cursor=...`: bounded `items`, `nextCursor`, `coverage` (`ready`, `indexing`, `partial`) and non-sensitive `coverageReasons`. Hits contain match field/role/snippet, the matching live main-lane Turn (`matchTurnId`/`matchTurnOrdinal`, null for title/id hits and retained archive text) and standalone metadata, never transcripts. Owner filtering precedes matching and metadata loading; foreign/deleted hits are withheld.
 Queries are bounded to 512 characters/32 terms and ordinary pages to 50 hits. Opaque cursors bind query/owner; empty pages with cursors are not exhausted searches. Storage failures remain errors, not empty successes. Timing logs contain length/count/elapsed time, never search text.
 `GET /api/v4/conversations/<conv_id>/diagnostic` is owner-scoped; [conversation diagnostics](CONVERSATION_DIAGNOSTICS.md) owns bounded reads, source fences, typed absence, upgrade errors and guards.
 
 ### Database path settings
 
 
-Panel entry reads a lightweight runtime snapshot: it must not hash or execute an engine binary, fingerprint source, recursively inspect authority contents, or perform fsync/WAL capability probes. Full launch verification remains mandatory at startup/switch admission, not settings entry. Filesystem summaries use read-only mount/free-space evidence; size is a cached background estimate. Candidate discovery is requested only by an explicit placement/scan action, independently of status rendering. A ready current backend is available; unknown next-launch readiness is not reported as “not installed”. `engine.engines.*.available` and `hasData` may be `null` when unverified; `availabilityState` reports `running`, `supported` or `unknown`, `launchVerification` is `not-checked`, and `filesystem.evidence` is `read-only`. `GET database/paths` returns `inProgress: true` with any cached candidates when another explicit scan owns the single-flight admission; it does not queue another scan.
+Panel entry reads a lightweight runtime snapshot: it must not hash or execute an engine binary, fingerprint source, recursively inspect authority contents, or perform fsync/WAL capability probes. Full launch verification remains mandatory at startup/switch admission, not settings entry. Filesystem summaries use read-only mount/free-space evidence; size is a cached background estimate. Full candidate capability discovery is requested only by an explicit placement/scan action, independently of status rendering. Automatic reconstructible index placement may use one memoized read-only mount/capacity and bounded metadata comparison; it never performs fsync or corpus scans during status rendering. A ready current backend is available; unknown next-launch readiness is not reported as “not installed”. `engine.engines.*.available` and `hasData` may be `null` when unverified; `availabilityState` reports `running`, `supported` or `unknown`, `launchVerification` is `not-checked`, and `filesystem.evidence` is `read-only`. `GET database/paths` returns `inProgress: true` with any cached candidates when another explicit scan owns the single-flight admission; it does not queue another scan.
 Database placement controls use per-section drafts and explicit Apply/Cancel. A toggle or candidate selection alone sends no write. Apply saves immediately within that section; closing discards unsaved drafts, while the enclosing settings Save/Cancel controls do not undo already applied database settings. Pending restart and fenced native exit constraints remain visible; full path diagnostics are disclosed on demand with copy controls. Entry/status refresh is single-flight within the active mount; teardown fences prior reads, probes, writes and confirmations. Failed refresh invalidates active claims instead of silently leaving old controls editable.
 
 `routes/api_v1/database_panel.py` owns placement ([storage contract](../STORAGE.md#settings-database-panel)); route definitions below use `/api/v1`, while the effective prefix follows the mounted major version.
 `GET /api/v1/database/status` reports optional `fastpath` for both SQLite and TofuDB, independently of required TofuDB `searchProjection` (`null` otherwise). Fast Path fields `enabled`, `mode`, `directory` describe the next-launch configuration, not runtime activation. `kind` identifies `native`, `sqlite`, or `unavailable`; `active` is a runtime witness (`null` when unknown), `activeDirectory` is the actual local authority/front, `restartRequired` compares configuration with the launch witness, and `locked`/`lockReason` prevent unsafe native disable/relocation. `authorityPath` and `shadowPath` identify the current serving authority and recovery shadow. Never infer activation from a saved checkbox or directory.
 `engine.nativeFastpath` remains the actual daemon launch witness (or `null`); an active native front is reported as `engine.authorityPath`, while `dataRoot` remains the durable deployment root. Projection fields: `required`, `directory` (active launch witness, empty if unavailable), `configuredDirectory` (custom base, empty for default), `defaultDirectory`, `pendingDirectory` (next launch), `restartRequired`. Custom bases are namespaced by canonical authority path. The panel renders loading/error states before enabling any configuration action; Fast Path and search use independent controls and pickers.
-`POST /api/v1/database/paths` accepts exactly one object: `{"fastPath":{"enabled":true,"directory":"/absolute/base"}}` for the selected SQLite or TofuDB backend, or TofuDB `{"searchProjection":{"directory":"/absolute/base"}}`. Native activation requires an explicitly selected existing writable persistent local disk base; memory/ephemeral/network paths and incompatible embedded/Normal-durability deployments are rejected. The native engine still owns launch-time capacity, measured fsync admission, lineage and restore validation. Saving only persists next-launch configuration (`TOFU_DB_FASTPATH_DIR` for native, `TOFU_STORAGE_FASTPATH*` for SQLite); it never copies or moves live authority data. Once native Fast Path is active or fenced by a retained `FASTPATH` marker, disabling or changing its base returns `409 fastpath_locked`: use stopped-server `fastpath-export` and explicitly select the verified exported authority instead. Empty projection directory restores `data/projections/tofudb-search`, not automatic fastest-disk selection; search stays enabled.
+`POST /api/v1/database/paths` accepts exactly one object: `{"fastPath":{"enabled":true,"directory":"/absolute/base"}}` for the selected SQLite or TofuDB backend, or TofuDB `{"searchProjection":{"directory":"/absolute/base"}}`. Native activation requires an explicitly selected existing writable persistent local disk base; memory/ephemeral/network paths and incompatible embedded/Normal-durability deployments are rejected. The native engine still owns launch-time capacity, measured fsync admission, lineage and restore validation. Saving only persists next-launch configuration (`TOFU_DB_FASTPATH_DIR` for native, `TOFU_STORAGE_FASTPATH*` for SQLite); it never copies or moves live authority data. Once native Fast Path is active or fenced by a retained `FASTPATH` marker, disabling or changing its base returns `409 fastpath_locked`: use stopped-server `fastpath-export` and explicitly select the verified exported authority instead. Empty projection directory selects automatic measured local index placement (`TOFU_INDEX_FASTPATH=auto`, at least a 3x metadata win); `off` or no eligible volume retains `data/projections/tofudb-search`. Nonempty custom directories retain priority. Only reconstructible indexes move; the selected database authority and search enablement remain unchanged. See [automatic index placement](../INDEX_FASTPATH.md).
 Saves return `ok`, `restartRequired` and updated state. No restart, migration or deletion is implicit. Restart requires explicit positive confirmation; a missing dialog bridge is not consent.
 Non-object, mixed, malformed, relative, unwritable, authority-overlapping or backend-incompatible projection requests fail without changing the active runtime. Panel preferences cannot silently supersede `TOFUDB_SEARCH_PROJECTION_DIR`. Validation uses disposable write probes, never authority-file contents.
 
@@ -200,10 +200,15 @@ duplicate record, but it does not weaken response redaction.
 ### Recovery with unconfirmed model usage
 
 Unconfirmed model usage retains `execution_token_usage_unknown` and `retryable: false`
-through native settlement, persistence and the localized error card. The original
-finite-budget execution remains closed; missing usage is never zero or settled by
-presentation. **Problem:** asking a nontechnical user to audit provider records
-leaves no usable recovery. **Decision:** the card offers a read-only safety check
+through native settlement, persistence and the localized error card; missing usage
+is never zero or settled by presentation. Every conversation turn (chat, Goal Mode,
+Flow) runs its account with the `continue` policy, so a refusal recorded by that
+account (`source: execution-budget`) offers the ordinary resumes like any failure.
+Refusals from the native model account or delegated swarm recovery keep the
+original finite-budget execution closed ([decision](CONVERSATION_SYNC_V3.md#unconfirmed-usage-forward-recovery)).
+**Problem:** asking a nontechnical user to audit provider records
+leaves no usable recovery. **Decision:** when no ordinary resume is offered, the
+card offers a read-only safety check
 and explicit confirmation of one new finite budget via the [conversation recovery
 command](CONVERSATION_SYNC_V3.md#unconfirmed-usage-forward-recovery). It preserves
 the original Turn, output and known usage; it does not replay its model request or
@@ -236,19 +241,59 @@ kind or frontend classifier duplicates the existing server override boundary.
 | Read / success | 200 | `api_ok` |
 | Created | 201 | `api_created` |
 | Deleted / no body | 204 | `api_no_content` |
-| Validation (missing/typed field) | 400 | `api_bad_request` — or raise `request_parser.BadRequest`, auto-converted |
+| Client fault: missing/typed field, or an operation invalid for the resource's current state | 400 | `api_bad_request` — or raise `lib.error_envelope.BadRequest` (the class `request_parser` raises), auto-converted |
 | Authn missing | 401 | `api_unauthorized` |
 | Authz refused | 403 | `api_forbidden` |
 | Missing resource | 404 | `api_not_found` |
 | Version/rev conflict, already-exists, already-running | 409 | `api_conflict` |
 | Body too large | 413 | `api_payload_too_large` |
-| Uncaught server fault | 500 | `api_internal_error` (or let it propagate — the §5 boundary converts) |
+| Uncaught server fault, including any builtin `ValueError` / `TypeError` | 500 | `api_internal_error` (or let it propagate — the §5 boundary converts) |
 | Transient overload (pool saturated, shed load) | 503 + `Retry-After` | `api_service_unavailable` |
 
 **Do not invent new statuses** for situations the table covers; a 200 with
 `{ok:false}` is a contract violation (one deliberate legacy exception:
 `api_v1/translate.py` mt-test reports logical failure with 200 —
-frozen in the drift baseline, do not copy it).
+frozen in the drift baseline, do not copy it). The exception covers only a
+missing key and the provider's typed `MtProviderError`; malformed fields
+are 400 and any other fault a redacted 500
+(`tests/translate/test_translate_mt_test_route.py`).
+
+**A builtin exception is never a client fault.** Problem: Python raises
+`TypeError`/`ValueError` for programming errors too, so a boundary that
+answers them with 400 and their raw text reports server bugs (for example an
+unexpected-keyword `TypeError` from a mixed-version process on every Stop) as
+caller mistakes, discloses internal text, and leaves no server log. Decision: only
+`BadRequest`, raised where the code knows the rejected value came from the
+caller, and typed domain outcomes (conflict, not found, storage taxonomy)
+choose a 4xx. Any other exception is a logged, redacted 500 under the
+disclosure boundary above. `BadRequest` subclasses `ValueError`, so
+in-process callers that catch `ValueError` keep their behavior. Alternatives
+rejected: carving known server faults out of a builtin mapping is unbounded;
+a conversation-only exception type would duplicate the `BadRequest` that
+every boundary already maps. Guards:
+`tests/conversation/test_conversation_command_error_taxonomy.py` (the
+conversation-sync routes) and
+`tests/conversation/test_conversation_adjacent_error_taxonomy.py` (Turn owner
+review, legacy human guidance and conversation search). Handlers elsewhere in
+`routes/` that still answer a builtin with 400 are migration debt, not
+precedent.
+
+**The storage taxonomy's own 400 is a typed rejection.** Problem:
+`storage_failure_response` answered `database_invalid_payload` (the only
+storage code that maps to 400: a request the authority refused, such as a
+malformed diagnostic or search cursor or an undeclared human-guidance choice;
+classification in [STORAGE.md](../STORAGE.md#failure-contract)) with an
+`internal` envelope and an ERROR log with traceback, so a caller's mistake read
+as a server failure. Decision: it answers like every other client fault, with
+the storage message as the string `error` (v4: `bad_request` problem) plus the
+`storageCode`/`retryAfterMs`/`operationId` receipt, and logs one
+`conversation.storage_rejected` WARNING without a traceback. Every other code
+keeps its answer; `database_protocol_error` stays a 500 whatever input
+provoked it, because the route cannot tell a caller's bad request from a
+broken frame or stale engine. Alternatives rejected: re-mapping protocol
+errors to 400 per route launders server faults; parsing the storage message
+for caller blame is brittle. Guard: `tests/api/test_api_response.py` checks the
+status and log class of every storage code.
 
 ### 2.4 Correlation
 
@@ -446,6 +491,41 @@ browser message array to clone. A source with a pending/running turn returns
  A successful clone stamps `settings.clonedFrom` with the
 source conversation id; the sidebar settings projection exposes that key and
 the conversation list renders a copy badge from it.
+| Clone | `POST /api/v4/conversations/{id}/clone` with `{conversationId,title}` | `{ok, conversationId, rev, turnCount, archiveCount}` |
+| Complete transcript export | `GET /api/v4/conversations/{id}/export?format=markdown` | `text/markdown` attachment `{id}.md`; `{ok, text}` JSON for the default `format=text` |
+
+All three lifecycle commands are owner-scoped receipt-backed commands. Delete is
+locally optimistic but the Undo action appears only after the server commit. A
+failed delete restores the local projection. Restore and clone are
+server-atomic and then hydrate through Conversation Sync v3. The client must
+never fetch a full transcript to prepare delete, PUT a browser snapshot to
+restore, or serialize a browser message array to clone. A source with a
+pending/running turn returns 409 for clone.
+ A successful clone stamps `settings.clonedFrom` with the
+source conversation id; the sidebar settings projection exposes that key and
+the conversation list renders a copy badge from it.
+
+Clone has no aggregate transcript-size ceiling. **Problem:** the clone held
+every source Turn projection in memory behind the 8 MiB single-document bound,
+so any long agent conversation failed permanently — every retry exhausted
+`database_resource_exhausted` and surfaced as a 503. **Decision:** the source
+Turn identities are mapped in one pass, then each Turn is materialized,
+rewritten and stored one at a time under the per-document
+`MAX_TURN_SNAPSHOT_BYTES` bound and the existing transaction envelope bound;
+large projections stage as shared blobs. Peak memory and the committed
+envelope are therefore independent of transcript length, and a Turn remains
+bounded exactly as it is on the ordinary append path. **Alternatives
+considered:** raising the aggregate limit spends memory proportional to the
+conversation inside one atomic transaction; a chunked multi-transaction clone
+loses the single-snapshot guarantee the contract states. The cost is decoding
+the source twice (identity pass, then content pass).
+
+Export is the human-facing record, not a model read: `format=markdown` pages
+the authority and renders **every** message, refusing the file when the pages
+cannot be stitched from one conversation revision or do not cover
+`msg_count`. The default `format=text` keeps the bounded HEAD+TAIL prose
+reference used by `@`-mention injection, whose consumer is a prompt rather
+than a saved file.
 
 Compaction archive inspection is owner-scoped; metadata stays cheap and the drawer opens the selected post-compaction result:
 
@@ -457,17 +537,25 @@ Compaction archive inspection is owner-scoped; metadata stays cheap and the draw
 | Read post-compaction messages | `GET /api/v4/conversations/{id}/compactions/{archiveId}?view=post` | `{ok, archive, view:"post", postMessages, postSnapshot}` |
 | Download pre-compaction snapshot | `GET /api/v4/conversations/{id}/compactions/{archiveId}?download=true` | unwrapped JSON attachment `{archive,messages}` |
 | Download post-compaction result | `GET /api/v4/conversations/{id}/compactions/{archiveId}?view=post&download=true` | unwrapped JSON attachment `{archive,view:"post",postMessages,postSnapshot}`; no pre-compaction body |
-| Run idle manual compaction | `POST /api/v4/conversations/{id}/compact` | `{ok, archiveId, tokensBefore, tokensAfter, tokenCountKind:"estimated", msgsBefore, msgsAfter, reductionPct, summaryPreview, receipt}` |
+| Run idle manual compaction (ordinary conversation) | `POST /api/v4/conversations/{id}/compact` | `{ok, archiveId, tokensBefore, tokensAfter, tokenCountKind:"estimated", msgsBefore, msgsAfter, reductionPct, summaryPreview, receipt}` |
+| Schedule a working-view compaction (protected conversation, or any conversation whose task is running) | `POST /api/v4/conversations/{id}/compact` | `{ok, scheduled:true, alreadyScheduled, requestId, requestedAt, protection, appliesAt}`; `protection` is `coordinator`, `project` or null (busy ordinary conversation); `appliesAt` is `next_model_call` (a running reply was woken) or `next_reply` |
+| Cancel a scheduled working-view compaction | `DELETE /api/v4/conversations/{id}/compact/scheduled/{requestId}` | `{ok, cancelled, applying}`; `cancelled` is false when that request is no longer pending |
 
-Manual compaction is not coordinator replacement or a harmless fresh working
-view. Protected Coordinator contexts return HTTP 409 with
-`coordinator_context_compaction_unsupported`; other conversations in a project
-with a coordinator binding history may conservatively return
-`project_context_compaction_unsupported`. The live-task 409 remains unchanged.
-These refusals preserve canonical source/report Turns, Attempts, binding and
-budget references; no summary purchase or partial archive/Turn mutation follows.
-The common persistence adapter repeats the protection before canonical
-compaction. No idle fresh-context endpoint or implicit rebind is provided.
+Manual compaction never rewrites a protected conversation: Coordinator contexts
+and other conversations in a project with a coordinator binding history keep
+their canonical source/report Turns, Attempts, binding and budget references.
+For them the same request returns 200 with `scheduled: true` and records one
+durable owner-scoped marker, also while a task runs; no summary is purchased
+and no archive or Turn changes in the request. The conversation's next model
+call compacts its working view, and ordinary checkpoint publication adopts it,
+which retires the marker. Repeating the request while it is pending returns the
+same `requestId` with `alreadyScheduled: true`. Ordinary conversations keep the
+idle-only rewrite; while their task runs the same request schedules the
+working-view marker (`protection: null`) instead of returning 409, and a
+withdrawn request is never applied by a later model call. The common persistence adapter repeats
+the protection before canonical compaction. No idle fresh-context endpoint or
+implicit rebind is provided; see
+[CONTEXT_COMPACTION.md](../CONTEXT_COMPACTION.md#coordinator-context-lifecycle).
 
 Archive metadata uses `schemaVersion=tofu.compaction-archive/v3`, millisecond
 `createdAt` and `tokenCountKind=estimated`; `payloadSize` measures stored-document bytes.
@@ -562,7 +650,8 @@ success envelopes in lockstep with the contract. Regenerate with
 | `GET/POST /api/v4/providers` | Lists or creates ProviderAccess bundles inside the same aggregate. |
 | `GET /api/v4/providers/templates` | Lists secret-free onboarding recipes as `{ok, items}`. Recipes are setup hints, not routing authority. |
 | `POST /api/v4/providers/templates/compile` | Accepts `{template_key, selected_model_ids?}` and returns a secret-free v2 ProviderAccess bundle for client-side review/staging; it does not persist. |
-| `POST /api/v4/providers/probe` | Authenticated discovery that returns transport facts plus a secret-free v2 ProviderAccess draft. It does not persist or echo credential plaintext. |
+| `POST /api/v4/providers/probe` | Authenticated discovery that returns transport facts plus a secret-free v2 ProviderAccess draft. It does not persist or echo credential plaintext. `listed_model_count` above `model_count` means the draft holds the ranked part of an oversized listing. |
+| `POST /api/v4/providers/{provider_id}/listed-models/import` | Lists the provider's `/models` with its saved credential and add-only imports every listed model not yet present, returning `{provider_id, listed_model_count, added_model_count, revision}`. An unknown provider is 404; `provider_listing_unavailable` and `provider_listing_empty` are 400. |
 | `GET/PATCH/DELETE /api/v4/providers/{provider_id}` | Reads, CAS-replaces, or deletes one Provider and its owner access resources. |
 | `PUT /api/v4/model-routing/credentials/{credential_id}/secret` | Replaces one encrypted credential secret outside the aggregate and advances its revision. |
 | `POST /api/v4/model-routing/migration/plan` | Produces a redacted, non-writing import plan and entity counts. |
@@ -658,7 +747,7 @@ rejects `providers`, `models`, and
 `model_catalog` with `legacy_model_routing_state_removed`. The former
 `/api/v4/model-catalog` surface is not registered.
 
-Artificial Analysis is an external, read-only Model enrichment, not a catalog authority. Authenticated owners read `GET /api/v4/model-intelligence/aa`, explicitly refresh with `POST /api/v4/model-intelligence/aa/refresh`, and save or clear their encrypted owner-scoped key with `PUT /api/v4/model-intelligence/aa/key` (`{api_key}`, maximum 256 characters). Responses expose only status, redacted key source/hint, attribution, fetch time, and scores keyed by exact `creator_id::model_id`; they never include the plaintext key or any ProviderAccess, Offering, Deployment, alias, or Route. Ordinary reads never wait on the external network: a bounded 24-hour public dataset cache is served while one background refresh refills stale data. OpenRouter pricing is a second external Model enrichment with an explicit write policy. `GET /api/v4/model-intelligence/openrouter-pricing` returns a read-only report that buckets each canonical Model as priced, fillable, official-covered, openrouter-free, unmatched, or drift (a priced Model whose USD list price disagrees with the OpenRouter row by more than 25% blended — a cross-check signal, never an auto-rewrite). `POST /api/v4/model-intelligence/openrouter-pricing/refresh` force-fetches the public keyless catalog and CAS-writes `list_pricing` only onto unpriced Models whose Creator has no official-direct coverage in the maintained pricing tables; officially priced Models are never rewritten, and all-zero OpenRouter rows never become a $0 list price (unknown stays unknown instead of impersonating an official free tier). The dataset shares the same bounded 24-hour cache/background-refresh budget as the AA enrichment.
+Artificial Analysis is an external, read-only Model enrichment, not a catalog authority. Authenticated owners read `GET /api/v4/model-intelligence/aa`, explicitly refresh with `POST /api/v4/model-intelligence/aa/refresh`, and save or clear their encrypted owner-scoped key with `PUT /api/v4/model-intelligence/aa/key` (`{api_key}`, maximum 256 characters). Responses expose only status, redacted key source/hint, attribution, fetch time, the AA Intelligence Index version every score belongs to (`index_version`, major.minor as AA reports it, null while unknown), and published scores keyed by exact `creator_id::model_id` (a Model AA lists without a current-version score has no entry); they never include the plaintext key or any ProviderAccess, Offering, Deployment, alias, or Route. Ordinary reads never wait on the external network: a bounded 24-hour public dataset cache is served while one background refresh refills stale data. OpenRouter pricing is a second external Model enrichment with an explicit write policy. `GET /api/v4/model-intelligence/openrouter-pricing` returns a read-only report that buckets each canonical Model as priced, fillable, official-covered, openrouter-free, unmatched, or drift (a priced Model whose USD list price disagrees with the OpenRouter row by more than 25% blended — a cross-check signal, never an auto-rewrite). `POST /api/v4/model-intelligence/openrouter-pricing/refresh` force-fetches the public keyless catalog and CAS-writes `list_pricing` only onto unpriced Models whose Creator has no official-direct coverage in the maintained pricing tables; officially priced Models are never rewritten, and all-zero OpenRouter rows never become a $0 list price (unknown stays unknown instead of impersonating an official free tier). The dataset shares the same bounded 24-hour cache/background-refresh budget as the AA enrichment.
 
 ### 2.10 Compact MCP tool summary
 
@@ -860,6 +949,16 @@ route once per page: a 404 falls back to the legacy resolve-then-PATCH pair and
 disables further probes until reload; any other failed response is returned
 without a second mutation attempt. `_localOnly` drafts remain cache-only.
 
+Every settings resolution treats the model choice (`model`, `modelRef`,
+`preferredProviderId`) as one unit: a conversation that already names a model
+keeps its own, and only one without a choice adopts the overrides'. A
+`{creator_id, model_id}` reference binds routing, so the stored `model`/`preset`
+follow its `model_id`; offering references and legacy picks keep their name.
+Merging the fields independently let a save made with another conversation's
+composer state pair this conversation's model name with that conversation's
+reference. Contract: `ResolveConvSettingsTest` in
+`tests/conversation/test_conv_config.py`.
+
 ### 2.16 Content-addressed Paper report start
 
 `POST /api/v4/paper/report/start` accepts either an ingest-minted
@@ -1047,6 +1146,25 @@ Swarm mailbox receipt timestamps (`submittedAt`, `inputInjectedAt`,
 `inputConfirmedAt`) are Unix epoch **milliseconds**, including numeric-string
 representations; lifecycle times such as `created_at` remain seconds.
 
+### Swarm agent stop
+
+`POST /api/v4/swarm/runs/<swarm_id>/agents/<agent_id>/stop` (scope
+`agents:swarm`) stops one running agent of the caller's live run and returns
+`{stopped: true, swarmId, agentId}`. It sends the model-facing `kill` tool's
+signal (`lib.swarm.integration.stop_swarm_agent` →
+`MasterOrchestrator.kill_agent`): the agent settles `cancelled` through its
+ordinary abort checkpoints and its coordinator receives that settlement;
+siblings and the run continue, and dependents start with the cancelled
+prerequisite as evidence. `swarm_id` is the exact run identity
+`swarms[].swarm_id` from the background-activity snapshot below, never the
+reusable session key or a task alias, so a later run that reuses the key or
+the agent ID is unreachable from an older row. 404 `swarm_agent_not_found`:
+no live run owned by the caller with that ID lists the agent (another owner's
+run is indistinguishable from none). 409 `swarm_agent_not_running`: the agent
+has no live invocation to signal — it is pending, already settled, or starting
+or finishing an attempt; the detail names the status. Spec:
+`tests/swarm/test_swarm_agent_stop.py`.
+
 ### 2.19 Background-activity snapshot
 
 `GET /api/v4/activity/background` answers one chrome question — "is anything
@@ -1054,6 +1172,8 @@ still executing now that the foreground turn has settled?" — for the
 authenticated owner. Sub-agent swarms routinely outlive their spawning turn
 (results arrive later as auto-dispatched inbox injects) and detached
 `run_command background=true` executions retain their originating `conv_id`.
+A delegated child's command keeps the conversation it ran in, although its
+completion is never published there ([task engine](../modules/task_engine.md#background-command-delivery-owner)).
 The snapshot remains owner-scoped; the conversation chip, tooltip and popover
 show only entries whose `conv_id` matches the active conversation. Switching
 conversations immediately reprojects the cached snapshot and closes the old
@@ -1109,6 +1229,9 @@ Rules:
   Background headers omit zero-count categories; individual rows explain actual
   waits rather than presenting every not-yet-started agent as generically queued.
 * `backgroundCommands` lists only `status == "running"` detached commands.
+  `command` is the launched text bounded by
+  `BackgroundCommandCompletion.command.maxLength` (`conversation_sync_v3.yaml`),
+  so an expanded activity row shows the same text as its completion card.
 
   Absence is not completion. Cards join `results[].backgroundCommandId` to conversation-scoped canonical queue/receipt evidence; optional outcomes follow `conversation_sync_v3.yaml`. Unknown legacy exit status means completed, not success. Activity hints wake one coalesced reader with a trailing refresh, not chat hydration. Queue enqueue alone emits no sync event; delivery commits do.
 * Both lists are empty in the steady state. A transient failure must keep the
@@ -1153,8 +1276,14 @@ is introduced. Preview/code-consent presentation follows [the render contract](.
   a redacted 500. The sole registered exception is best-effort locked-out
   telemetry for an already-unauthorized browser poll, whose response must
   remain the authentication boundary's 401 even when its body is malformed.
+* Application code that rejects a caller-supplied value (a missing command
+  field, an operation the resource's state forbids) raises the same
+  `BadRequest` from `lib.error_envelope`. It never relies on a builtin
+  `ValueError` reaching a route; a route never answers one with 400.
 * Query-string **path** args → `decode_proxy_path_arg('path')` (the VS Code
   proxy double-encodes; this seam undoes it, bounded).
+* Query-string **JSON** args → `decode_proxy_json_value(raw)` (same proxy;
+  JSON text never begins with `%`, so only a still-encoded value is decoded).
 
 ## 4. Carve-out registry
 
@@ -1188,6 +1317,10 @@ The bridge-secret transport namespace is also deliberately unversioned. In addit
 | `tests/api/test_api_contract_*_parity.py` (21 batch suites) | Per-batch wire parity (legacy keys byte-identical; additions only +ok/+error/+request_id) + shipped-source tripwires + front/back coordination anchors for every bare-array migration |
 | `tests/api/test_api_response_safe_route_rollout.py` | `@safe_route` rollout state; documents the handlers that must NOT be decorated (side-effecting except blocks) |
 | `tests/diagnostics/test_request_parser.py` | `BadRequest` → 400 mapping, typed extractors, AST rejection of raw `request.get_json()` calls, and broad-exception misclassification in `routes/**` |
+| `tests/conversation/test_conversation_command_error_taxonomy.py` | Any builtin exception answered with a 4xx in `routes/conversation_sync_v3.py`; an untyped command or read failure answered as anything but a logged, redacted 500 |
+| `tests/conversation/test_conversation_adjacent_error_taxonomy.py` | The same rule for Turn owner review, legacy human guidance and conversation search, on both majors: `BadRequest` keeps 400 + message + `field`; a builtin or a storage protocol failure is a logged 500 |
+| `tests/api/test_research_error_taxonomy.py`, `tests/api_keys/test_production_start_route.py` | The same rule for Research routes and every registered `POST /api/v{1,4}/tasks/start` starter: a builtin fault is a redacted 500, `BadRequest` keeps 400 + `field`, `LifecycleConflict` is 409 and a typed `LifecycleNotFound` (for example a deleted selected Research idea source) is a 404 carrying its message |
+| `tests/api/test_api_v1_service_fault_taxonomy.py` | The same rule for credential reveal, API-key creation, agent run, subscription-adapter accounts, media ingest, billing pages and checkout, evolution and database-panel paths: a builtin service fault is a redacted 500, a storage outage keeps the storage taxonomy, typed rejections keep 400 + message (MCP update apply: `tests/mcp_protocol/test_mcp_updates.py`, typed `MCPServerNotFound` → 404) |
 
 `@safe_route` note: the framework boundary (`server.py`) already converts
 uncaught exceptions on `/api/*` to the JSON 500 envelope, so `@safe_route` is
@@ -1253,9 +1386,39 @@ the original command foreground-owned; the response never invents success.
 Cross-cutting backend object contracts are defined once, machine-readably, and are
 never duplicated here: Project Brain v1 → `contracts/project_brain_v1.schema.json`;
 Research snapshot → `contracts/research_record_v1.schema.json`; Research Foundry
-program → `contracts/research_program_v1.schema.json`. See
+program → `contracts/research_program_v1.schema.json`; Coordinator task board
+(`GET /api/v4/project/coordination/progress?path=`, scope `conversations`,
+read-only) → `progressState` in `contracts/project_coordination_v1.schema.json`;
+channel accounts, threads and outbox (`/api/v4/channels/*`,
+`routes/api_v1/channels.py`, behavior [CHANNELS.md](../CHANNELS.md)) →
+`contracts/channels_v1.schema.json`. See
 [research cycle](../RESEARCH_CYCLE.md) for write-failure, snapshot-size, and checkpoint
 recovery boundaries.
+
+Global Router ([ROUTER.md](../ROUTER.md)) → `contracts/router_v1.schema.json`
+(DTOs generated into `frontend/src/api/router.generated.ts` by
+`scripts/gen_project_coordination_contract.py`; scope `conversations`, owner from
+the authenticated principal). `GET /api/v4/router` reads the binding view plus
+`workerModel` and never creates anything; `POST /api/v4/router` (empty body,
+`Idempotency-Key` required) ensures the owner's router home and conversation
+with a deterministic identity, so retries converge; a home that cannot be
+prepared is `503 router_home_unavailable`. `POST /api/v4/router/worker-model`
+`{path, workerModel|null}` sets or clears a bound Router's Worker model after
+route admission (400 unroutable, 403 unbound); `GET /api/v4/router/worker-model`
+`?path=` reads the same view for any Global or Project Router path without
+changing it (an unbound path answers `availability: unbound`, `workerModel: ''`).
+`GET /api/v4/router/instructions` (`cursor`, `includeCancelled`, or
+`instructionId` for one instruction with its applications; active and paused
+instructions are listed by default) and `POST
+/api/v4/router/instructions/{pause,resume,cancel}` `{instructionId}`
+(`Idempotency-Key` required) manage standing instructions: pause and resume are
+idempotent, cancellation is final and a cancelled instruction cannot be paused
+or resumed (400); unknown query or body fields are 400.
+
+The bootstrap `contracts/api_v4.yaml` deliberately carries only the API-major
+negotiation operations (its generator rejects other paths); product routes such
+as these are projected from `routes/api_v1/` with `@api_meta` declarations and
+their own domain schema, like every other coordination endpoint.
 Restart approval GET includes diagnostic `preparation` per [`restart_preparation_v1.json`](../../contracts/restart_preparation_v1.json): actual phase, elapsed seconds, optional remaining budget and update time; only the executable restart POST grants acceptance.
 
 Native non-streaming Chat completion responses expose `provider_id` from the

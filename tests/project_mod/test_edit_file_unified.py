@@ -32,7 +32,7 @@ def test_unified_schema_is_the_default_model_surface(monkeypatch):
     properties = parameters['properties']
     assert list(properties)[:3] == ['description', 'path', 'edits']
     assert properties['description']['maxLength'] == 120
-    assert parameters['required'] == ['description', 'edits']
+    assert parameters['required'] == ['edits']
     # One file per batch is named ONCE: the item carries `path` only to leave
     # that file, so it is not in the item's required list.
     assert 'path' not in properties['edits']['items']['required']

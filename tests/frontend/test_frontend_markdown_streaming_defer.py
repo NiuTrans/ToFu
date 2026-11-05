@@ -33,7 +33,7 @@ _BODY = r"""
 const { setup } = require(process.env.JSDOM_HARNESS);
 const hljsCalls = { highlight: 0, highlightAuto: 0 };
 const katexCalls = { count: 0 };
-const { check, report } = setup({
+const { check, report, window } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body></body>',
   targets: [process.argv[2], process.argv[4]],
@@ -55,6 +55,11 @@ const { check, report } = setup({
     },
   },
 });
+
+// The renderer fails closed without a sanitizer; install the real one on
+// this jsdom window (lazily read per render by core/markdown.js).
+global.DOMPurify = window.DOMPurify =
+  require(process.argv[3] + '/node_modules/dompurify')(window);
 
 const md = 'before\n\n```js\nconst x = 1;\n```\n\ninline $E = mc^2$ math';
 

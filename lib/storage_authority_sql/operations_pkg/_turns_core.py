@@ -150,6 +150,7 @@ _TURN_CHANGE_CAPTURE_OPERATIONS = frozenset({
     "turn.steer.commit",
     "turn.delete",
     "turn.event.record",
+    "turn.event.record_batch",
     "turn.projection.update",
     "turn.recover",
     "turn.related.announce",
@@ -389,7 +390,19 @@ def _turn_change_capture(
     clean_result = result
     attempt_events: list[Mapping[str, Any]] = []
     turn_projection_changes: list[Mapping[str, Any]] = []
-    if isinstance(result, Mapping):
+    if operation_name == "turn.event.record_batch":
+        # One ordinary record result per entry; their sync events keep entry order.
+        if not isinstance(result, list) or not all(isinstance(item, Mapping) for item in result):
+            raise StorageError(
+                "database_protocol_error", "Turn event batch returned an invalid result")
+        clean_result = []
+        for item in result:
+            item = dict(item)
+            private_events = item.pop("_conversationSyncAttemptEvents", [])
+            attempt_events.extend(
+                event for event in private_events if isinstance(event, Mapping))
+            clean_result.append(item)
+    elif isinstance(result, Mapping):
         clean_result = dict(result)
         private_events = clean_result.pop("_conversationSyncAttemptEvents", [])
         private_turn_change = clean_result.pop("_conversationSyncTurnPatch", None)
@@ -673,6 +686,7 @@ def _turn_change_capture(
         "turn.attempt.dispatch_worker",
         "turn.attempt.start",
         "turn.event.record",
+        "turn.event.record_batch",
         "turn.recover",
         "turn.related.announce",
         "turn.visible.sync",

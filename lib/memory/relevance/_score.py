@@ -1,11 +1,16 @@
-"""Single streaming BM25 core plus the public plain-text scorer.
+"""Single BM25 formula: streaming core, reusable corpus index, text scorer.
 
-The core retains only each document's length and query-term frequencies, never
-the corpus-wide token lists. Memory search, automatic prefetch, and generic
-snippet ranking share this formula so cost optimizations cannot drift scores.
+The streaming core retains only each document's length and query-term
+frequencies, never the corpus-wide token lists; body search uses it. The
+immutable :class:`TokenCorpusIndex` keeps one tokenized corpus's per-document
+term counts so repeated queries over an unchanged metadata corpus skip
+re-tokenization. Both feed the same final scoring pass, and memory search,
+automatic prefetch, and generic snippet ranking share it, so cost
+optimizations cannot drift scores.
 """
 
 import math
+from collections import Counter
 from collections.abc import Iterable
 
 from lib.log import get_logger
@@ -46,6 +51,17 @@ def _score_token_documents(
             document_frequency[term] += 1
         document_stats.append((document_length, term_frequency))
 
+    return _score_query_term_frequencies(
+        query_terms, document_stats, document_frequency, total_document_length)
+
+
+def _score_query_term_frequencies(
+    query_terms: set[str],
+    document_stats: list[tuple[int, dict[str, int]]],
+    document_frequency: dict[str, int],
+    total_document_length: int,
+) -> list[tuple[int, float]]:
+    """Final BM25 pass shared by the streaming core and the corpus index."""
     document_count = len(document_stats)
     if not document_count:
         return []
@@ -72,6 +88,56 @@ def _score_token_documents(
             score += inverse_document_frequency * numerator / denominator
         scores.append((index, score))
     return scores
+
+
+class TokenCorpusIndex:
+    """Immutable per-document term counts of one source-ordered corpus.
+
+    ``score(query)`` returns exactly what :func:`_score_token_documents`
+    returns for the same token documents: it derives the same query-term
+    statistics from retained counts and runs the same final pass. Equal token
+    strings share one object, so retention follows the corpus vocabulary.
+    """
+
+    __slots__ = ('_document_lengths', '_term_counts', '_total_document_length')
+
+    def __init__(self, token_documents: Iterable[list[str]]) -> None:
+        vocabulary: dict[str, str] = {}
+        document_lengths: list[int] = []
+        term_counts: list[dict[str, int]] = []
+        for tokens in token_documents:
+            document_lengths.append(len(tokens))
+            term_counts.append({
+                vocabulary.setdefault(term, term): frequency
+                for term, frequency in Counter(tokens).items()
+            })
+        self._document_lengths = tuple(document_lengths)
+        self._term_counts = tuple(term_counts)
+        self._total_document_length = sum(document_lengths)
+
+    def score(self, query: str) -> list[tuple[int, float]]:
+        """Return source-ordered BM25 scores for every indexed document."""
+        query_tokens = _tokenize(query)
+        if not query_tokens:
+            return []
+
+        query_terms = set(query_tokens)
+        document_stats: list[tuple[int, dict[str, int]]] = []
+        document_frequency = {term: 0 for term in query_terms}
+        for document_length, counts in zip(
+                self._document_lengths, self._term_counts):
+            term_frequency = {
+                term: counts[term] for term in query_terms if term in counts}
+            for term in term_frequency:
+                document_frequency[term] += 1
+            document_stats.append((document_length, term_frequency))
+
+        return _score_query_term_frequencies(
+            query_terms,
+            document_stats,
+            document_frequency,
+            self._total_document_length,
+        )
 
 
 def score_items(query: str, items: list[str]) -> list[tuple[int, float]]:

@@ -1,5 +1,54 @@
 # Free search in a real agent
 
+Contract v12 retains native related discovery listings in the evaluation
+observation. **Problem:** the adapter preserved primary and uncertain rows but
+dropped their pipeline-owned `similar_snippets`, hiding already observed URLs
+that the production formatter exposes. This is an adapter defect, reproduced
+with synthetic listings independently of a live task.
+
+**Decision:** preserve existing candidate order, then fill remaining slots with
+direct related listings, one per visible group per round. All rows share the
+same six-result allowance, exact URL validation, deduplication and text limits.
+Related listings are `unverified_candidate` observations: they grant discovery
+for a later fetch, never quotation evidence or verified page equivalence.
+Invalid parents, recursive metadata, arbitrary external-provider fields and raw
+source traces cannot grant this authority. No search ranking or tool schema is
+changed. Start a new cohort; never rewrite prior records or infer their missing
+observations from raw URL traces.
+
+**Alternatives:** discarding native discovery changes the product semantics;
+adding an unbounded side channel breaks equal result budgets; treating related
+snippets as fetched evidence invents support. Verify
+`test_search_candidate_projection.py` and the chronological navigation tests.
+
+Contract v11 separated raw Markdown fidelity from observed visible wording.
+**Problem:** v10 deliberately required copying Markdown syntax. A quotation
+that preserved every displayed word while omitting link/emphasis markup failed
+that presentation rule, even though its wording was present. That was a
+documented restriction, not a parser malfunction or evidence of invented facts.
+
+**Decision:** the prompt now permits omitting inline presentation. Report
+`quote_raw_observed` and `quote_rendered_observed` separately; either can satisfy
+`quote_observed`. Raw matching retains the previous whitespace/NFKC rules.
+The additional projection uses the same declared CommonMark parser as URL
+discovery, preserving literal text/code-span content within each inline block.
+It never substitutes link destinations, titles or image descriptions for words,
+joins separate blocks/fetches, interprets fenced code as nested Markdown, or
+strips literal HTML. Punctuation, qualifiers and word order still matter.
+The one chronological `observed_sources` owner admits both projections only
+after accepted successful discovery and fetching; hidden/unfetched text cannot
+earn credit. Delivered newlines remain intact until parsing.
+
+**Alternatives rejected:** regex stripping can invent text or eat literal code;
+an unrestricted semantic matcher can accept paraphrases without verifiable
+spans; requiring raw formatting mixes copying accuracy with observed wording.
+Existing records are immutable. Any retrospective sensitivity analysis is
+separate from their original cohort grades. Version 11 comparisons freeze their prompts
+and predicates before execution and still do not establish semantic entailment
+or search leadership. `test_search_quote_projection.py` covers multilingual
+inline forms, negative qualifiers, block boundaries and source authority. Worker
+identity also records the included pypdf reader alongside optional native extras.
+
 For a separate model-free, topic-balanced recorded-source diagnostic, see
 [`source-probe.md`](source-probe.md). Its coverage results are not agent scores.
 
@@ -18,8 +67,9 @@ Both return six results in the same title/URL/snippet format, with the same
 1800-character snippet ceiling. Both use the same explicit network proxy and
 verified TLS. No search API key or paid search service is required.
 
-The agent must discover URLs by searching, then fetch them before citing.
-Follow-up searches are allowed; arbitrary guessed URLs are not. This measures
+The agent must discover URLs by searching or following links delivered by a
+successful fetch, then fetch a page before citing it. Follow-up searches are
+allowed; arbitrary guessed URLs are not. This measures
 retrieval within that constrained workflow, not the products' full extraction,
 browser, cache or agent capabilities. Each operation starts a fresh process;
 cold startup and owned process cleanup are included in tool wall time.
@@ -46,6 +96,61 @@ from the agent, including when it retried the same HTTP-refused URL. Both arms
 now use the package's shared safe projection; internal exception text, headers
 and worker identities remain excluded. Earlier cohort records and grades stay
 unchanged. Native callback replay verifies this boundary without model calls.
+
+Contract v8 adds page-link navigation through one chronological
+`contracts.observed_sources` projection shared by dispatch, retrieved coverage
+and quote grading. **Problem:** search-only discovery prevented an agent from
+following a source's document index or references, so the diagnostic could not
+exercise multi-hop retrieval. **Decision:** accepted successful fetches of
+already observed URLs can introduce absolute links in their delivered text.
+Both arms keep the same eight-call, six-result, 20,000-character page and
+45-second operation budgets. No extra fetch, model call or agent loop is added.
+Earlier cohorts retain their original contracts and grades.
+
+The existing `markdown-it-py` dependency parses
+[CommonMark links](https://spec.commonmark.org/0.31.2/#links), including reference
+links and autolinks, with URL serialization disabled to preserve source path
+and query spelling. The manifest records its installed version. Complete
+standalone prose URL lines also count; punctuation is not repaired. Relative
+targets, code examples and image sources do not grant discovery. A bare final
+URL line in a truncated page is excluded because its identity may be incomplete.
+Only delivered text counts: hidden full bodies, search snippets, raw provider
+traces, failed outputs and rejected callbacks cannot authorize another read.
+Later discovery never gives an earlier unsolicited fetch retroactive credit.
+
+**Alternatives considered:** allowing arbitrary guessed paths measures a
+different workflow; parsing links only in the dispatcher would leave grading
+inconsistent; expanding the page or tool-call budgets would confound navigation
+with more work. A whole HTML/browser crawler is unnecessary for the Markdown
+source already delivered by the common fetcher. This extends the diagnostic;
+it does not establish general browsing or answer quality. Behavioral and native
+callback tests live in `tests/evaluations/test_search_observed_navigation.py`.
+
+Contract v10 separates execution-budget outcomes from other terminal errors,
+even when the native state says `done` and contains successful model rounds.
+**Problem:** a quota failure after the first search could otherwise retain
+`provenance_valid=true`. Conversely, treating every `retryable=false` as a
+cohort-wide blocker stops unrelated questions after one exhausts its budget.
+That flag describes retrying the same request, not the scope of the failure.
+
+**Decision:** the runtime's `budget_exceeded` is a comparable, failed task
+outcome when the remaining native model/tool provenance is valid. It never
+earns pass credit, even if partial content matches the answer. Other terminal
+errors invalidate their attempt. Safe kind/status/retryability facts remain
+visible; provider messages and private details remain excluded. Literal
+source/quote scores remain diagnostics, separate from outcome credit.
+
+Only explicit non-retryable `quota`, `permission` or `oauth_reauth` errors stop
+later tasks and arms after owned work settles. The incomplete summary records
+that stop; unrun attempts are not search failures. Other task errors do not
+silently retry or stop unrelated questions. Fetch errors remain ordinary agent
+observations. **Alternatives considered:** continuing after an account failure
+wastes calls; excluding budget exhaustion hides difficult unsolved tasks;
+stopping on every non-retryable error confuses request and cohort scopes;
+matching provider-message text duplicates the runtime's classification.
+Existing cohort artifacts are not rewritten. Tests in
+`tests/evaluations/test_search_terminal_errors.py` replay the native callback
+boundary without provider requests.
 
 The default command prints a manifest and makes no network/model calls:
 
@@ -97,9 +202,10 @@ admission. The production process retirement helper kills and joins owned
 workers and descendants on timeout. Unsettled work stops later dispatch.
 
 Each fact needs an exact reference value, an allowed primary hostname, and an
-8–350-character quotation actually delivered by a successful fetch of a
-search-discovered URL. Whitespace and Unicode compatibility normalization are
-allowed; paraphrases are not. Quote predicates check reference terms, not
+8–350-character quotation observed in a successful fetch of a previously
+observed URL, under the raw or visible-wording policy above. Whitespace and
+Unicode compatibility normalization are allowed; paraphrases are not.
+Quote predicates check reference terms, not
 semantic entailment. Wrong-page citations, rejected callbacks, missing or
 changed actual model/provider identity and changed paired tool fingerprints
 cannot certify a comparable success. Inspect individual fact flags and raw

@@ -645,7 +645,7 @@ impl UploadState {
                 }
                 let mut bytes = Vec::new();
                 bytes.try_reserve_exact(begin.event_bytes).map_err(|_| {
-                    io::Error::new(io::ErrorKind::OutOfMemory, "event upload allocation failed")
+                    crate::resource_exhaustion::reservation_failure("event upload allocation failed")
                 })?;
                 self.pending = Some(PendingUpload {
                     row: begin.snapshot,

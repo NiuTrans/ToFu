@@ -37,6 +37,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import pytest
 
+from tests.support.motion_media import install_motion_media_doubles as _fake_media
+
 pytestmark = pytest.mark.unit
 
 TEST_OWNER_USER_ID = 1
@@ -277,7 +279,7 @@ def test_podcast_worker_phase_vocabulary(podcast_env, phash, monkeypatch):
     """phase_started source→script→audio with indexes; script sub-step
     progress events flow through generate_script's on_event."""
     import lib.paper.podcast_engine.worker as PE
-    from lib.paper.podcast_runtime import _new_podcast_task
+    from tests.support.paper_podcast import new_podcast_task as _new_podcast_task
 
     def _script_with_steps(**kw):
         kw['on_event']({'type': 'progress', 'phase': 'script',
@@ -305,7 +307,7 @@ def test_podcast_worker_generating_row_then_done(podcast_env, phash, monkeypatch
     """P-UX4: the row says 'generating' mid-run and 'done' at the end —
     it must never LINGER as generating (that would read as interrupted)."""
     import lib.paper.podcast_engine.worker as PE
-    from lib.paper.podcast_runtime import _new_podcast_task
+    from tests.support.paper_podcast import new_podcast_task as _new_podcast_task
 
     seen = {}
 
@@ -325,7 +327,7 @@ def test_podcast_worker_generating_row_then_done(podcast_env, phash, monkeypatch
 
 def test_podcast_error_row_never_lingers_generating(podcast_env, phash, monkeypatch):
     import lib.paper.podcast_engine.worker as PE
-    from lib.paper.podcast_runtime import _new_podcast_task
+    from tests.support.paper_podcast import new_podcast_task as _new_podcast_task
 
     def _boom(**kw):
         raise RuntimeError('script llm dead')
@@ -344,7 +346,7 @@ def test_podcast_abort_keeps_script_as_script_only(podcast_env, phash, monkeypat
     """§3.4F: abort after the script landed → the partial product is kept
     as a script_only row (degrade_reason tells the truth)."""
     import lib.paper.podcast_engine.worker as PE
-    from lib.paper.podcast_runtime import _new_podcast_task
+    from tests.support.paper_podcast import new_podcast_task as _new_podcast_task
 
     _insert_report(phash)
     task = _new_podcast_task('podcast_ux04', phash, 'short', 'zh', 'alloy', None, user_id=TEST_OWNER_USER_ID)
@@ -416,41 +418,6 @@ def _engine_task(tmp_path, monkeypatch, **over):
               quality='draft', parallel=2, width=1080, height=1440)
     kw.update(over)
     return _new_motion_task(_motion_task_id(), **kw, user_id=TEST_OWNER_USER_ID)
-
-
-def _fake_media(monkeypatch):
-    import re as _re
-
-    def fake_render(project_dir, output, **kw):
-        with open(output, 'wb') as f:
-            f.write(b'mp4')
-        return {'ok': True, 'output': output, 'elapsed': 0.1}
-
-    def fake_probe(path, **kw):
-        idx = os.path.join(os.path.dirname(path), 'index.html')
-        dur = 4.0
-        if os.path.isfile(idx):
-            m = _re.search(r'data-duration="([0-9.]+)"',
-                           open(idx, encoding='utf-8').read())
-            if m:
-                dur = float(m.group(1))
-        return {'codec': 'h264', 'width': 1080, 'height': 1440, 'fps': 30.0,
-                'duration': dur, 'has_audio': False}
-
-    def fake_concat(inputs, output, **kw):
-        with open(output, 'wb') as f:
-            f.write(b'mp4')
-        return {'ok': True, 'output': output, 'duration': 8.0, 'mode': 'copy'}
-
-    def fake_mux(video, audio, output, **kw):
-        with open(output, 'wb') as f:
-            f.write(b'mp4')
-        return {'ok': True, 'output': output, 'duration': 8.0}
-
-    monkeypatch.setattr('lib.motion_video.render_project', fake_render)
-    monkeypatch.setattr('lib.motion_video.probe_video', fake_probe)
-    monkeypatch.setattr('lib.motion_video.concat_mp4s', fake_concat)
-    monkeypatch.setattr('lib.motion_video.mux_audio_video', fake_mux)
 
 
 def _fake_tts(monkeypatch):
@@ -695,8 +662,8 @@ def test_podcast_lookup_surfaces_interrupted(flask_client, podcast_env, phash):
 def test_podcast_poll_reaps_stalled_task(
         flask_client, podcast_env, phash, monkeypatch):
     """The podcast poll route rides the shared TaskRuntime stall reaper."""
-    from lib.paper.podcast_runtime import (
-        _new_podcast_task, _podcast_runtime)
+    from lib.paper.podcast_runtime import _podcast_runtime
+    from tests.support.paper_podcast import new_podcast_task as _new_podcast_task
     tid = f'podcast_stall_{uuid.uuid4().hex[:8]}'
     _new_podcast_task(
         tid, phash, 'short', 'zh', 'alloy', None,

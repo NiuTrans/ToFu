@@ -415,18 +415,29 @@ def test_worker_applies_refresh_deadline_to_first_poll(monkeypatch):
     assert waits == [17]
 
 
-def test_unauthenticated_start_keeps_catalog_worker_absent(monkeypatch):
+def test_slow_login_discovery_runs_off_boot_and_unauthenticated_worker_joins(monkeypatch):
+    import threading
     codex_catalog.stop_codex_catalog_refresher(timeout=0)
     monkeypatch.setattr(codex_catalog, '_worker_thread', None)
     monkeypatch.setattr(codex_catalog, '_worker_started', False)
-    monkeypatch.setattr('lib.oauth.token_store.load_token', lambda _name: {})
-    thread = mock.Mock(side_effect=AssertionError('must remain thread-free'))
-    monkeypatch.setattr(codex_catalog.threading, 'Thread', thread)
-
-    assert codex_catalog.start_codex_catalog_refresher() is False
+    entered, release = threading.Event(), threading.Event()
+    caller = threading.get_ident()
+    def resolve(_name):
+        assert threading.get_ident() != caller
+        entered.set()
+        assert release.wait(5)
+        return {}
+    monkeypatch.setattr('lib.oauth.token_store.load_token', resolve)
+    try:
+        assert codex_catalog.start_codex_catalog_refresher() is True
+        assert entered.wait(5)
+        assert codex_catalog.start_codex_catalog_refresher() is False
+        assert codex_catalog.stop_codex_catalog_refresher(timeout=0) is False
+    finally:
+        release.set()
+        assert codex_catalog.stop_codex_catalog_refresher(timeout=5) is True
     assert codex_catalog._worker_thread is None
     assert codex_catalog._worker_started is False
-    thread.assert_not_called()
 
 
 def test_worker_researches_discovery_then_throttles_unchanged_catalog(monkeypatch):

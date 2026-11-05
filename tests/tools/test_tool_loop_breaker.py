@@ -1699,6 +1699,25 @@ class TestStagnationEnvControls:
 
 
 class TestCleanFinishSettlement:
+
+    def test_production_acceptance_preserves_remaining_chat_work(self):
+        from lib.tasks_pkg.handlers.motion_video import _mark_background_task_accepted
+        task, rs = _task(), _rs()
+        _mark_background_task_accepted(task, 'produce_slides',
+                                       {'ok': True, 'task_id': 'slides_owned'}, 0)
+        with registered_chat_task(task):
+            assert finish_after_background_task_acceptance(
+                task, rs, round_num=0, tid='abcdef12') is False
+        assert not task.get('_toolLoopCleanFinish')
+        assert not task.get('content')
+        task['_backgroundTaskAccepted'] = {
+            'tool': 'compute_wait', 'taskId': 'owned_dependency',
+            'message': 'Waiting for the accepted dependency.',
+        }
+        with registered_chat_task(task):
+            assert finish_after_background_task_acceptance(
+                task, rs, round_num=1, tid='abcdef12') is True
+
     def test_background_acceptance_finishes_without_polling_round(self):
         task, rs = _task(), _rs()
         task['_backgroundTaskAccepted'] = {

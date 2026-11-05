@@ -20,6 +20,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from lib.conversation_sync.settled_rows import (
+    SettledDict,
+    memo_get,
+    memo_put,
+    settle_unless_same,
+)
+
 _MAX_EXECUTION_ID_CHARS = 256
 _MAX_LLM_ROUND_TEXT_CHARS = 64
 
@@ -244,9 +251,27 @@ def tool_round_with_execution_identity(
     """
     if not isinstance(value, Mapping):
         return value
-    result = dict(value)
     normalized_attempt = _identity_text(attempt_id)
     normalized_task = _identity_text(task_id)
+    if type(value) is SettledDict:
+        # A settled occurrence never changes, so its stamp is computed once.
+        key = ("execution-identity", normalized_attempt, normalized_task,
+               bool(overwrite))
+        stamped = memo_get(value, key)
+        if stamped is None:
+            stamped = memo_put(value, key, settle_unless_same(value, _stamped_round(
+                value, normalized_attempt, normalized_task, overwrite)))
+        return stamped
+    return _stamped_round(value, normalized_attempt, normalized_task, overwrite)
+
+
+def _stamped_round(
+    value: Mapping[str, Any],
+    normalized_attempt: str,
+    normalized_task: str,
+    overwrite: bool,
+) -> dict[str, Any]:
+    result = dict(value)
     existing_attempt, existing_task = execution_identity(value)
     if ((existing_task and existing_task != normalized_task)
             or (existing_attempt and existing_attempt != normalized_attempt)):
@@ -268,15 +293,26 @@ def tool_rounds_with_execution_identity(
     """Copy a round list and stamp each mapping with one execution identity."""
     if not isinstance(values, (list, tuple)):
         return []
-    return [
-        tool_round_with_execution_identity(
-            value,
-            attempt_id=attempt_id,
-            task_id=task_id,
-            overwrite=overwrite,
-        )
-        for value in values
-    ]
+    normalized_attempt = _identity_text(attempt_id)
+    normalized_task = _identity_text(task_id)
+    key = ("execution-identity", normalized_attempt, normalized_task,
+           bool(overwrite))
+    stamped_rounds = []
+    for value in values:
+        if type(value) is SettledDict:
+            stamped = memo_get(value, key)
+            if stamped is None:
+                stamped = memo_put(value, key, settle_unless_same(value, _stamped_round(
+                    value, normalized_attempt, normalized_task, overwrite)))
+        else:
+            stamped = tool_round_with_execution_identity(
+                value,
+                attempt_id=attempt_id,
+                task_id=task_id,
+                overwrite=overwrite,
+            )
+        stamped_rounds.append(stamped)
+    return stamped_rounds
 
 
 def projection_history_with_execution_identity(

@@ -10,9 +10,12 @@ from __future__ import annotations
 import hashlib
 import re
 
+import orjson
+
 from lib.storage.errors import StorageError
 from lib.storage.generated_project_dispatch_contract import SPEC
-from ._common import _dump, _integer, _required_text
+from lib.storage.protocol import validate_finite_json_numbers
+from ._common import _integer, _required_text
 from ._records import _record_get_owned, _record_list_owned, _record_put_owned, _record_delete_owned
 
 HEADS = SPEC['namespaces']['heads']
@@ -58,7 +61,13 @@ def _revision(payload, field):
 def _document(value, maximum):
     if not isinstance(value, dict):
         _invalid('Dispatch document must be an object')
-    size = len(_dump(value))
+    # Wire bounds count the caller's canonical JSON. The SQL record encoder may
+    # intern projection-shaped values, which must never admit a larger document.
+    validate_finite_json_numbers(value)
+    try:
+        size = len(orjson.dumps(value, option=orjson.OPT_SORT_KEYS))
+    except (TypeError, orjson.JSONEncodeError):
+        _invalid('Dispatch document is not serializable')
     if size > maximum:
         _invalid('Dispatch document exceeds transport bound')
     return size

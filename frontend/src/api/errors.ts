@@ -265,3 +265,29 @@ export function apiFailure(error: unknown): ApiFailure {
     cause: error,
   };
 }
+
+/* "Try again later" answers. A 500 qualifies only when nothing attributes it
+ * to the backend (no response request ID, no structured error body): then a
+ * proxy or a replaced worker answered. A backend 500 is a real failure and
+ * must reach the user instead of being repeated forever. */
+const TRANSIENT_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);
+const TRANSIENT_STORAGE_CODES = new Set(['database_busy', 'database_unavailable', 'database_timeout']);
+
+function failureRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : {};
+}
+
+/** A transport or availability failure that an identical repeat can outlive.
+ * User cancellation and every definitive rejection are not transient. */
+export function isTransientApiFailure(error: unknown): boolean {
+  const failure = failureRecord(error);
+  const status = Number(failure.status || 0);
+  if (status === 0) return failure.code === 'network' || failure.code === 'timeout';
+  if (TRANSIENT_HTTP_STATUSES.has(status)) return true;
+  const body = failureRecord(failure.body);
+  if (status === 500) {
+    return !failure.serverRequestId && !failure.envelope && !failure.problem && !body.error;
+  }
+  return TRANSIENT_STORAGE_CODES.has(String(failureRecord(failure.envelope).storageCode
+    ?? failureRecord(body.error).storageCode ?? body.storageCode ?? ''));
+}

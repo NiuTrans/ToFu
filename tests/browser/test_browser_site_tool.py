@@ -1,5 +1,6 @@
 """Executable site-capability boundaries; no live browser or account requests."""
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,11 +9,11 @@ import pytest
 from lib.browser import adapters
 from lib.browser.site_tool import site_tool
 
-# The modelplaza site pack ships with bundles/meituan (internal builds only);
+# The modelplaza site pack ships with bundles/yourprovider (internal builds only);
 # these boundary tests name it explicitly, so the module skips when the pack
 # is absent (opensource tree) instead of misreporting adapter behavior.
 if not (Path(__file__).resolve().parents[2]
-        / 'bundles' / 'meituan' / 'site_packs' / 'modelplaza.json').is_file():
+        / 'bundles' / 'yourprovider' / 'site_packs' / 'modelplaza.json').is_file():
     pytest.skip('modelplaza site pack is not shipped in this build',
                 allow_module_level=True)
 
@@ -34,8 +35,9 @@ def test_discover_inspect_and_invoke_share_adapter_schema(runtime, monkeypatch):
     assert command['input_schema'] == adapters.get_adapter('modelplaza').command('search').input_schema
     seen = []
     monkeypatch.setattr(adapters, 'invoke_adapter', lambda *a, **k: seen.append((a, k)) or {'ok': True, 'result': []})
+    runtime.cancel_event = abort = object()
     assert json.loads(site_tool({'site': 'modelplaza', 'operation': 'search', 'params': {'query': 'Claude'}}, runtime))['ok']
-    assert seen[0][1] == {'owner_user_id': '41', 'client_id': 'device-a'}
+    assert seen[0][1] == {'owner_user_id': '41', 'client_id': 'device-a', 'cancel_event': abort}
 
 
 @pytest.mark.parametrize('query', ['site:platform.claude.com/docs thinking', 'after:2026-01-01', 'intext:signature'])
@@ -101,6 +103,7 @@ def test_native_invoke_cannot_bypass_pacing(monkeypatch):
         def __init__(self, *a, **k): pass
         def __enter__(self): return self
         def __exit__(self, *a): pass
+        def site_scope(self, scope): return nullcontext(self)
     monkeypatch.setattr(adapters, 'BrowserPage', Page)
     seen = []
     adapter = adapters.SiteAdapter(id='paced-fixture', name='Fixture', domains=('example.com',), commands=(adapters.AdapterCommand('search', 'test', min_interval_s=12, cooldown_s=300, output_schema={'type': 'array'}, handler=lambda *a: seen.append(1) or []),))

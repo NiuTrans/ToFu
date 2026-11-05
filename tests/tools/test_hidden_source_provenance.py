@@ -206,7 +206,11 @@ def test_settle_pipeline_forwards_provenance_and_model_reference(monkeypatch, xu
     assert ('Original source retained' in str(model)) is omitted
     assert 'SECRET' not in str(model)
     if omitted:
-        assert evidence['artifactRef'] in str(model)
+        from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository, resolve_artifact_ref
+        reference = resolve_artifact_ref(task, json.loads(model)['artifactRef'], user_id=17)
+        assert reference == evidence['artifactRef']
+        recovered = ToolResultArtifactRepository().read_range(user_id=17, artifact_ref=reference)
+        assert recovered['content'] == 'redacted original'
         assert sink.value.text() == 'redacted original'
     else:
         assert 'Document updated successfully' in str(model)
@@ -243,10 +247,12 @@ def test_fetch_readgate_opt_in_only_for_original_source(monkeypatch, gate):
     from types import SimpleNamespace
     from lib.tasks_pkg.handlers.search import _handlers as handler
     # No network/LLM/write: stub the received observation and local rendering.
-    item = {'page_content': 'Full received page' if not gate else '',
+    item = {'url': 'https://example.org/received',
+            'page_content': 'Full received page' if not gate else '',
             'filtered_chars': 18 if not gate else 0,
             'error_msg': 'read gate rejected' if gate else None}
     if gate:
+        item['reason'] = 'irrelevant'
         item['fetched_source'] = 'READGATE_RECOVERY_NEEDLE'
     monkeypatch.setattr(handler, '_load_search_backend', lambda: (
         SimpleNamespace(_fetch_url_one=lambda *a, **k: item), None))
@@ -257,6 +263,7 @@ def test_fetch_readgate_opt_in_only_for_original_source(monkeypatch, gate):
         {'_userId': 17}, {}, 'fetch_url', 'fetch',
         {'url': 'https://example.org/received'}, 0, {}, {}, None, False)
     assert capture_result(source).source_omitted is gate
+    assert capture_result(source).execution_status == 'ok'
     delivery = deliver(source)
     assert ('Original source retained' in delivery.model_text) is gate
     if gate:

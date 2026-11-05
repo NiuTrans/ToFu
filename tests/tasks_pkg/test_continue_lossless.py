@@ -3,7 +3,10 @@
 Covers the Continue / resume flow introduced to fix the two losses the user
 called out (historical tool-call content + reasoning/thinking content):
 
-  • OpenAI / DeepSeek / Qwen / GLM / Kimi / Doubao / MiniMax / ERNIE / LongCat
+  • DeepSeek
+      — tool calls/results and unsigned reasoning_content must round-trip.
+
+  • OpenAI / Qwen / GLM / Kimi / Doubao / MiniMax / ERNIE / LongCat
       — tool_calls + tool results must round-trip.
       — thinking / thought_signature / extra_content MUST NOT be injected
         (those APIs reject or silently strip vendor extensions).
@@ -30,6 +33,7 @@ No real LLM calls, no Flask, no DB.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import os
 import sys
@@ -43,7 +47,6 @@ if PROJECT_ROOT not in sys.path:
 from lib.model_info import (
     model_requires_thinking_signature_replay,
     model_requires_thought_signature_on_tool_calls,
-    model_supports_assistant_prefill,
 )
 from lib.chat.turn_builder import scan_continue_checkpoint
 from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
@@ -110,14 +113,6 @@ class TestModelCapabilities:
                   'longcat-flash'):
             assert not model_requires_thinking_signature_replay(m), m
             assert not model_requires_thought_signature_on_tool_calls(m), m
-
-    def test_anthropic_rejects_assistant_prefill(self):
-        assert not model_supports_assistant_prefill('claude-opus-4-7')
-        assert not model_supports_assistant_prefill('claude-sonnet-4-5')
-
-    def test_others_tolerate_assistant_prefill(self):
-        for m in ('gpt-4o', 'qwen3-max', 'gemini-2.5-flash', 'kimi-k2.6'):
-            assert model_supports_assistant_prefill(m), m
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1125,7 +1120,7 @@ class TestAnthropicSignatureCapture:
 
 
 class TestOpenAICompatReasoningDetails:
-    """The PRODUCTION path for aws.claude-opus-4.8: the sankuai gateway is
+    """The PRODUCTION path for aws.claude-opus-4.8: the example-corp gateway is
     OpenAI-compat (no protocol=anthropic), and streams the Claude thinking
     signature OpenRouter-style as `reasoning_details:[{type:thinking,
     signature:...}]`. Capture it on the way in, rebuild it on replay."""
@@ -1268,7 +1263,6 @@ from lib.tasks_pkg.segments import (  # noqa: E402
     assemble_segments,
     reconstruct_tool_messages_from_segments,
     rehydrate_segments,
-    resume_prefill_from_segments,
     segments_to_json,
     tool_history_from_segments,
 )
@@ -1334,17 +1328,6 @@ class TestSegmentReconstructionParity:
             'arguments': '{"path":"safe.py"}',
         }]
 
-        assert resume_prefill_from_segments(
-            [None, {'type': 'text', 'terminal': False}, {
-                'type': 'text', 'terminal': True, 'deliverable': True,
-                'text': 'partial answer',
-            }],
-            'gpt-4o', finish_reason='aborted') == 'partial answer'
-        assert resume_prefill_from_segments(
-            [{'type': 'text', 'terminal': True, 'deliverable': True,
-              'text': {'bad': 'text'}}],
-            'gpt-4o', finish_reason='aborted') is None
-
     def test_assemble_ignores_non_text_sidecars(self):
         task = _task_with_rounds([{
             'roundNum': 1, 'llmRound': 0, 'toolCallId': 'valid',
@@ -1386,6 +1369,66 @@ class TestSegmentReconstructionParity:
         assert from_seg == from_rounds
         assert from_seg[0]['tool_calls'][0]['extra_content'] == \
             {'google': {'thought_signature': 'gem'}}
+
+    def test_cold_segment_replay_retains_responses_items_per_occurrence(self):
+        """Reused call/item IDs and round zero stay local to the owning attempt."""
+        rounds = []
+        expected_items = []
+        for attempt in ('old', 'new'):
+            items = [
+                {'type': 'reasoning', 'id': 'rs-reused',
+                 'encrypted_content': f'synthetic-{attempt}-a', 'summary': []},
+                {'type': 'reasoning', 'id': 'rs-reused',
+                 'encrypted_content': f'synthetic-{attempt}-b', 'summary': []},
+                {'type': 'reasoning', 'id': 'rs-reused',
+                 'encrypted_content': f'synthetic-{attempt}-a', 'summary': []},
+            ]
+            expected_items.append(deepcopy(items))
+            for ordinal, call_id in enumerate(('call-reused', 'call-sibling'), 1):
+                round_entry = self._round(
+                    ordinal, 0, call_id, 'read_files', '{}',
+                    f'{attempt} result {ordinal}')
+                round_entry.update(attemptId=f'attempt-{attempt}',
+                                   taskId=f'task-{attempt}')
+                # The sidecar belongs to the second occurrence of each batch,
+                # not whichever round happens to be first or shares its ID.
+                if ordinal == 2:
+                    round_entry['_responsesItems'] = items
+                rounds.append(round_entry)
+
+        task = _task_with_rounds(rounds)
+        original_task = deepcopy(task)
+        thin = json.loads(json.dumps(segments_to_json(
+            assemble_segments(task, merged=rounds))))
+        original_thin = deepcopy(thin)
+        assert all('_round' not in segment and '_responsesItems' not in segment
+                   for segment in thin)
+        rehydrated = rehydrate_segments(thin, rounds)
+        original_rehydrated = deepcopy(rehydrated)
+        from_segments = reconstruct_tool_messages_from_segments(rehydrated)
+        from_rounds = _reconstruct_tool_call_messages(rounds)
+
+        assert task == original_task
+        assert thin == original_thin
+        assert rehydrated == original_rehydrated
+        assert from_rounds is not None
+        assert [message.get('_responses_items') for message in from_rounds
+                if message.get('tool_calls')] == expected_items
+        assert from_segments == from_rounds
+        assert [[call['id'] for call in message['tool_calls']]
+                for message in from_segments if message.get('tool_calls')] == [
+            ['call-reused', 'call-sibling'], ['call-reused', 'call-sibling'],
+        ]
+        assert [message['content'] for message in from_segments
+                if message.get('role') == 'tool'] == [
+            'old result 1', 'old result 2', 'new result 1', 'new result 2',
+        ]
+
+        cold_row = {'role': 'assistant', 'content': '',
+                    'toolRounds': rounds, 'segments': thin}
+        original_row = deepcopy(cold_row)
+        assert _build_assistant_messages(cold_row) == from_rounds
+        assert cold_row == original_row
 
     def test_thin_without_rehydrate_drops_extra_content(self):
         """NC-ish: reconstructing from the THIN segments (no rehydrate) loses

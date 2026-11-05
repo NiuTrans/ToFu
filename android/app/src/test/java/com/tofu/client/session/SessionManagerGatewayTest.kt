@@ -17,6 +17,35 @@ import org.junit.Test
 
 /** Observable gateway contracts: credential destination, cookies, handoff and stale writes. */
 class SessionManagerGatewayTest {
+    @Test fun editing_auth_or_alias_during_password_post_blocks_late_session_promotion() = runTest {
+        for (edit in listOf("auth", "alias", "delete")) {
+            lateinit var h: Harness
+            h = Harness(profile()) { request ->
+                if (request.method == "POST") {
+                    h.dao.row = when (edit) {
+                        "auth" -> h.profile.copy(authType = AuthType.NONE)
+                        "alias" -> h.profile.copy(alias = "renamed")
+                        else -> null
+                    }
+                    reply(request, 302, cookie = "code-server-session=late; Path=/dev/")
+                } else if (request.url.encodedPath.endsWith("api/v4/meta")) reply(request, 404)
+                else reply(request, body = """<form class="login-form" method="post"><input type="hidden" name="base" value="."><input type="password" name="password"></form>""")
+            }
+            assertTrue(edit, h.manager.login(h.profile) is LoginResult.NeedsInteractiveSso)
+            assertTrue(edit, h.dao.stamps.isEmpty())
+        }
+    }
+
+    @Test fun profile_deleted_during_discovery_never_receives_a_password() = runTest {
+        lateinit var h: Harness
+        h = Harness(profile()) { request ->
+            h.dao.row = null
+            reply(request, body = """<form class="login-form" method="post"><input type="hidden" name="base" value="."><input type="password" name="password"></form>""")
+        }
+        assertTrue(h.manager.login(h.profile) is LoginResult.NeedsInteractiveSso)
+        assertFalse(h.requests.any { it.method == "POST" })
+    }
+
     private val base = "https://host.example:8443/dev/proxy/15000/"
     private fun profile(auth: AuthType = AuthType.CODE_SERVER_PASSWORD) = Profile(id = 1, alias = "test", baseUrl = base, authType = auth)
 
@@ -30,8 +59,8 @@ class SessionManagerGatewayTest {
         override suspend fun update(profile: Profile): Int { row = profile; return 1 }
         override suspend fun deleteById(id: Long) { row = null }
         override suspend fun setCookieHost(id: Long, host: String?): Int { row = row?.copy(cookieHost = host); return 1 }
-        override suspend fun setCookieHostIfUrlMatches(id: Long, expectedUrl: String, host: String): Int {
-            if (row?.id != id || row?.baseUrl != expectedUrl) return 0
+        override suspend fun setCookieHostIfCurrent(id: Long, expectedUrl: String, expectedAlias: String, expectedAuthType: AuthType, host: String): Int {
+            if (row?.id != id || row?.baseUrl != expectedUrl || row?.alias != expectedAlias || row?.authType != expectedAuthType) return 0
             stamps += host; row = row?.copy(cookieHost = host); return 1
         }
         override suspend fun touchLastUsed(id: Long, timestamp: Long) = 1

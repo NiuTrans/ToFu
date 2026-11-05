@@ -39,6 +39,7 @@ def _tool_owner_id(fn_args: dict) -> int:
 
 def _execute_timer_create(fn_args):
     """Persist one durable watcher and release the current model task."""
+    from lib.scheduler._shared import CONTINUATION_TOOL_CHOICES, capture_continuation_policy
     from lib.scheduler.timer import create_timer, start_timer_loop
 
     check_instruction = str(fn_args.get("check_instruction") or "")
@@ -62,12 +63,12 @@ def _execute_timer_create(fn_args):
     parent_config = parent_task.get("config", {}) if parent_task else {}
     # Preserve explicit tool choices and browser identity without granting
     # default web search to every bare watcher. Missing continuation choices
-    # fall back to the target conversation through build_task_config.
-    tools_config = {key: parent_config[key] for key in (
-        "projectPath", "searchMode", "fetchEnabled", "codeExecEnabled",
-        "browserEnabled", "browserClientId", "imageGenEnabled",
-        "memoryEnabled", "autoTranslate", "uiLang",
-    ) if key in parent_config}
+    # fall back to the target conversation through build_task_config. The
+    # creating turn's model route, depth, prompt and tool exposure ride along
+    # so the continuation runs as the agent that set the watcher.
+    tools_config = {key: parent_config[key] for key in CONTINUATION_TOOL_CHOICES
+                    if key in parent_config}
+    tools_config.update(capture_continuation_policy(parent_config))
     poll_interval = _coerce_int_arg(
         "poll_interval", fn_args.get("poll_interval", 60), 60
     )

@@ -158,11 +158,11 @@ def test_capability_protocol_filter_and_candidate_budget_are_forwarded(
 def test_grouped_capability_listing_reads_and_indexes_one_authority_once(
     monkeypatch,
 ) -> None:
-    import lib.model_routing.routing as routing
+    from lib.model_routing import selection_resolution
 
     repository, boundary = _owner_with_image_route(41)
     original_get = repository.get
-    original_normalize = routing.normalize_document
+    original_normalize = selection_resolution.normalize_document
     reads = []
     normalizations = []
 
@@ -175,7 +175,7 @@ def test_grouped_capability_listing_reads_and_indexes_one_authority_once(
         return original_normalize(document, *args, **kwargs)
 
     monkeypatch.setattr(repository, "get", counted_get)
-    monkeypatch.setattr(routing, "normalize_document", counted_normalize)
+    monkeypatch.setattr(selection_resolution, "normalize_document", counted_normalize)
 
     groups = list_capability_route_groups(
         repository,

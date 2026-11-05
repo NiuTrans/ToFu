@@ -2,9 +2,16 @@
 
 Conversation completions use the existing durable queue + inbox handoff lane.
 An idle conversation gets one collective wake only after all registered
-commands have published their durable results.
-Headless commands retain queryable results until completed-history eviction or process
-exit; running entries are never evicted. Controls are scoped to their owner.
+commands have published their durable results. The receiving conversation is
+fixed at launch by ``lib.tasks_pkg.conversation_delivery``: a child invocation
+runs under its parent's conversation id, but its commands publish nowhere.
+Headless and child commands retain queryable results until completed-history
+eviction or process exit; running entries are never evicted. Controls are
+scoped to their owner.
+A failed publication stays ``failed`` and retries with backoff. It settles as
+``undeliverable`` (one WARNING, no restart record) only once the authority
+confirms its owner conversation absent and no live flow can still create it
+(docs/STORAGE_OPERATIONS.md).
 
 Durability (POSIX): every background command also writes a record directory
 under ``data/background_commands/<command_id>/`` — its output streams to
@@ -13,6 +20,12 @@ exit-code sentinel. After a restart the sweep below delivers finished
 results, reattaches to still-running processes (queryable via ``poll``,
 stoppable via ``kill``), and reports processes that died with the server.
 The model never learns about the restart unless the command actually died.
+
+Credential redaction survives the restart without persisting a secret: the
+record keeps each selected vault entry's name and opaque write revision, and a
+result rebuilt without the launching worker's in-memory values re-resolves
+them only while every revision holds. Otherwise the retained output is
+withheld behind a typed notice (docs/contracts/TOOL_EXECUTION_POLICY.md).
 """
 from __future__ import annotations
 
@@ -24,7 +37,7 @@ import shutil
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, NamedTuple
 
 from lib.log import get_logger
 from lib.tools.resource_policy import tool_result_cache_capacity
@@ -39,6 +52,11 @@ _lock = threading.Lock()
 _recovery_in_progress = False
 _recovery_scan_failed = False
 _recovery_incomplete_conversations: set[tuple[int, str]] = set()
+# Delivery statuses after which nothing further is published for a result.
+_SETTLED_DELIVERY = frozenset({'queued', 'not_applicable', 'undeliverable'})
+# A launching flow may create its conversation after its task returns (Feishu
+# persists the exchange afterwards). Fixed deadline, never hardware-derived.
+OWNER_CREATION_GRACE_S = 600.0
 
 
 
@@ -118,7 +136,10 @@ def release_completion_envelope(*, command_id: str, conv_id: str, user_id: int) 
 
 
 def conversation_results_complete(*, conv_id: str, user_id: int) -> bool:
-    """True when every known command for this owner/conversation is published.
+    """True when every known command for this owner/conversation has settled.
+
+    Settled means published, or confirmed undeliverable: an absent owner can
+    never publish, so it must not hold a restored conversation's wake hostage.
 
     A finished process is still pending until its durable receipt commits.
     Startup scans all records before allowing a completion wake, so a result
@@ -130,7 +151,7 @@ def conversation_results_complete(*, conv_id: str, user_id: int) -> bool:
             return False
         return all(
             entry['done'].is_set()
-            and entry['state']['delivery_status'] == 'queued'
+            and entry['state']['delivery_status'] in _SETTLED_DELIVERY
             for entry in _registry.values()
             if entry.get('conv_id') == conv_id and entry.get('user_id') == user_id
         )
@@ -205,30 +226,41 @@ def background_command_result(command: str, command_id: str, *,
                               has_conversation: bool = True) -> str:
     from lib.tools.background_guidance import background_command_guidance
 
+    from lib.tasks_pkg.conversation_delivery import storage_free_runtime
+
     guidance = background_command_guidance(
         authority_catalog=task.get('_executable_tool_catalog'),
         has_conversation=has_conversation,
+        outlives_run=storage_free_runtime(task),
     )
     return (f'$ {command}\n\n[Command moved to background: {command_id}. '
             f'{guidance}]')
 
 
 def start_background_command(*, task: dict[str, Any], command: str,
-                             execute: Any, config: dict | None = None) -> str:
+                             execute: Any, config: dict | None = None,
+                             credentials: Any = None) -> str:
     """Register controls before starting exactly one detached worker.
 
     ``execute`` is called as ``execute(bg_task, exec_ctx)`` where exec_ctx
     carries ``command_id``, ``wrapped_command`` (POSIX durable wrapper, or
     None on platforms without it), ``note_spawn(pid, pgid)``, and
-    ``build_result(aborted=...)``. Callers must supply an execution closure
+    ``build_result(aborted=..., runner_result=...)``, where ``runner_result``
+    is the runner's own result for the wrapper. Callers must supply an execution closure
     that does not retain foreground presentation/task objects. A failed
     thread start releases its registry entry and durable record.
+    ``credentials`` are the vault entry names the command requests; the
+    record keeps their names and revisions, never their values.
     """
+    from lib.tasks_pkg.conversation_delivery import completion_conversation_id
     from lib.tasks_pkg.handlers._background_command import _delivery_config
 
     command_id = f'bg_{uuid.uuid4().hex[:12]}'
     bg_task = BackgroundCommandTask(task)
-    delivery_task = {key: bg_task.get(key) for key in ('convId', '_userId')}
+    # Decided once, at launch: a child invocation's convId names its parent's
+    # conversation, which must never receive or be woken by this result.
+    delivery_task = {'convId': completion_conversation_id(task),
+                     '_userId': bg_task.get('_userId')}
     delivery_config = _delivery_config(config)
     done = threading.Event()
     state: dict[str, Any] = {
@@ -238,7 +270,10 @@ def start_background_command(*, task: dict[str, Any], command: str,
                             and delivery_task.get('_userId') else 'not_applicable'),
     }
     paths, record = _create_record(command_id, command, task,
-                                   state['started_at'])
+                                   state['started_at'],
+                                   conv_id=delivery_task['convId'],
+                                   delivery_config=delivery_config,
+                                   credentials=credentials)
 
     def _note_spawn(pid: Any, pgid: Any) -> None:
         if record is None or not pid:
@@ -259,15 +294,18 @@ def start_background_command(*, task: dict[str, Any], command: str,
         'wrapped_command': (_wrap_for_record(command, paths)
                             if paths is not None else None),
         'note_spawn': _note_spawn,
-        'build_result': (lambda aborted=False:
-                         _result_from_record(record, paths, aborted=aborted)),
+        'build_result': (lambda aborted=False, runner_result='':
+                         _result_from_record(record, paths, aborted=aborted,
+                                             runner_result=runner_result,
+                                             redaction=_injected_redaction(record))),
     }
     # The execution context carries command restrictions/credentials. It is
     # owned only by the worker, not retained in the completed registry entry.
     copied_context = contextvars.copy_context()
     entry = {'done': done, 'state': state, 'task': bg_task,
              'launch_task_id': str(task.get('id') or ''),
-             'user_id': task.get('_userId'), 'conv_id': task.get('convId') or ''}
+             'user_id': task.get('_userId'), 'conv_id': delivery_task['convId'],
+             'origin_conv_id': str(task.get('convId') or '')}
 
     def _worker() -> None:
         error = None
@@ -287,16 +325,16 @@ def start_background_command(*, task: dict[str, Any], command: str,
             entry['task'] = None
             done.set()
         if delivery_task.get('convId') and delivery_task.get('_userId'):
-            from lib.tasks_pkg.handlers._background_command import _queue_completion
-            published = _queue_completion(
+            status = deliver_completion(
                 task=delivery_task, config=delivery_config,
                 command_id=command_id, command=command, result=state['result'])
             with _lock:
-                state['delivery_status'] = 'queued' if published else 'failed'
-        # The durable record survives ONLY an undelivered result; anything
-        # delivered (or with nowhere to deliver) is settled.
-        if paths is not None and state['delivery_status'] in (
-                'queued', 'not_applicable'):
+                state['delivery_status'] = status
+        else:
+            _note_unpublished(command_id, entry['launch_task_id'])
+        # The durable record survives ONLY an unsettled result; a delivered,
+        # undeliverable or headless (nowhere to deliver) result is settled.
+        if paths is not None and state['delivery_status'] in _SETTLED_DELIVERY:
             _remove_record_dir(paths['dir'])
         if state['delivery_status'] == 'queued':
             wake_completed_background_batch(delivery_task['convId'], delivery_task['_userId'])
@@ -328,6 +366,7 @@ def register_handed_off_command(*, command_id: str, task: dict[str, Any],
     record makes poll and kill work while it drains; unlike an explicitly
     backgrounded command, its already-running shell has no restart record.
     """
+    from lib.tasks_pkg.conversation_delivery import completion_conversation_id
     with _lock:
         spawned_at = getattr(task, 'spawned_at', None)
         elapsed = max(0.0, time.monotonic() - spawned_at) if spawned_at else 0.0
@@ -336,7 +375,8 @@ def register_handed_off_command(*, command_id: str, task: dict[str, Any],
             'task': task,
             'launch_task_id': str(task.get('id') or ''),
             'user_id': task.get('_userId'),
-            'conv_id': task.get('convId') or '',
+            'conv_id': completion_conversation_id(task),
+            'origin_conv_id': str(task.get('convId') or ''),
             'state': {
                 'command': command, 'result': None, 'error': None,
                 'finished': False, 'started_at': time.time() - elapsed,
@@ -364,12 +404,11 @@ def finish_handed_off_command(*, command_id: str, result: str,
         entry['done'].set()
 
 
-def set_handed_off_delivery(command_id: str, published: bool) -> None:
+def set_handed_off_delivery(command_id: str, status: str) -> None:
     with _lock:
         entry = _registry.get(command_id)
         if entry is not None:
-            entry['state']['delivery_status'] = ('queued' if published
-                                                  else 'failed')
+            entry['state']['delivery_status'] = status
             _prune_finished()
 
 
@@ -382,7 +421,7 @@ def _prune_finished() -> None:
     """
     finished = [(cid, entry) for cid, entry in _registry.items()
                 if entry['done'].is_set()
-                and entry['state']['delivery_status'] in ('queued', 'not_applicable')]
+                and entry['state']['delivery_status'] in _SETTLED_DELIVERY]
     excess = len(finished) - tool_result_cache_capacity()
     if excess > 0:
         finished.sort(key=lambda item: item[1]['state']['finished_at'])
@@ -398,9 +437,11 @@ def _owned(entry: dict | None, user_id: Any) -> bool:
 def _snapshot(command_id: str, entry: dict) -> dict[str, Any]:
     state = entry['state']
     finished = entry['done'].is_set()
+    # Activity shows a command under the conversation it ran in, which for a
+    # child invocation is not the conversation that receives its completion.
     return {
         'command_id': command_id, 'command': state['command'],
-        'conv_id': entry.get('conv_id', ''),
+        'conv_id': entry.get('origin_conv_id', entry.get('conv_id', '')),
         'status': 'completed' if finished else 'running',
         'result': state['result'] if finished else None,
         'error': state['error'], 'started_at': state['started_at'],
@@ -449,18 +490,25 @@ def kill_background_command(command_id: str, *, user_id: Any = None, task_id: st
     return True
 
 
-def list_background_commands(*, user_id: Any = None) -> list[dict[str, Any]]:
+def list_background_commands(*, user_id: Any = None,
+                             task_id: str | None = None) -> list[dict[str, Any]]:
+    """The owner's commands; an optional task_id keeps only that task's launches."""
+    from lib.background_command_projection import bounded_completion_preview
     with _lock:
         result = []
         for cid, entry in _registry.items():
-            if not _owned(entry, user_id):
+            if not _owned(entry, user_id) or (task_id is not None and entry.get(
+                    'launch_task_id', str((entry.get('task') or {}).get('id') or '')) != task_id):
                 continue
             item = _snapshot(cid, entry)
             item.pop('result')
             item.pop('error')
-            item['command'] = item['command'][:200]
             result.append(item)
-        return result
+    # The activity popover expands a running row to this text; sharing the
+    # completion card's bound keeps both views of one command identical.
+    for item in result:
+        item['command'] = bounded_completion_preview({'command': item['command']})['command']
+    return result
 
 
 def task_effect_snapshot(*, task_id: str, user_id: Any) -> dict:
@@ -479,11 +527,100 @@ def task_effect_snapshot(*, task_id: str, user_id: Any) -> dict:
                 'commands':sorted(commands,key=lambda row:row['command_id'])}
 
 
+def deliver_completion(*, task: dict[str, Any], config: dict | None,
+                       command_id: str, command: str, result: str) -> str:
+    """Publish one finished command's completion and return its delivery status.
+
+    ``queued``: the durable receipt committed. ``failed``: retryable, because
+    storage was unavailable, an ACK was lost, the owner read could not answer,
+    or the absent owner may still be created. ``undeliverable``: the owner is
+    confirmed absent and no live flow can create it; settled here exactly once.
+    """
+    from lib.background_command_delivery import CompletionOwnerAbsent
+    from lib.tasks_pkg.handlers._background_command import _queue_completion
+    try:
+        published = _queue_completion(
+            task=task, config=config, command_id=command_id,
+            command=command, result=result)
+    except CompletionOwnerAbsent as absence:
+        if not _owner_absence_is_final(command_id):
+            logger.info('[BackgroundCommand:%s] completion owner not present yet; '
+                        'retrying while it can still be created: %s', command_id, absence)
+            return 'failed'
+        _settle_undeliverable(command_id, str(absence))
+        return 'undeliverable'
+    return 'queued' if published else 'failed'
+
+
+def _owner_absence_is_final(command_id: str) -> bool:
+    """Whether no live flow can still create this completion's owner conversation.
+
+    A registered result waits until its launching task is no longer live and
+    OWNER_CREATION_GRACE_S has passed since that was first observed: a flow may
+    create its conversation only after its task returns. A record recovered
+    after a restart is unregistered; its launcher and every creation flow it
+    owned ended with the previous process.
+    """
+    with _lock:
+        entry = _registry.get(command_id)
+        launch_task_id = '' if entry is None else entry.get('launch_task_id') or ''
+    if entry is None:
+        return True
+    if _launcher_live(launch_task_id):
+        with _lock:
+            entry['state'].pop('owner_absent_since', None)
+        return False
+    now = time.monotonic()
+    with _lock:
+        absent_since = entry['state'].setdefault('owner_absent_since', now)
+    return now - absent_since >= OWNER_CREATION_GRACE_S
+
+
+def _note_unpublished(command_id: str, launch_task_id: str) -> None:
+    """Say once why nothing publishes this result; ``poll`` still reads it.
+
+    ``launcher_running``: the launching task can still poll it.
+    ``launcher_settled``: only a holder of the command ID (such as a parent
+    the launcher reported it to) can read it before history eviction.
+    """
+    reason = 'launcher_running' if _launcher_live(launch_task_id) else 'launcher_settled'
+    logger.info('[BackgroundCommand:%s] completion not published: its launching '
+                'task owns no conversation delivery; result retained for poll '
+                '(reason=%s)', command_id, reason)
+
+
+def _launcher_live(task_id: str) -> bool:
+    if not task_id:
+        return False
+    from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_STATUSES
+    from lib.tasks_pkg.manager import chat_task_runtime
+    task = chat_task_runtime.get(task_id)
+    return task is not None and task.get('status') not in TASK_REPLAY_TERMINAL_STATUSES
+
+
+def _settle_undeliverable(command_id: str, reason: str) -> None:
+    """Record the terminal status and its single WARNING; drop retry state."""
+    with _lock:
+        entry = _registry.get(command_id)
+        if entry is not None:
+            state = entry['state']
+            if state.get('delivery_status') == 'undeliverable':
+                return
+            state['delivery_status'] = 'undeliverable'
+            for key in ('delivery_retry_at', 'delivery_retry_attempts',
+                        'owner_absent_since'):
+                state.pop(key, None)
+            entry.pop('completion_envelope', None)
+    logger.warning('[BackgroundCommand:%s] completion undeliverable, settled '
+                   'without further retry: %s', command_id, reason)
+
+
 def retry_failed_background_deliveries() -> int:
     """Retry due receipts fairly, with one serial publisher and bounded work.
 
     Failed originals stay recoverable. Exponential backoff bounds serialization,
-    storage calls and error logs; success releases the existing durable record.
+    storage calls and error logs; success releases the existing durable record,
+    and so does settling a confirmed-absent owner as undeliverable.
     """
     now = time.monotonic()
     deadline = now + 1.0
@@ -511,28 +648,29 @@ def retry_failed_background_deliveries() -> int:
             state['delivery_inflight'] = True
             conv_id, user_id = entry['conv_id'], entry['user_id']
             command, result = state.get('command') or '', state.get('result') or ''
-        published = False
+        status = 'failed'
         try:
-            from lib.tasks_pkg.handlers._background_command import _queue_completion
-            published = _queue_completion(
+            status = deliver_completion(
                 task={'convId': conv_id, '_userId': user_id}, config=None,
                 command_id=command_id, command=command, result=result,
             )
         finally:
             with _lock:
                 state.pop('delivery_inflight', None)
-                if published:
-                    state['delivery_status'] = 'queued'
-                    state.pop('delivery_retry_at', None)
-                    state.pop('delivery_retry_attempts', None)
-                else:
+                state['delivery_status'] = status
+                if status == 'failed':
                     attempts = min(9, state.get('delivery_retry_attempts', 0) + 1)
                     state['delivery_retry_attempts'] = attempts
                     state['delivery_retry_at'] = time.monotonic() + min(300.0, 2.0 ** attempts)
-        if not published:
+                else:
+                    state.pop('delivery_retry_at', None)
+                    state.pop('delivery_retry_attempts', None)
+        if status == 'failed':
             continue
         if _posix_durable():
             _remove_record_dir(os.path.join(_records_root(), command_id))
+        if status != 'queued':
+            continue
         wake_completed_background_batch(conv_id, user_id)
         published_count += 1
     with _lock:
@@ -570,17 +708,31 @@ def _record_paths(rdir: str) -> dict[str, str]:
 
 
 def _create_record(command_id: str, command: str, task: dict,
-                   started_at: float):
-    """Mint the record directory; (paths, record) or (None, None)."""
+                   started_at: float, *, conv_id: str,
+                   delivery_config: dict, credentials: Any = None):
+    """Mint the record directory; (paths, record) or (None, None).
+
+    ``conv_id`` is the launch-time delivery owner, never re-derived after a
+    restart; ``origin_conv_id`` only keeps the activity display. Likewise
+    ``delivery_config`` is the launch-time completion config: a result
+    recovered after a restart must wake the conversation with the launching
+    turn's model and project, not with server defaults. ``credentials``
+    becomes ``{entry: revision}`` (``{}`` when none were requested, None
+    when they could not be recorded), read before the worker resolves them.
+    """
     if not _posix_durable():
         return None, None
+    from lib.message_queue import freeze_queue_payload
     rdir = os.path.join(_records_root(), command_id)
     paths = _record_paths(rdir)
     record = {
         'command_id': command_id, 'command': command,
         'task_id': str(task.get('id') or ''),
-        'conv_id': str(task.get('convId') or ''),
+        'conv_id': conv_id,
+        'origin_conv_id': str(task.get('convId') or ''),
         'user_id': task.get('_userId'),
+        'delivery_config': freeze_queue_payload(delivery_config),
+        'credentials': _credential_revisions(command_id, credentials),
         'started_at': started_at,
         'pid': None, 'pgid': None, 'pid_starttime': None,
     }
@@ -592,6 +744,63 @@ def _create_record(command_id: str, command: str, task: dict,
                      command_id, exc)
         return None, None
     return paths, record
+
+
+def _credential_revisions(command_id: str, credentials: Any) -> dict[str, str] | None:
+    from lib.credentials_vault import run_command_credential_revisions
+    try:
+        return run_command_credential_revisions(credentials)
+    except Exception as exc:
+        # The worker's own resolution reports the request; recovery withholds.
+        logger.debug('[BackgroundCommand:%s] credential revisions unrecorded: %s',
+                     command_id, type(exc).__name__)
+        return None
+
+
+class _RecordRedaction(NamedTuple):
+    """How one record's retained output is scrubbed before it is read."""
+
+    redactor: Any = None
+    withheld: str = ''
+
+
+_WITHHELD_UNRECORDED = (
+    'Output withheld (credential_record_missing): this record does not say '
+    'which vault credentials the command received, so its output cannot be '
+    'scrubbed of their values. The exit status is kept; inspect the '
+    "command's effects instead of its output")
+
+
+def _recorded_redaction(record: dict) -> _RecordRedaction:
+    """Redaction for a record read without its launching worker's values.
+
+    Startup recovery and reattached watchers use it. A vault read failure
+    propagates so recovery retries rather than delivering unscrubbed output.
+    """
+    recorded = record.get('credentials')
+    if recorded == {}:
+        return _RecordRedaction()
+    if not isinstance(recorded, dict):
+        return _RecordRedaction(withheld=_WITHHELD_UNRECORDED)
+    from lib.credentials_vault import (
+        RecordedCredentialUnavailable, resolve_recorded_run_command_env)
+    from lib.project_mod.run_command import credential_redactor
+    try:
+        return _RecordRedaction(credential_redactor(
+            resolve_recorded_run_command_env(recorded)))
+    except RecordedCredentialUnavailable as unavailable:
+        return _RecordRedaction(withheld=(
+            f'Output withheld (credential_unresolvable): {unavailable} after '
+            'this command started, so its output cannot be scrubbed of the '
+            "value it received. The exit status is kept; inspect the command's "
+            'effects instead of its output'))
+
+
+def _injected_redaction(record: dict) -> _RecordRedaction:
+    """The launching worker's exact injected values, else the record's."""
+    from lib.project_mod.run_command import injected_credential_redactor
+    redactor = injected_credential_redactor()
+    return _recorded_redaction(record) if redactor is None else _RecordRedaction(redactor)
 
 
 def _write_record(paths: dict, record: dict) -> None:
@@ -632,20 +841,38 @@ def _wrap_for_record(command: str, paths: dict) -> str:
             f'printf %s "$?" > {shlex.quote(paths["exit"])}')
 
 
-def _read_bounded(path: str) -> str:
+def _read_bounded(path: str, redactor: Any = None) -> str:
+    """Read a record stream, redacting before the window cut can split a value."""
     try:
         size = os.path.getsize(path)
         with open(path, 'rb') as fh:
             if size <= _RECORD_READ_CAP:
                 data = fh.read()
+                if redactor is not None:
+                    data = redactor.redact_bytes(data)
             else:
                 half = _RECORD_READ_CAP // 2
                 head = fh.read(half)
                 fh.seek(max(half, size - half))
-                data = head + b'\n...[middle omitted]...\n' + fh.read()
+                tail = fh.read()
+                if redactor is not None:
+                    head, tail = redactor.redact_cut(head, tail)
+                data = head + b'\n...[middle omitted]...\n' + tail
         return data.decode('utf-8', errors='replace')
     except OSError:
         return ''
+
+
+def _retains_output(paths: dict) -> bool:
+    for key in ('stdout', 'stderr'):
+        try:
+            if os.path.getsize(paths[key]):
+                return True
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True  # Unknown content is withheld, never read unscrubbed.
+    return False
 
 
 def _read_exit_code(paths: dict) -> int | None:
@@ -656,20 +883,53 @@ def _read_exit_code(paths: dict) -> int | None:
         return None
 
 
+def _runner_observation(result: str) -> tuple[str, int] | None:
+    """The shell's own output and exit status from the runner's result.
+
+    The wrapper writes the exit sentinel only after the command ran. A shell
+    that rejects the script first (a syntax error anywhere in the command)
+    or dies before the sentinel still reported its real status to the
+    runner, and its diagnostics went to the runner's pipes rather than the
+    record files. ``None`` when the result carries no terminal status.
+    """
+    from lib.background_command_projection import command_result_status
+    status = command_result_status(result)
+    header, separator, rest = result.partition('\n')
+    if (not status or status['timedOut'] or status['interrupted']
+            or not separator or not header.startswith('$ ')):
+        return None
+    return rest[:rest.rfind('\n[exit code:')].strip(), status['exitCode']
+
+
 def _result_from_record(record: dict, paths: dict, *, aborted: bool = False,
-                        interrupted_by: str = '') -> str:
-    from lib.project_mod.run_command import _format_run_output
-    stdout = _read_bounded(paths['stdout'])
-    stderr = _read_bounded(paths['stderr'])
+                        interrupted_by: str = '', runner_result: str = '',
+                        redaction: _RecordRedaction | None = None) -> str:
+    """The command's result from its record; ``redaction`` defaults to the record's."""
+    from lib.project_mod.run_command import _format_run_output, split_group_warnings
+    if redaction is None:
+        redaction = _recorded_redaction(record)
+    # The runner's process-group warnings describe this command's own group.
+    runner_result, notices = split_group_warnings(runner_result)
+    if redaction.withheld and _retains_output(paths):
+        stdout = stderr = ''
+        notices = [redaction.withheld, *notices]
+    else:
+        stdout = _read_bounded(paths['stdout'], redaction.redactor)
+        stderr = _read_bounded(paths['stderr'], redaction.redactor)
     if aborted:
         return _format_run_output(record['command'], stdout, stderr, -1,
-                                  aborted=True)
+                                  aborted=True, notices=notices)
     if interrupted_by:
         return _format_run_output(record['command'], stdout, stderr, -1,
-                                  interrupted_by=interrupted_by)
+                                  interrupted_by=interrupted_by, notices=notices)
     code = _read_exit_code(paths)
+    if code is None and runner_result:
+        observed = _runner_observation(runner_result)
+        if observed is not None:
+            diagnostics, code = observed
+            stderr = '\n'.join(part for part in (stderr.rstrip('\n'), diagnostics) if part)
     return _format_run_output(record['command'], stdout, stderr,
-                              code if code is not None else -1)
+                              code if code is not None else -1, notices=notices)
 
 
 def _pid_starttime(pid: int) -> str | None:
@@ -715,16 +975,18 @@ def _kill_record_tree(record: dict) -> bool:
     return True
 
 
-def _deliver_record(record: dict, result: str) -> bool:
-    """Queue the completion through the standard lane. True when settled —
-    delivered, or with nowhere to deliver (headless)."""
+def _deliver_record(record: dict, result: str) -> str:
+    """Publish a recovered result through the standard lane; return its status.
+
+    A headless record (nowhere to deliver) is ``not_applicable``.
+    """
     if not record.get('conv_id') or record.get('user_id') is None:
-        return True
-    from lib.tasks_pkg.handlers._background_command import _queue_completion
-    delivery_task = {'convId': record['conv_id'], '_userId': record['user_id']}
-    return bool(_queue_completion(
-        task=delivery_task, config=None, command_id=record['command_id'],
-        command=record['command'], result=result))
+        _note_unpublished(record['command_id'], str(record.get('task_id') or ''))
+        return 'not_applicable'
+    return deliver_completion(
+        task={'convId': record['conv_id'], '_userId': record['user_id']},
+        config=record.get('delivery_config'), command_id=record['command_id'],
+        command=record['command'], result=result)
 
 
 _DIED_NOTE = ('server restart — the recorded process is no longer running and '
@@ -745,6 +1007,9 @@ def _reattach(record: dict, paths: dict) -> None:
         # Startup recovery retains the unreadable/unsafe record and reports
         # incomplete recovery; never manufacture a worker or signal authority.
         raise ValueError('Cannot reattach an unverified process-group record') from error
+    # Resolved once, before registration: the values are proven against the
+    # recorded revisions now, so a later vault write cannot unscrub output.
+    redaction = _recorded_redaction(record)
     command_id = record['command_id']
     done = threading.Event()
     state: dict[str, Any] = {
@@ -762,7 +1027,8 @@ def _reattach(record: dict, paths: dict) -> None:
     entry = {'done': done, 'state': state, 'task': task,
              'launch_task_id': str(record.get('task_id') or ''),
              'user_id': record.get('user_id'),
-             'conv_id': record.get('conv_id') or ''}
+             'conv_id': record.get('conv_id') or '',
+             'origin_conv_id': record.get('origin_conv_id', record.get('conv_id') or '')}
     with _lock:
         if command_id in _registry:
             return
@@ -774,15 +1040,12 @@ def _reattach(record: dict, paths: dict) -> None:
                          finished_at=time.time())
             entry['task'] = None
             done.set()
-        if _deliver_record(record, result):
-            with _lock:
-                state['delivery_status'] = (
-                    'queued' if record.get('conv_id') else 'not_applicable')
+        status = _deliver_record(record, result)
+        with _lock:
+            state['delivery_status'] = status
+        if status in _SETTLED_DELIVERY:
             _remove_record_dir(paths['dir'])
-        else:
-            with _lock:
-                state['delivery_status'] = 'failed'
-        if state['delivery_status'] == 'queued':
+        if status == 'queued':
             wake_completed_background_batch(record.get('conv_id') or '', record.get('user_id'))
         with _lock:
             _prune_finished()
@@ -813,19 +1076,20 @@ def _reattach(record: dict, paths: dict) -> None:
         while time.monotonic() < deadline:
             if task.get('aborted'):
                 _retire_before_settlement()
-                _finish(_result_from_record(record, paths, aborted=True))
+                _finish(_result_from_record(record, paths, aborted=True,
+                                            redaction=redaction))
                 return
             if _read_exit_code(paths) is not None:
-                _finish(_result_from_record(record, paths))
+                _finish(_result_from_record(record, paths, redaction=redaction))
                 return
             if not _record_pid_alive(record):
-                _finish(_result_from_record(record, paths,
+                _finish(_result_from_record(record, paths, redaction=redaction,
                                             interrupted_by=_DIED_NOTE))
                 return
             time.sleep(REATTACH_POLL_S)
         _retire_before_settlement()
         _finish(_result_from_record(
-            record, paths,
+            record, paths, redaction=redaction,
             interrupted_by='reattach lifetime exceeded — group retirement observed'))
 
     thread = threading.Thread(target=_worker, daemon=True,
@@ -839,10 +1103,14 @@ def recover_background_commands_on_startup() -> int:
     Finished commands deliver their result; still-running ones reattach
     (queryable via poll, stoppable via kill); dead ones deliver a
     died-with-the-server notice with partial output. Nothing is re-run and
-    the model learns nothing unless the command actually died.
+    the model learns nothing unless the command actually died. Maintenance
+    ticks can overlap; a sweep that finds another one running returns 0, so
+    each record is published and settled by one sweep at a time.
     """
     global _recovery_in_progress, _recovery_scan_failed
     with _lock:
+        if _recovery_in_progress:
+            return 0
         _recovery_in_progress = True
     settled = 0
     scan_failed = False
@@ -884,7 +1152,7 @@ def recover_background_commands_on_startup() -> int:
             try:
                 if _read_exit_code(paths) is not None:
                     delivered = _deliver_record(
-                        record, _result_from_record(record, paths))
+                        record, _result_from_record(record, paths)) in _SETTLED_DELIVERY
                     if delivered:
                         _remove_record_dir(rdir)
                 elif _record_pid_alive(record):
@@ -892,7 +1160,7 @@ def recover_background_commands_on_startup() -> int:
                     delivered = True  # The live registry entry blocks wake.
                 else:
                     delivered = _deliver_record(record, _result_from_record(
-                        record, paths, interrupted_by=_DIED_NOTE))
+                        record, paths, interrupted_by=_DIED_NOTE)) in _SETTLED_DELIVERY
                     if delivered:
                         _remove_record_dir(rdir)
                 if not delivered and identity is not None:
@@ -912,15 +1180,10 @@ def recover_background_commands_on_startup() -> int:
     if settled:
         logger.info('[BackgroundCommand] startup recovery settled %d '
                     'record(s)', settled)
-    # Receipts committed before the crash have no remaining process record.
-    # The owner-scoped queue scan recovers their one collective wake as well.
-    if scan_failed:
-        return settled
-    try:
-        from lib.message_queue import drain_idle_background_batches
-        drain_idle_background_batches()
-    except Exception as exc:
-        logger.warning('[BackgroundCommand] startup batch scan deferred: %s', exc)
+    # Receipts committed before the crash have no remaining process record;
+    # their one collective wake starts a model turn, so it runs after
+    # readiness (server_assembly._run_post_ready_deferred) and on every
+    # maintenance tick, never inside this readiness-critical scan.
     return settled
 
 
@@ -928,5 +1191,5 @@ __all__ = ['start_background_command', 'background_command_result',
            'check_background_command', 'kill_background_command',
            'list_background_commands', 'conversation_results_complete',
            'conversation_has_known_commands', 'wake_completed_background_batch',
-           'retry_failed_background_deliveries', 'recovery_needs_retry',
-           'recover_background_commands_on_startup']
+           'deliver_completion', 'retry_failed_background_deliveries',
+           'recovery_needs_retry', 'recover_background_commands_on_startup']

@@ -34,6 +34,16 @@ def _owner_boundary(payload: Mapping[str, Any]) -> tuple[int, str]:
     )
 
 
+def _lock_owner(session: Session, owner_user_id: int, tenant_id: str) -> None:
+    session.lock_key("model_routing.owner", f"{tenant_id}:{owner_user_id}")
+
+
+def _lock_secret(
+    session: Session, owner_user_id: int, tenant_id: str, secret_reference: str,
+) -> None:
+    session.lock_key("model_routing.secrets", f"{tenant_id}:{owner_user_id}:{secret_reference}")
+
+
 def _document_payload(payload: Mapping[str, Any], key: str) -> tuple[dict[str, Any], str]:
     value = payload.get(key)
     if not isinstance(value, Mapping):
@@ -67,6 +77,33 @@ def _authority_document(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _current_secret_references(session: Session, owner_user_id: int, tenant_id: str) -> set[str]:
+    """Read under the owner fence; unreadable references never authorize cleanup."""
+    row = session.fetch_one(
+        "SELECT document_json FROM storage_model_routing_authorities "
+        "WHERE owner_user_id = ? AND tenant_id = ?", (owner_user_id, tenant_id))
+    if row is None:
+        return set()
+    document = _decoded_object(row["document_json"], "document")
+    if document is None:
+        raise StorageError("database_integrity", "Stored model-routing document is empty")
+    credentials = document.get("credentials", [])
+    if not isinstance(credentials, list):
+        raise StorageError("database_integrity", "Stored model-routing credentials are invalid")
+    references = set()
+    for credential in credentials:
+        if not isinstance(credential, dict):
+            raise StorageError("database_integrity", "Stored model-routing credential is invalid")
+        reference = credential.get("secret_reference")
+        if reference is None:
+            continue
+        if not isinstance(reference, str):
+            raise StorageError("database_integrity", "Stored model-routing secret reference is invalid")
+        if reference.strip():
+            references.add(reference.strip())
+    return references
+
+
 def _model_routing_get(session: Session, payload: Mapping[str, Any]) -> Any:
     owner_user_id, tenant_id = _owner_boundary(payload)
     row = session.fetch_one(
@@ -98,8 +135,7 @@ def _model_routing_commit(session: Session, payload: Mapping[str, Any]) -> Any:
         raise StorageError(
             "database_protocol_error", "migration_receipt must be an object")
 
-    boundary_key = f"{tenant_id}:{owner_user_id}"
-    session.lock_key("model_routing.owner", boundary_key)
+    _lock_owner(session, owner_user_id, tenant_id)
     current = session.fetch_one(
         "SELECT revision, document_json FROM storage_model_routing_authorities "
         "WHERE owner_user_id = ? AND tenant_id = ?",
@@ -196,8 +232,7 @@ def _model_routing_migration_receipt_put(
     encoded_receipt = _json_text(dict(receipt))
     updated_at = _number(
         payload, "updated_at", minimum=0, maximum=32_503_680_000)
-    boundary_key = f"{tenant_id}:{owner_user_id}"
-    session.lock_key("model_routing.owner", boundary_key)
+    _lock_owner(session, owner_user_id, tenant_id)
     current = session.fetch_one(
         "SELECT revision FROM storage_model_routing_authorities "
         "WHERE owner_user_id = ? AND tenant_id = ?",
@@ -243,8 +278,7 @@ def _model_routing_secret_put(session: Session, payload: Mapping[str, Any]) -> A
     key_hint = _optional_text(payload, "key_hint", 64)
     updated_at = _number(
         payload, "updated_at", minimum=0, maximum=32_503_680_000)
-    boundary_key = f"{tenant_id}:{owner_user_id}"
-    session.lock_key("model_routing.secrets", f"{boundary_key}:{secret_reference}")
+    _lock_secret(session, owner_user_id, tenant_id, secret_reference)
     current = session.fetch_one(
         "SELECT created_at FROM storage_model_routing_secrets WHERE "
         "owner_user_id = ? AND tenant_id = ? AND secret_reference = ?",
@@ -319,18 +353,16 @@ def _model_routing_secret_list(session: Session, payload: Mapping[str, Any]) -> 
 def _model_routing_secret_delete(session: Session, payload: Mapping[str, Any]) -> Any:
     owner_user_id, tenant_id = _owner_boundary(payload)
     secret_reference = _required_text(payload, "secret_reference", 256)
-    existing = session.fetch_one(
-        "SELECT 1 AS present FROM storage_model_routing_secrets WHERE "
+    _lock_owner(session, owner_user_id, tenant_id)
+    if secret_reference in _current_secret_references(session, owner_user_id, tenant_id):
+        return {"deleted": False, "secret_reference": secret_reference}
+    _lock_secret(session, owner_user_id, tenant_id, secret_reference)
+    deleted = session.execute(
+        "DELETE FROM storage_model_routing_secrets WHERE "
         "owner_user_id = ? AND tenant_id = ? AND secret_reference = ?",
         (owner_user_id, tenant_id, secret_reference),
     )
-    if existing is not None:
-        session.execute(
-            "DELETE FROM storage_model_routing_secrets WHERE owner_user_id = ? "
-            "AND tenant_id = ? AND secret_reference = ?",
-            (owner_user_id, tenant_id, secret_reference),
-        )
-    return {"deleted": existing is not None, "secret_reference": secret_reference}
+    return {"deleted": bool(deleted), "secret_reference": secret_reference}
 
 
 def _model_routing_secret_prune(session: Session, payload: Mapping[str, Any]) -> Any:
@@ -345,6 +377,8 @@ def _model_routing_secret_prune(session: Session, payload: Mapping[str, Any]) ->
     }
     before = _number(
         payload, "updated_before", minimum=0, maximum=32_503_680_000)
+    _lock_owner(session, owner_user_id, tenant_id)
+    active.update(_current_secret_references(session, owner_user_id, tenant_id))
     removed: list[str] = []
     cursor = None
     while len(removed) < 256:
@@ -364,11 +398,14 @@ def _model_routing_secret_prune(session: Session, payload: Mapping[str, Any]) ->
             cursor = (float(row["updated_at"]), secret_reference)
             if secret_reference in active:
                 continue
-            session.execute(
+            _lock_secret(session, owner_user_id, tenant_id, secret_reference)
+            # A concurrent put can refresh a row after the page was selected.
+            deleted = session.execute(
                 "DELETE FROM storage_model_routing_secrets WHERE owner_user_id = ? "
-                "AND tenant_id = ? AND secret_reference = ?",
-                (owner_user_id, tenant_id, secret_reference))
-            removed.append(secret_reference)
+                "AND tenant_id = ? AND secret_reference = ? AND updated_at < ?",
+                (owner_user_id, tenant_id, secret_reference, before))
+            if deleted:
+                removed.append(secret_reference)
             if len(removed) == 256:
                 break
         if len(rows) < 256:

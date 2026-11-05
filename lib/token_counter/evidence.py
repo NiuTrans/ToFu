@@ -14,6 +14,13 @@ from typing import Any
 
 ADMITTED_INPUT_TOKENS_KEY = '_admitted_input_tokens'
 
+TEXT_COUNT_VIEW_KEY = '_text_count_view'
+"""A task body's provider view of its owner's text-count memo.
+
+It proves nothing about the body: every admission still recounts the body's
+content and only reuses digest-keyed counts. Provider boundaries strip it.
+"""
+
 
 def validated_admitted_input_tokens(value: Any) -> int | None:
     """Return trusted positive integer evidence, excluding bool-as-int."""
@@ -24,5 +31,6 @@ def validated_admitted_input_tokens(value: Any) -> int | None:
 
 __all__ = [
     'ADMITTED_INPUT_TOKENS_KEY',
+    'TEXT_COUNT_VIEW_KEY',
     'validated_admitted_input_tokens',
 ]

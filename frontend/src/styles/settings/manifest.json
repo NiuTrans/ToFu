@@ -4,6 +4,9 @@
   "output": "static/settings.css",
   "sections": [
     {
+      "path": "00-status-colors.css"
+    },
+    {
       "path": "01-core-panels.css"
     },
     {
@@ -38,6 +41,9 @@
     },
     {
       "path": "12-codex-shared-login.css"
+    },
+    {
+      "path": "13-dx-channel.css"
     }
   ],
   "sourceEntry": "settings.generated.css",

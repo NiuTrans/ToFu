@@ -250,10 +250,10 @@ test('server projection keys creator/model/provider exactly and pending provider
    * must not look "unconfigured": the model-level auto row is the fallback. */
   const kimi = { creator_id: 'moonshot', model_id: 'kimi-k3', provider_id: '', offering_id: '', support: 'supported', can_disable: false, depths: ['default', 'low', 'high', 'max'] };
   const kimiRows = [kimi,
-    { ...kimi, provider_id: 'sankuai' }, { ...kimi, provider_id: 'sankuai', offering_id: 'off_a' },
+    { ...kimi, provider_id: 'example-corp' }, { ...kimi, provider_id: 'example-corp', offering_id: 'off_a' },
     { ...kimi, provider_id: 'catpaw' }, { ...kimi, provider_id: 'catpaw', offering_id: 'off_b' }];
-  assert.equal(projectReasoningControl(kimiRows, { creator_id: 'moonshot', model_id: 'kimi-k3' }, 'meituan').notice, '');
-  assert.deepEqual(projectReasoningControl(kimiRows, { creator_id: 'moonshot', model_id: 'kimi-k3' }, 'meituan').levels, ['default', 'low', 'high', 'max']);
+  assert.equal(projectReasoningControl(kimiRows, { creator_id: 'moonshot', model_id: 'kimi-k3' }, 'yourprovider').notice, '');
+  assert.deepEqual(projectReasoningControl(kimiRows, { creator_id: 'moonshot', model_id: 'kimi-k3' }, 'yourprovider').levels, ['default', 'low', 'high', 'max']);
   for (const support of ['unknown', 'unsupported']) assert.deepEqual(projectReasoningControl([{ ...row, support }], { creator_id: 'a', model_id: 'same' }).levels, ['default']);
 });
 test('a displayed model with no confirmed ref resolves by unique model id (provisional default)', () => {
@@ -264,7 +264,7 @@ test('a displayed model with no confirmed ref resolves by unique model id (provi
    * displayed model id is the intent and resolves to its unique identity. */
   const kimi = { creator_id: 'moonshot', model_id: 'kimi-k3', provider_id: '', offering_id: '', support: 'supported', can_disable: false, default_depth: 'max', depths: ['default', 'low', 'high', 'max'] };
   const kimiRows = [kimi,
-    { ...kimi, provider_id: 'sankuai' }, { ...kimi, provider_id: 'sankuai', offering_id: 'off_a' },
+    { ...kimi, provider_id: 'example-corp' }, { ...kimi, provider_id: 'example-corp', offering_id: 'off_a' },
     { ...kimi, provider_id: 'catpaw', availability: 'no_route' }];
   // Before the fix: null ref → unconfigured notice even though kimi-k3 shows.
   const resolved = projectReasoningControl(kimiRows, null, '', 'kimi-k3');

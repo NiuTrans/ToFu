@@ -84,7 +84,8 @@ def test_one_pass_syncs_fills_and_scores(monkeypatch):
 
     def fake_refresh_scores(models, *, api_key, key_source, key_hint):
         scores_calls.append({"models": len(models), "api_key": api_key})
-        return {"status": "ok", "scores": {"acme::acme-1": {"intelligence": 42.0}}}
+        return {"status": "ok", "index_version": 5,
+                "scores": {"acme::acme-1": {"intelligence": 42.0}}}
 
     monkeypatch.setattr(auto_update, "refresh_scores", fake_refresh_scores)
 
@@ -96,8 +97,10 @@ def test_one_pass_syncs_fills_and_scores(monkeypatch):
     assert summary["catalog"] == {"added": 1, "creators_added": 0, "pruned": 0}
     assert summary["pricing"]["status"] == "ok"
     assert summary["pricing"]["applied"] == 1
+    # The index version explains a score-count drop after an AA major bump.
     assert summary["scores"] == {
-        "status": "ok", "key_source": "settings", "scores": 1}
+        "status": "ok", "key_source": "settings", "scores": 1,
+        "index_version": 5}
     assert scores_calls == [{"models": 1, "api_key": "owner-key"}]
 
     priced = repository.get(boundary).document["models"][0]["list_pricing"]
@@ -218,9 +221,12 @@ def test_daily_schedule_defaults_and_async_dispatch(monkeypatch):
     assert captured["max_runtime"] == (
         auto_update.MODEL_INTELLIGENCE_UPDATE_MAX_RUNTIME)
 
-    called = []
+    import threading
+
+    runs = []
     monkeypatch.setattr(
-        manager, "_dispatch_maintenance_task", lambda task: called.append(task))
-    manager._dispatch_claimed_task(
-        {"id": "daily", "task_type": "model_intelligence_daily"})
-    assert len(called) == 1
+        manager, "_run_and_record", lambda task: runs.append(threading.current_thread()))
+    assert manager._dispatch_claimed_task(
+        {"id": "daily", "task_type": "model_intelligence_daily"}) is True
+    assert manager.stop(timeout=5)
+    assert len(runs) == 1 and runs[0] is not threading.current_thread()

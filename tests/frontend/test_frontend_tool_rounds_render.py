@@ -34,7 +34,7 @@ import subprocess
 
 import pytest
 
-from tests._jsdom import JS_DIR, run_harness
+from tests._jsdom import JS_DIR, require_node_modules, run_harness
 from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
@@ -1258,8 +1258,7 @@ def test_tool_result_owner_and_retained_round_adapter():
     assert 'globalThis' not in source
     assert 'window.' not in source
     assert 'document.' not in source
-    if shutil.which('node') is None:
-        pytest.skip('node is required for the typed tool-result contract')
+    require_node_modules('jsdom')
     owner_process = subprocess.run(
         [shutil.which('node'), '-e', _OWNER_HARNESS],
         capture_output=True,

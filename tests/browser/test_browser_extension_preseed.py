@@ -73,7 +73,7 @@ def _get_zip(path='/api/browser/download', headers=None):
 
 
 class TestDownloadPreseed:
-    def test_zip_carries_working_preseed(self, _isolated_key_store):
+    def test_zip_carries_working_preseed(self, _isolated_key_store, tmp_path):
         status, body = _get_zip()
         assert status == 200
         zf = zipfile.ZipFile(io.BytesIO(body))
@@ -91,6 +91,14 @@ class TestDownloadPreseed:
         # The regular payload is untouched.
         assert 'browser_extension/background.js' in names
         assert 'browser_extension/manifest.json' in names
+        # Execute the downloaded graph: a valid preseed is useless if an
+        # imported worker owner was omitted from the authenticated archive.
+        zf.extractall(tmp_path)
+        from tests._browser_extension_probe import run_extension_probe
+        probe = run_extension_probe('protocol426',
+                                    background_path=tmp_path / 'browser_extension/background.js')
+        assert probe['state']['queue'] == ['completed-result']
+        assert 'upgrade required' in probe['state']['lastError']
 
     def test_each_download_mints_a_distinct_key(self, _isolated_key_store):
         _s1, body1 = _get_zip()

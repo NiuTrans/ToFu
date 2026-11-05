@@ -2,18 +2,12 @@
 
 `workspace.ts` lazily composes `studio.ts` as the primary `#/evolution` surface;
 the durable program notebook remains explicitly available at `#/evolution/programs`.
-`programs/experiment-charts.ts` projects bounded saved measurements through the shared rich-response chart presenter. `evidence-charts.ts` admits complete delivery charts beside exact originals, without transport or timers. Studio styles live in `frontend/src/styles/application/26-studio-*.css`; notebook observations use `26-evolution-observations.css`.
-`studio/command-center.ts` owns the persistent conversational briefing and
-receipt-backed stage HUD, without transport or timers.
-`26-studio-command-center.css` owns the responsive mission/scene composition.
-Compact inspection disclosures preserve focus and expansion for the selected
-goal; the full inspector retains source-reading authority. Real-browser theme,
-contrast and draft checks live in `test_evolution_studio_browser.py`. Intake lives beside the
-scene, never in an entry modal; explicit dispatch retains idempotent retry keys.
+`programs/experiment-charts.ts` projects bounded saved measurements through the shared rich-response chart presenter. `evidence-charts.ts` admits complete delivery charts beside exact originals, without transport or timers; its acceptance note is optional for surfaces that show the verdict beside the charts. Studio styles live in `frontend/src/styles/application/26-studio-game.css` (theme-invariant `--studio-*` palette in `00-design-tokens.css`); notebook observations use `26-evolution-observations.css`.
 `route-host.ts` owns pending-route epochs, one mounted page and teardown; each
 route imports its own graph through the shared document-lifetime module cache.
-`studio-entry.ts` alone installs studio controls/theme. Child import failures
+`studio-entry.ts` alone loads studio styles. Child import failures
 use the shell's installed reload authority; no route creates its own guard.
+Chat is the conversational entry; `programs/page.ts` links source-bound plans back through the shell conversation loader. The advanced form and detailed notebook reuse the same programme records (`testing/programs.test.cjs`).
 The program notebook composes the shared durable program/run API; its
 `programs/controller.ts` owns one visible read flight, paging and route fencing.
 `programs/current-experiment.ts` projects confirmed execution identity, stable inspection controls and unavailable-read warnings without transport or timers.
@@ -46,57 +40,96 @@ never implies review acceptance. See `docs/STAGE_OUTCOMES.md` and
 `testing/outcome-reader.test.cjs` for original paging and interrupted-usage checks.
 The same reader separates declared artifact snapshots from output/tools, pins their
 digest/completeness, and marks incomplete capture; full bytes never imply verified value.
-`controller.ts` owns the detailed-page read lifecycle. The studio owns one
-visible-page read flight, stable input islands, idempotent submission retries and
-real task role markers; it reserves a mission header, room rail, scene and tool shelf. Goal selection
-and management actions live in the menu drawer; the task heading opens details.
-`goal-room.ts` owns furniture navigation, per-goal shelves
-and material forms; late writes never repaint another goal. `office-scene.ts` owns the bounded Canvas animation,
-actor buttons and teardown, per-role workstations, activity
-emotes, stationary idle poses, the swarm visitor door (roster
-from the task's swarm status, capped at eight including departing avatars), and the
+`controller.ts` owns the detailed-page read lifecycle.
+
+The studio (`studio.ts`) is a game screen over real Headless runs: one visible-page
+read flight, stable input islands, idempotent submission retries and goal-fenced
+writes. `studio/projection.ts` is the single pure projection from confirmed run,
+workspace, coordinator, question and swarm snapshots to everything shown: phase,
+wait (human | compute | background), stage track, per-role intent/emote, meters (a
+running stage's usage is a `≥` lower bound), counts, deliverable and the one
+primary action; `studioEvents` turns two views of the same goal into toasts. A
+compute park's placeholder result is never a deliverable. Visible copy is state,
+never instruction; names and long reasons live in tooltips and accessible labels.
+`studio/hud.ts` renders the quest banner, stage track, meters, hotbar and toasts;
+`studio/dialogue.ts` the dialogue box (pending questions as choice forms with the
+asking role's portrait; a stalled compute read as the executor saying where it is
+stuck, with the record and the Router Watchdog hand-off; the coordinator's newest
+unseen reply; an open chat log marks that reply read, so the box never repeats it);
+`goal-workbench.ts` derives the stall facts and wait label shared by the dialogue
+and the inspector, so a parked turn's record reads as the wait, never as a finished
+delivery; `studio/windows.ts`
+one docked, non-modal window with persistent panes (journal, chat, briefing, menu,
+actor sheet), heading focus on open, focus return (to the stage when the opener
+cannot take it, e.g. a route-opened briefing) and Escape. The actor sheet shows
+the role's portrait, live state and current tool above `role-models.ts`; its
+decision action exists only for the role whose question is pending. `studio/glyphs.ts` is
+the HUD icon set. Hotkeys (never while typing): 1-5 journal tabs, T chat, J journal,
+N new goal, Esc window/menu; WASD/arrows walk the avatar, E interacts, +/-/0 zoom.
+The menu's animation pause sets the root's `data-motion`, stilling HUD animations
+with the world. Wide screens show one HUD bar; below 1024px the stage track and
+meters (`.evo-hud-status`) wrap in their own row under the quest.
+
+`engine/` is the game engine. `loop.ts` advances fixed 60 Hz steps over visible
+time and sleeps without callbacks when the world reports no change, waking on one
+timer for the next emote/screen keyframe; `camera.ts` fits the world height inside
+the HUD frame, pans/zooms/clamps and follows the scene's focus when the room
+overflows (portrait); `pointer.ts` recognizes tap, drag-pan, wheel and pinch;
+`paint.ts` draws in-world plates, bubbles, emotes, hotspot brackets and the blurred
+backdrop; `particles.ts` bounded event bursts; `stage.ts` hosts one scene on one
+device-resolution canvas with an accessible button layer mirrored over scene
+targets (`.evo-target`) that re-project on any origin/scale change (camera, eased
+HUD insets, viewport), held movement keys and teardown. Hidden or offscreen
+stages own no callbacks; reduced motion settles every beat at once; a prop slide
+to where it already is settles at once; the avatar's floor tap wakes frames only
+while it walks.
+`office-scene.ts` is the main office scene. Resident poses follow the projected
+roles: per-role workstations, waits (the asking role gathers at the front door; a
+compute or background wait keeps the executor at its lit desk), emotes, stationary
+idle poses, swarm visitors entering and leaving through the front door (roster from
+the task's swarm status, capped at eight including departing avatars), and the
 per-actor action sequencer: chairs are rolling props with pull, sit, roll-in,
 roll-out, stand and push beats; interruption preserves the current foot/seat pose.
-Only visible-time frames advance beats; hidden/offscreen scenes own no callbacks. The first eight durable material IDs
-are books: newly added agent links travel from the executor's desk to the
-shelf, and removals retain the remaining link identities. New assignment
-journal sequences send the coordinator to the executor once.
-`office-objects.ts` owns the individually controllable
-prop registry (chairs, books: id/kind/state/eased slides,
-no DOM or timers) and draws the authored rolling chair; `office-navigation.ts` owns
+The first eight durable material IDs are books: newly added agent links travel from
+the executor's desk to the pile beside the bookshelf, and removals retain the
+remaining link identities. New assignment journal sequences send the coordinator to
+the executor once; research/coordination/delegation tool events route the executor.
+The human's avatar is the only character the human steers; pointer activation of
+furniture also walks it there. `office-layout.ts` owns the art-aligned hotspots,
+stations, choreography points and prop anchors (walkability checked by
+`testing/office-scene.test.cjs`). `office-objects.ts` owns the individually
+controllable prop registry (chairs, books: id/kind/state/eased slides, no DOM or
+timers) and draws the authored rolling chair; `office-navigation.ts` owns
 furniture-aware paths with exact endpoints and collision-checked connectors.
 `office-motion.ts` owns distance-based gait and eased seat poses;
-`office-sprite-geometry.ts` owns side-frame source-row repair and fixed-scale foot anchors.
-`office-canvas.ts` owns capped backing storage, dirty paint signatures and constant-space
-counters, not a ticker or task runtime. `office-character.ts` maps live roles to eight distinct
-character models; `office-character-art.ts` lazily paints their four-direction
-walking sheets in both room canvases. `office-game-frames.ts` is generated alpha
-metadata for `assets/game-*.webp`; regenerate/check it with
-`scripts/generate_evolution_game_frames.py`. `office-sprites.ts` and `people.png`
-are the network-failure fallback only. `room-catalog.ts` owns six fixed rooms, scenery and role routing; `office-rooms.ts`
-owns the always-visible directory, selected room and roster reconciliation.
-Same-role members have distinct briefs inside their department room. Empty rooms
-remain visitable; unavailable roster data stays unknown. Only the selected pod
-has a renderer. Desktop uses a room rail; narrow screens use a labelled Rooms
-button and the same directory in a drawer, while the member brief stays visible
-in the tool shelf. Room thumbnails are packaging derivatives of authored art.
+`office-sprite-geometry.ts` owns side-frame source-row repair and fixed-scale foot
+anchors. `office-character.ts` maps live roles to eight distinct character models;
+`office-character-art.ts` lazily paints their four-direction walking sheets.
+`office-game-frames.ts` is generated alpha metadata for `assets/game-*.webp`;
+regenerate/check it with `scripts/generate_evolution_game_frames.py`.
+`office-sprites.ts` and `people.png` are the network-failure fallback only.
+`room-catalog.ts` owns six fixed rooms, scenery, role routing and the localized job
+title (`roleTitleKey`, by room theme) that names free-form swarm roles everywhere; `office-rooms.ts`
+owns the room tiles, selected room, member card and roster reconciliation; the
+studio swaps the stage scene on selection. Same-role members have distinct briefs.
+Empty rooms remain visitable; unavailable roster data stays unknown. Only the
+selected department room has a scene. `agent-pod.ts` is that scene: it selects
+lazy chair-free `assets/pod-*-clear.webp` scenery from the agent's role and draws
+only status-dependent actor/screen details over it; a same-agent pending-to-running
+or running-to-terminal change plays one bounded arrive/leave chair beat; initial
+snapshots settle immediately. Room thumbnails are packaging derivatives of art.
 `assets/office-clear.webp` is shipped chair-free generated scenery;
 `assets/office.png` remains its comparison source. `assets/people.png` is a
 six-character sprite atlas derived from generated art by
-`scripts/generate_evolution_people.py` (roles own sprites 0-2, visitors cycle 3-5);
-`assets/props.png` is the nine-prop chair/book atlas drawn deterministically
-in the office woodwork palette by `scripts/generate_evolution_props.py`
+`scripts/generate_evolution_people.py`; `assets/props.png` is the nine-prop
+chair/book atlas drawn deterministically by `scripts/generate_evolution_props.py`
 (the PROPS bounds in `office-objects.ts` are its printed output, drift-checked
 by `tests/evolution/test_evolution_props_generated.py`).
-`assets/pod-*-clear.webp` are lazy, chair-free 4:3 room backgrounds for the rostered
-sub-agent offices. `agent-pod.ts` selects one from the agent's actual role and
-draws only status-dependent actor/monitor details over it; the books in room
-scenery are ordinary furniture, not a goal-material count. The selected WebP
-loads on first entry to a pod, with a procedural fallback if unavailable. A
-same-agent pending-to-running or running-to-terminal status change drives one
-bounded arrival/leave chair sequence; initial snapshots settle immediately.
-`ui-components.ts` registers the pinned, studio-only Web Awesome controls and scoped
-theme; `studio.ts` owns drawer routing and viewport teardown.
+`goal-room.ts` owns the journal: library, plan, execution, review and delivery tabs,
+per-goal material forms and the two-step stop; late writes never repaint another
+goal. `studio/goal-run-inspector.ts` renders section-scoped inspection (status and
+waits, latest work, usage with the compute resource launcher, records with the
+`studio/outcome-reader.ts` island, review, deliverable).
 `components/` renders evidence and forms with injected API and
 navigation ports. The workbench never installs itself on document.body.
 The lazy `../evolution.ts` entry alone bridges to the application shell.
@@ -108,7 +141,7 @@ Unmeasurable validation requires a separate explicit waiver choice.
 Verify controller/lifecycle and decision tests, then the real-server workspace
 browser journeys, `npm run check:frontend`, the frame metadata check, and the visual tier.
 
-Pure runtime/scene/room specifications: `node --test frontend/src/features/evolution/testing/office-{runtime,scene,rooms}.test.cjs`.
+Pure specifications: `node --test frontend/src/features/evolution/testing/{projection,engine,office-scene,office-rooms,office-pod-motion,goal-room,studio}.test.cjs`.
 `tests/evolution/test_evolution_office_browser.py::test_office_runtime_deterministic_render_cost`
 uses the local source preview and a bounded 60 Hz virtual clock with real Canvas2D.
 It writes CPU callback timings, paint counts and teardown evidence to
@@ -116,6 +149,13 @@ It writes CPU callback timings, paint counts and teardown evidence to
 CPU submission, not GPU/display FPS. Production bundle/browser integration is a separate gate.
 
 Independent design preview: run `node_modules/.bin/vite --config frontend/src/features/evolution/testing/vite.config.mjs` and open
-`/preview.html` on the printed local URL. This mounts the same
-page with synthetic read-only fixtures and the fixed light frosted theme.
-Select the notebook with `?scenario=program`. Tests select empty/error fixtures with `?scenario=empty` / `?scenario=failure`; preview commands cannot call the production API.
+`/preview.html` on the printed local URL. This mounts the same page with synthetic
+read-only fixtures. Test URL parameters select fixtures: `?scenario=program`
+(notebook), `empty`, `failure`, `terminal`, `legacy-failed`, `needs-attention`,
+`swarm`, `compute`, `compute-error` and `question`; preview commands cannot call the
+production API.
+
+Programme intake reuses `features/skills/selection.ts` and the installed-skills API;
+required IDs and research inputs use existing owned drafts. Shared source schemas
+and backend admission own guide hashes/tool bindings; the UI never infers passed
+checks from selection. Verify Programme catalog, handoff and stale-read scenarios.

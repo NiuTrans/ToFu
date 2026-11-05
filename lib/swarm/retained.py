@@ -11,12 +11,15 @@ from __future__ import annotations
 import json
 import uuid
 
+from lib.log import get_logger
 from lib.swarm.retained_launch import (
     LaunchOutcome, apply_launch_outcome, classify_launch, launch_lookup,
 )
 from lib.swarm.retained_repository import (
     RetainedAgentError, RetainedAgentRepository, scope_for,
 )
+
+logger = get_logger(__name__)
 
 
 def _public(value: dict, *, memory: bool = False) -> dict:
@@ -305,6 +308,8 @@ def execute_manage_agents(args: dict, *, task: dict, cfg: dict,
             except Exception as error:
                 # Worker entry can precede an exception or lost launch reply.
                 # Control exceptions still propagate with the durable fence.
+                logger.error('[Swarm] retained agent %s launch outcome unconfirmed',
+                             agent_id, exc_info=True)
                 outcome = LaunchOutcome('unknown', {'exception_type': type(error).__name__})
             try:
                 repository.change(scope, agent_id, lambda current: apply_launch_outcome(
@@ -312,6 +317,8 @@ def execute_manage_agents(args: dict, *, task: dict, cfg: dict,
             except Exception:
                 # Acceptance/rejection may be known locally but not durably
                 # recorded. Preserve the original lookup, never replay launch.
+                logger.error('[Swarm] retained agent %s launch outcome not recorded',
+                             agent_id, exc_info=True)
                 outcome = LaunchOutcome('unknown', outcome.handle)
             handle = dict(outcome.handle)
             if outcome.state == 'rejected':

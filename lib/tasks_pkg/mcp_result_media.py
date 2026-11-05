@@ -35,6 +35,11 @@ def _validate_image(raw):
     return mime
 
 
+def task_media_lock(task: dict[str, Any]) -> threading.Lock:
+    """The one lock over a task's MCP image and inline model-image budgets."""
+    return task.setdefault('_mcpMediaLock', threading.Lock())
+
+
 def capture_mcp_result_images(task: dict[str, Any], result: object, *,
                               source_tool: str, tool_call_id: str,
                               reference_field: str = '_mcpImages') -> int:
@@ -52,7 +57,7 @@ def capture_mcp_result_images(task: dict[str, Any], result: object, *,
         owner = require_user_id(task.get('_userId'), context='MCP result image owner')
     except (ValueError, TypeError):
         owner = None
-    lock = task.setdefault('_mcpMediaLock', threading.Lock())
+    lock = task_media_lock(task)
     appended = 0
     receipts = []
     with lock:

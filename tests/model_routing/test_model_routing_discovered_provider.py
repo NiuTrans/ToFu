@@ -76,6 +76,74 @@ def test_discovery_bundle_is_stable_complete_and_pending_identity() -> None:
         first["provider"]["provider_id"])
 
 
+def _relay_bundle(models, **kwargs) -> dict:
+    return build_discovered_provider_bundle(
+        provider_id="relay", display_name="Relay", brand="generic",
+        base_url="https://relay.example/v1", models=models, **kwargs)
+
+
+def test_large_listing_creation_keeps_a_ranked_part() -> None:
+    """Creation imports a part of an oversized listing instead of refusing it:
+    requested ids, then chat models Tofu already registers, then other chat
+    models, each in listing order. The rest stays loadable on request."""
+    from lib.model_routing.discovered_provider import (
+        DISCOVERY_RETAINED_MODEL_COUNT, listed_model_count)
+
+    listing = (
+        [{"model_id": f"embed-{index:03d}", "capabilities": ["embedding"]}
+         for index in range(100)]
+        + [{"model_id": f"vendor/tune-{index:03d}", "capabilities": ["text"]}
+           for index in range(600)]
+        + [{"model_id": "meta-llama/Llama-3.3-70B-Instruct", "capabilities": ["text"]},
+           {"model_id": "embed-chosen", "capabilities": ["embedding"]}])
+    directory = [{"creator_id": "meta", "model_id": "Llama-3.3-70B-Instruct",
+                  "display_name": "Llama 3.3 70B Instruct",
+                  "capabilities": ["text"], "context_window": 131_072}]
+
+    bundle = _relay_bundle(listing, official_directory=directory,
+                           keep_model_ids=["embed-chosen"])
+
+    kept = {row["pending_model_id"] for row in bundle["offerings"]}
+    assert listed_model_count(listing) == 702
+    assert len(kept) == DISCOVERY_RETAINED_MODEL_COUNT
+    assert {"embed-chosen", "meta-llama/Llama-3.3-70B-Instruct"} <= kept
+    assert not any(model_id.startswith("embed-0") for model_id in kept)
+    assert sorted(model_id for model_id in kept if model_id.startswith("vendor/")) == [
+        f"vendor/tune-{index:03d}" for index in range(DISCOVERY_RETAINED_MODEL_COUNT - 2)]
+
+
+def test_listing_within_the_retained_size_is_imported_whole() -> None:
+    from lib.model_routing.discovered_provider import DISCOVERY_RETAINED_MODEL_COUNT
+
+    listing = [{"model_id": f"embed-{index:03d}", "capabilities": ["embedding"]}
+               for index in range(DISCOVERY_RETAINED_MODEL_COUNT)]
+    assert len(_relay_bundle(listing)["offerings"]) == DISCOVERY_RETAINED_MODEL_COUNT
+
+
+def test_provider_contract_accepts_a_fully_loaded_large_listing() -> None:
+    """After "load all", a relay provider holds its whole listing; saving the
+    card and probing every row must not be refused for its size."""
+    from lib.generated_api_v1_model_routing import decode_request
+
+    ids = [f"vendor/model-{index:04d}" for index in range(1347)]
+    bundle = _relay_bundle([{"model_id": model_id, "capabilities": ["text"]} for model_id in ids],
+                           keep_model_ids=ids)
+    assert len(bundle["offerings"]) == len(ids)
+
+    write = {key: bundle[key] for key in (
+        "provider", "provider_access", "connections", "credentials",
+        "offerings", "deployments")}
+    write["expected_revision"] = 1
+    decode_request("createProvider", write)
+    decode_request("updateProvider", write)
+    targets = [{"offering_id": deployment["offering_id"],
+                "connection_id": deployment["connection_id"],
+                "wire_model_id": deployment["wire_model_id"]}
+               for deployment in bundle["deployments"]]
+    decode_request("startProviderProbeCells", {"targets": targets,
+                                               "only": {"model_ids": ids}})
+
+
 def test_account_discovery_does_not_enrich_from_another_provider(monkeypatch):
     from lib.llm_dispatch.discovery import _probe, _discover
 
@@ -139,6 +207,7 @@ def test_probe_route_returns_secret_free_v2_draft(monkeypatch) -> None:
     payload = asyncio.run(exercise())
     assert payload["ok"] is True
     assert payload["model_count"] == 1
+    assert payload["listed_model_count"] == 1
     assert payload["provider_bundle"]["offerings"][0][
         "pending_model_id"] == "deepseek-chat"
     assert payload["credential_id"] == payload["provider_bundle"][

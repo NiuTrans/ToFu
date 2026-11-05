@@ -27,6 +27,7 @@ from lib.evolution import automation
 from lib.api_response import (
     api_bad_request, api_conflict, api_created, api_not_found, api_ok,
 )
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 from lib.storage.errors import StorageError
 from lib.openapi import api_meta
@@ -54,6 +55,8 @@ def _call(fn, *args, **kwargs):
     """Map the library's typed failures onto canonical envelopes."""
     try:
         return fn(*args, **kwargs)
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
     except evolution.EvolutionContractError as exc:
         return api_bad_request(str(exc))
     except evolution.EvolutionStateError as exc:
@@ -62,8 +65,13 @@ def _call(fn, *args, **kwargs):
         if exc.code == 'database_conflict':
             return api_conflict('evolution state changed; reload before retrying')
         raise
-    except (ValueError, TypeError) as exc:
-        return api_bad_request(str(exc))
+
+
+def _query_int(name: str, default: str) -> int:
+    try:
+        return int(request.args.get(name, default))
+    except ValueError as exc:
+        raise BadRequest(str(exc), field=name) from exc
 
 
 @api_v1_evolution_bp.route('/api/v4/evolution/programs', methods=['POST'])
@@ -83,7 +91,7 @@ def list_evolution_programs():
     from lib.evolution.programs import program_page
     result = _call(lambda: program_page(user_id=request_user_id(),
         after=request.args.get('after', ''), before=request.args.get('before', ''),
-        limit=int(request.args.get('limit', '20'))))
+        limit=_query_int('limit', '20')))
     return api_ok(result) if isinstance(result, dict) else result
 
 
@@ -130,8 +138,8 @@ def append_evolution_program_steps(program_id):
 def page_evolution_experiments(program_id):
     from lib.evolution.programs import experiment_page
     result = _call(lambda: experiment_page(program_id, user_id=request_user_id(),
-                    after=int(request.args.get('after', '0')),
-                    limit=int(request.args.get('limit', '20'))))
+                    after=_query_int('after', '0'),
+                    limit=_query_int('limit', '20')))
     return api_ok(result) if isinstance(result, dict) else result
 
 
@@ -657,7 +665,7 @@ def get_evolution_run(run_id):
 def get_evolution_stage_outcome(run_id, task_id):
     from lib.evolution.stage_outcomes import page
     result = _call(lambda: page(run_id, task_id, user_id=request_user_id(),
-                               offset=int(request.args.get('offset', '0')),
+                               offset=_query_int('offset', '0'),
                                source_kind=request.args.get('source_kind', 'deliverable')))
     return api_ok({'outcome': result}) if isinstance(result, dict) else result
 
@@ -757,7 +765,7 @@ def get_goal_coordination(run_id):
     try:
         after=int(request.args.get('after','0'))
         before=int(request.args['before']) if 'before' in request.args else None
-    except ValueError:return api_bad_request('cursor must be an integer')
+    except ValueError as exc:raise BadRequest('cursor must be an integer') from exc
     if not 0<=after<=1000000 or (before is not None and not 1<=before<=1000000):
         return api_bad_request('cursor is out of range')
     result=_call(conversation_page,run_id,user_id=request_user_id(),after=after,

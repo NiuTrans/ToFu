@@ -75,8 +75,8 @@ def _add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--native-profile',default='',help='Trusted unpriced native SDK resource profile JSON file.')
     parser.add_argument('--native-shutdown-timeout',type=float,default=5.0,help='Native joined-close grace in seconds.')
     parser.add_argument('--max-inflight', type=int, default=None,
-                        help='Concurrent runs; omitted or 0 uses the hardware budget. '
-                             'TOFU_AGENT_MAX_INFLIGHT overrides the automatic default.')
+                        help='Optional concurrent-run limit; omitted or 0 means unlimited. '
+                             'TOFU_AGENT_MAX_INFLIGHT supplies the default limit.')
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -150,6 +150,13 @@ def _parser() -> argparse.ArgumentParser:
              'exposes the full storage-free tool surface (dangerous execution '
              'stays opt-in inside TOOLS_ALL). Keyword-routed exposure is '
              'opt-in via TOFU_AGENT_RUN_NATIVE_EXPOSURE=routed.')
+    run_parser.add_argument(
+        '--delegate-mode', action='store_true',
+        default=os.environ.get('TOFU_AGENT_RUN_DELEGATE_MODE', '')
+        .strip().lower() in ('1', 'true', 'yes'),
+        help='Run in Delegate Mode: the root only orchestrates and every '
+             'read/search/command/edit goes to spawn_agents workers '
+             '(lib/tasks_pkg/delegate_mode.py). Requires swarm tools.')
     run_parser.add_argument(
         '--trajectory', default=os.environ.get(
             'TOFU_AGENT_RUN_TRAJECTORY', 'atif'),
@@ -232,7 +239,7 @@ def _self_heal_no_proxy(access) -> None:
         file=sys.stderr)
 
 def _runtime_and_setup(
-    args, *, native_execution=None,
+    args, *, native_execution=None, remote_principal: bool = True,
 ) -> tuple[AgentRuntime, ModelRoutingSetupService]:
     store = ModelRoutingSettingsStore()
     access = _model_routing_from_args(args)
@@ -258,6 +265,7 @@ def _runtime_and_setup(
         max_inflight=args.max_inflight,
 
         harness_profile=getattr(args, 'harness_profile', 'auto'),
+        remote_principal=remote_principal,
         **({'native_execution':native_execution} if native_execution is not None else {}),
     )
     setup = ModelRoutingSetupService(
@@ -271,8 +279,8 @@ def _runtime_and_setup(
 
 
 def _runtime(args) -> AgentRuntime:
-    """Compatibility helper retained for focused CLI tests/importers."""
-    runtime, _setup = _runtime_and_setup(args)
+    """Runtime for `run`: the operator launched it locally, so it is not remote."""
+    runtime, _setup = _runtime_and_setup(args, remote_principal=False)
     return runtime
 
 
@@ -282,21 +290,21 @@ def _run_task(args) -> int:
     task_text,config=_prepare_run(args)
 
     runtime = _runtime(args)
+    execution = None
     try:
-        result = runtime.run(
+        execution = runtime.start(
             [{'role': 'user', 'content': task_text}],
             config=config,
             trajectory=args.trajectory or None,
             timeout_s=args.timeout_s,
         )
+        result = execution.result()
     except AgentTimeoutError:
-        runtime.close(abort=True)
-        _emit({
-            'ok': False,
-            'status': 'timeout',
-            'error': {'kind': 'timeout',
-                      'message': f'run exceeded {args.timeout_s}s'},
-        }, args.output)
+        try:
+            runtime.close(abort=True)
+        except AgentTimeoutError:
+            pass  # teardown did not join: report without settled run evidence
+        _emit(_timeout_document(args, execution), args.output)
         print(f'run failed: kind=timeout message=run exceeded '
               f'{args.timeout_s}s', file=sys.stderr)
         return 3
@@ -304,6 +312,20 @@ def _run_task(args) -> int:
         runtime.close(abort=False)
 
     return _project_run_result(result,args)
+
+
+def _timeout_document(args, execution) -> dict:
+    """Timeout result that keeps the aborted run's settled evidence once joined."""
+    document = {}
+    if execution is not None and execution.done:
+        document = _run_document(execution.result())
+    document.update({
+        'ok': False,
+        'status': 'timeout',
+        'error': {'kind': 'timeout',
+                  'message': f'run exceeded {args.timeout_s}s'},
+    })
+    return document
 
 
 def _prepare_run(args):
@@ -331,11 +353,13 @@ def _prepare_run(args):
     config['tools.nativeExposure'] = (
         os.environ.get('TOFU_AGENT_RUN_NATIVE_EXPOSURE', 'full').strip()
         or 'full')
+    if getattr(args, 'delegate_mode', False):
+        config['delegateMode'] = True
 
     return task_text,config
 
 
-def _project_run_result(result,args):
+def _run_document(result) -> dict:
     document = {
         'ok': result.ok,
         'id': result.id,
@@ -356,8 +380,11 @@ def _project_run_result(result,args):
     if result.trajectory_format:
         document['trajectory_format'] = result.trajectory_format
         document['trajectory'] = result.trajectory
+    return document
 
-    _emit(document, args.output)
+
+def _project_run_result(result,args):
+    _emit(_run_document(result), args.output)
 
     if result.ok:
         return 0
@@ -379,14 +406,18 @@ async def _run_native_task(args) -> int:
     profile=_native_profile(args)
     async with owned_native_agent_configuration(archive=args.native_archive,configuration=profile,
             working_directory=config['project'],environ=dict(os.environ),shutdown_seconds=args.native_shutdown_timeout) as native:
-        runtime,_setup=_runtime_and_setup(args,native_execution=native)
+        runtime,_setup=_runtime_and_setup(args,native_execution=native,remote_principal=False)
+        execution=None
         try:
-            result=await runtime.run_async([{'role':'user','content':task_text}],config=config,
+            execution=runtime.start([{'role':'user','content':task_text}],config=config,
                 trajectory=args.trajectory or None,timeout_s=args.timeout_s)
+            result=await execution.result_async()
         except AgentTimeoutError:
-            await runtime.close_async(abort=True)
-            _emit({'ok':False,'status':'timeout','error':{'kind':'timeout',
-                'message':f'run exceeded {args.timeout_s}s'}},args.output)
+            try:
+                await runtime.close_async(abort=True)
+            except AgentTimeoutError:
+                pass  # teardown did not join: report without settled run evidence
+            _emit(_timeout_document(args,execution),args.output)
             print(f'run failed: kind=timeout message=run exceeded {args.timeout_s}s',file=sys.stderr)
             return 3
         finally:

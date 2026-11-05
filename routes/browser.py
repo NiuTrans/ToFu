@@ -13,6 +13,7 @@ from quart import Blueprint, jsonify, request
 from lib.api_v4 import raw_success_response
 from lib.openapi import media_responses, api_meta
 from lib.browser.log_safety import text_for_log
+from lib.error_envelope import BadRequest
 from lib.quart_sync import send_file
 
 from lib.log import get_logger, log_event
@@ -398,7 +399,7 @@ async def browser_poll():
         )
         response.headers['Retry-After'] = '300'
         return response, status
-    except (TypeError, ValueError) as exc:
+    except BadRequest as exc:
         logger.info('[Browser] rejected poll client=%s: %s',
                     client_id[:12], exc)
         return api_bad_request(str(exc))

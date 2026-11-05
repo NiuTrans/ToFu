@@ -6,7 +6,7 @@
 //! BlockStore verifies every returned payload's content hash. Index blocks
 //! use the ordinary block cache and never require a full-history startup scan.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -521,13 +521,13 @@ impl RoutingRoot {
         Ok(found)
     }
 
-    /// Explicit history pruning rewrites only metadata after every pruned
-    /// source payload has a durable ordinary copy. Streaming cursors bound
-    /// memory independently of the total retained history size.
+    /// Bulk operator compaction keeps one streaming cursor/page writer instead
+    /// of collecting every retired source's locations. Automatic, bounded
+    /// slices use remove_locations to avoid a full-history publication hold.
     pub(crate) fn retain_sources(
         &self,
         blocks: &BlockStore,
-        keep: &std::collections::BTreeSet<BlockId>,
+        keep: &BTreeSet<BlockId>,
     ) -> io::Result<Self> {
         let mut merged: Option<Run> = None;
         for run in self.levels.iter().flatten().rev() {
@@ -553,10 +553,67 @@ impl RoutingRoot {
         let level = size_level(run.entries);
         let mut levels = vec![None; level + 1];
         levels[level] = Some(run);
-        Ok(Self {
-            levels,
+        Ok(Self { levels, verified_pages: Arc::default() })
+    }
+
+    /// Retire exact (payload, source) locations after their authenticated
+    /// SegmentIndex payloads have durable ordinary copies. The index witnesses
+    /// identify candidate pages without reading unrelated history. Preserve
+    /// run precedence and immutable pages; never merge the full routing tree
+    /// while history pruning owns the publication lane needed by WAL rotation.
+    pub(crate) fn remove_locations(
+        &self,
+        blocks: &BlockStore,
+        retired: &BTreeSet<(BlockId, BlockId)>,
+    ) -> io::Result<Self> {
+        if retired.is_empty() {
+            return Ok(self.clone());
+        }
+        let mut result = Self {
+            levels: Vec::with_capacity(self.levels.len()),
             verified_pages: Arc::default(),
-        })
+        };
+        for run in &self.levels {
+            let Some(run) = run else {
+                result.levels.push(None);
+                continue;
+            };
+            let mut retained_run = Run { entries: 0, pages: Vec::with_capacity(run.pages.len()) };
+            for page in &run.pages {
+                let range = (page.first, BlockId([0; 32]))
+                    ..=(page.last, BlockId([u8::MAX; 32]));
+                let retained_page = if retired.range(range).next().is_none() {
+                    Some(page.clone())
+                } else {
+                    // Always validate the actual candidate bytes, including
+                    // ordering, offsets and the page's identity/range witness.
+                    let mut entries = decode_page(&blocks.get_materialized_shared(page.id)?, page)?;
+                    entries.retain(|(id, location)| !retired.contains(&(*id, location.source)));
+                    if entries.len() == page.entries as usize {
+                        Some(page.clone())
+                    } else if entries.is_empty() {
+                        None
+                    } else {
+                        Some(PageReference {
+                            id: blocks.put_loose(&encode_page(&entries)?)?,
+                            first: entries.first().unwrap().0,
+                            last: entries.last().unwrap().0,
+                            entries: entries.len() as u32,
+                        })
+                    }
+                };
+                if let Some(page) = retained_page {
+                    retained_run.entries += u64::from(page.entries);
+                    retained_run.pages.push(page);
+                }
+            }
+            result.levels.push((retained_run.entries > 0).then_some(retained_run));
+        }
+        // The existing format permits gaps, but never a trailing empty level.
+        while result.levels.last().is_some_and(Option::is_none) {
+            result.levels.pop();
+        }
+        Ok(result)
     }
 
     pub(crate) fn page_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
@@ -693,6 +750,116 @@ mod tests {
     }
 
     #[test]
+    fn pruning_preserves_unaffected_routing_pages() {
+        // Separate key ranges model old history unrelated to this retirement.
+        // Pruning one source must not copy those immutable pages into new runs.
+        let blocks = store();
+        let retired = BlockId([11; 32]);
+        let retained = BlockId([12; 32]);
+        let location = |source| PayloadLocation {
+            source, source_bytes: 16, offset: 0, length: 1,
+        };
+        let older = BTreeMap::from([(BlockId([20; 32]), location(retained))]);
+        let newer = BTreeMap::from([(BlockId([21; 32]), location(retired))]);
+        let mut old_writer = RunWriter::new(&blocks);
+        for entry in older { old_writer.push(entry).unwrap(); }
+        let mut other_writer = RunWriter::new(&blocks);
+        other_writer.push((BlockId([22; 32]), location(retained))).unwrap();
+        let mut old_run = old_writer.finish().unwrap();
+        let other_run = other_writer.finish().unwrap();
+        old_run.entries += other_run.entries;
+        old_run.pages.extend(other_run.pages);
+        let mut new_writer = RunWriter::new(&blocks);
+        for entry in newer { new_writer.push(entry).unwrap(); }
+        let root = RoutingRoot { levels: vec![Some(new_writer.finish().unwrap()),
+            Some(old_run)], verified_pages: Arc::default() };
+        let unchanged = root.levels[1].as_ref().unwrap().pages[0].id;
+        let pruned = root.remove_locations(&blocks, &BTreeSet::from([(BlockId([21; 32]), retired)])).unwrap();
+        assert_eq!(pruned.lookup(&blocks, BlockId([21; 32])).unwrap(), None);
+        assert_eq!(pruned.lookup(&blocks, BlockId([20; 32])).unwrap(), Some(location(retained)));
+        assert!(pruned.page_ids().any(|id| id == unchanged),
+            "unrelated immutable routing pages must survive a small retirement");
+        assert_eq!(root.lookup(&blocks, BlockId([21; 32])).unwrap(), Some(location(retired)),
+            "a captured old routing root must remain readable");
+    }
+
+    #[test]
+    fn pruning_io_depends_on_affected_pages_not_retained_history() {
+        use crate::vfs::Operation;
+        for page_count in [4_u64, 64, 512] {
+            let vfs = Arc::new(DeterministicVfs::new(None));
+            vfs.create_dir(Path::new("/data")).unwrap();
+            vfs.sync_directory(Path::new("/")).unwrap();
+            let blocks = BlockStore::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+            blocks.set_cache_capacity_bytes(0).unwrap();
+            let retired_source = BlockId([11; 32]);
+            let retained_source = BlockId([12; 32]);
+            let key = |page: u64, slot: u8| {
+                let mut bytes = [0; 32];
+                bytes[..8].copy_from_slice(&page.to_be_bytes());
+                bytes[31] = slot;
+                BlockId(bytes)
+            };
+            let location = |source| PayloadLocation { source, source_bytes: 16, offset: 0, length: 1 };
+            let mut pages = Vec::new();
+            for page in 0..page_count {
+                let mut writer = RunWriter::new(&blocks);
+                for slot in 0..3 {
+                    let source = if page == 1 && slot == 1 { retired_source } else { retained_source };
+                    writer.push((key(page, slot), location(source))).unwrap();
+                }
+                pages.extend(writer.finish().unwrap().pages);
+            }
+            let root = RoutingRoot { levels: vec![Some(Run { entries: page_count * 3, pages })],
+                verified_pages: Arc::default() };
+            let retired = BTreeSet::from([(key(1, 1), retired_source)]);
+            vfs.arm_fault(None).unwrap();
+            let pruned = root.remove_locations(&blocks, &retired).unwrap();
+            let trace = vfs.trace().unwrap();
+            let reads = trace.iter().filter(|op| **op == Operation::Read).count();
+            let writes = trace.iter().filter(|op| **op == Operation::Write).count();
+            println!("history pruning: retained_pages={page_count} reads={reads} writes={writes}");
+            assert!(reads <= 4, "small retirement scanned unrelated history: {reads} reads for {page_count} pages");
+            assert!(writes <= 4, "small retirement rewrote unrelated history: {writes} writes");
+            assert_eq!(pruned.lookup(&blocks, key(1, 1)).unwrap(), None);
+            for (page, slot) in [(0, 0), (1, 0), (1, 2), (page_count - 1, 2)] {
+                assert_eq!(pruned.lookup(&blocks, key(page, slot)).unwrap(), Some(location(retained_source)));
+            }
+            assert_eq!(root.lookup(&blocks, key(1, 1)).unwrap(), Some(location(retired_source)));
+            let reopened = RoutingRoot::decode(&pruned.encode().unwrap()).unwrap();
+            assert_eq!(reopened, pruned);
+            let appended = reopened.append(&blocks, &BTreeMap::from([
+                (key(1, 1), location(retained_source)),
+            ])).unwrap();
+            assert_eq!(appended.lookup(&blocks, key(1, 1)).unwrap(), Some(location(retained_source)));
+        }
+    }
+
+    #[test]
+    fn pruning_preserves_other_sources_of_the_same_payload_and_rejects_bad_pages() {
+        let blocks = store();
+        let id = BlockId([20; 32]);
+        let old = PayloadLocation { source: BlockId([11; 32]), source_bytes: 16, offset: 0, length: 1 };
+        let new = PayloadLocation { source: BlockId([12; 32]), ..old };
+        let mut old_writer = RunWriter::new(&blocks);
+        old_writer.push((id, old)).unwrap();
+        let mut new_writer = RunWriter::new(&blocks);
+        new_writer.push((id, new)).unwrap();
+        let root = RoutingRoot { levels: vec![Some(new_writer.finish().unwrap()),
+            Some(old_writer.finish().unwrap())], verified_pages: Arc::default() };
+        let pruned = root.remove_locations(&blocks, &BTreeSet::from([(id, old.source)])).unwrap();
+        assert_eq!(pruned.lookup(&blocks, id).unwrap(), Some(new));
+        assert_eq!(RoutingRoot::decode(&pruned.encode().unwrap()).unwrap(), pruned);
+        let empty = pruned.remove_locations(&blocks, &BTreeSet::from([(id, new.source)])).unwrap();
+        assert_eq!(RoutingRoot::decode(&empty.encode().unwrap()).unwrap(), RoutingRoot::default());
+        assert_eq!(root.remove_locations(&blocks, &BTreeSet::new()).unwrap(), root);
+        let mut malformed = root.clone();
+        malformed.levels[0].as_mut().unwrap().pages[0].entries += 1;
+        assert_eq!(malformed.remove_locations(&blocks, &BTreeSet::from([(id, old.source)]))
+            .unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn routing_merges_overlapping_runs_and_rewrites_pruned_sources() {
         let blocks = store();
         let old = BlockId([11; 32]);
@@ -729,14 +896,14 @@ mod tests {
             assert!(candidates.iter().all(|location| location.source == new));
         }
         let retained = root
-            .retain_sources(&blocks, &std::collections::BTreeSet::from([new]))
+            .remove_locations(&blocks, &(0..5000_u32).map(|index| (BlockId::for_payload(&index.to_le_bytes()), old)).collect())
             .unwrap();
         assert!(retained
             .lookup(&blocks, BlockId::for_payload(&4999_u32.to_le_bytes()))
             .unwrap()
             .is_some());
         assert!(retained
-            .retain_sources(&blocks, &Default::default())
+            .remove_locations(&blocks, &(0..5000_u32).map(|index| (BlockId::for_payload(&index.to_le_bytes()), new)).collect())
             .unwrap()
             .levels
             .is_empty());

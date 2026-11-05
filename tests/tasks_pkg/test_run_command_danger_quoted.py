@@ -10,8 +10,9 @@ grep such as::
 
 matched ``\\bshutdown\\b`` inside the quoted search pattern and was blocked
 ("Command blocked for safety: matches dangerous pattern"), even though nothing
-was actually shutting down. The fix masks quoted-literal CONTENTS before the
-scan so only unquoted command structure is inspected.
+was actually shutting down. The guard now judges the program words of the
+shell-structure parse, so a quoted argument is data; the full matrix lives in
+tests/project_mod/test_dangerous_command_structure.py.
 """
 
 import pytest

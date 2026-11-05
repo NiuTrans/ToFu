@@ -9,7 +9,7 @@ final class LoginFormTests: XCTestCase {
         let html = "<html><form method=\"post\" action=\"./login\">"
         XCTAssertEqual(
             LoginForm.resolveAction(html, pageUrl: page)?.absoluteString,
-            "https://h.example/some/login"
+            "https://h.example/some/prefix/login"
         )
     }
 
@@ -43,7 +43,7 @@ final class LoginFormTests: XCTestCase {
         let html = "<form class='big' method='post' action='./login'>"
         XCTAssertEqual(
             LoginForm.resolveAction(html, pageUrl: page)?.absoluteString,
-            "https://h.example/some/login"
+            "https://h.example/some/prefix/login"
         )
     }
 }

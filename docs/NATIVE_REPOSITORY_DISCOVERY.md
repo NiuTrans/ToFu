@@ -37,4 +37,26 @@ Cold activation keeps `StreamLimits` a frozen dataclass while defining its small
 
 Application task scopes preserve canonical file-local grammar failures and references, while owned measurement scopes remain strict by default. This separates application error semantics from complete-work measurement admission; malformed frames, invalid configuration, artifact failures and cancellation still fail the tool. A whole-scan reference fallback would hide native failure and is not introduced. Installed model-loop fixtures join their provider even when configuration validation fails. `system_repository_cold_activation_20261015.json` records the API/installed checks, rejected copy prototypes and a complete targeted cold cohort that still exceeds the CPU guard. Defaults remain unchanged.
 
+Repository qualification follows the common tool result contract. **Problem:**
+older scanner checks treated the handler tuple's third slot as an error flag,
+and an SDK fixture used it to finish a failed scan as successful. **Decision:**
+that slot remains `is_search=False`; finalizer/event `status` is the outcome
+authority, including cancellation and artifact refusal. The offline port checks
+run in the regular test ladder as well as before measurements. **Alternative
+rejected:** returning `True` on failure would publish an error as search evidence.
+Verify `tests/repo_map/test_tool_port_checks.py`, native application/owned scanner
+tests, and `tests/tasks_pkg/test_repo_map_handler.py`.
+
+The recording repository adapters share one invocation owner. **Problem:**
+component and task adapters rewrote Python source and cloned the repository API
+to inject scanners, while the public adapter duplicated their call path.
+**Decision:** all pass the borrowed scanner through `repository_scanner` and
+privately bind only the recording finalizer. Component fixtures retain their
+explicit owner alias; actual tasks resolve the canonical principal before any
+scan. Real transient event publication remains with `publication_port.py`.
+**Alternatives rejected:** string replacements couple qualification to formatting;
+merging recording and real publication would erase the measured boundary.
+Port construction changes require fresh source witnesses before new measurements;
+old timing receipts are not evidence for the new adapters.
+
 <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

@@ -16,8 +16,7 @@ def owner(monkeypatch):
     monkeypatch.setattr(incremental, '_worker_threads', weakref.WeakSet())
     monkeypatch.setattr(incremental, '_retired_stamps', {})
     monkeypatch.setattr(incremental, '_shutdown_started', False)
-    monkeypatch.setattr(incremental, '_PREVIEW_MIN_NARRATION_CHARS', 1)
-    monkeypatch.setattr(incremental._Accumulator, '_push', lambda *args: None)
+    monkeypatch.setattr(incremental._Accumulator, '_push', lambda *args, **kwargs: None)
     monkeypatch.setattr(incremental._Accumulator, '_translate',
         lambda self, source, **kwargs: ('translated:' + source, 'fixture'))
     yield

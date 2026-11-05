@@ -101,7 +101,7 @@ class _CustomTool:
     name: str
     schema: dict              # canonical function plus optional decoded-result metadata
     mode: str                 # 'client' | 'webhook' | 'sandbox'
-    write: bool               # runs in the serial write phase
+    write: bool               # approval-eligible effect (write partition)
     idempotent: bool          # dedup-cached within the task
     execution: dict           # backend-specific config (url/auth/command/…)
 
@@ -422,19 +422,20 @@ class ToolEnvironment:
     # ── client: zero-trust handoff ──
     def _run_client(self, tool, task, tc_id, fn_args, rn,
                     round_entry) -> tuple[str, bool]:
+        from lib.agent_core.events import EventType, build_event
         from lib.tasks_pkg.manager import append_event
         call_id = f'ctool_{secrets.token_hex(8)}'
         round_entry['status'] = 'awaiting_client_tool'
         round_entry['customCallId'] = call_id
         def publish():
-            append_event(task, {
-                'type': 'custom_tool_call',
-                'roundNum': rn,
-                'toolCallId': round_entry.get('toolCallId', tc_id),
-                'callId': call_id,
-                'toolName': tool.name,
-                'arguments': fn_args,
-            })
+            append_event(task, build_event(
+                EventType.CUSTOM_TOOL_CALL,
+                roundNum=rn,
+                toolCallId=round_entry.get('toolCallId', tc_id),
+                callId=call_id,
+                toolName=tool.name,
+                arguments=fn_args,
+            ))
         return request_client_tool_result(
             call_id, task=task,
             timeout=tool.execution.get('timeout_s', self.limits.per_call_timeout_s),

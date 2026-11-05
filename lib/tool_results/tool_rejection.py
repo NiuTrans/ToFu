@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, MutableMapping
 from typing import Any
 
+from lib.tool_results.tool_round_status import TERMINAL_TOOL_ROUND_STATUSES
+
 
 REJECTION_FIELD = 'rejection'
 LEGACY_REJECTION_FIELD = '_rejected'
@@ -146,10 +148,7 @@ def terminal_tool_rejection(
     abort, or untyped refusal stops the scan so an earlier rejection cannot be
     misreported as the turn outcome.
     """
-    terminal_statuses = frozenset({
-        'done', 'error', 'failed', 'rejected', 'aborted', 'interrupted',
-        'skipped', 'unanswerable',
-    })
+    terminal_statuses = TERMINAL_TOOL_ROUND_STATUSES | {'failed', 'interrupted', 'skipped'}
     for candidate in reversed(list(tool_rounds or ())):
         if not isinstance(candidate, Mapping):
             continue

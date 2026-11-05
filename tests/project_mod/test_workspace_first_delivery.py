@@ -11,6 +11,9 @@ from tests.storage.test_integration_delivery import automatic_workspace, git, re
 
 pytestmark = pytest.mark.unit
 
+# This path is materialized inside fixture repositories, not read from this repo.
+_AUDIT_SYNTHETIC_REPO_PATHS = {'tests/test_cache.py'}
+
 
 def finish(root, task='automatic', outcome='completed'):
     return delivery.settle_task_workspace(str(root), task, user_id=1, outcome=outcome)
@@ -228,3 +231,36 @@ def test_legacy_committed_lost_ack_keeps_ancestry_recovery(repo, monkeypatch):
     assert result['state'] == 'delivered'
     assert result['publicationMode'] == 'committed'
     assert (root / 'base.txt').read_text() == 'later user edits\n'
+
+
+def test_file_already_delivered_under_another_commit_is_not_a_conflict(repo, monkeypatch):
+    # Duplicate cherry-picks: the canonical tree already holds the task's new
+    # file byte-for-byte (published earlier from another chain, still untracked).
+    root, _, _ = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'tests').mkdir()
+    (work / 'tests/test_cache.py').write_text('def test_cache():\n    assert True\n')
+    (work / 'base.txt').write_text('task edit\n')
+    (root / 'tests').mkdir()
+    (root / 'tests/test_cache.py').write_text('def test_cache():\n    assert True\n')
+    head, index = git(root, 'rev-parse', 'HEAD'), (root / '.git/index').read_bytes()
+    result = finish(root)
+    assert result['state'] == 'delivered', result
+    assert (root / 'base.txt').read_text() == 'task edit\n'
+    assert (root / 'tests/test_cache.py').read_text() == 'def test_cache():\n    assert True\n'
+    assert git(root, 'rev-parse', 'HEAD') == head
+    assert (root / '.git/index').read_bytes() == index
+
+
+def test_divergent_add_add_names_the_conflicting_path_and_applies_nothing(repo, monkeypatch):
+    root, _, _ = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'added.txt').write_text('task version\n')
+    (work / 'base.txt').write_text('task edit\n')
+    (root / 'added.txt').write_text('peer version\n')
+    result = finish(root)
+    assert result['state'] == 'blocked', result
+    assert result['retry']['conflictPaths'] == ['added.txt']
+    assert 'added.txt' in result['reason'] and 'does not match index' not in result['reason']
+    assert (root / 'added.txt').read_text() == 'peer version\n'
+    assert (root / 'base.txt').read_text() != 'task edit\n'

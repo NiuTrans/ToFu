@@ -12,12 +12,14 @@ from lib.agent_core.events import EventType, build_event
 from lib.turn_activity_timeline import capture_compaction_boundary, fold_activity_timeline
 from tests._runtime_sections import ROOT
 from tests.support.frontend_visual import frontend_visual_origin, frontend_visual_page as frontend_visual_page  # noqa: F401
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 
 
 @pytest.mark.parametrize('width', [1100, 390])
 def test_refused_preflight_follows_its_tool_in_live_and_reload(frontend_visual_page, tmp_path, width):
+    require_node_modules('vite')
     page = frontend_visual_page
     page.set_viewport_size({'width': width, 'height': 900})
     bundle = tmp_path / 'conversation-owner.js'

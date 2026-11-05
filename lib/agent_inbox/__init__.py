@@ -48,13 +48,15 @@ Usage::
     from lib.tasks_pkg.context_composer import append_injection
     append_injection(messages, 'inbox_delivery', coalesced_payload,
                      task=task, round_num=round_num,
-                     contains_human_steer=bool(steer_items))
+                     contains_human_steer=bool(steer_items),
+                     display_owner='inbox-lanes')
     # Do NOT hand-append a bare ``{'role': 'user', ...}`` dict here — that
     # bypasses registry attribution and the context manifest (see tests:
-    # test_runtime_prompt_writers_cannot_bypass). Display stays with the
-    # ``_inboxInjects`` chip (the ``<swarm-update>`` card); the carrier does
-    # NOT also emit a ``system_note`` context-injection row — that rendered
-    # the same payload a second time.
+    # test_runtime_prompt_writers_cannot_bypass_shared_interface). Only these
+    # drains declare dedicated display ownership: completion uses the
+    # ``_inboxInjects`` chip; peer/steer/background lanes keep their existing
+    # confirmed-delivery UI. Other inbox_delivery writers default to a
+    # ``system_note`` so messages without a dedicated sidecar remain visible.
 
     # 3) Task completes — clear the inbox AND tombstone it so late
     #    sub-agents can't recreate the bucket.

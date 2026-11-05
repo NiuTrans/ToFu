@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable as Callable, Sequence as Sequence
+from collections.abc import Callable as Callable, Mapping, Sequence as Sequence
 from dataclasses import dataclass, field
 import faulthandler
 import os
@@ -191,20 +191,26 @@ class SQLiteSession:
             )
         return affected
 
-    def fetch_one(self, sql: str, params: tuple[Any, ...] = ()):
+    def fetch_one(
+        self, sql: str, params: tuple[Any, ...] = (),
+    ) -> Mapping[str, Any] | None:
         row = self.connection.execute(sql, params).fetchone()
         return dict(row) if row is not None else None
 
-    def fetch_all(self, sql: str, params: tuple[Any, ...] = ()):
+    def fetch_all(
+        self, sql: str, params: tuple[Any, ...] = (),
+    ) -> list[Mapping[str, Any]]:
         return [dict(row) for row in self.connection.execute(sql, params).fetchall()]
 
-    def fetch_one_for_update(self, sql: str, params: tuple[Any, ...] = ()):
+    def fetch_one_for_update(
+        self, sql: str, params: tuple[Any, ...] = (),
+    ) -> Mapping[str, Any] | None:
         """The enclosing BEGIN IMMEDIATE already serializes this decision."""
         return self.fetch_one(sql, params)
 
     def fetch_one_for_update_skip_locked(
         self, sql: str, params: tuple[Any, ...] = (),
-    ):
+    ) -> Mapping[str, Any] | None:
         """Select one claim candidate inside the serialized writer txn.
 
         SQLite has one physical writer, so the surrounding ``BEGIN
@@ -765,9 +771,13 @@ class _FairWriter:
         """Run ``jobs`` in one or more commit segments, one fsync per segment.
 
         Per-job SAVEPOINTs give each job its own atomicity and error
-        isolation inside the shared transaction.  Raises _BatchFailed when a
-        segment reports failure; its exact unknown-delivery membership must
-        be fenced before the caller retries any pending job.
+        isolation inside the shared transaction.  A failed job may have
+        observed earlier members' uncommitted writes (a version conflict),
+        so its error is delivered only with the segment's COMMIT; a segment
+        that rolls back leaves it pending for re-evaluation.  Raises
+        _BatchFailed when a segment reports failure; its exact
+        unknown-delivery membership must be fenced before the caller
+        retries any pending job.
         """
         batch_start = time.monotonic()
         # The progress handler is re-armed PER JOB with ``min(job.deadline_at,
@@ -782,6 +792,7 @@ class _FairWriter:
             lambda: 1 if time.monotonic() >= segment_deadline else 0, 1000)
         segment_start = batch_start
         segment_work: list[_WriteJob] = []
+        segment_failures: list[tuple[_WriteJob, StorageError]] = []
         in_transaction = False
         try:
             for job in jobs:
@@ -795,8 +806,10 @@ class _FairWriter:
                     # Lane-boundary / time-budget commit: background work and
                     # overlong segments must not extend the latency of the
                     # jobs already executed in this segment.
-                    self._commit_segment(segment_work, segment_deadline)
+                    self._commit_segment(
+                        segment_work, segment_deadline, segment_failures)
                     segment_work = []
+                    segment_failures = []
                     in_transaction = False
                     now = time.monotonic()
                     if job.cancelled or now >= job.deadline_at:
@@ -852,7 +865,7 @@ class _FairWriter:
                             # Defer to the batch-level retry/fallback, which
                             # re-runs this job with the same policy.
                             raise _BatchFailed(mapped) from op_exc
-                        self._resolve(job, error=mapped)
+                        segment_failures.append((job, mapped))
                         continue
                     if time.monotonic() >= job.deadline_at:
                         self._set_phase('rollback')
@@ -875,7 +888,8 @@ class _FairWriter:
                 job.result_pending = result  # resolved only when the segment commits
                 segment_work.append(job)
             if in_transaction:
-                self._commit_segment(segment_work, segment_deadline)
+                self._commit_segment(
+                    segment_work, segment_deadline, segment_failures)
                 in_transaction = False
         finally:
             if in_transaction:
@@ -895,6 +909,7 @@ class _FairWriter:
         self,
         segment_work: list[_WriteJob],
         segment_deadline: float,
+        segment_failures: list[tuple[_WriteJob, StorageError]],
     ) -> None:
         if time.monotonic() >= segment_deadline:
             raise _BatchFailed(StorageError(
@@ -913,6 +928,8 @@ class _FairWriter:
         for job in segment_work:
             self._resolve(job, result=job.result_pending)
             job.result_pending = None
+        for job, error in segment_failures:
+            self._resolve(job, error=error)
 
     def _transaction_still_active(self) -> bool:
         """Observe the writer-owned connection before rollback erases proof.
@@ -1038,6 +1055,7 @@ class _FairWriter:
         transaction_timeout_s: float | None = None,
         join_on_timeout: bool = False,
     ) -> Any:
+        submitted_at = time.monotonic()
         if priority not in self._queues:
             raise StorageError('database_protocol_error', 'Invalid storage priority')
         if not self._thread.is_alive():
@@ -1079,8 +1097,10 @@ class _FairWriter:
             self.metrics['submitted'] += 1
             self.metrics['max_queue_depth'] = max(self.metrics['max_queue_depth'], depth)
             self._condition.notify()
-        acquire_wait = max(0.0, deadline_at - time.monotonic())
+        acquire_started_at = time.monotonic()
+        acquire_wait = max(0.0, deadline_at - acquire_started_at)
         if not job.started.wait(acquire_wait):
+            acquire_finished_at = time.monotonic()
             # The caller no longer owns a useful write. Remove the job while
             # it is still queued so its operation closure and decoded RPC
             # payload become reclaimable immediately. If the writer already
@@ -1104,11 +1124,23 @@ class _FairWriter:
                 current = self.current_job()
                 if current is not None:
                     current['held_s'] = round(now - current['started_at'], 1)
+                if deadline_at <= submitted_at:
+                    deadline_state = 'expired_on_entry'
+                elif acquire_wait == 0.0:
+                    deadline_state = 'expired_before_wait'
+                else:
+                    deadline_state = 'expired_while_waiting'
                 logger.warning(
-                    'SQLite writer acquisition timed out after %.1fs '
-                    '(priority=%s op=%s queue=%s held_by=%s) — the writer is '
-                    'occupied; see stall diagnostics above',
-                    acquire_wait, priority, operation_name or 'unknown',
+                    'SQLite writer acquisition timed out '
+                    '(deadline_state=%s entry_remaining_ms=%.3f '
+                    'wait_budget_ms=%.3f wait_elapsed_ms=%.3f '
+                    'submit_elapsed_ms=%.3f priority=%s op=%s '
+                    'queue=%s held_by=%s)',
+                    deadline_state, (deadline_at - submitted_at) * 1000,
+                    acquire_wait * 1000,
+                    (acquire_finished_at - acquire_started_at) * 1000,
+                    (acquire_finished_at - submitted_at) * 1000,
+                    priority, operation_name or 'unknown',
                     self.queue_depths(), current)
             if join_on_timeout and not removed_before_start:
                 # Native callbacks retain their runtime until the drained job

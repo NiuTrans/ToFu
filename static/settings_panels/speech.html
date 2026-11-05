@@ -1,9 +1,8 @@
         <div class="settings-tab-panel" id="settingsTab_speech">
           <div class="settings-section-title">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px;opacity:.65"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
-            <span data-i18n="settings.sttService">语音识别（语音输入）</span>
+            <span data-i18n="settings.sttService">语音识别</span>
           </div>
-          <p class="settings-desc" data-i18n-html="settings.sttServiceDesc">配置语音转文字（STT）服务后，聊天输入框会出现麦克风按钮，可直接说话转成文字。<br>未配置时麦克风按钮自动隐藏。</p>
 
           <!-- Live status banner (reflects Api.audio.capabilities()) -->
           <div id="sttStatusBanner" class="settings-hint-banner" style="display:none;margin-top:0;margin-bottom:12px">
@@ -13,8 +12,8 @@
           <div class="settings-group">
             <div class="settings-toggle-row">
               <div>
-                <span class="settings-toggle-label" data-i18n="settings.sttEnable">启用语音输入</span>
-                <div class="settings-toggle-desc" data-i18n="settings.sttEnableDesc">关闭后立即停用语音识别（麦克风按钮隐藏），已填写的凭证会保留</div>
+                <span class="settings-toggle-label" data-i18n="settings.sttEnable">启用此识别服务</span>
+                <div class="settings-toggle-desc" data-i18n="settings.sttEnableDesc">停用会保留配置；其他已启用的识别服务仍可使用。</div>
               </div>
               <label class="stg-toggle">
                 <input type="checkbox" id="settingSttEnabled">

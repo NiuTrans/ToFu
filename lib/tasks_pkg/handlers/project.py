@@ -1,5 +1,11 @@
 # HOT_PATH
-"""Project file tool handler: read/write/search/grep/run project files."""
+"""Project tool admission, transport routing and final settlement.
+
+The registered handler keeps descriptor scope, project guidance, read/freshness
+gates and path restrictions in order. Admitted local I/O and command lifetimes
+live in _project_execution; image/write-artifact presentation lives in
+_project_presentation. Remote desktop routing retains its separate wire policy.
+"""
 
 from __future__ import annotations
 
@@ -12,12 +18,6 @@ from lib.tasks_pkg.executor import (
     _finalize_tool_round,
     _resolve_content_ref,
     tool_registry,
-)
-from lib.tasks_pkg.handlers.code_exec import (
-    _make_grep_intercept_cb,
-    _make_run_command_progress_cb,
-    _make_run_command_spawn_cb,
-    _make_stdin_callback,
 )
 from lib.tasks_pkg.handlers._read_gate import (
     _collect_target_paths,
@@ -50,7 +50,8 @@ PROJECT_HANDLER_TOOL_NAMES = frozenset(PROJECT_TOOL_NAMES) - {
 
 def _record_producer_result_metadata(fn_name, content, round_entry):
     """Carry producer-side omission evidence to the settlement boundary."""
-    if fn_name != 'grep_search' or not isinstance(round_entry, dict):
+    if fn_name not in ('search_files', 'grep_search') \
+            or not isinstance(round_entry, dict):
         return
     from lib.project_mod.read_tools import grep_result_was_truncated
 
@@ -71,10 +72,18 @@ _REMOTE_CMD_MAP = {
     'write_file': 'project_write_file',
     'apply_diff': 'project_apply_diff',
     'edit_file': 'project_edit_file',
+    # The desktop wire command keeps its deployed name.
+    'search_files': 'project_grep_search',
     'grep_search': 'project_grep_search',
     'find_files': 'project_find_files',
     'run_command': 'project_run_command',
 }
+
+
+def _remote_error_text(task, remote, error):
+    from lib.desktop.device_waits import offline_hint
+    return (f'Error: remote worktree {remote["root"]}: {error}'
+            + offline_hint(task, remote['agent_id']))
 
 
 def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
@@ -163,7 +172,7 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
             cancellation=Cancellation(task))
         if error:
             return _finish(
-                f'Error: remote worktree {remote["root"]}: {error}',
+                _remote_error_text(task, remote, error),
                 {'exitCode': 'error', 'routedAs': 'project_list_dir'},
                 badge='remote error')
         if isinstance(result, dict) and result.get('error'):
@@ -206,7 +215,7 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
             cancellation=Cancellation(task))
         if error:
             return _finish(
-                f'Error: remote worktree {remote["root"]}: {error}',
+                _remote_error_text(task, remote, error),
                 {'exitCode': 'error', 'routedAs': 'project_find_files'},
                 badge='remote error')
         if isinstance(result, dict) and result.get('error'):
@@ -228,7 +237,8 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
     # observed outcome rather than inventing a second execution deadline.
     bridge_timeout = None
 
-    progress_cb = _make_run_command_progress_cb(task, rn, round_entry, command)
+    progress_cb = _make_run_command_progress_cb(
+        task, rn, round_entry, command, lifecycle=None)
     seen = {'stdout': 0, 'stderr': 0}
     stop = threading.Event()
 
@@ -260,20 +270,33 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
                 task.get('id', '?')[:8])
     watcher = threading.Thread(target=_watch, daemon=True)
     watcher.start()
+    command_failed = True
     try:
         result, error = send_desktop_command(
             'project_run_command', params, timeout=bridge_timeout,
             target_agent_id=remote['agent_id'],
             user_id=task.get('_userId', '') or '', cmd_id=cmd_id,
             cancellation=Cancellation(task))
+        command_failed = False
     finally:
         stop.set()
         watcher.join()
-    _drain_once()          # 尾帧:wait 返回后可能还有最后一批
-    progress_cb.flush()
+        try:
+            _drain_once()
+        except Exception:
+            if not command_failed:
+                raise
+            logger.warning('Remote output drain failed after bridge failure', exc_info=True)
+        finally:
+            try:
+                progress_cb.flush()
+            except Exception:
+                if not command_failed:
+                    raise
+                logger.warning('Remote output flush failed after bridge failure', exc_info=True)
 
     if error:
-        return _finish(f'Error: remote worktree {remote["root"]}: {error}',
+        return _finish(_remote_error_text(task, remote, error),
                        {'exitCode': 'error'}, badge='remote error')
     result = result if isinstance(result, dict) else {}
     text = format_desktop_result('project_run_command', result)
@@ -348,7 +371,7 @@ def _execute_remote_project_tool(task, fn_name, tc_id, fn_args, rn,
         target_agent_id=remote['agent_id'],
         user_id=task.get('_userId', '') or '', cancellation=Cancellation(task))
     if error:
-        return _finish(f'Error: remote worktree {remote["root"]}: {error}',
+        return _finish(_remote_error_text(task, remote, error),
                        badge='remote error')
     if fn_name in {'write_file', 'apply_diff', 'edit_file'}:
         from lib.project_mod.receipts import FileReceiptError, decode_write_receipts
@@ -366,143 +389,6 @@ def _execute_remote_project_tool(task, fn_name, tc_id, fn_args, rn,
 
 
 
-def _screenshot_to_descriptor(img, filename=''):
-    """Turn a ``__screenshot__`` dict into a frontend-render descriptor.
-
-    Returns a dict ``{uri, format, filename}`` where ``uri`` is the full
-    ``data:<mime>;base64,...`` string the browser can drop straight into an
-    ``<img src>``. ``uri`` is empty when the dict lacks a usable data URL.
-    """
-    if not isinstance(img, dict):
-        return {'uri': '', 'format': '', 'filename': filename}
-    return {
-        'uri': img.get('dataUrl', '') or '',
-        'format': img.get('format', 'png'),
-        'filename': filename,
-    }
-
-
-def _maybe_promote_write_to_artifact(task, fn_name, fn_args, project_path, meta):
-    """Detect renderable writes (md/html/svg) and persist + emit artifact event.
-
-    Mutates ``meta`` in place to attach ``artifactId`` so the chat-side
-    tool round can render an "Open in panel" chip.
-
-    This is best-effort: any failure (DB unavailable, read race, oversize)
-    logs and degrades to "no artifact, just the normal tool round".
-    """
-    if fn_name not in ('write_file', 'edit_file', 'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents'):
-        return
-    rel_path = (fn_args.get('path') or '').strip()
-    if not rel_path:
-        return
-
-    # Feature-flag gate — read live from lib at call time so a hot
-    # config reload disables / re-enables without a restart.
-    try:
-        import lib as _lib_mod
-        if not getattr(_lib_mod, 'ARTIFACTS_ENABLED', True):
-            return
-    except Exception as e:
-        logger.debug('[Artifacts] feature flag check failed (non-fatal): %s', e)
-
-    try:
-        from lib.artifacts import (
-            ArtifactSizeError,
-            create_artifact,
-            detect_format,
-            emit_artifact_event,
-            is_renderable_path,
-        )
-    except Exception as e:  # pragma: no cover — defensive import guard
-        logger.debug('[Artifacts] subsystem unavailable: %s', e)
-        return
-
-    if not is_renderable_path(rel_path):
-        return
-
-    fmt = detect_format(rel_path)
-    if fmt is None:
-        return
-
-    # Routine project doc edits (README.md, CHANGELOG.md, etc.) shouldn't
-    # spawn artifact chips — only HTML/SVG outputs are "report-shaped"
-    # enough to deserve the side panel.  Inline ```markdown fences are
-    # still promoted by Producer B (lib/artifacts/scanner.py).
-    if fmt == 'markdown':
-        return
-
-    # Resolve the on-disk target so we capture the canonical bytes (post
-    # write).  ``apply_diff`` / ``insert_content`` lacks a `content` arg —
-    # we always read from disk.
-    try:
-        from lib.project_mod.write_tools import _resolve_write_path
-        target = _resolve_write_path(project_path, rel_path)
-    except Exception as e:
-        # _resolve_write_path raises ValueError when an absolute path
-        # falls outside any registered root.  Either way, we can't safely
-        # promote it.
-        logger.debug('[Artifacts] cannot resolve write path %s: %s', rel_path, e)
-        return
-
-    try:
-        from lib.artifacts.response_files import read_project_file
-        from lib.project_mod.tool_admission import Cancellation
-        # The write-path authority already validated this exact target. Reuse
-        # the no-follow snapshot reader; its parent is a derived verified root.
-        raw = read_project_file(target, [os.path.dirname(target)],
-                                cancelled=Cancellation(task).is_set)
-        content = raw.decode('utf-8', errors='replace')
-        size = len(raw)
-    except (OSError, ValueError, RuntimeError) as error:
-        logger.warning('[Artifacts] read-back failed: %s', error)
-        return
-
-    conv_id = task.get('convId') or ''
-    if not conv_id:
-        logger.debug('[Artifacts] task without convId, skipping')
-        return
-
-    msg_id = task.get('_assistantMsgId') or task.get('msgId') or ''
-    title = os.path.basename(rel_path) or rel_path
-    src_ref = {'path': rel_path, 'tool': fn_name}
-
-    try:
-        artifact_meta = create_artifact(
-            conv_id=conv_id,
-            content=content,
-            format=fmt,
-            source='write_file',
-            source_ref=src_ref,
-            task_id=task.get('id', ''),
-            msg_id=msg_id,
-            title=title,
-        )
-    except ArtifactSizeError as e:
-        logger.info('[Artifacts] write_file size cap rejection: %s', e)
-        return
-    except Exception as e:
-        logger.warning('[Artifacts] create_artifact failed for %s: %s',
-                       rel_path, e, exc_info=True)
-        return
-
-    try:
-        emit_artifact_event(task, artifact_meta)
-    except Exception as e:
-        logger.warning('[Artifacts] emit_artifact_event failed for id=%s: %s',
-                       artifact_meta.get('id', '?')[:8], e, exc_info=True)
-
-    # Annotate the chat-side meta so the tool round can render the chip.
-    meta['artifactId']     = artifact_meta['id']
-    meta['artifactFormat'] = artifact_meta['format']
-    meta['artifactTitle']  = artifact_meta['title']
-    meta['artifactSize']   = artifact_meta['size_bytes']
-    logger.debug(
-        '[Artifacts] promoted write_file path=%s id=%s fmt=%s size=%d',
-        rel_path, artifact_meta['id'][:8], artifact_meta['format'], size,
-    )
-
-
 # Register read_files independently — it's a global tool that works with or
 # without a project path (absolute paths route to lib.file_reader.read_local_file
 # for PDFs/images/Office docs/text). The shared _handle_project_tool handles
@@ -511,6 +397,8 @@ def _maybe_promote_write_to_artifact(task, fn_name, fn_args, project_path, meta)
                     description='Read one or more files (relative or absolute)')
 @tool_registry.tool('inspect_image', category='files',
                     description='Zoom/rotate/crop view of a local image')
+@tool_registry.tool('inspect_video', category='files',
+                    description='Key frames, probe facts and transcript of a local video')
 @tool_registry.tool_set(PROJECT_HANDLER_TOOL_NAMES, category='project',
                         description='Read/write/search project files')
 def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None,
@@ -574,6 +462,14 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                     ref.get('tool_round'), len(resolved),
                     fn_args.get('path', '?'), task.get('id', '?')[:8])
 
+    from lib.tasks_pkg.conversation_delivery import deferred_completion_refusal
+    deferred_refusal = deferred_completion_refusal(task, fn_name, fn_args)
+    if deferred_refusal:
+        meta = build_project_tool_meta(fn_name, fn_args, deferred_refusal)
+        meta.update(notRun=True, exitCode='not-run', badge='unsupported')
+        _finalize_tool_round(task, rn, round_entry, [meta], status='error')
+        return tc_id, deferred_refusal, False
+
     # ── RWA remote-worktree routing (P3) ──
     # 远程绑定的会话在此分流:同名工具 → 桥命令寻址入队。服务器 FS 门
     # (下方 ReadGate/FreshGate/abs_path_guard)不适用 —— agent 自守。
@@ -613,7 +509,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     fn_args = rebind_project_tool_arguments(task, fn_args)
     if fn_name == 'run_command':
         from lib.tasks_pkg.workspace_delivery import prepare_worker_command_runtime
-        prepare_worker_command_runtime(task)
+        prepare_worker_command_runtime(task, fn_args.get('command') or '')
 
     # A model occasionally tries to export browser cookies and replay them in
     # curl/wget for a file download. Detect that narrow shape before any shell
@@ -678,7 +574,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         _finalize_tool_round(
             task, rn, round_entry, [meta],
             status='done' if ok else 'error')
-        return tc_id, tool_content, not ok
+        return tc_id, tool_content, False
     # ── Read-before-edit gate ──
     # apply_diff / insert_content built from guessed content are the dominant
     # source of "Search text not found" failures. Refuse them unless the
@@ -719,7 +615,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 meta = build_project_tool_meta(fn_name, fn_args, _gate_err)
                 meta['badge'] = 'read check unavailable'
                 _finalize_tool_round(task, rn, round_entry, [meta], status='error')
-                return tc_id, _gate_err, True
+                return tc_id, _gate_err, False
             _skip_idx, _unread_raw = [], []
         if _skip_idx:
             edits = fn_args.get('edits') or []
@@ -783,7 +679,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 meta = build_project_tool_meta(fn_name, fn_args, _fresh_err)
                 meta['badge'] = 'freshness check unavailable'
                 _finalize_tool_round(task, rn, round_entry, [meta], status='error')
-                return tc_id, _fresh_err, True
+                return tc_id, _fresh_err, False
             _stale_idx, _stale_raw = [], []
         if _stale_idx:
             edits = fn_args.get('edits') or []
@@ -822,7 +718,6 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         _execution_args['edits'] = [_execution_args['edits'][i] for i in _admitted_indices]
     _read_observations = []
 
-    from lib.project_mod import execute_tool
     from lib.project_mod.abs_path_guard import (
         reset_restricted, set_restricted, task_is_remote,
     )
@@ -844,225 +739,24 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     #   executor's convId-or-id) worked. Use the same key everywhere.
     _root_conv_id = execution_root_key(task)
     try:
-        # read_files is globally available — when no project is attached,
-        # absolute paths still work (routed inside tool_read_files via
-        # lib.file_reader); project-relative paths error out helpfully.
-        if fn_name in ('read_files', 'inspect_image') and not project_path:
-            # read_files / inspect_image need the task so an uploaded-attachment
-            # ref (att_media_ / att_txt_ / /api/images/) can be resolved under
-            # the owner scope (media refs require task['_userId'], legacy text
-            # refs scan task['messages']).
-            _no_proj_kw = ({'task': task}
-                           if fn_name in ('read_files', 'inspect_image') else {})
-            if fn_name == 'read_files':
-                _no_proj_kw['result_projection_items'] = _result_projection_items
-                _no_proj_kw['file_source_capture'] = file_source_capture
-
-                _no_proj_kw['read_observations'] = _read_observations
-            tool_content = execute_tool(fn_name, fn_args, '', conv_id=_root_conv_id,
-                                        task_id=task['id'], **_no_proj_kw)
-        else:
-            _progress_cb = None
-            _spawn_cb = None
-            _extra_kw = {'task': task}
-            if fn_name == 'write_file':
-                from lib.tasks_pkg.tool_runtime import active_context_for_call
-                _extra_kw['runtime_context'] = active_context_for_call(
-                    task, round_num=rn, tool_call_id=tc_id, round_entry=round_entry)
-            if fn_name == 'read_files':
-                _extra_kw['result_projection_items'] = _result_projection_items
-                _extra_kw['file_source_capture'] = file_source_capture
-
-                _extra_kw['read_observations'] = _read_observations
-            if fn_name in ('read_files', 'inspect_image'):
-                _extra_kw['task'] = task
-            if fn_name == 'run_command' and fn_args.get('background') and project_path:
-                from lib.tasks_pkg.background_commands import (
-                    background_command_result, start_background_command,
-                )
-                # Capture only execution inputs, never foreground presentation
-                # callbacks or task/round graphs in a long-lived closure.
-                background_args = dict(fn_args)
-                background_task_id = task['id']
-
-                from copy import deepcopy
-                from lib.tasks_pkg.workspace_delivery import (
-                    execution_repositories, ensure_execution_roots)
-                background_policy = deepcopy(ensure_execution_roots(task))
-
-                background_roots = {key: deepcopy((task.get('config') or {}).get(key))
-                    for key in ('projectPath', 'projectPaths', 'readOnlyPaths',
-                                'workspaceRuntimeRoots')}
-                background_execution = {
-                    'repositories': deepcopy(execution_repositories(task))}
-                def _execute_explicit_background(command_task, exec_ctx):
-                    exec_args = dict(background_args)
-                    command_task['_workspaceExecution'] = background_execution
-
-                    if background_policy is not None:
-                        command_task['_workspaceRootPolicy'] = deepcopy(background_policy)
-                    command_task['config'] = background_roots
-                    wrapped = exec_ctx.get('wrapped_command')
-                    from lib.project_mod.tool_admission import RecordedCommandSource
-                    admission_source = (RecordedCommandSource(
-                        str(background_args.get('command') or ''), wrapped) if wrapped else None)
-                    if wrapped:
-                        # POSIX durable record: streams go to files, the exit
-                        # code to a sentinel; the worker rebuilds the
-                        # authoritative result from those files afterwards.
-                        exec_args['command'] = wrapped
-
-                    spawned = False
-
-                    def _note_spawn(*_spawn_args):
-                        nonlocal spawned
-                        spawned = bool(command_task.get('_subprocess_pid'))
-                        exec_ctx['note_spawn'](
-                            command_task.get('_subprocess_pid'),
-                            command_task.get('_subprocess_pgid'))
-
-                    result = execute_tool(
-                        'run_command', exec_args, project_path,
-                        conv_id=_root_conv_id, task_id=background_task_id,
-                        task=command_task, stdin_callback=None, on_chunk=None,
-                        on_spawn=_note_spawn, runtime_context=None,
-                        recorded_command_source=admission_source,
-                    )
-                    if wrapped and spawned:
-                        return exec_ctx['build_result'](
-                            aborted=bool(command_task.get('aborted')))
-                    return result
-
-                command_id = start_background_command(
-                    task=task, config=cfg,
-                    command=str(background_args.get('command') or ''),
-                    execute=_execute_explicit_background,
-                )
-                tool_content = background_command_result(
-                    str(background_args.get('command') or ''), command_id,
-                    task=task,
-                    has_conversation=bool(task.get('convId') and task.get('_userId')),
-                )
-                meta = build_project_tool_meta(fn_name, fn_args, tool_content)
-                meta.pop('notRun', None)
-                meta.pop('reason', None)
-                meta.update(exitCode='background', backgrounded=True,
-                            backgroundCommandId=command_id, badge='background',
-                            timedOut=False)
-                _finalize_tool_round(task, rn, round_entry, [meta])
-                return tc_id, tool_content, False
-            if fn_name == 'run_command':
-                _cmd = fn_args.get('command', '') or ''
-                _stdin_cb = _make_stdin_callback(task, rn, round_entry, _cmd)
-                from lib.tasks_pkg.tool_runtime import active_context_for_call
-                _runtime_context = active_context_for_call(
-                    task, round_num=rn, tool_call_id=tc_id,
-                    round_entry=round_entry)
-                _spawn_cb = _make_run_command_spawn_cb(
-                    task, rn, round_entry)
-                _progress_cb = _make_run_command_progress_cb(
-                    task, rn, round_entry, _cmd,
-                    runtime_context=_runtime_context,
-                    lifecycle=_spawn_cb)
-                _extra_kw = {
-                    'stdin_callback': _stdin_cb,
-                    'on_chunk': _progress_cb,
-                    # The spawn clock (). Without this the project
-                    # mode — the COMMON case — published no deadlineTs and
-                    # forced no checkpoint, so the countdown silently never
-                    # appeared exactly where it mattered most. The same factory
-                    # _handle_code_exec uses, so both entry points share ONE
-                    # implementation (the lesson of the entrance-count drift).
-                    'on_spawn': _spawn_cb,
-                    'on_grep_intercept': _make_grep_intercept_cb(
-                        task, rn, round_entry),
-                    'task': task,  # enable cooperative abort of subprocesses
-
-                    'runtime_context': _runtime_context,
-                }
-            tool_content = ''
-            command_failed = True
-            try:
-                if fn_name == 'run_command' and project_path:
-                    from lib.tasks_pkg.handlers._background_command import (
-                        run_with_steer_handoff,
-                    )
-
-                    def _detach_progress():
-                        detach = getattr(_progress_cb, 'detach', None)
-                        if callable(detach):
-                            detach()
-
-                    def _execute_run(command_task):
-                        command_kw = dict(_extra_kw)
-                        command_kw['task'] = command_task
-                        return execute_tool(
-                            fn_name, fn_args, project_path,
-                            conv_id=_root_conv_id, task_id=task['id'],
-                            **command_kw,
-                        )
-
-                    tool_content = run_with_steer_handoff(
-                        task=task,
-                        config=cfg,
-                        command=_cmd,
-                        execute=_execute_run,
-                        on_detach=_detach_progress,
-
-                        on_handoff=lambda command_id: round_entry.update(backgroundCommandId=command_id),
-                        round_num=rn,
-                        tool_call_id=tc_id,
-                    )
-                else:
-                    tool_content = (
-                        execute_tool(
-                            fn_name, _execution_args, project_path,
-                            conv_id=_root_conv_id, task_id=task['id'],
-                            **_extra_kw,
-                        ) if project_path else 'Error: No project path.'
-                    )
-                command_failed = False
-            finally:
-                if _spawn_cb is not None:
-                    _spawn_cb.finish()
-                # Flush any buffered run_command output tail.
-                if _progress_cb is not None:
-                    try:
-                        _progress_cb.flush()
-                    except Exception as e:
-                        logger.debug('[run_command] progress flush failed: %s', e)
-
-                    _finalize_output = getattr(
-                        _progress_cb, 'finalize_output', None)
-                    if callable(_finalize_output):
-                        from lib.tasks_pkg.handlers._background_command import (
-                            is_background_command_result,
-                        )
-                        _incomplete = command_failed or (
-                            _runtime_context is not None
-                            and _runtime_context.cancellation_requested
-                        ) or '[Command timed out]' in tool_content or (
-                            '[Command interrupted by' in tool_content) or (
-                            is_background_command_result(tool_content))
-                        _artifact = _finalize_output(complete=not _incomplete)
-                        from lib.tasks_pkg.handlers.code_exec import (
-                            _project_output_artifact,
-                            _register_output_artifact_origin,
-                        )
-                        tool_content = _project_output_artifact(
-                            tool_content, _artifact)
-                        _register_output_artifact_origin(
-                            task, round_entry, _artifact,
-                            tool_name='run_command', display=_cmd,
-                            tool_call_id=tc_id)
-                        if _artifact.spilled:
-                            round_entry['outputArtifact'] = {
-                                'artifactRef': _artifact.artifact_ref,
-                                'sizeBytes': _artifact.size_bytes,
-                                'complete': _artifact.complete,
-                                'degraded': _artifact.degraded,
-                                'degradedReason': _artifact.degraded_reason,
-                            }
+        from lib.tasks_pkg.handlers._project_execution import execute_local_project_tool
+        execution = execute_local_project_tool(
+            task, cfg, fn_name, tc_id, fn_args, rn, round_entry, project_path,
+            root_conv_id=_root_conv_id, execution_args=_execution_args,
+            result_projection_items=_result_projection_items,
+            file_source_capture=file_source_capture,
+            read_observations=_read_observations)
+        tool_content = execution.content
+        _recorded_file_changes = execution.recorded_file_changes
+        if execution.background_command_id is not None:
+            meta = build_project_tool_meta(fn_name, fn_args, tool_content)
+            meta.pop('notRun', None)
+            meta.pop('reason', None)
+            meta.update(exitCode='background', backgrounded=True,
+                        backgroundCommandId=execution.background_command_id, badge='background',
+                        timedOut=False)
+            _finalize_tool_round(task, rn, round_entry, [meta])
+            return tc_id, tool_content, False
     finally:
         reset_restricted(_abs_token)
 
@@ -1101,69 +795,12 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     from lib.tools.rich_response import image_posthook
     _response_assets = image_posthook(task, fn_name, fn_args, project_path, tool_content)
 
-    # read_files with absolute image paths returns a batch dict with __batch_images__
-    _img_descriptors = None  # frontend-render image list (all images in a batch)
-    is_batch_image = isinstance(tool_content, dict) and tool_content.get('__batch_images__')
-    if is_batch_image:
-        # Extract the first image for VLM upload, keep text content
-        _images = tool_content['__batch_images__']
-        _text = tool_content.get('_text_content', '')
-        # Capture every image's data URI for inline rendering. Each image dict
-        # already carries its own filename (set in read_tools).
-        _img_list = [img for img in _images.values()
-                     if isinstance(img, dict) and img.get('__screenshot__')]
-        _img_descriptors = [_screenshot_to_descriptor(img, img.get('filename', ''))
-                            for img in _img_list]
-        # Use the first image as the primary screenshot result, but attach the
-        # full list so EVERY image rides the wire to the VLM (one image_url
-        # block each — see _append_screenshot_message).
-        first_img = _img_list[0] if _img_list else next(iter(_images.values()))
-        tool_content = first_img
-        if len(_img_list) > 1:
-            tool_content['images'] = _img_list
-        # Store the text content as fallback
-        if _text:
-            tool_content['_text_fallback'] = _text
-
-    # read_files may return a __screenshot__ dict for images (single absolute image path)
-    is_image_result = isinstance(tool_content, dict) and tool_content.get('__screenshot__')
-    if is_image_result:
-        tool_content.get('_text_fallback', '') or 'Image loaded.'
-        file_path = fn_args.get('path', '?')
-        filename = os.path.basename(file_path)
-        fmt = tool_content.get('format', 'png')
-        orig_size = tool_content.get('originalSize', 0)
-        comp_size = tool_content.get('compressedSize', 0)
-        size_info = f'{comp_size:,} bytes'
-        if tool_content.get('compressionApplied') and orig_size:
-            size_info = f'{orig_size:,} → {comp_size:,} bytes (compressed)'
-        if _img_descriptors is None:
-            _img_descriptors = [_screenshot_to_descriptor(tool_content, filename)]
-        meta = {
-            'toolName': fn_name, 'title': filename,
-            'snippet': f'{filename} ({fmt}, {size_info})',
-            'source': 'Project', 'fetched': True,
-            'fetchedChars': comp_size, 'url': '',
-            'badge': fmt,
-            # Inline-render payload — frontend (tool_rounds.js) draws an
-            # <img> per descriptor. Each carries a full data: URL.
-            'imageDataUris': ([d for d in _img_descriptors if d.get('uri')]
-                              + [s for s in _svg_renders if s.get('uri')]),
-        }
-        if _response_assets:
-            meta['responseAssets'] = _response_assets
-            tool_content['responseAssets'] = _response_assets
-        # ── inspect_image: surface the transform + source/view dimensions ──
-        if fn_name == 'inspect_image':
-            _ops = tool_content.get('inspectOps', '') or ''
-            _view = tool_content.get('viewSize') or []
-            _src = tool_content.get('sourceSize') or []
-            meta['inspectOps'] = _ops
-            if len(_view) == 2 and len(_src) == 2:
-                meta['snippet'] = (f'{filename}: {_src[0]}×{_src[1]} → '
-                                   f'{_view[0]}×{_view[1]}px ({_ops})')
-            if _ops:
-                meta['badge'] = _ops
+    from lib.tasks_pkg.handlers._project_presentation import prepare_project_image_result
+    image_result = prepare_project_image_result(
+        fn_name, fn_args, tool_content,
+        svg_renders=_svg_renders, response_assets=_response_assets)
+    if image_result is not None:
+        tool_content, meta = image_result
         _finalize_tool_round(task, rn, round_entry, [meta])
         return tc_id, tool_content, False
 
@@ -1239,7 +876,8 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     # Best-effort: failure here MUST NOT fail the tool round itself.
     if fn_name in ('write_file', 'edit_file', 'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents') and project_path:
         try:
-            _maybe_promote_write_to_artifact(task, fn_name, fn_args, project_path, meta)
+            from lib.tasks_pkg.handlers._project_presentation import maybe_promote_write_to_artifact
+            maybe_promote_write_to_artifact(task, fn_name, fn_args, project_path, meta)
         except Exception as e:
             logger.debug('[Artifacts] promotion path failed (non-fatal): %s',
                          e, exc_info=True)
@@ -1262,29 +900,16 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     except Exception as e:
         logger.debug('[Project] workspace_root_added emit failed (non-fatal): %s', e)
 
-    # For run_command: inject fileChanges from tracked modifications
+    # For run_command: the changes this command recorded for undo. A command
+    # run from another directory records into that directory's journal with
+    # paths relative to it, so only the primary root's changes are listed.
     if fn_name == 'run_command' and project_path:
-        try:
-            from lib.project_mod.modifications import get_modifications
-            task_mods = [m for m in get_modifications(project_path, conv_id=task.get('convId'), include_content=False)
-                         if m.get('taskId') == task.get('id') and m.get('type') == 'run_command']
-            if task_mods:
-                file_changes = []
-                for m in task_mods:
-                    p = m.get('path', '')
-                    existed = m.get('existed', True)
-                    if not existed:
-                        action = 'created'
-                    elif 'originalContent' in m:
-                        import os as _os
-                        abs_p = _os.path.join(project_path, p) if not _os.path.isabs(p) else p
-                        action = 'deleted' if not _os.path.exists(abs_p) else 'modified'
-                    else:
-                        action = 'modified'
-                    file_changes.append({'path': p, 'action': action})
-                meta['fileChanges'] = file_changes
-        except Exception as e:
-            logger.debug('[Executor] run_command fileChanges enrichment failed: %s', e)
+        _journal_root = os.path.abspath(project_path)
+        _file_changes = [{'path': change['path'], 'action': change['action']}
+                         for change in _recorded_file_changes
+                         if change['basePath'] == _journal_root]
+        if _file_changes:
+            meta['fileChanges'] = _file_changes
 
     # A successful project write is the runtime signal that derives the one
     # immutable-conversation work item for this physical task.  The same hook

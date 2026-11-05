@@ -11,7 +11,7 @@
     "slotAdmission": "sparse-usize-identifiers-without-slot-count-quota",
     "literalAdmission": "checked-size-without-aggregate-byte-quota",
     "maximumLegacyDocumentBytes": 8388608,
-    "maximumExecutableOperations": 374
+    "maximumExecutableOperations": 383
   },
   "physicalBounds": {
     "maximumEntityKeyBytes": 3072,
@@ -515,8 +515,12 @@
     "tailRebalance": "redistribute-or-merge-within-maximum-page-bytes"
   },
   "activeWalRotation": {
-    "maximumBytes": 67108864,
+    "synchronousCheckpointBytes": 67108864,
     "softThresholdBytes": 62914560,
+    "recoveryReadBufferBytes": 131072,
+    "appendAdmission": "checked-u64-offset-without-maintenance-byte-quota",
+    "foregroundMaintenancePolicy": "notify-existing-rotation-driver;never-wait-for-history-encoding-or-publication",
+    "recoveryPolicy": "buffered-frame-scan;validate-record-size-before-allocation;preserve-exact-durable-prefix-and-tail-truncation",
     "maximumRecoveryPackedLocations": 65536,
     "foregroundMaterializeTargetBytes": 8388608,
     "historyPreparationTargetBytes": 262144,
@@ -524,13 +528,13 @@
     "historyPreparationPolicy": "one-partial-or-pending-segment;whole-record-steps-may-exceed-target;finish-before-checkpoint;worker-absence-is-synchronous",
     "backgroundWaitRoundMilliseconds": 250,
     "maximumBackgroundWaitRounds": 240,
-    "softPolicy": "incremental-materialize;let-partial-history-encoding-and-its-live-packer-finish;defer-checkpoint-while-any-staged-payload-including-background-reservations-remains",
-    "hardPolicy": "complete-materialization-and-checkpoint-before-single-or-group-append-would-exceed-maximum",
+    "softPolicy": "existing-driver-prepares-and-publishes-checkpoint;successor-writes-continue-while-maintenance-is-delayed",
+    "synchronousPolicy": "without-driver-incrementally-materialize;complete-checkpoint-at-synchronous-threshold",
     "waitPolicy": "recheck-background-creating-under-condition-mutex-before-wait;bounded-synchronous-fallback",
     "maximumPendingRetiredWals": 1,
-    "maximumPendingRetiredWalBytes": 67108864,
+    "retiredWalBytes": "durable-backlog-without-byte-quota;reclaim-only-after-checkpoint-publication",
     "retirementPolicy": "publish-checkpoint-before-queue;existing-background-packer-removes-and-syncs-parent-outside-authority;worker-absence-is-synchronous",
-    "retirementBackpressure": "drain-previous-retirement-before-next-checkpoint;retain-slot-on-delete-or-sync-error",
+    "retirementBackpressure": "defer-next-checkpoint-only;retain-slot-on-delete-or-sync-error;never-refuse-new-appends",
     "retirementRecovery": "reconstruct-only-immediate-predecessor-from-current-control-generation;no-startup-directory-scan",
     "retirementShutdown": "finish-pending-retirement-before-worker-registration-release;surface-cleanup-error"
   },
@@ -635,21 +639,20 @@
     }
   },
   "blockPayloadReadCache": {
-    "maximumResidentEntries": 65536,
-    "maximumRecencyRecords": 131072,
-    "residentBytesPolicy": "existing-launch-derived-byte-cap-charges-vector-capacity;entry-and-recency-caps-also-apply;zero-disables-all-population",
-    "evictionPolicy": "bounded-access-history-with-exact-lru;disable-releases-payload-and-metadata-allocations"
+    "entryOverheadBytes": 256,
+    "residentBytesPolicy": "existing-launch-derived-byte-cap-charges-vector-capacity-plus-fixed-entry-overhead;no-independent-entry-or-recency-cap;zero-disables-all-population",
+    "evictionPolicy": "exact-lru-intrusive-list-constant-time-access-and-eviction;disable-releases-payload-and-metadata-allocations",
+    "catalogInvalidation": "when-a-replacement-catalog-drops-a-previously-referenced-segment-evict-its-verified-index-ids-absent-from-every-added-segment;clear-on-any-uncertainty;pure-additions-keep-verified-payloads"
   },
   "payloadSegmentReadCache": {
     "maximumResidentIndexAndFilterBytes": 67108864,
-    "independentMembershipBudgetDivisor": 4,
     "maximumResidentSegments": 4096,
     "maximumRecencyRecords": 8192,
     "membershipFilterBitsPerBlock": 16,
     "membershipFilterMinimumBits": 64,
-    "membershipFilterHashRounds": 2,
+    "membershipFilterHashRounds": 4,
     "maximumFilterBytesPerSegment": 131072,
-    "membershipPolicy": "verified-index-derived-negative-filter;positive-requires-exact-id;payload-crc-and-hash-on-every-read",
+    "membershipPolicy": "verified-index-derived-negative-filter-retained-for-every-catalogued-segment-outside-the-index-byte-budget;forget-when-an-installed-catalog-drops-the-segment;positive-requires-exact-id;payload-crc-and-hash-on-every-read",
     "evictionPolicy": "bounded-access-history-with-exact-lru;forget-on-segment-removal"
   },
   "authorityGarbageCollection": {
@@ -665,7 +668,6 @@
     "temporaryFreeSpacePercent": 2,
     "leanTemporaryBytes": 67108864,
     "maximumBlocksPerRound": 65536,
-    "maximumPhysicalBlocks": 20000000,
     "rpcMaximumPhysicalBlocksPerRequestedMillisecond": 256,
     "maximumTemporaryBlockFilesRemovedPerRound": 1,
     "maximumPayloadSegmentFilesScannedPerRound": 4163,
@@ -699,7 +701,7 @@
     "Explicit backup and garbage-collection reachability follows persisted stream segment references plus blob-backed versioned-document, command-receipt, and logical-outbox leaf values as owner-bound semantic graph edges without consulting transaction history; ordinary open and foreground range retirement do not scan values.",
     "Stream cursors and immutable segment references live in the current entity root alongside retained-prefix watermarks; metadata v2 decodes legacy v1 with a retained base of one, normal authority open never rebuilds catalogs from historical commits, retired cursors fail explicitly, and reads resolve at most 1000 events and 8 MiB from the caller's MVCC snapshot.",
     "Automatic history maintenance retains at most 64 complete immutable 4 MiB segments through a suffix-only v2 manifest, never rewrites transaction payloads or checkpoints an active WAL, and publishes only after one launch-probed low-priority maintenance admission.",
-    "Explicit authority garbage collection first stream-matches at most 20000000 loose-directory entries with constant retained memory and removes at most one strictly named bounded .new temporary block file before reachability marking. It then streams current Entity, persistent capsule, semantic external-block, retained-history, and active-WAL reachability into bounded on-volume mark runs; it refuses live MVCC handles, republishes unchanged CONTROL state before referenced-file deletion, removes at most 65536 loose blocks or 268435456 bytes, scans at most 4163 payload-segment directory entries (4096 catalog slots + 2 in-flight background publications + 64 deferred retirements + 1) and removes at most one strictly named unreferenced complete or temporary segment, then inspects one generation-selected catalog window of at most 16 manifest segments and rewrites or retires at most one through a double-stabilized catalog per repeatable round. When the selected round has no reclaimable victim, it may compact at least 128 and at most 65536 reachable, not-already-segmented loose blocks in one bounded cross-shard batch within both the 268435456-byte segment ceiling and the launch-derived temporary-space budget; an executed no-victim catalog window advances the durable CONTROL cursor."
+    "Explicit authority garbage collection first stream-matches every loose-directory entry with constant retained memory and removes at most one strictly named bounded .new temporary block file before reachability marking. It then streams current Entity, persistent capsule, semantic external-block, retained-history, and active-WAL reachability into bounded on-volume mark runs; it refuses live MVCC handles, republishes unchanged CONTROL state before referenced-file deletion, removes at most 65536 loose blocks or 268435456 bytes, scans at most 4163 payload-segment directory entries (4096 catalog slots + 2 in-flight background publications + 64 deferred retirements + 1) and removes at most one strictly named unreferenced complete or temporary segment, then inspects one generation-selected catalog window of at most 16 manifest segments and rewrites or retires at most one through a double-stabilized catalog per repeatable round. When the selected round has no reclaimable victim, it may compact at least 128 and at most 65536 reachable, not-already-segmented loose blocks in one bounded cross-shard batch within both the 268435456-byte segment ceiling and the launch-derived temporary-space budget; an executed no-victim catalog window advances the durable CONTROL cursor."
   ],
   "transactionIr": {
     "stepKinds": [
@@ -913,7 +915,11 @@
         "redeem mint merges immutable logical batches and exact code locators into independent 4096-way blob-capable directories so the 10000-code API bound remains below point-witness and write-set ceilings",
         "redeem consumption stores compact state in an independent 4096-way blob-capable directory without rewriting its batch and publishes wallet ledger state receipt and outbox atomically",
         "stale reserve reads consume the transactionally maintained age projection rather than scanning immutable ledger history",
-        "list work and responses fail closed at explicit row scan and byte ceilings"
+        "list work and responses fail closed at explicit row scan and byte ceilings",
+        "a pending payment may be prepared with an empty provider_id; its primary id owns quote replay, and unbound payments cannot settle",
+        "billing.payment.bind atomically assigns one nonempty provider_id to a prepared payment after matching user_id provider amount_minor and currency; an identity claimed by another payment, changed binding, failed state or missing quote returns accepted=false with no writes",
+        "provider binding preserves immutable quote credit_micro and primary id; same binding retries accept pending or settled rows and ordinary settlement retains the canonical provider reference",
+        "legacy_session_id permits only a pending Stripe cs_ breadcrumb with the identical stored raw.checkout_session to bind a pi_ identity; binding removes the old provider claim atomically, and settlement preserves the legacy Session evidence"
       ],
       "ledgerKinds": [
         "adjust_credit",
@@ -1559,6 +1565,17 @@
       "maximumObjectiveCharacters": 100000,
       "maximumAgentIdsPerDelivery": 1000,
       "maximumRoundsUsed": 1000000,
+      "checkpointMarkerResultFields": [
+        "actuals_complete",
+        "checkpoint_phase",
+        "completion_tokens",
+        "cost_usd",
+        "elapsed_seconds",
+        "prompt_tokens",
+        "rounds_used",
+        "total_tokens"
+      ],
+      "maximumCheckpointMarkerTextCharacters": 64,
       "lifecycle": "durable-resumable-agent-session",
       "constraints": [
         "swarm keys are exact tenant-global owner-bearing claims while all public reads and resumable indexes remain owner scoped",
@@ -1567,7 +1584,11 @@
         "completed undelivered and pending running or retrying agents contribute exactly once to the resumable count",
         "delivery acknowledgement rewrites only compact state and updates resumable eligibility without materializing message history",
         "session deletion retires at most 1000 agents and every document state count index claim receipt and outbox edge in one transaction",
-        "session get and startup resumable list reject aggregate responses above the 64 MiB stream ceiling minus response slack rather than returning incomplete recovery state"
+        "session get with agents rejects aggregate responses above the 64 MiB stream ceiling minus response slack rather than returning incomplete recovery state",
+        "startup resumable list returns only owner-local session keys and agent pages pack whole agents below the stream ceiling with an explicit continuation so retained history never needs one response",
+        "agent state get returns the session header without specifications or config plus one agent's compact state and never reads an agent core so per-round run fencing cost is independent of retained history",
+        "agent checkpoint mark overlays only declared scalar result fields rounds and updated time on an existing agent's compact state without reading or rewriting its core, every agent read applies the overlay and the next agent save retires it",
+        "agent save records an optional caller checkpoint id as the append base and echoes it, agent append extends the transcript only when the stored checkpoint id and message count equal the caller's base and otherwise changes nothing, and a successful append leaves the agent exactly as a full save of the extended transcript"
       ],
       "fields": [
         {
@@ -1938,7 +1959,7 @@
         "owner status/created and conversation indexes plus the tenant-global active/created feed publish atomically with every status transition",
         "the internal cross-owner active feed verifies each embedded owner and receives no tenant-global wildcard authority",
         "poll IDs come from one tenant-global monotonic sequence and non-empty logical poll IDs use exact per-timer idempotency claims",
-        "poll commit atomically appends one immutable ledger row and advances watcher progress; replay never advances twice",
+        "poll commit atomically appends one immutable ledger row and advances an active watcher's progress; a settled watcher returns a not-advanced receipt naming its status, with no ledger row, poll-ID claim or progress change; replay never advances twice",
         "conversation purge range-retires every owned timer and its poll partitions in the same authority transaction",
         "all timer and poll responses are bounded and malformed documents, counters, claims, or indexes fail closed"
       ],
@@ -3236,6 +3257,7 @@
       "maximumTimingTracePersistedBytes": 98304,
       "maximumTimingTraceCounter": 2147483647,
       "projectionHeadNamespace": "turn_projection_heads",
+      "metadataSummaryNamespace": "turn_metadata_summaries",
       "maximumTurnProjectionInlineLiveBytes": 65536,
       "maximumTurnProjectionHeadPatches": 64,
       "maximumTurnProjectionTextPageBytes": 16384,
@@ -3290,7 +3312,7 @@
         "bound attempts maintain compact owner-scoped task/effective-time and conversation/created-time indexes in the same OCC transaction as lifecycle changes; timing discovery never reads projection blobs and detail reads validate the exact indexed attempt and Turn before returning a bounded trace",
         "attempt dispatch claims update only pending non-queued owner-visible attempts; process-qualified claims replay after a lost acknowledgement while legacy unqualified claims remain one-shot",
         "attempt lifecycle mutations append one exact sequence-keyed event and publish its conversation-sync envelope in the same transaction as attempt, Turn, header, and index state",
-        "terminal attempts maintain an owner-scoped settled-time retention index; turn.events.prune validates exact Attempt and current-Turn fences, retires at most 64 clustered event ranges and 200000 rows under a 67108864-byte materialization ceiling, and reports resumable progress without touching live attempts or transcript authority",
+        "terminal attempts maintain an owner-scoped settled-time retention index; turn.events.prune validates exact Attempt and current-Turn fences, point-deletes the exact event rows of at most 64 Attempts and 200000 rows per transaction, never more than one rebaseable overlay delta carries, under a 67108864-byte materialization ceiling, and reports resumable progress without touching live attempts or transcript authority",
         "Tofu-DB conversation-sync Attempt envelopes use a compact same-owner immutable source reference with an explicit physical document identity; replay and export expand the complete original event, existing retention-reference keys protect the source until sync retirement, and legacy inline envelopes remain readable",
         "conversation-sync envelopes carry top-level turnId for every Turn-specific change and attemptId for every Attempt-specific change; identity-free aggregate and deletion changes omit both fields",
         "conversation-sync writes maintain an owner-scoped age index and exact Attempt-event reference keys; Attempt age locators retain the identity and sequence evidence needed to remove those references after conversation deletion retires the replay range; turn.sync.prune removes at most 1000 replay rows and 67108864 materialized bytes per transaction, leaves the monotonic head intact, and releases every matching transport-retention fence atomically",
@@ -3420,6 +3442,8 @@
       "attemptIndexNamespace": "raw_archives_by_attempt_created",
       "conversationIndexNamespace": "raw_archives_by_conversation_created",
       "conversationStatsNamespace": "raw_archive_conversation_stats",
+      "ownerAgeIndexNamespace": "raw_archives_by_owner_created",
+      "ownerAgeBackfillNamespace": "raw_archive_owner_age_backfill",
       "maximumStoredBytes": 16777216,
       "maximumDocumentBytes": 25165824,
       "maximumDecodedPartBytes": 67108864,
@@ -3430,13 +3454,17 @@
       "maximumSummaryBytes": 65536,
       "maximumSummaryKeys": 32,
       "maximumListRows": 64,
+      "maximumReclaimedArchivesPerPut": 64,
+      "maximumAgeBackfillRowsPerPut": 512,
       "freeSpaceWireMaximumBytes": 1000000000000000,
-      "lifecycle": "durable-user-state",
+      "lifecycle": "reconstructible-diagnostic-evidence-reclaimed-oldest-first",
       "constraints": [
         "archive identity is claimed tenant-globally so a re-put under another owner is a typed conflict while an identical re-put under the claiming owner replays idempotently",
         "put proves the owning attempt row under the same owner with matching conversation turn and task before any write and a missing owner is a typed not-found",
         "compressed part bytes travel inside the put step outside the shared 8 MiB literal pool and each part stays within 16 MiB with the pair within the same 16 MiB per-attempt budget",
-        "tenant-global and per-attempt stored-byte counters admit or scrub: budget or free-space exhaustion scrubs to a partial archive with empty parts and reason quota_exhausted and attempt-budget exhaustion scrubs likewise with reason attempt_limit",
+        "archives are reconstructible diagnostic evidence, not durable user state: before the owner or conversation archive ceiling or the tenant stored-byte budget would refuse or scrub a live put, the put reclaims the oldest archives in (created_at_ms, archive_id) order inside its own transaction, the conversation ceiling from that conversation and the owner ceiling and budget from the owner, at most 64 per put; idempotent replay and offline restore never reclaim",
+        "budget exhaustion that reclaiming cannot cure (parts larger than the budget, nothing left to reclaim, or the 64-archive bound) and free-space exhaustion scrub to a partial archive with empty parts and reason quota_exhausted, and per-attempt budget exhaustion scrubs likewise with reason attempt_limit",
+        "an owner-scoped age index of big-endian created_at_ms then id carries every archive's removal record; put, restore, reclamation, Attempt cleanup and conversation deletion maintain it atomically, and archives that predate it are backfilled from the conversation removal index through a persistent owner cursor, at most 512 rows per live put, before reclamation reads it",
         "part bytes ride inside one bounded document per archive that spills to an owner-bound blob so authority GC retains exactly the live archive bytes",
         "list order is (created_at_ms, archive_id) ascending reproduced by task and task+round covering indexes of big-endian timestamp then id, bounded by a 64-row page",
         "reads inflate strictly: a stored part must finish its zlib stream within 64 MiB decoded with no unused trailing bytes, and any violation is a typed integrity error",
@@ -3788,6 +3816,12 @@
       "kind": "query",
       "table": "billing_wallets_and_ledger",
       "receiptRequired": false
+    },
+    {
+      "name": "billing.payment.bind",
+      "kind": "command",
+      "table": "billing_wallets_and_ledger",
+      "receiptRequired": true
     },
     {
       "name": "billing.payment.find",
@@ -4185,6 +4219,12 @@
       "kind": "command",
       "table": "integration_workspaces",
       "receiptRequired": true
+    },
+    {
+      "name": "integration.workspace.delivery_action_page",
+      "kind": "query",
+      "table": "integration_workspaces",
+      "receiptRequired": false
     },
     {
       "name": "integration.workspace.delivery_page",
@@ -5381,7 +5421,31 @@
       "receiptRequired": true
     },
     {
+      "name": "swarm.agent.append",
+      "kind": "command",
+      "table": "swarm_sessions",
+      "receiptRequired": true
+    },
+    {
+      "name": "swarm.agent.checkpoint.mark",
+      "kind": "command",
+      "table": "swarm_sessions",
+      "receiptRequired": true
+    },
+    {
       "name": "swarm.agent.save",
+      "kind": "command",
+      "table": "swarm_sessions",
+      "receiptRequired": true
+    },
+    {
+      "name": "swarm.agent.state.get",
+      "kind": "query",
+      "table": "swarm_sessions",
+      "receiptRequired": false
+    },
+    {
+      "name": "swarm.agents.acknowledge_results",
       "kind": "command",
       "table": "swarm_sessions",
       "receiptRequired": true
@@ -5391,6 +5455,12 @@
       "kind": "command",
       "table": "swarm_sessions",
       "receiptRequired": true
+    },
+    {
+      "name": "swarm.agents.page",
+      "kind": "query",
+      "table": "swarm_sessions",
+      "receiptRequired": false
     },
     {
       "name": "swarm.resumable.list",
@@ -5690,7 +5760,7 @@
       "name": "turn.branch.delete",
       "kind": "command",
       "table": "conversation_turns",
-      "receiptRequired": false
+      "receiptRequired": true
     },
     {
       "name": "turn.cleanup",
@@ -5720,10 +5790,16 @@
       "name": "turn.delete",
       "kind": "command",
       "table": "conversation_turns",
-      "receiptRequired": false
+      "receiptRequired": true
     },
     {
       "name": "turn.event.record",
+      "kind": "command",
+      "table": "conversation_turns",
+      "receiptRequired": false
+    },
+    {
+      "name": "turn.event.record_batch",
       "kind": "command",
       "table": "conversation_turns",
       "receiptRequired": false
@@ -5870,6 +5946,12 @@
       "name": "turn.visible.sync",
       "kind": "command",
       "table": "conversation_turns",
+      "receiptRequired": false
+    },
+    {
+      "name": "worker_job.claim_horizon",
+      "kind": "query",
+      "table": "storage_worker_jobs",
       "receiptRequired": false
     },
     {
@@ -6037,6 +6119,15 @@
       "recovery": "replay uncovered keys from recorded coverage, never infer complete coverage from root equality"
     },
     "downgrade": "drain outstanding version-2 partial directories before an older reader is considered"
+  },
+  "turnProjectionRead": {
+    "operation": "turn.get",
+    "flag": "include_projection",
+    "default": true,
+    "authorization": "existing owner/conversation/Turn and execution-epoch fences apply before metadata is returned",
+    "delivery": "internal lifecycle port; public endpoints retain the default full projection",
+    "metadata": "false omits projection and private projection-head locators; SQL selects metadata columns only, native reads the physical Turn header without reconstructing checkpoint/patch/text bodies; legacy monolithic JSON retains existing bounded whole-byte validation and its Serde-marker compatibility fallback, while the metadata selector skips projection/private-head values",
+    "failure": "non-boolean flags and malformed owned metadata fail closed; absent or foreign Turns return null"
   },
   "attemptExecutionConfig": {
     "operation": "turn.attempt.get",

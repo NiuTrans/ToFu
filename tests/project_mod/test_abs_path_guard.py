@@ -6,6 +6,7 @@ symlinks (escape denied), and task_is_remote classification.
 """
 
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -80,6 +81,39 @@ class AbsPathGuardTest(unittest.TestCase):
         self.assertFalse(g.task_is_remote({}))
         self.assertFalse(g.task_is_remote({'_api_key_id': ''}))
         self.assertFalse(g.task_is_remote('not-a-dict'))
+
+    def _png(self, directory):
+        from PIL import Image
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, 'pixel.png')
+        Image.new('RGB', (4, 4), 'red').save(path)
+        return path
+
+    def _outside_png(self):
+        directory = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        return self._png(directory)
+
+    def test_restricted_inspect_image_denies_out_of_root_absolute_path(self):
+        from lib.project_mod import execute_tool
+        from lib.project_mod.read_tools import tool_inspect_image
+        outside = self._outside_png()
+        inside = self._png(os.path.join(self._root, 'img'))
+        tok = g.set_restricted(True)
+        try:
+            for denied in (tool_inspect_image(self._root, outside),
+                           execute_tool('inspect_image', {'path': outside}, self._root)):
+                self.assertIsInstance(denied, str)
+                self.assertIn('Access denied', denied)
+            allowed = tool_inspect_image(self._root, inside)
+            self.assertTrue(isinstance(allowed, dict) and allowed.get('__screenshot__'))
+        finally:
+            g.reset_restricted(tok)
+
+    def test_unrestricted_inspect_image_reads_absolute_paths(self):
+        from lib.project_mod.read_tools import tool_inspect_image
+        shot = tool_inspect_image(self._root, self._outside_png())
+        self.assertTrue(isinstance(shot, dict) and shot.get('__screenshot__'))
 
 
 if __name__ == '__main__':

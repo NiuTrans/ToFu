@@ -15,7 +15,7 @@ fn malformed() -> io::Error {
 pub(super) fn encode(ids: &[u64], maximum_bytes: usize) -> io::Result<Vec<u8>> {
     let mut bytes = vec![VERSION];
     if bytes.len() > maximum_bytes {
-        return Err(io::Error::new(io::ErrorKind::OutOfMemory, "posting value exceeds bound"));
+        return Err(crate::resource_exhaustion::domain_bound("posting value exceeds bound"));
     }
     let mut previous = 0;
     for &id in ids {
@@ -23,7 +23,7 @@ pub(super) fn encode(ids: &[u64], maximum_bytes: usize) -> io::Result<Vec<u8>> {
         previous = id;
         loop {
             if bytes.len() == maximum_bytes {
-                return Err(io::Error::new(io::ErrorKind::OutOfMemory, "posting value exceeds bound"));
+                return Err(crate::resource_exhaustion::domain_bound("posting value exceeds bound"));
             }
             let remaining = delta >> 7;
             bytes.push((delta as u8 & 127) | if remaining != 0 { 128 } else { 0 });

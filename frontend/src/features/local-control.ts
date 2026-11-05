@@ -1,4 +1,5 @@
 /** Demand-loaded Local Control modal, capability probes, and agent relay. */
+import '../styles/application/14-local-control.css';
 import '../runtime/local-control-presenters.generated.js';
 import { getFeatureBinding } from '../feature-registry';
 import { invokeFeatureEntry, type FeatureCallable } from '../runtime-bridge';

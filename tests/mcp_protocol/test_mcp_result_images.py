@@ -192,6 +192,7 @@ def test_ingest_mcp_image_uses_owner_scoped_attachment_authority(monkeypatch):
 
     assert seen["add"][0][2]["user_id"] == 11
     assert seen["add"][0][2]["scope"] == "attachment"
+    assert seen["add"][0][2]["defer_image_ocr"] is True
     assert seen["add"][0][2]["command_id"] != seen["add"][1][2]["command_id"]
     assert seen["patch"][0][1]["origin"] == "mcp_tool_result"
     assert image["preview"] == "/api/v4/media/attachments/image-doc/source"

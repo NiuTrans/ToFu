@@ -38,6 +38,7 @@ logger = get_logger(__name__)
 
 __all__ = ['PPTDError', 'Deck', 'Page', 'parse_deck', 'parse_page_text', 'validate_deck',
            'resolve_color', 'text_style', 'table_style', 'resolve_media',
+           'chart_font_family',
            'DEFAULT_TEXT_STYLE', 'ELEMENT_TYPES', 'SHAPES_KNOWN']
 
 DEFAULT_SIZE = (1280, 720)                    # 16:9, 1px = 1pt
@@ -251,6 +252,16 @@ def text_style(content: dict, theme: dict) -> dict:
     if out.get('backgroundColor'):
         out['backgroundColor'] = resolve_color(out['backgroundColor'], theme)
     return out
+
+
+def chart_font_family(theme: dict) -> str:
+    """Chart labels use the canonical body face in both renderings and subsets."""
+    from lib.design_sys.fonts import canonical_font_family
+
+    family = text_style({'style': '$body'}, theme).get('fontFamily')
+    if isinstance(family, dict):
+        family = family.get('ea') or family.get('latin')
+    return canonical_font_family(family, fallback=DEFAULT_TEXT_STYLE['fontFamily'])
 
 
 def cell_content(cell) -> dict:

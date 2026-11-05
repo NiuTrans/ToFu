@@ -26,7 +26,7 @@ from tofu_db._loopback import urlopen as loopback_urlopen
 from pathlib import Path
 from typing import NamedTuple
 
-from runtime_guards import resource_budget_manifest
+from runtime_guards import UNLIMITED, resource_budget_manifest
 from server_manager import (
     SERVER_ENV_KEYS,
     listener_pids,
@@ -40,6 +40,10 @@ from supervisor_protocol import (
     supervisor_source_fingerprint,
 )
 from tofu_dotenv import parse_env_boolean, read_dotenv_values
+from serverctl_pkg.restart_budget import (
+    FRONTEND_BUILD_SECONDS, FRONTEND_LOCK_WAIT_SECONDS,
+    LIFECYCLE_REQUEST_SECONDS, NATIVE_CHILD_SECONDS,
+)
 
 
 PROJECT = os.path.realpath(os.environ.get('TOFU_PROJECT_PATH') or
@@ -55,8 +59,8 @@ BASE_URL = f'http://{MANAGER_HOST}:{MANAGER_PORT}'
 # cleanup; a shorter timeout leaves a healthy manager behind while reporting
 # launch failure.
 _MANAGER_LAUNCH_TIMEOUT_FLOOR = 25.0
-_FRONTEND_REPAIR_TIMEOUT_SECONDS = 600.0
-_FRONTEND_BUILD_LOCK_TIMEOUT_SECONDS = 60.0
+_FRONTEND_REPAIR_TIMEOUT_SECONDS = FRONTEND_BUILD_SECONDS
+_FRONTEND_BUILD_LOCK_TIMEOUT_SECONDS = FRONTEND_LOCK_WAIT_SECONDS
 STARTUP_STUCK_SECONDS = 300.0
 
 _CGROUP_V2_USAGE = '/sys/fs/cgroup/memory.current'
@@ -414,44 +418,25 @@ def prepare_source_frontend_artifact(
             file=sys.stderr,
         )
         rebuild_started = time.monotonic()
-        capture_kwargs = {
-            'stdout': subprocess.PIPE,
-            'stderr': subprocess.STDOUT,
-            'text': True,
-        } if capture_output else {}
         build_environment = dict(os.environ)
         if not build_environment.get('TOFU_PYTHON') and not build_environment.get('PYTHON'):
             # Detached managers may have no Python on PATH. The Node canary
             # uses these existing overrides; otherwise retain this interpreter.
             build_environment['TOFU_PYTHON'] = sys.executable
         try:
-            completed = subprocess.run(
-                command,
-                cwd=PROJECT,
+            from serverctl_pkg.native_engine import _run
+            _run(
+                command, cwd=Path(PROJECT),
                 timeout=_FRONTEND_REPAIR_TIMEOUT_SECONDS,
-                env=build_environment,
-                **capture_kwargs,
+                environment=build_environment,
+                progress=None if capture_output else 'Building frontend resources',
+                failure_subject='frontend artifact rebuild',
             )
-        except subprocess.TimeoutExpired as exc:
-            message = (
-                'frontend artifact rebuild timed out after '
-                f'{_FRONTEND_REPAIR_TIMEOUT_SECONDS:.0f}s')
-            tail = _captured_build_output_tail(
-                getattr(exc, 'output', None)) if capture_output else ''
-            if tail:
-                return f'{message}; build output tail:\n{tail}'
-            return message + '; run `npm run build:frontend` manually'
+        except (RuntimeError, KeyboardInterrupt) as exc:
+            message = str(exc) or 'frontend artifact rebuild cancelled'
+            return message if capture_output else message + '; run `npm run build:frontend` manually'
         except OSError as exc:
             return f'frontend artifact rebuild could not start: {exc}'
-        if completed.returncode:
-            message = (
-                f'frontend artifact rebuild failed with exit '
-                f'{completed.returncode}')
-            tail = _captured_build_output_tail(
-                getattr(completed, 'stdout', None)) if capture_output else ''
-            if tail:
-                return f'{message}; build output tail:\n{tail}'
-            return message + '; run `npm run build:frontend` manually'
         try:
             _validate_frontend_artifact()
         except Exception as final_error:
@@ -479,7 +464,7 @@ def prepare_native_engine_artifact(operation: str, *, project: str | None = None
     from runtime_guards import load_deployment_configuration
     if load_deployment_configuration(environment).storage_backend != 'tofudb':
         return ''
-    from serverctl_pkg.native_engine import _run, PREPARATION_TOTAL_TIMEOUT_SECONDS, reconcile_project_pin
+    from serverctl_pkg.native_engine import _run, reconcile_project_pin
     try:
         inherited_pin = os.environ.get('TOFUDB_EXPECTED_SHA256')
         if reconcile_project_pin(root, previous_project, environment):
@@ -489,7 +474,7 @@ def prepare_native_engine_artifact(operation: str, *, project: str | None = None
         print(f'Preparing storage engine before {operation}; shutdown waits for successful preparation.',
               file=sys.stderr, flush=True)
         _run([sys.executable, '-m', 'serverctl_pkg.native_engine', '--project', str(root)],
-             cwd=root, environment=environment, timeout=PREPARATION_TOTAL_TIMEOUT_SECONDS + 30,
+             cwd=root, environment=environment, timeout=NATIVE_CHILD_SECONDS,
              progress='Preparing storage engine', termination_grace=15)
         print(f'Storage engine ready in {time.monotonic() - started:.1f}s.',
               file=sys.stderr, flush=True)
@@ -600,7 +585,21 @@ def request_frontend_artifact_repair(
 
 def cmd_prepare_frontend(args: argparse.Namespace) -> int:
     """Validate or atomically repair frontend without changing lifecycle."""
-    error = _repair_source_frontend_artifact(args.operation)
+    # The manager's timeout must unwind the builders' process-group owners,
+    # including the separately-sessioned native preparation child.
+    from serverctl_pkg.native_engine import EnginePreparationCancelledError
+    def interrupted(_signal, _frame):
+        raise EnginePreparationCancelledError('Artifact preparation was cancelled.')
+    previous = None
+    if os.name != 'nt' and threading.current_thread() is threading.main_thread():
+        previous = signal.signal(signal.SIGTERM, interrupted)
+    try:
+        error = _repair_source_frontend_artifact(args.operation)
+    except (EnginePreparationCancelledError, KeyboardInterrupt):
+        error = 'Artifact preparation was cancelled; the running service has not been stopped.'
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
     if error:
         print(f'Frontend preflight failed: {error}', file=sys.stderr)
         return 1
@@ -730,11 +729,20 @@ def _startup_age_seconds(status: dict | None, *, now: float | None = None) -> fl
     return max(0.0, (time.time() if now is None else float(now)) - started_at)
 
 
+def _startup_in_progress(status: dict | None) -> bool:
+    """A live, identity-checked HTTP response still reports boot recovery."""
+    return bool(status and status.get('running') and _status_liveness(status)
+                and status.get('observed') in ('starting', 'degraded')
+                and status.get('ready') is not True
+                and status.get('readinessState') == 'starting')
+
+
 def _startup_stuck(status: dict | None, *, now: float | None = None) -> bool:
     return bool(
         status
         and status.get('observed') in ('starting', 'degraded')
         and status.get('ready') is not True
+        and not _startup_in_progress(status)
         and _startup_age_seconds(status, now=now) >= STARTUP_STUCK_SECONDS)
 
 
@@ -808,11 +816,8 @@ def _print_start_failure_help() -> None:
 
 def _post(action: str, **extra) -> dict:
     ensure_manager()
-    # The manager answers only after graceful shutdown (up to 300s + 5s),
-    # storage lease release, and a source artifact preflight (up to 1320s).
-    # A shorter socket deadline reports failure after the replacement has
-    # already started, leaving the caller with a false-negative restart.
-    lifecycle_timeout = 1660.0 if action in ('stop', 'restart') else 5.0
+    # Include both builders, cleanup and worker shutdown in the outer clock.
+    lifecycle_timeout = LIFECYCLE_REQUEST_SECONDS if action in ('start', 'stop', 'restart') else 5.0
     return _request('/' + action, {
         'projectPath': PROJECT,
         'source': extra.pop('source', 'serverctl'),
@@ -1197,18 +1202,18 @@ class _StartupProgress:
         self.last_emitted_stage = stage_key
         self.last_line_at = now
 
-    def finish(self, *, ready: bool) -> None:
+    def finish(self, *, ready: bool, starting: bool = False) -> None:
         if not self.enabled:
             return
         self._consume_worker_log()
         if self.interactive:
             self.stream.write('\r\033[2K')
-        outcome = 'ready' if ready else 'failed'
+        outcome = 'ready' if ready else 'still starting' if starting else 'failed'
         self.stream.write(f'Tofu startup {outcome} after {self.elapsed:.1f}s.\n')
         summary = self._render_phase_summary()
         if summary:
             self.stream.write('Startup stages:\n' + '\n'.join(summary) + '\n')
-        if not ready and self.failure_hint:
+        if not ready and not starting and self.failure_hint:
             self.stream.write(f'Startup error: {self.failure_hint}\n')
         self.stream.flush()
 
@@ -1281,12 +1286,6 @@ def _print_status(status: dict, *, manager_online: bool = True) -> None:
         print(f"Restarts: legacy-total={status.get('restartCount', 0)}")
     if status.get('lastRecoverySeconds') is not None:
         print(f"Last RTO: {float(status['lastRecoverySeconds']):.3f}s")
-    if status.get('workerRssGuardEnabled'):
-        rss = status.get('workerRssBytes')
-        limit = status.get('workerRssRecycleBytes')
-        print('RSS guard: '
-              f"{float(rss or 0) / (1024 ** 3):.2f} GiB / "
-              f"{float(limit or 0) / (1024 ** 3):.2f} GiB hard ceiling")
     if status.get('lastWorkerExitReason'):
         print(
             f"Last exit: {status.get('lastWorkerExitKind') or 'unknown'} / "
@@ -1388,7 +1387,7 @@ def managed_start(server_args: list[str] | None = None, *, wait: float = 180.0,
         print(f"Status: {_control_command('status')}")
         print(f"Logs  : {_control_command('logs', '-f')}")
         return 0
-    progress.finish(ready=False)
+    progress.finish(ready=False, starting=_startup_in_progress(status))
     port_drift = _worker_port_drift(status, read_lock_status(PROJECT))
     if port_drift and port_drift.get('ready'):
         print(
@@ -1403,11 +1402,21 @@ def managed_start(server_args: list[str] | None = None, *, wait: float = 180.0,
             f'Tofu startup is stuck after '
             f'{_startup_age_seconds(status) / 60:.1f} minutes.',
             file=sys.stderr)
+    elif _startup_in_progress(status):
+        _print_start_in_progress()
     else:
         print('Tofu was launched but did not become ready before the timeout.', file=sys.stderr)
     _print_status(status or result)
-    _print_start_failure_help()
+    if not _startup_in_progress(status):
+        _print_start_failure_help()
     return 1
+
+
+def _print_start_in_progress() -> None:
+    print('Tofu is still starting; the foreground wait ended before readiness. '
+          'The running startup continues.', file=sys.stderr)
+    print(f"Observe the same startup without restarting: {_control_command('start')}",
+          file=sys.stderr)
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
@@ -1526,10 +1535,13 @@ def cmd_restart(args: argparse.Namespace) -> int:
             f"Restarted worker is ready at {port_drift['url']}, but manager "
             f"readiness still probes port {port_drift['managerPort']}.",
             file=sys.stderr)
+    elif _startup_in_progress(status):
+        _print_start_in_progress()
     else:
         print('Restart launched, but the server is not ready.', file=sys.stderr)
     _print_status(status or result)
-    _print_start_failure_help()
+    if not _startup_in_progress(status):
+        _print_start_failure_help()
     return 1
 
 
@@ -1959,6 +1971,10 @@ def _gib_text(value: int | None) -> str:
     return 'unknown' if value is None else f'{value / (1 << 30):.1f} GiB'
 
 
+def _resource_text(value) -> str:
+    return 'unlimited' if str(value) == str(UNLIMITED) else str(value)
+
+
 def _classify_recovery_cron(text: str) -> tuple[list[str], list[str]]:
     lines = [line for line in text.splitlines()
              if line.strip() and not line.lstrip().startswith('#')]
@@ -1980,7 +1996,7 @@ def _doctor_findings(
     """Classify diagnostics once, with severity and an executable next step.
 
     Runtime failures are errors. Hardening gaps that do not stop today's
-    server (boot recovery, off-host backups, RSS policy) are warnings. Keeping
+    server (boot recovery, off-host backups) are warnings. Keeping
     that distinction machine-readable prevents a support bot from treating a
     healthy personal install as down merely because it lacks a production
     topology recommendation.
@@ -2128,11 +2144,6 @@ def _doctor_findings(
             'boot_recovery_missing', 'warning',
             'manager will not recover after host/session restart',
             _control_command('install-recovery'))
-    if status and status.get('workerRssGuardEnabled') is False:
-        add(
-            'rss_guard_disabled', 'warning',
-            'manager-side worker RSS recycle guard is disabled',
-            'set TOFU_PROCESS_RSS_RECYCLE_MB to a safe non-zero ceiling')
     if status and manager_generation and not manager_generation.get('current'):
         loaded = str(manager_generation.get('loadedFingerprint') or 'unreported')
         add(
@@ -2263,9 +2274,6 @@ def build_doctor_report() -> dict:
         for name in (
             'TOFU_MAX_INFLIGHT_TASKS',
             'TOFU_AGENT_WORKERS',
-            'TOFU_TASK_RSS_RESERVE_MB',
-            'TOFU_PROCESS_RSS_RELIEF_MB',
-            'TOFU_PROCESS_RSS_RECYCLE_MB',
         )
     }
     budget_mismatches = {
@@ -2409,31 +2417,30 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"{'unknown' if capacity_mb is None else capacity_mb} MiB available; "
         f"disk free {'unknown' if disk_free_mb is None else disk_free_mb} MiB "
         f"at {probe['data_path']}")
+    storage_reserve = defaults['TOFU_STORAGE_MIN_FREE_BYTES']
     print(
-        f"Budget  : tasks={defaults['TOFU_MAX_INFLIGHT_TASKS']}; "
-        f"sync/agent={defaults['TOFU_SYNC_WORKERS']}/"
-        f"{defaults['TOFU_AGENT_WORKERS']}; storage RPC="
-        f"{defaults['TOFU_STORAGE_RPC_CAPACITY']} / "
-        f"{defaults['TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB']} MiB frames; "
-        f"RSS soft/hard="
-        f"{defaults['TOFU_PROCESS_RSS_RELIEF_MB']}/"
-        f"{defaults['TOFU_PROCESS_RSS_RECYCLE_MB']} MiB; logs="
-        f"{defaults['TOFU_LOG_TOTAL_BUDGET_MB']} MiB; storage reserve="
-        f"{int(defaults['TOFU_STORAGE_MIN_FREE_BYTES']) // (1024 * 1024)} MiB")
+        f"Budget  : tasks={_resource_text(defaults['TOFU_MAX_INFLIGHT_TASKS'])}; "
+        f"sync/agent={_resource_text(defaults['TOFU_SYNC_WORKERS'])}/"
+        f"{_resource_text(defaults['TOFU_AGENT_WORKERS'])}; storage RPC="
+        f"{_resource_text(defaults['TOFU_STORAGE_RPC_CAPACITY'])} / "
+        f"{_resource_text(defaults['TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB'])} MiB frames; "
+        f"logs={_resource_text(defaults['TOFU_LOG_TOTAL_BUDGET_MB'])} MiB; "
+        'storage reserve='
+        + (_resource_text(storage_reserve) if str(storage_reserve) == str(UNLIMITED)
+           else f'{int(storage_reserve) // (1024 * 1024)} MiB'))
     overrides = resource_budget['overrides']
     if overrides:
         print('Override: ' + '; '.join(
-            f'{name}={value}' for name, value in sorted(overrides.items())))
+            f'{name}={_resource_text(value)}'
+            for name, value in sorted(overrides.items())))
     if worker_resource_budget:
         live_values = worker_resource_budget.get('values') or {}
         print(
             'Live budget: policy='
             f"{worker_resource_budget.get('policyVersion') or 'legacy/unattributed'}; "
             + '; '.join(
-                f'{name}={value}' for name, value in sorted(live_values.items())))
-    if status and status.get('workerRssGuardEnabled'):
-        print(f"RSS cap : {_gib_text(status.get('workerRssRecycleBytes'))} "
-              '(manager-enforced)')
+                f'{name}={_resource_text(value)}'
+                for name, value in sorted(live_values.items())))
     if snapshot['latestPath']:
         print(f"Snapshot: {snapshot['latestAgeHours']:.1f}h old; "
               f"{_gib_text(snapshot['latestSizeBytes'])}; "

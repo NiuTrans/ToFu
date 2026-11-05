@@ -40,6 +40,7 @@ import shutil
 import subprocess
 
 import pytest
+from tests._runtime_sections import native_module_graph
 from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
@@ -68,6 +69,7 @@ global.console = console;
 win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+eval(fs.readFileSync(process.argv[4], 'utf8'));
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js (real, shipped)
 
 const out = [];
@@ -98,7 +100,7 @@ article.innerHTML =
   '<h2>Method</h2>' +
   '<p>Later the paper discusses NFE budget in detail.</p>';
 
-const glossary = _extractGlossary(article);
+const glossary = extractGlossary(article);
 check('glossary_extracted_one_row', glossary.length === 1);
 const def = glossary.length ? glossary[0].def : '';
 // The CLEAN plain-text def must NOT carry the raw LaTeX annotation source.
@@ -113,7 +115,7 @@ const naive = (article.querySelector('tbody td:nth-child(2)').textContent || '')
 check('NC_naive_textContent_leaks', naive.indexOf('\\text{') !== -1);
 
 // Decorate later mentions and inspect the produced span + card.
-_decorateGlossaryTerms(article, glossary);
+decorateGlossaryTerms(article, glossary);
 const term = article.querySelector('.paper-term');
 check('later_mention_decorated', !!term);
 check('term_is_focusable', !!term && term.getAttribute('tabindex') === '0');
@@ -144,19 +146,15 @@ process.exit(0);
 
 
 def _run():
-    harness = os.path.join(HERE, '_paper_glossary_harness.js')
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
-    try:
-        proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'paper', 'report.js'), ROOT],
-            capture_output=True, text=True, timeout=60,
-        )
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
+    glossary = native_module_graph([
+        ('.native/glossary.js', os.path.join(ROOT, 'frontend/src/features/paper/report-article/glossary.ts')),
+        ('.native/terms.js', os.path.join(ROOT, 'frontend/src/features/paper/report-article/terms.ts')),
+    ])
+    proc = subprocess.run(
+        ['node', '-e', _HARNESS, 'paper-glossary',
+         os.path.join(JS_DIR, 'paper', 'report.js'), ROOT, glossary],
+        capture_output=True, text=True, timeout=60,
+    )
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -164,8 +162,6 @@ def _run():
     assert output.count('PASS') >= 12, f'expected >=12 PASS lines, got:\n{output}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_paper_glossary_card_renders_markdown():
     _run()
 

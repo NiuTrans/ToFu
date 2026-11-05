@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import time
+from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -24,6 +26,7 @@ from .protocol import (
     client_protocol,
 )
 from .sessions import acquire_browser_lease
+from .site_scope import SiteScope, matches_site_domain
 
 logger = get_logger(__name__)
 
@@ -46,6 +49,8 @@ class AdapterCommand:
     handler: Callable | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
+        object.__setattr__(self, 'input_schema', deepcopy(self.input_schema))
+        object.__setattr__(self, 'output_schema', deepcopy(self.output_schema))
         if self.access not in ('read', 'write'):
             raise AdapterValidationError('command access must be read or write')
         if self.session not in ('ephemeral', 'persistent'):
@@ -75,8 +80,8 @@ class AdapterCommand:
     def public_dict(self) -> dict:
         return {
             'name': self.name, 'description': self.description,
-            'access': self.access, 'input_schema': self.input_schema,
-            'output_schema': self.output_schema,
+            'access': self.access, 'input_schema': deepcopy(self.input_schema),
+            'output_schema': deepcopy(self.output_schema),
             'required_capabilities': list(self.required_capabilities),
             'session': self.session, 'window_mode': self.window_mode,
             'timeout': self.timeout,
@@ -250,11 +255,28 @@ def adapters_payload(*, client_id: str | None = None) -> dict:
 
 def invoke_adapter(adapter_id: str, command_name: str, params: dict | None = None,
                    *, owner_user_id: str, client_id: str | None = None,
-                   task_id: str = '') -> dict:
+                   task_id: str = '', _page: BrowserPage | None = None,
+                   cancel_event=None) -> dict:
+    """Run one declared adapter command on a fresh leased page.
+
+    ``_page`` lends a workflow-owned page (exact owner/device, ephemeral read
+    operations only); the caller keeps closing it. ``cancel_event`` is the
+    task abort event: it refuses dispatch and interrupts browser waits.
+    """
     adapter = get_adapter(adapter_id)
     if adapter is None:
         raise AdapterValidationError(f'unknown adapter: {adapter_id}')
     command = adapter.command(command_name)
+    if cancel_event is not None and cancel_event.is_set():
+        raise AdapterExecutionError(
+            'cancelled', 'Browser task cancelled before adapter dispatch')
+    if _page is not None and (
+            str(_page.lease.owner_user_id) != str(owner_user_id)
+            or _page.lease.client_id != client_id
+            or command.access != 'read' or command.session != 'ephemeral'
+            or command.window_mode == 'current'):
+        raise AdapterValidationError(
+            'Shared pages require the exact owner/device and an ephemeral read operation')
     params = dict(params or {})
     _validate_params(command.input_schema, params)
 
@@ -267,23 +289,23 @@ def invoke_adapter(adapter_id: str, command_name: str, params: dict | None = Non
                 'Native site search does not accept web operators; use native keywords '
                 'or a scoped web engine. Constraints are never silently stripped.')
     target_domain = normalize_domain(params.get('url') or adapter.domains[0])
-    if params.get('url') and not any(
-            target_domain == normalize_domain(domain)
-            or target_domain.endswith('.' + normalize_domain(domain))
-            for domain in adapter.domains):
+    if params.get('url') and not matches_site_domain(params['url'], adapter.domains):
         raise AdapterValidationError(
             f'URL is outside adapter domains: {target_domain or "invalid URL"}')
     started = time.time()
     outcome = 'error'
     used_client = str(client_id or '')
     try:
-        lease = acquire_browser_lease(
+        lease = _page.lease if _page is not None else acquire_browser_lease(
             owner_user_id=owner_user_id, client_id=client_id, task_id=task_id,
             session=command.session, timeout=command.timeout + 15)
         used_client = lease.client_id
         require_caps = command.required_capabilities
-        with BrowserPage(
-                lease, default_active=command.window_mode == 'active') as page:
+        context = nullcontext(_page) if _page is not None else BrowserPage(
+            lease, default_active=command.window_mode == 'active',
+            cancel_event=cancel_event)
+        with context as page, page.site_scope(SiteScope(
+                adapter.domains, adapter.name, adapter.login_url)):
             if require_caps:
                 from .protocol import require_capabilities
                 require_capabilities(lease.client_id, require_caps)

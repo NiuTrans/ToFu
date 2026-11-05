@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from bs4 import BeautifulSoup
 
-from tests._jsdom import JS_DIR, run_harness
+from tests._jsdom import JS_DIR, require_node_modules, run_harness
 
 
 pytestmark = pytest.mark.unit
@@ -25,7 +25,7 @@ FLOW_PICKER = ROOT / "frontend" / "src" / "features" / "orchestration" / "flow-p
 VITE_TEST_BUNDLER = ROOT / "scripts" / "vite_test_bundle.mjs"
 
 
-def test_desktop_and_mobile_group_plan_and_autopilot():
+def test_desktop_and_mobile_group_every_agent_mode():
     from lib.application_shell_fragments import (
         inject_fragments,
         list_fragment_names,
@@ -42,6 +42,7 @@ def test_desktop_and_mobile_group_plan_and_autopilot():
     desktop = shell.select_one("#submenuAgentMode")
     assert desktop is not None
     assert desktop.select_one("#agentModeStandard") is not None
+    assert desktop.select_one("#delegateModeToggle") is not None
     assert desktop.select_one("#planModeToggle") is not None
     assert desktop.select_one("#autopilotToggle") is not None
     assert desktop.select_one("#endpointToggle") is None
@@ -50,9 +51,13 @@ def test_desktop_and_mobile_group_plan_and_autopilot():
     mobile = shell.select_one(".mobile-agent-mode-group")
     assert mobile is not None
     for element_id in (
-        "mobileAgentModeStandard", "mobilePlanMode", "mobileAutopilot",
+        "mobileAgentModeStandard", "mobileDelegateMode", "mobilePlanMode",
+        "mobileAutopilot",
     ):
         assert mobile.select_one(f"#{element_id}") is not None
+    desktop_modes = [item["data-mode"] for item in desktop.select(".agent-mode-item")]
+    mobile_modes = [item["data-mode"] for item in mobile.select(".mobile-agent-mode-item")]
+    assert desktop_modes == mobile_modes == ["standard", "delegate", "plan", "autopilot"]
     assert mobile.select_one("#mobileEndpoint") is None
 
 
@@ -87,6 +92,8 @@ const html = `<!doctype html><body>
     <div id="agentModeMenu">
       <button id="agentModeStandard" class="agent-mode-item" data-mode="standard"
         role="radio" aria-checked="true"></button>
+      <button id="delegateModeToggle" class="agent-mode-item" data-mode="delegate"
+        role="radio" aria-checked="false"></button>
       <button id="planModeToggle" class="agent-mode-item" data-mode="plan"
         role="radio" aria-checked="false"></button>
       <button id="autopilotToggle" class="agent-mode-item" data-mode="autopilot"
@@ -109,6 +116,7 @@ const { window, document, check, report } = setup({
     runtimeScope: {},
     planMode: false,
     autopilotEnabled: false,
+    delegateMode: false,
     activeFlow: 'flow-old',
     imageGenMode: true,
     humanGuidanceEnabled: false,
@@ -160,6 +168,19 @@ const conflictingFlow = normalizeConversationInteractionModes({
 check('Conflict gives explicit Flow second precedence',
   conflictingFlow.agentMode === 'standard' && conflictingFlow.activeFlow === 'flow-old');
 check('Unknown agent mode normalizes to Standard', normalize('unknown') === 'standard');
+const storedDelegate = normalizeConversationInteractionModes({ delegateMode: true });
+check('Delegate snapshot resolves to Delegate',
+  storedDelegate.agentMode === 'delegate' && storedDelegate.delegateMode === true
+  && !storedDelegate.planMode && !storedDelegate.autopilotEnabled);
+check('Every other loop owner outranks Delegate',
+  normalizeConversationInteractionModes({ delegateMode: true, planMode: true }).agentMode === 'plan'
+  && normalizeConversationInteractionModes({ delegateMode: true, autopilotEnabled: true }).agentMode === 'autopilot'
+  && normalizeConversationInteractionModes({ delegateMode: true, activeFlow: 'flow-old' }).agentMode === 'standard'
+  && normalizeConversationInteractionModes({ delegateMode: true, activeFlow: 'flow-old' }).delegateMode === false);
+const delegateFlags = flags('delegate');
+check('Delegate flags are exclusive',
+  delegateFlags.delegateMode && !delegateFlags.planMode && !delegateFlags.autopilotEnabled
+  && resolve(false, false, true) === 'delegate' && resolve(false, true, true) === 'autopilot');
 
 check('Plan selection accepted', setAgentMode('plan') === true);
 check('Plan is the only wire mode', planMode && !autopilotEnabled);
@@ -171,8 +192,23 @@ check('Plan radio selected', document.querySelector('#agentModeMenu [data-mode="
 setAgentMode('autopilot');
 check('Autopilot is mutually exclusive', !planMode && autopilotEnabled);
 setAgentMode('standard');
-check('Standard clears both flags', !planMode && !autopilotEnabled);
+check('Standard clears every mode flag', !planMode && !autopilotEnabled && !delegateMode);
 check('Leaving Autopilot disarms durable marker', disarms === 1);
+
+global.activeFlow = 'flow-old';
+global.imageGenMode = true;
+global.humanGuidanceEnabled = false;
+setAgentMode('delegate');
+check('Delegate is the only wire mode', delegateMode && !planMode && !autopilotEnabled);
+check('Delegate clears Flow and image mode but leaves Human Guidance to the user',
+  activeFlow === '' && imageGenMode === false && humanGuidanceEnabled === false);
+check('Delegate trigger label projected',
+  document.getElementById('agentModeLabel').textContent === 'toolbar.delegateMode');
+check('Delegate radio selected',
+  document.querySelector('#agentModeMenu [data-mode="delegate"]').getAttribute('aria-checked') === 'true'
+  && document.querySelector('#agentModeMenu [data-mode="standard"]').getAttribute('aria-checked') === 'false');
+setAgentMode('plan');
+check('Plan replaces Delegate', planMode && !delegateMode);
 
 setAgentMode('plan');
 busy = true;
@@ -237,12 +273,21 @@ check('Rendered Flow choices lock with the trigger',
 check('Locked trigger advertises the locked tooltip hook',
   document.getElementById('agentModeToggle').getAttribute('data-i18n-title')
     === 'toolbar.agentModeLockedTooltip');
+// Every projected Turn change re-applies the lock while a reply streams.
+const lockObserver = new window.MutationObserver(() => {});
+lockObserver.observe(document.body, { subtree: true, attributes: true });
+_setAgentModeLocked(true);
+_setAgentModeLocked(true);
+const lockRewrites = lockObserver.takeRecords().map((record) => record.attributeName);
+lockObserver.disconnect();
+check('Re-applying an unchanged lock rewrites no attribute: ' + lockRewrites.join(','),
+  lockRewrites.length === 0);
 _setAgentModeLocked(false);
 check('Unlock restores the base tooltip hook and the click target',
   document.getElementById('agentModeToggle').getAttribute('data-i18n-title')
     === 'toolbar.agentModeTooltip'
     && !document.getElementById('agentModeToggle').disabled);
-check('Accepted transitions persist once each', saves === 4);
+check('Accepted transitions persist once each', saves === 6);
 report();
 """
 
@@ -252,7 +297,7 @@ def test_agent_mode_transitions_are_atomic_and_lock_in_flight():
         TOOLBAR,
         _HARNESS,
         extra_targets=[AGENT_MODE],
-        expect_pass=30,
+        expect_pass=39,
         label="agent mode selector",
     )
 
@@ -269,6 +314,7 @@ def test_typed_flow_picker_preserves_projection_notice_and_keyboard_contracts(
     tmp_path: Path,
 ):
     """The migrated owner is exercised through the production Vite graph."""
+    require_node_modules('jsdom', 'vite')
     bundle = tmp_path / "flow-picker.cjs"
     compiled = subprocess.run(
         [

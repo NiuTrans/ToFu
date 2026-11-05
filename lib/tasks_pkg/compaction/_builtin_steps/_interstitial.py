@@ -84,7 +84,8 @@ def fold_paired_interstitial(ctx: CompactionContext) -> int:
             paired_assistants_compacted += 1
 
     if paired_assistants_compacted > 0:
-        logger.info(
+        log = logger.debug if ctx.dry_run else logger.info
+        log(
             '[L1-pair] conv=%s  co-compacted %d paired assistant interstitials '
             '(~%d tokens saved; A/B-verified -1.4%% cache writes vs B-only)',
             _log_id(ctx.conv_id),

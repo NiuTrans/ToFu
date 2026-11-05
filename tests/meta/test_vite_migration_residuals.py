@@ -275,8 +275,8 @@ def test_sync_gap_and_reset_recover_from_durable_cursor() -> None:
         ],
         r"""
 class FakeEventSource {
-  constructor(url) {
-    this.url = url;
+  constructor(request) {
+    this.request = request;
     this.closed = false;
     this.listeners = new Map();
     this.onopen = null;
@@ -309,7 +309,6 @@ const eventually = async predicate => {
 const sources = [];
 const snapshots = [];
 const protocolErrors = [];
-const streamCalls = [];
 let snapshotCount = 0;
 const snapshotSequences = [2, 10, 20];
 const api = {
@@ -326,17 +325,12 @@ const api = {
       settings: {}, turns: [], attempts: [],
     };
   },
-  eventsUrl(conversationId, after, streamClientId, streamGeneration) {
-    streamCalls.push({conversationId, after, streamClientId, streamGeneration});
-    return `/conversations/${conversationId}/events?after=${after}`;
-  },
 };
 const coordinator = new ConversationSyncCoordinator({
   conversationId: 'conv-a',
-  streamClientId: 'page-a',
   api,
-  eventSourceFactory(url) {
-    const source = new FakeEventSource(url);
+  eventSourceFactory(request) {
+    const source = new FakeEventSource(request);
     sources.push(source);
     return source;
   },
@@ -369,31 +363,28 @@ const cursor = coordinator.cursor;
 coordinator.close();
 
 return {
-  sourceUrls: sources.map(source => source.url),
+  streamRequests: sources.map(({request}) => ({
+    conversationId: request.conversationId,
+    after: request.after,
+    cursorSource: request.cursorSource ?? null,
+  })),
   snapshotCount: snapshots.length,
   protocolErrors,
   firstClosed: first.closed,
   secondClosed: second.closed,
   thirdClosed: third.closed,
   cursor,
-  streamCalls,
 };
 """,
     )
 
-    stream_calls = result.pop("streamCalls")
-    generations = [call.pop("streamGeneration") for call in stream_calls]
-    # Snapshot fencing may consume generations without opening a source. The
-    # wire contract requires positive, strictly increasing ownership tokens,
-    # not a particular initial value or implementation-specific step size.
-    assert all(isinstance(value, int) and 0 < value <= 2147483647 for value in generations)
-    assert all(previous < current for previous, current in zip(generations, generations[1:]))
-    result["streamCalls"] = stream_calls
+    # Stream generations belong to the page transport
+    # (conversation-event-multiplexer.test.ts); each recovered stream resumes
+    # from the snapshot that re-anchored it.
     assert result == {
-        "sourceUrls": [
-            "/conversations/conv-a/events?after=cursor-2",
-            "/conversations/conv-a/events?after=cursor-10",
-            "/conversations/conv-a/events?after=cursor-20",
+        "streamRequests": [
+            {"conversationId": "conv-a", "after": f"cursor-{sequence}", "cursorSource": "snapshot"}
+            for sequence in (2, 10, 20)
         ],
         "snapshotCount": 3,
         "protocolErrors": [],
@@ -401,23 +392,6 @@ return {
         "secondClosed": True,
         "thirdClosed": True,
         "cursor": "cursor-20",
-        "streamCalls": [
-            {
-                "conversationId": "conv-a",
-                "after": "cursor-2",
-                "streamClientId": "page-a",
-            },
-            {
-                "conversationId": "conv-a",
-                "after": "cursor-10",
-                "streamClientId": "page-a",
-            },
-            {
-                "conversationId": "conv-a",
-                "after": "cursor-20",
-                "streamClientId": "page-a",
-            },
-        ],
     }
 
 
@@ -452,7 +426,7 @@ const makeSnapshot = syncSeq => ({
   settings: {}, turns: [], attempts: [],
 });
 class FakeEventSource {
-  constructor(url) { this.url = url; this.closed = false; }
+  constructor(request) { this.request = request; this.closed = false; }
   addEventListener() {}
   removeEventListener() {}
   close() { this.closed = true; }
@@ -475,14 +449,11 @@ const api = {
     turnPageCalls.push({options});
     return new Promise(() => {});  // never settles; only the call args matter
   },
-  eventsUrl(conversationId, after) {
-    return `/conversations/${conversationId}/events?after=${after}`;
-  },
 };
 const coordinator = new ConversationSyncCoordinator({
   conversationId: 'conv-a',
   api,
-  eventSourceFactory(url) { return new FakeEventSource(url); },
+  eventSourceFactory(request) { return new FakeEventSource(request); },
   onSnapshot() {},
   onAttemptEvent() { return true; },
   onTurnDelta() { return true; },

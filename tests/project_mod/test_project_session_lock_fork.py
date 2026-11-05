@@ -8,7 +8,7 @@ import pytest
 pytestmark = [pytest.mark.unit, pytest.mark.skipif(not hasattr(os, 'fork'), reason='POSIX fork boundary')]
 
 
-@pytest.mark.parametrize('scenario', ['owner-thread', 'other-thread', 'descriptor-reuse',
+@pytest.mark.parametrize('scenario', ['owner-thread', 'other-thread', 'descriptor-reuse', 'queued-waiter',
     pytest.param('registry-budget', marks=pytest.mark.skipif(
         not os.path.isdir('/proc/self/fd'), reason='Linux descriptor budget probe'))])
 def test_fork_does_not_transfer_session_ownership(tmp_path, scenario):
@@ -58,6 +58,33 @@ elif scenario == 'registry-budget':
         pass
     assert not locks._active_descriptors
     assert len(os.listdir('/proc/self/fd')) == before
+elif scenario == 'queued-waiter':
+    import time
+    locks._wait_seconds = lambda: 10
+    acquired, release = threading.Event(), threading.Event()
+    def owner():
+        with locks.locked_session(session):
+            acquired.set()
+            assert release.wait(10)
+    def waiter():
+        with locks.locked_session(session):
+            pass
+    first = threading.Thread(target=owner)
+    first.start()
+    assert acquired.wait(10)
+    second = threading.Thread(target=waiter)
+    second.start()
+    time.sleep(0.2)
+    pid = os.fork()
+    if pid == 0:
+        # Neither parent thread exists in the child: their place in line and
+        # their holder evidence must not survive the fork.
+        os._exit(0 if not locks._holders and not locks._waiting else 11)
+    release.set()
+    first.join(10)
+    second.join(10)
+    assert not first.is_alive() and not second.is_alive()
+    wait_success(pid)
 else:
     acquired, release = threading.Event(), threading.Event()
     def owner():

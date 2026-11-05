@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from lib.conversation_sync.command_service import ConversationTurnCommandService
+from lib.error_envelope import BadRequest
 
 
 def _build_user_message(
@@ -19,8 +20,11 @@ def _build_user_message(
 ) -> Any:
     from lib.chat.turn_builder import build_user_msg_from_payload
 
+    # The command persists authored text; the accepted attempt (or the
+    # running lane it is delivered into) owns any send translation.
     return build_user_msg_from_payload(
-        dict(message), dict(config), conv_id=conversation_id, user_id=user_id
+        dict(message), dict(config), conv_id=conversation_id, user_id=user_id,
+        translate_input=False,
     )
 
 
@@ -59,12 +63,19 @@ def _mutate_file_changes(
     conversation_id: str,
     user_id: Any,
 ) -> Mapping[str, Any]:
-    """Resolve and mutate one executor task's project at the backend edge."""
+    """Resolve and mutate one executor task's project at the backend edge.
+
+    Only the file-history engine's typed refusals (``refused: True``) answer
+    as ``BadRequest``. Every other failure is a ``FileHistoryFault``: its
+    message, which the turn records as ``fileChanges.error``, discloses no
+    raw exception text, and the command boundary answers a redacted 500.
+    """
     from lib.project_mod import (
         redo_task_modifications,
         resolve_base_path,
         undo_task_modifications,
     )
+    from lib.project_mod.modifications import FileHistoryFault
 
     # TODO(enterprise): project modification journals need user-scoped
     # ownership before multi-user deployment.  Keep identity explicit here so
@@ -75,18 +86,41 @@ def _mutate_file_changes(
         or resolve_base_path(conv_id=conversation_id)
     )
     if not project_path:
-        raise ValueError("No project is recorded for this turn")
+        raise BadRequest("No project is recorded for this turn")
     mutate = (
         undo_task_modifications
         if operation == "undo"
         else redo_task_modifications
     )
-    result = mutate(project_path, task_id)
+    try:
+        result = mutate(project_path, task_id)
+    except FileHistoryFault:
+        raise
+    except Exception as error:
+        raise FileHistoryFault(
+            f"Could not {operation} the turn's file changes: "
+            f"{FileHistoryFault.reason(error)}") from error
     if not isinstance(result, Mapping):
-        raise ValueError("Project file command returned an invalid result")
+        raise FileHistoryFault("Project file command returned an invalid result")
     outcome = dict(result)
+    failed = (outcome.get("details") or {}).get("failed") or []
+    # Row reasons are disclosable for refusals and faults alike.
+    reasons = "; ".join(
+        f"{row.get('path')}: {row.get('reason')}" for row in failed)
+    if any(row.get("refused") is not True for row in failed):
+        raise FileHistoryFault(f"Could not {operation} {reasons}")
     if outcome.get("ok") is False:
-        raise ValueError(str(outcome.get("error") or "Project file command failed"))
+        if outcome.get("refused") is not True:
+            raise FileHistoryFault(
+                f"Could not {operation} the turn's file changes: internal error")
+        raise BadRequest(str(outcome.get("error") or "Project file command failed"))
+    if operation == "undo":
+        # A settled "undone" turn offers redo, which rewrites the turn's files
+        # unconditionally; a refused or empty undo must therefore stay applied.
+        if failed:
+            raise BadRequest("Could not undo " + reasons)
+        if not outcome.get("undone"):
+            raise BadRequest("No recorded file changes remain to undo for this turn")
     return outcome
 
 

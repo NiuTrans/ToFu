@@ -16,7 +16,7 @@ pytestmark = pytest.mark.unit
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 INDEX_HTML = ROOT / 'index.html'
 GENERAL_PANEL = ROOT / 'static/settings_panels/general.html'
-MAIN = ROOT / 'frontend/src/main.ts'
+MAIN = ROOT / 'frontend/src/application.ts'
 MANIFEST = ROOT / 'frontend/src/runtime/sections/manifest.json'
 UTILITY_FEATURE = ROOT / 'frontend/src/features/utility-panels.ts'
 
@@ -75,10 +75,8 @@ def test_boot_check_and_idle_preload_preserve_ambient_badge():
 
 
 def test_settings_reads_update_pill_as_an_optional_live_port():
-    core = (ROOT / 'frontend/src/features/settings/core-panel.ts').read_text(
-        encoding='utf-8')
-    assert "typeof bridge._renderSettingsUpdatePill === 'function'" in core
-    assert 'bridge._renderSettingsUpdatePill();' in core
+    # The live/absent port behavior is exercised by test_settings_load_lifecycle;
+    # this boundary only prevents the generated presenter from freezing it.
     settings = next(
         bundle for bundle in _manifest()['lazyBundles']
         if bundle['name'] == 'settings-presenters'

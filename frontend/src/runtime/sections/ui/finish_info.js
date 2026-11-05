@@ -190,8 +190,20 @@ const _CACHE_CAUSE_PHRASES = [
   ['prefix bytes unchanged', '前缀字节未变'],
   ['breakpoint advancement', '缓存断点前移'],
   ['server-side eviction', '服务端缓存被驱逐'],
+  // ── Prefix-mutation verdict. Its billing clause comes from the round's
+  //    provider usage (_policy.py:_resolve_break_cause), so token counts sit
+  //    BETWEEN these fragments. The fixed "whole body" sentence first is the
+  //    wording of rounds persisted before that change. ──
   ['cached prefix bytes changed between turns (non-idempotent history edit) — the whole body was re-billed uncached',
    '两轮之间缓存前缀的字节被改写（历史被非幂等编辑）——整段上下文按未命中重新计费'],
+  ['cached prefix bytes changed between turns (non-idempotent history edit) — ',
+   '两轮之间缓存前缀的字节被改写（历史被非幂等编辑）——'],
+  ['the whole prompt was re-billed uncached', '整段提示按未命中重新计费'],
+  [' tokens were still read from cache; the rest of the prompt was billed as uncached input (no cache write reported)',
+   ' 个 token 仍从缓存读取；其余提示按未缓存输入计费（未报告缓存写入）'],
+  [' tokens were still read from cache and ', ' 个 token 仍从缓存读取，'],
+  [' tokens from the last cache point before the change onward were written to cache',
+   ' 个 token（自改动前最后一个缓存点起）被写入缓存'],
   ['cached prefix bytes changed between turns', '两轮之间缓存前缀字节被改写'],
   ['non-idempotent history edit', '历史被非幂等编辑'],
   ['the whole body was re-billed uncached', '整段上下文按未命中重新计费'],
@@ -451,25 +463,46 @@ function _quotaUsageTokens(usage) {
 
 /** Latest account-wide Codex quota snapshot + observed deltas for this turn.
  *
- * Every apiRound carries the upstream response-header snapshot.  Summing the
- * adjacent-snapshot differences gives the best available per-turn signal, but
- * it remains account-wide (concurrent conversations may move the same
- * counter), so the UI explicitly calls it "observed" rather than exact cost.
+ * Only calls whose upstream returned quota headers carry a snapshot, and one
+ * turn can mix routes: a metered API-key main model plus an internal
+ * compaction call on a ChatGPT subscription. Tokens are therefore summed over
+ * snapshot-bearing calls only; when other token-bearing calls exist the turn
+ * is mixed and `sources` names the calls behind the readings. A snapshot kept
+ * only on the turn usage cannot be split by call, so it keeps the whole-turn
+ * total. Summed adjacent-snapshot differences remain account-wide (concurrent
+ * conversations may move the same counter), so the UI calls them "observed"
+ * rather than exact cost.
  */
 function _subscriptionQuotaForMessage(msg) {
+  const rounds = msg.apiRounds || [];
   const snapshots = [];
+  const sources = [];
   let turnTokens = 0;
-  for (const rd of (msg.apiRounds || [])) {
-    turnTokens += _quotaUsageTokens(rd && rd.usage);
+  let otherCalls = 0;
+  for (const rd of rounds) {
+    const tokens = _quotaUsageTokens(rd && rd.usage);
     const q = rd && rd.usage && rd.usage._subscription_quota;
-    if (q) snapshots.push(q);
+    if (!q) {
+      if (tokens > 0) otherCalls += 1;
+      continue;
+    }
+    snapshots.push(q);
+    turnTokens += tokens;
+    const model = String(rd.usage._dispatch?.model || rd.model || '').trim()
+      || t('finishInfo.unknownValue');
+    const source = rd.kind === 'compaction'
+      ? t('finishInfo.quotaSourceCompaction', { model }) : model;
+    if (!sources.includes(source)) sources.push(source);
   }
-  if (!(msg.apiRounds || []).length) turnTokens = _quotaUsageTokens(msg.usage);
-  if (!snapshots.length && msg.usage && msg.usage._subscription_quota) {
+  const quotaCalls = snapshots.length;
+  if (!quotaCalls) {
+    if (!(msg.usage && msg.usage._subscription_quota)) return null;
     snapshots.push(msg.usage._subscription_quota);
-    if (!turnTokens) turnTokens = _quotaUsageTokens(msg.usage);
+    turnTokens = rounds.reduce(
+      (sum, rd) => sum + _quotaUsageTokens(rd && rd.usage), 0,
+    ) || _quotaUsageTokens(msg.usage);
+    otherCalls = 0;
   }
-  if (!snapshots.length) return null;
   const latest = snapshots[snapshots.length - 1];
   const deltas = { primary: 0, secondary: 0 };
   const baselines = { primary: false, secondary: false };
@@ -482,7 +515,9 @@ function _subscriptionQuotaForMessage(msg) {
       if (Number.isFinite(delta) && delta > 0) deltas[name] += delta;
     }
   }
-  return { latest, deltas, baselines, turnTokens };
+  return {
+    latest, deltas, baselines, turnTokens, quotaCalls, otherCalls, sources,
+  };
 }
 
 /** Wall-clock turn duration: 8.4s → "8.4s", 65s → "1m05s", 75m → "1h15m". */
@@ -689,7 +724,8 @@ function renderFinishInfo(msg, turnId) {
   } else if (_turnStatus === 'failed' || _terminalError) {
     const _failedTone = (_terminalEnv?.severity === 'warning'
       || _presentation?.tone === 'warning') ? 'warn' : 'err';
-    const _failedLabel = _kindLabel || t('finishInfo.reasonFailed');
+    const _failedLabel = (_presentation?.label === 'Refused' ? t('finishInfo.reasonRefused') : '')
+      || _kindLabel || t('finishInfo.reasonFailed');
     const _failedTip = _detailText || t('finishInfo.reasonFailedTip');
     const _failedIcon = _failedTone === 'warn'
       ? Icon('alertTriangle', 12) : Icon('x', 12);
@@ -697,7 +733,9 @@ function renderFinishInfo(msg, turnId) {
       ? ` data-error-kind="${escapeHtml(_terminalEnv.kind)}"` : '';
     parts.push(`<span class="finish-tag ${_failedTone} terminal-failure"${_kindAttr} title="${escapeHtml(_failedTip)}">${_failedIcon}${escapeHtml(_failedLabel)}</span>`);
   } else {
-    parts.push(`<span class="finish-tag warn" title="${escapeHtml(_detailText)}">${escapeHtml(_presentation?.label || _turnStatus)}</span>`);
+    const _warnLabel = _presentation?.label === 'Refused'
+      ? t('finishInfo.reasonRefused') : (_presentation?.label || _turnStatus);
+    parts.push(`<span class="finish-tag warn" title="${escapeHtml(_detailText)}">${escapeHtml(_warnLabel)}</span>`);
   }
   /* The typed presenter selects the server's proven execution duration. */
   const _timing = typeof presentTurnExecutionTiming === 'function'
@@ -786,11 +824,23 @@ function renderFinishInfo(msg, turnId) {
           observed = t('finishInfo.quotaObservedNoTick');
           _tips.push(observed);
         }
-        const exactTokens = _quota.turnTokens > 0
-          ? t('finishInfo.quotaTurnTokens', { tokens: fmt(_quota.turnTokens) }) : '';
-        if (exactTokens) _tips.push(t('finishInfo.quotaTurnTokensDetail', {
-          tokens: fmt(_quota.turnTokens),
-        }));
+        const _mixedTurn = _quota.otherCalls > 0;
+        const _sources = _quota.sources.join(t('finishInfo.listSepDot'));
+        let exactTokens = '';
+        if (_quota.turnTokens > 0) {
+          exactTokens = _mixedTurn
+            ? t('finishInfo.quotaSubscriptionTokens', { tokens: fmt(_quota.turnTokens) })
+            : t('finishInfo.quotaTurnTokens', { tokens: fmt(_quota.turnTokens) });
+        }
+        if (_mixedTurn) {
+          _tips.unshift(t('finishInfo.quotaMixedTurnDetail', {
+            calls: _quota.quotaCalls, other: _quota.otherCalls, source: _sources,
+          }));
+        } else if (exactTokens) {
+          _tips.push(t('finishInfo.quotaTurnTokensDetail', {
+            tokens: fmt(_quota.turnTokens),
+          }));
+        }
         _tips.push(t('finishInfo.quotaCaveat'));
         /* One flex item per fact, never one monolithic joined blob: the
          * finish row's flex-wrap can only break BETWEEN items, and every
@@ -803,7 +853,10 @@ function renderFinishInfo(msg, turnId) {
         const _facts = _labels.slice();
         if (exactTokens) _facts.push(exactTokens);
         if (observed) _facts.push(observed);
-        _facts[0] = `${t('finishInfo.quotaPrefix')} · ${_facts[0]}`;
+        const _prefix = _mixedTurn
+          ? t('finishInfo.quotaPrefixWithSource', { source: _sources })
+          : t('finishInfo.quotaPrefix');
+        _facts[0] = `${_prefix} · ${_facts[0]}`;
         const _quotaTip = escapeHtml(_tips.join('\n'));
         for (const _fact of _facts) {
           parts.push(`<span class="subscription-quota-tag" title="${_quotaTip}">${escapeHtml(_fact)}</span>`);

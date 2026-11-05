@@ -23,6 +23,10 @@ from contextlib import contextmanager
 from pathlib import Path
 import stat
 
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
 CONTINUITY_VERSION = 'motion-continuity-v1'
 MAX_BEATS = 24
 MAX_PLAN_BYTES = 64 * 1024
@@ -414,6 +418,7 @@ def _worker_check(project_dir: str, timeout: float, expected_digest: str) -> dic
     except Exception as exc:
         # Sampler capacity limits, runtime errors and unavailable dependencies
         # are missing evidence, NOT malformed author contracts.
+        logger.debug('continuity evidence unavailable: %s', exc)
         return _unavailable(f'continuity evidence unavailable: {exc}')
 
 

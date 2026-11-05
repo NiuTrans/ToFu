@@ -73,7 +73,8 @@ def _template() -> dict:
         return json.load(handle)
 
 
-def _seed_mini_card(repository, boundary, selected=(_SEED_MODEL,)):
+def _seed_mini_card(repository, boundary, selected=(_SEED_MODEL,),
+                    secret_plaintext='sk-test'):
     """A real YourProvider-card-in-miniature: same template, one installed model."""
     bundle = compile_provider_template_bundle(
         'yourprovider', selected_model_ids=list(selected))
@@ -82,7 +83,7 @@ def _seed_mini_card(repository, boundary, selected=(_SEED_MODEL,)):
     document['provider_accesses'].append(bundle['provider_access'])
     document['connections'].extend(bundle['connections'])
     credential = dict(bundle['credentials'][0])
-    secret = repository.put_secret(boundary, 'sk-test')
+    secret = repository.put_secret(boundary, secret_plaintext)
     credential['secret_reference'] = secret['secret_reference']
     credential['key_hint'] = secret['key_hint']
     document['credentials'].append(credential)
@@ -420,6 +421,47 @@ def test_declared_face_convergence_never_touches_an_owner_connection():
                   and row['base_url'].count('/') <= 4)
     assert 'features' not in (kunlun.get('inference_profile') or {})
 
+
+def test_cache_affinity_carrier_converges_onto_installed_claude_face():
+    """A card installed before the carrier declaration starts sending it.
+
+    Mirrors 2026-11-02 (conversation mvywcu5qqy5ocy): the anthropic face
+    Connection carried no profile, so Claude rounds sent no Mt-Session-Id and
+    FRIDAY spread one conversation over several upstream accounts.
+    """
+    from lib.llm.route_features import route_feature
+    repository = InMemoryModelRoutingRepository()
+    boundary = _boundary()
+    _seed_mini_card(repository, boundary, selected=['claude-opus-5.5'])
+    document = repository.get(boundary).document
+    face = next(row for row in document['connections']
+                if row.get('gateway_namespace') == 'anthropic')
+    face.pop('inference_profile', None)
+    repository.compare_and_swap(
+        boundary, document, expected_revision=repository.get(boundary).revision)
+
+    stats = sync_template_supply(
+        boundary=boundary, repository=repository, backfill_only=True)
+
+    document = repository.get(boundary).document
+    face = next(row for row in document['connections']
+                if row.get('gateway_namespace') == 'anthropic')
+    assert face['inference_profile']['features'] == {
+        'cache_affinity_mt_session_id': 'supported'}
+    assert stats['repaired_connections'] == 1
+    deployment = next(row for row in document['deployments']
+                      if row['connection_id'] == face['connection_id'])
+    resolved = resolve_inference_profile(
+        connection={'protocol': 'anthropic',
+                    'inference_profile': profile_from_metadata(face)},
+        deployment={'inference_profile': profile_from_metadata(deployment)})
+    assert route_feature(resolved, 'cache_affinity_mt_session_id',
+                         protocol='anthropic') is True
+    again = sync_template_supply(
+        boundary=boundary, repository=repository, backfill_only=True)
+    assert again['repaired_connections'] == 0
+
+
 def _install_deepseek_pair(repository, boundary):
     """Scaffold plus the pre-rename DeepSeek supply: V4.1 live, V4 leftover.
 
@@ -476,16 +518,30 @@ def _offering(document, offering_id):
                 if row['offering_id'] == offering_id)
 
 
-def test_recipe_rename_supersedes_the_previous_offering_only():
+def test_recipe_rename_supersedes_the_previous_offering_only(monkeypatch):
     """The same gateway wires re-authored under a new logical id must retire
     the previous offering — otherwise one supply is offered (and dispatched)
     twice under two Model identities."""
     repository = InMemoryModelRoutingRepository()
     boundary = _boundary()
-    access_id = _install_deepseek_pair(repository, boundary)
+    _install_deepseek_pair(repository, boundary)
+    template = _template()
+    template['offering_recipes'] = [
+        {'model_id': 'deepseek-v4-flash',
+         'request_ids': ['deepseek-v4-flash',
+                         'deepseek-v4-flash-huawei']},
+        {'model_id': 'deepseek-v4.1-flash',
+         'request_ids': ['deepseek-v4.1-flash',
+                         'deepseek-v4-flash-huawei',
+                         'deepseek-v4-flash-tencent']},
+    ]
+    monkeypatch.setattr(
+        'lib.model_routing.template_supply._find_template',
+        lambda document, access, templates: template)
 
     stats = sync_template_supply(
-        boundary=boundary, repository=repository, prober=_prober_ok)
+        boundary=boundary, repository=repository, prober=_prober_ok,
+        backfill_only=True)
 
     document = repository.get(boundary).document
     assert _offering(document, 'off_rename_1')['stale'] is True
@@ -500,7 +556,8 @@ def test_recipe_rename_supersedes_the_previous_offering_only():
                for row in document['models'])
     # Idempotent: a second pass retires nothing new.
     again = sync_template_supply(
-        boundary=boundary, repository=repository, prober=_prober_ok)
+        boundary=boundary, repository=repository, prober=_prober_ok,
+        backfill_only=True)
     assert again['superseded_offerings'] == 0
     assert _offering(repository.get(boundary).document,
                      'off_rename_1')['stale'] is True
@@ -755,3 +812,163 @@ def test_template_probe_merges_face_and_credential_headers(monkeypatch, cell_hea
         api_key='synthetic-key', extra_headers=envelope, recipes=[]) == {'model': 'ok'}
     assert received == [{**(cell_headers or {}), **envelope}]
     assert envelope == before
+
+
+_PLAN_DEFAULT_URL = 'https://gw.invalid/v1/native'
+_PLAN_OWNER_URL = 'https://gw.invalid/v1/owner'
+_PLAN_SELECTOR = {'x-context-provider': 'kunlun'}
+_PLAN_OWNER_HEADERS = {'X-Default-Route': 'native'}
+
+
+def _plan_connection(url, namespace=''):
+    """A namespace-less owner Connection, or a face Connection the template
+    created (``gateway_namespace``) carrying that face's selector."""
+    return {
+        'connection_id': f'conn-{namespace or "owner"}-{url}',
+        'provider_access_id': 'pa-plan',
+        'base_url': url,
+        'protocol': 'openai_responses' if namespace else 'openai',
+        'extra_headers': dict(_PLAN_SELECTOR if namespace
+                              else _PLAN_OWNER_HEADERS),
+        **({'gateway_namespace': namespace} if namespace else {}),
+    }
+
+
+@pytest.mark.parametrize('kunlun_url,layout,expected_default', [
+    # Template URL unhosted, face Connection listed first.
+    pytest.param('https://gw.invalid/v1', [
+        ('https://gw.invalid/v1', 'kunlun'), (_PLAN_OWNER_URL, ''),
+    ], (_PLAN_OWNER_URL, 'openai', _PLAN_OWNER_HEADERS), id='fallback'),
+    # A selector face shares the default URL; backfill appended its
+    # Connection after the owner one, or the owner one came later.
+    pytest.param(_PLAN_DEFAULT_URL, [
+        (_PLAN_DEFAULT_URL, ''), (_PLAN_DEFAULT_URL, 'kunlun'),
+    ], (_PLAN_DEFAULT_URL, 'openai', _PLAN_OWNER_HEADERS),
+        id='shared-url-face-last'),
+    pytest.param(_PLAN_DEFAULT_URL, [
+        (_PLAN_DEFAULT_URL, 'kunlun'), (_PLAN_DEFAULT_URL, ''),
+    ], (_PLAN_DEFAULT_URL, 'openai', _PLAN_OWNER_HEADERS),
+        id='shared-url-face-first'),
+    # No namespace-less Connection: the template's own default endpoint.
+    pytest.param(_PLAN_DEFAULT_URL, [
+        (_PLAN_DEFAULT_URL, 'kunlun'),
+    ], (_PLAN_DEFAULT_URL, 'openai', {}), id='face-connections-only'),
+    # A face Connection left at a URL the template no longer declares.
+    pytest.param('https://gw.invalid/v1', [
+        ('https://gw.invalid/v1-retired', 'kunlun'), (_PLAN_DEFAULT_URL, ''),
+        ('https://gw.invalid/v1', 'kunlun'),
+    ], (_PLAN_DEFAULT_URL, 'openai', _PLAN_OWNER_HEADERS),
+        id='stale-face-url'),
+])
+def test_probe_plan_never_gives_default_cells_a_face_connection(
+        kunlun_url, layout, expected_default):
+    """A ``gateway_namespace`` Connection belongs to its face: its selector
+    (aigc: 400 该模型在 provider 下无可用账号 off that face), endpoint and
+    protocol never reach default-endpoint cells, whatever the Connection
+    order, and the owner Connection's headers never reach the face."""
+    from lib.model_routing.template_supply import _probe_plan
+
+    template = {
+        'base_url': _PLAN_DEFAULT_URL,
+        'faces': {'kunlun': {'base_url': kunlun_url, 'protocol': 'responses',
+                             'extra_headers': dict(_PLAN_SELECTOR)}},
+    }
+    document = {'connections': [_plan_connection(url, namespace)
+                                for url, namespace in layout]}
+
+    base_url, protocol, faces, default_headers = _probe_plan(
+        document, {'provider_access_id': 'pa-plan'}, template)
+
+    assert (base_url, protocol, default_headers) == expected_default
+    assert faces['kunlun']['base_url'] == kunlun_url
+    assert faces['kunlun']['extra_headers'] == _PLAN_SELECTOR
+
+
+def test_template_probe_gives_default_face_headers_only_to_default_face_cells(
+        monkeypatch):
+    from lib.model_routing import template_supply
+    from lib.provider import provider_probe
+
+    work = [
+        (0, 'k', 'm-default', 'w-default', [], 'https://example.invalid/v1/',
+         'openai'),
+        (0, 'k', 'm-anthropic', 'w-anthropic', [],
+         'https://example.invalid/anthropic', 'anthropic'),
+        (0, 'k', 'm-kunlun', 'w-kunlun', [], 'https://example.invalid/kunlun',
+         'responses', {'extra_headers': {'x-context-provider': 'kunlun'}}),
+    ]
+    monkeypatch.setattr(provider_probe, 'build_probe_work', lambda *a, **k: work)
+    received = {}
+
+    def probe(url, key, wire, headers, timeout, **kwargs):
+        received[wire] = dict(headers)
+        return 'ok', ''
+
+    monkeypatch.setattr(provider_probe, 'probe_one_cell', probe)
+    template_supply._live_prober(
+        base_url='https://example.invalid/v1', protocol='openai', faces={},
+        api_key='k', extra_headers={'X-Collision': 'credential'},
+        default_face_headers={'X-Default': 'native', 'X-Collision': 'default'},
+        recipes=[])
+    assert received == {
+        'w-default': {'X-Default': 'native', 'X-Collision': 'credential'},
+        'w-anthropic': {'X-Collision': 'credential'},
+        'w-kunlun': {'x-context-provider': 'kunlun',
+                     'X-Collision': 'credential'},
+    }
+
+
+def test_template_probe_sends_each_face_only_its_own_headers(monkeypatch):
+    """aigc answers 400 该模型在 provider 下无可用账号 when the kunlun selector
+    rides a wire outside the kunlun face. Every YourProvider card carries the
+    kunlun face Connection, so a probe that unions Connection headers sends
+    the selector on every cell and no missing default-face recipe can ever
+    probe served. Real faces, real ``build_probe_work``; only the network
+    call is replaced."""
+    import threading
+
+    from lib.model_routing.credential_envelope import ENVELOPE_FORMAT
+    from lib.provider import provider_probe
+
+    repository = InMemoryModelRoutingRepository()
+    boundary = _boundary()
+    envelope = {'X-Envelope': 'credential'}
+    _seed_mini_card(repository, boundary, secret_plaintext=json.dumps({
+        'format': ENVELOPE_FORMAT, 'api_key': 'sk-test',
+        'extra_headers': envelope}))
+    template = _template()
+    default_url = template['base_url']
+    kunlun_url = template['faces']['kunlun']['base_url']
+    anthropic_url = template['faces']['anthropic']['base_url']
+    snapshot = repository.get(boundary)
+    document = snapshot.document
+    for row in document['connections']:
+        if row['base_url'] == default_url:
+            row['extra_headers'] = {'X-Default-Route': 'native'}
+        elif row['base_url'] == kunlun_url:
+            row['extra_headers'] = {**row['extra_headers'],
+                                    'X-Kunlun-Route': 'm17'}
+    repository.compare_and_swap(boundary, document,
+                                expected_revision=snapshot.revision)
+    seen = []
+    lock = threading.Lock()
+
+    def probe(url, key, wire, headers, timeout, **kwargs):
+        with lock:
+            seen.append((wire, url, dict(headers)))
+        return 'not_found', ''
+
+    monkeypatch.setattr(provider_probe, 'probe_one_cell', probe)
+    sync_template_supply(boundary=boundary, repository=repository)
+
+    own = {
+        default_url: {'X-Default-Route': 'native'},
+        kunlun_url: {'x-context-provider': 'kunlun', 'X-Kunlun-Route': 'm17'},
+        anthropic_url: {},
+    }
+    assert {url for _wire, url, _headers in seen} == set(own)
+    for wire, url, headers in seen:
+        assert headers == {**own[url], **envelope}, (wire, url, headers)
+    cells = {(wire, url) for wire, url, _headers in seen}
+    assert ('kunlunbedrock.gpt-6.1-sol-m17', kunlun_url) in cells
+    assert ('gpt-6.1-sol', default_url) in cells

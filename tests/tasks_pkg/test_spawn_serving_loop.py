@@ -313,7 +313,9 @@ def test_stop_before_worker_admission_settles_once_without_start_error(monkeypat
     monkeypatch.setattr(tp, '_settle_unscheduled_workspace', preserved)
     if route == 'serving-loop':
         async def drive():
-            await tp._executor_runner(asyncio.get_running_loop(), runner, task)()
+            from lib.tasks_pkg.manager.runtime import chat_task_runtime
+            tp.spawn_task(task, runner=runner)
+            await asyncio.gather(*chat_task_runtime._bg_tasks)
         asyncio.run(drive())
     else:
         with ThreadPoolExecutor(max_workers=1) as executor:

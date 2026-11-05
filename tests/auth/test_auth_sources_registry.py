@@ -16,6 +16,7 @@ All offline: the store + knowledge paths point at tmp dirs.
 """
 
 import os
+import json
 import tempfile
 
 import pytest
@@ -243,13 +244,12 @@ def test_live_session_cache_capacity_derives_from_device_budget(
 
 def test_listing_carries_knowledge_badge(store):
     A, sk = store
-    sk.pin_knowledge('xiaohongshu.com', extractor_js='(() => [{title:"t",url:"https://x"}])()',
-                     wait_selector='div.card', evidence={'anchors': 5})
+    from pathlib import Path
+    Path(sk._STORE_PATH).write_text(json.dumps({'xiaohongshu.com': {
+        'extractor_js': '(() => [])()', 'version': 1}}))
     rows = {r['domain']: r for r in A.list_sources()}
     badge = rows['xiaohongshu.com']['knowledge']
-    assert badge['pinned'] is True
-    assert badge['version'] == 1
-    assert badge['verified_at'] > 0
+    assert badge == {'pinned': False, 'migration_required': True}
     # An unpinned site reports pinned=False — the 仅凭据 badge state.
     A.upsert_source('weibo.com', cookies=[])
     rows = {r['domain']: r for r in A.list_sources()}

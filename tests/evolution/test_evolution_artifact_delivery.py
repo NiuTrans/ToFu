@@ -24,9 +24,8 @@ def no_reindex(monkeypatch):
 @pytest.fixture
 def persisted_runtime(monkeypatch,request):
     """No synthetic record.* seam: durable run, manifest, parts and result owners."""
-    from lib.storage import storage_status
-    if not storage_status().get('ready'):
-        request.getfixturevalue('chat_sidecar')
+    from tests._chat_sidecar import require_authority_for_owner
+    require_authority_for_owner(request, OWNER)
     from tests.conftest import _assert_isolated_storage
     _assert_isolated_storage('explicit artifact delivery persistence')
     from lib.evolution import runs

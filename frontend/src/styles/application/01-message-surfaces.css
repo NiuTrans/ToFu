@@ -1,0 +1,237 @@
+/* ── 字母配色 — 两处共用同一套渐变。侧栏此前是紫渐变(#8b6cf6→#a78bfa)、欢迎屏是
+   豆腐奶油-琥珀金渐变,dark 下实测就是「侧栏紫 Tofu + 欢迎屏金 Tofu」同一品牌两个
+   颜色。保留金系(它是豆腐本身的颜色;紫是早年通用 accent 的遗留)。 ── */
+.sidebar-brand-t,.welcome h2.tofu-brand .tofu-brand-t{background-image:linear-gradient(135deg,#f5d5a0,#e8b86d)}
+.sidebar-brand-o,.welcome h2.tofu-brand .tofu-brand-o1{background-image:linear-gradient(135deg,#fdf2d7,#f0dbb8)}
+.sidebar-brand-f,.welcome h2.tofu-brand .tofu-brand-f{background-image:linear-gradient(135deg,#dcc8a4,#c5a87e)}
+.sidebar-brand-u,.welcome h2.tofu-brand .tofu-brand-u{background-image:linear-gradient(135deg,#e8b86d,#d4a050)}
+.welcome h2.tofu-brand>span{-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+/* `.tofu-brand` 原有的 font-family/font-size/font-weight/letter-spacing 已删除:后两项
+   是死代码(被 .welcome h2 压过),font-size 同样由 .welcome h2 的 24px 决定——留着只会
+   让下一个人以为它们生效。 */
+.tofu-brand{margin-bottom:6px}.welcome p{color:var(--text-secondary);font-size:var(--font-size-md);max-width:380px;line-height:1.5}.feature-pills{display:flex;gap:6px;margin-top:var(--space-4);flex-wrap:wrap;justify-content:center}.feature-pill{font-size:var(--font-size-xs);padding:var(--space-1) var(--space-3);border-radius:20px;border:1px solid var(--border);color:var(--text-secondary);background:var(--bg-tertiary);display:flex;align-items:center;gap:5px}
+.cv-off .message{content-visibility:visible!important}.message{margin-bottom:var(--space-6);content-visibility:auto;contain-intrinsic-size:auto 120px;display:grid;grid-template-columns:auto minmax(0,1fr) var(--rail-w);column-gap:var(--space-3);align-items:flex-start;position:relative;grid-column:1 / -1}@keyframes slideUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}@keyframes fadeIn{from{opacity:0}to{opacity:1}}.message-new{animation:slideUp .3s ease;content-visibility:visible}
+.message-avatar{width:40px;height:40px;border-radius:0;display:flex;align-items:center;justify-content:center;font-size:var(--font-size-md);font-weight:600;flex-shrink:0;background:transparent;color:white;margin-top:2px;overflow:visible;box-shadow:none}.message-avatar img,.message-avatar svg{filter:brightness(0.82) saturate(0.85)}.message-avatar svg{image-rendering:pixelated}.message:not(.user-msg) .message-avatar{background:transparent;border-radius:0;box-shadow:none}.message.user-msg .message-avatar{width:40px;height:40px;background:transparent;color:#a5b4fc}
+/* ── READING MEASURE (single source of truth, theme-agnostic) ──────
+ * `--msg-measure` bounds the ENTIRE message body: prose, code blocks, tables
+ * and tool cards all lay out against the same number, so a code block never
+ * runs wider than the paragraph above it.
+ *
+ * WHY IT LIVES HERE AND NOT IN A THEME BLOCK: the only cap that ever existed
+ * was `[data-theme="tofu"] .md-content{max-width:72ch}` — theme-scoped, so
+ * dark and light users had NO bound and read the full content box. Declaring
+ * it on `:root` + applying it on `.message-content` makes all three themes
+ * inherit one value. Re-introducing a per-theme measure would recreate the
+ * split; change THIS number instead.
+ * Guarded per-theme by tests/turn_lifecycle/test_turn_ctx_rail_geometry.py. */
+:root{ --msg-measure:var(--conversation-reading-measure); }
+.message-content{flex:1;min-width:0;max-width:var(--msg-measure);overflow:hidden;position:relative;contain:layout style}
+.conversation-surface [hidden]{display:none!important}
+/* ConversationSurface owns keyed blocks, but the retained visual contract has
+ * one body flow inside `.message-content`. A second grid here creates doubled
+ * gaps and lets cards establish competing width tracks. */
+.message-content>.conversation-turn-blocks{display:block;min-width:0;max-width:100%}
+.message-content>.conversation-turn-blocks>.conversation-block{min-width:0;max-width:100%}
+.message-header{display:flex;align-items:center;gap:10px;margin-bottom:5px}
+.avatar{width:28px;height:28px;border-radius:var(--radius-xs);display:flex;align-items:center;justify-content:center;font-size:var(--font-size-md);font-weight:600;flex-shrink:0}.avatar.user{background:var(--user-bubble);color:#a5b4fc}.avatar.assistant{background:linear-gradient(135deg,var(--accent),#a78bfa);color:white}
+.message-role{font-size:var(--font-size-md);font-weight:600}.message-time{font-size:var(--font-size-xs);color:var(--text-tertiary)}.stream-elapsed-timer{font-size:var(--font-size-xs);font-family:'JetBrains Mono',monospace;margin-left:6px;display:inline-flex;align-items:center;gap:var(--space-1)}.stream-elapsed{color:var(--text-tertiary);font-weight:400}.stream-stuck-warn{color:var(--thinking-text);font-weight:600;animation:stuckPulse 2s ease-in-out infinite}.stream-stuck-severe{color:var(--error-text);font-weight:700;animation:stuckPulse 1s ease-in-out infinite}.stream-stuck-activity{color:var(--text-secondary);font-weight:500;font-style:italic;animation:stuckPulse 2.4s ease-in-out infinite}@keyframes stuckPulse{0%,100%{opacity:0.6}50%{opacity:1}}.stream-liveness{display:inline-flex;align-items:center;gap:5px;font-size:var(--font-size-xs);font-weight:600;padding:2px var(--space-2);border-radius:6px;line-height:1.5}.stream-liveness-icon{flex-shrink:0}.stream-liveness-warn{color:var(--thinking-text);background:rgba(200,170,90,.12);animation:stuckPulse 2s ease-in-out infinite}.stream-force-finish-btn{font-size:10px;font-family:'JetBrains Mono',monospace;background:var(--error-text);color:white;border:none;border-radius:4px;padding:1px var(--space-2);margin-left:6px;cursor:pointer;font-weight:600;opacity:0.9;transition:opacity .2s}.stream-force-finish-btn:hover{opacity:1}.message-body{padding-left:0;overflow:hidden;max-width:100%}
+/* ── Message image thumbnail grid ── */
+.msg-image-grid{display:flex;flex-wrap:wrap;gap:var(--space-2);margin-bottom:10px}
+/* Inside an injection chip (steer/peer card) the bubble's bottom margin is
+ * noise — the card already owns its rhythm. Tighten + give a hover affordance
+ * so the thumbnail reads as a clickable preview, not a static image. */
+.msg-image-grid.sw-inject-img-grid{margin:0 0 var(--space-2)}
+.msg-image-grid.sw-inject-img-grid .msg-img-thumb{cursor:zoom-in;transition:border-color .2s,transform .15s}
+.msg-image-grid.sw-inject-img-grid .msg-img-thumb:hover{border-color:var(--accent);transform:translateY(-1px)}
+.msg-video-list{display:flex;flex-wrap:wrap;gap:var(--space-2);margin-bottom:10px}
+.msg-video-card{display:flex;align-items:center;gap:10px;padding:6px var(--space-3) 6px 6px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;max-width:300px;transition:border-color .2s}
+.msg-video-card:hover{border-color:var(--accent)}
+.msg-video-thumb{position:relative;width:72px;height:44px;border-radius:6px;overflow:hidden;background:#000;flex:none;display:flex;align-items:center;justify-content:center}
+.msg-video-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.msg-video-play{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:15px;text-shadow:0 1px 3px rgba(0,0,0,.75)}
+.msg-video-info{min-width:0}
+.msg-video-name{font-size:var(--font-size-sm);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
+.msg-video-meta{font-size:var(--font-size-xs);color:var(--text-tertiary);white-space:nowrap}
+.video-chip img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.video-chip.video-failed{opacity:.75;border-color:var(--error-text)}
+.msg-img-thumb{position:relative;width:80px;height:80px;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border);cursor:pointer;transition:border-color .2s,transform .15s;flex-shrink:0}
+.msg-img-thumb:hover{border-color:var(--accent);transform:scale(1.04)}
+.msg-img-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.msg-img-thumb.pdf-page{border-color:rgba(207,167,56,0.35)}
+.msg-img-badge{position:absolute;top:3px;left:3px;background:rgba(207,167,56,0.9);color:#fff;font-size:7px;font-weight:700;padding:1px var(--space-1);border-radius:3px;font-family:'JetBrains Mono',monospace}
+.msg-img-size{position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.7);color:#aaa;font-size:8px;text-align:center;padding:1px 0;font-family:'JetBrains Mono',monospace}
+.msg-img-thumb.placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--bg-tertiary)}
+.msg-img-placeholder-icon{font-size:20px}
+/* Legacy bare img fallback (markdown-rendered images)
+ * ★ Excludes image-gen cards: :not() specificity (0,2,2) was beating the (0,2,1) overrides
+ *   in .ig-result-card / .imagegen-card, squishing generated images to 300×200px */
+.message-body img:not(.md-image, .msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){max-width:300px;max-height:200px;border-radius:var(--radius-sm);margin-bottom:var(--space-2);border:1px solid var(--border);cursor:pointer;transition:opacity .2s}.message-body img:not(.md-image, .msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img):hover{opacity:0.85}
+.md-content{font-family:var(--md-sans);font-size:14.5px;line-height:1.75;letter-spacing:0.005em;color:var(--text-primary);contain:layout style;overflow-x:hidden;max-width:100%;overflow-wrap:break-word;word-wrap:break-word}.md-content p{margin-bottom:13px}.md-content p:last-child{margin-bottom:0}.md-content strong{font-weight:650}.md-content em{font-style:italic;color:var(--text-secondary)}.md-content a{color:var(--accent);text-decoration:none;word-break:break-word;text-underline-offset:2px}.md-content a:hover{text-decoration:underline}.md-content ul,.md-content ol{margin:10px 0 13px 22px}.md-content li{margin-bottom:5px}.md-content li::marker{color:var(--text-tertiary)}.md-content h1,.md-content h2,.md-content h3,.md-content h4{margin:22px 0 9px;font-weight:650;letter-spacing:-0.01em;line-height:1.35}.md-content h1{font-size:20px}.md-content h2{font-size:17px}.md-content h3{font-size:15px}.md-content blockquote{border-left:3px solid var(--accent);padding:var(--space-2) var(--space-4);margin:var(--space-3) 0;color:var(--text-secondary);background:var(--bg-tertiary);border-radius:0 var(--radius-xs) var(--radius-xs) 0}.md-content code{font-family:'JetBrains Mono',monospace;font-size:12.5px;background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;border:1px solid var(--border)}.md-content pre{margin:var(--space-3) 0;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border)}.md-content pre code{display:block;padding:var(--space-4);overflow-x:auto;background:var(--bg-secondary);border:none;line-height:1.5}.code-header{display:flex;align-items:center;gap:var(--space-2);padding:6px var(--space-3);background:var(--bg-tertiary);border-bottom:1px solid var(--border);font-size:var(--font-size-xs);font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}.code-header span{flex:1}.copy-btn{background:none;border:none;color:var(--text-tertiary);cursor:pointer;font-size:var(--font-size-xs);font-family:inherit;padding:2px var(--space-2);border-radius:4px;transition:color var(--transition),background-color var(--transition);flex-shrink:0}.copy-btn:hover{color:var(--text-primary);background:var(--bg-hover)}.md-content.user-content{white-space:pre-wrap;word-break:break-word}pre.code-long{position:relative}pre.code-long[data-collapsed="true"]>code{max-height:200px;overflow:hidden}pre.code-long[data-collapsed="true"]::after{content:'';position:absolute;bottom:0;left:0;right:0;height:60px;background:linear-gradient(to bottom,transparent,var(--bg-secondary));pointer-events:none;border-radius:0 0 var(--radius-sm) var(--radius-sm)}.code-collapse-btn{background:none;border:none;color:var(--accent);cursor:pointer;font-size:var(--font-size-xs);font-family:'JetBrains Mono',monospace;padding:2px var(--space-2);border-radius:4px;transition:color var(--transition),background-color var(--transition);flex-shrink:0;white-space:nowrap}.code-collapse-btn:hover{background:var(--accent-subtle);color:var(--accent-hover)}.table-header{display:flex;align-items:center;gap:var(--space-2);padding:var(--space-1) var(--space-3);background:var(--bg-tertiary);border-bottom:1px solid var(--border);font-size:var(--font-size-xs);font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}.table-header span{flex:1}.md-table-wrapper{overflow-x:auto;margin:var(--space-3) 0;border:1px solid var(--border);border-radius:var(--radius-sm);scrollbar-width:thin;scrollbar-color:var(--text-tertiary) transparent}.md-table-wrapper::-webkit-scrollbar{height:6px}.md-table-wrapper::-webkit-scrollbar-track{background:transparent}.md-table-wrapper::-webkit-scrollbar-thumb{background:var(--text-tertiary);border-radius:3px}.md-content table{width:max-content;min-width:100%;border-collapse:collapse;font-size:var(--font-size-md);margin:0}.md-content th,.md-content td{padding:var(--space-2) var(--space-3);border:1px solid var(--border);text-align:left;white-space:normal;word-break:break-word}.md-content th{background:var(--bg-tertiary);font-weight:600;white-space:nowrap}
+/* Thinking content retains its own layout containment. */
+.thinking-block{margin-bottom:var(--space-2);border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;overflow:hidden;contain:content}
+
+/* Windowed messages keep their execution history available as quiet metadata,
+   not as a second full-width action bar competing with the turn controls. */
+.message-activity-loader{width:fit-content;max-width:100%;min-height:28px;margin:3px 0 7px;padding:var(--space-1) 6px;border:0;border-radius:5px;background:transparent;color:var(--text-tertiary);font:500 11px/1.4 var(--md-sans);text-align:left;cursor:pointer;display:inline-flex;align-items:center;gap:6px;vertical-align:top;transition:background-color var(--transition),color var(--transition),opacity var(--transition)}
+.message-activity-loader>svg{opacity:.62}
+.message-activity-loader>span:nth-child(2){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.message-activity-loader-chevron{font-size:var(--font-size-lg);font-weight:400;line-height:1;color:currentColor;opacity:.38;transition:opacity var(--transition),transform var(--transition)}
+.message-activity-loader:hover{background:var(--bg-hover);color:var(--text-secondary)}
+.message-activity-loader:hover .message-activity-loader-chevron{opacity:.72;transform:translateX(1px)}
+.message-activity-loader.is-loading{cursor:wait;opacity:.62}
+.message-activity-loader.is-loading>svg{animation:spin .8s linear infinite}
+.message-activity-loader.is-loading .message-activity-loader-chevron{visibility:hidden}
+.message-activity-loader.is-error{color:var(--error-text);background:transparent}
+.message-activity-loader.is-error:hover{background:var(--error-bg)}
+.message-activity-loader:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* Display-only "Earlier Thinking" block surfaced on Continue rollback —
+   the trailing reasoning that was discarded because no provider can
+   accept it on replay. Visually distinguished from live thinking via
+   dashed border + slightly muted background. */
+.thinking-block.thinking-prior{border-style:dashed;opacity:.85}
+.thinking-block.thinking-prior .thinking-label::before{content:"\2937  ";opacity:.7}
+.thinking-block.content-prior .thinking-label{color:var(--text-tertiary)}
+.thinking-block.content-prior .thinking-label::before{content:"\21A9  "}
+.thinking-header{display:flex;align-items:center;gap:var(--space-2);padding:6px var(--space-3);cursor:pointer;user-select:none;transition:background var(--transition)}.thinking-header:hover{background:var(--bg-hover)}.thinking-label{font-size:var(--font-size-sm);font-weight:500;color:var(--text-tertiary);flex:1}.thinking-toggle{font-size:var(--font-size-xs);color:var(--text-tertiary);opacity:.6;transition:transform .3s ease}.thinking-block.expanded .thinking-toggle{transform:rotate(180deg)}.thinking-content{max-height:0;overflow:hidden;transition:max-height .4s ease}.thinking-block.expanded .thinking-content{max-height:none}.thinking-text{padding:0 14px 14px;font-size:var(--font-size-md);line-height:1.6;color:var(--text-secondary);white-space:pre-wrap;word-break:break-word}
+/* Markdown-rendered thinking (Codex '**…**' headline summaries): the base
+ * rule is white-space:pre-wrap for plain-text streaming; rendered HTML must
+ * NOT pre-wrap or the newlines between tags become visible blank lines. */
+.thinking-text.thinking-md{white-space:normal}
+.thinking-text.thinking-md p{margin:0 0 var(--space-2)}
+.thinking-text.thinking-md p:last-child{margin-bottom:0}
+.thinking-text.thinking-md ul,.thinking-text.thinking-md ol{margin:0 0 var(--space-2);padding-left:1.4em}
+.thinking-text.thinking-md ul:last-child,.thinking-text.thinking-md ol:last-child{margin-bottom:0}
+/* Typed conversation surface renders the thinking block as semantic
+   <details>/<summary> reusing the same classes as the div+.expanded idiom:
+   hide the UA disclosure marker, rotate the chevron and reveal the content
+   off the [open] attribute instead of the .expanded class. */
+summary.thinking-header{list-style:none}
+summary.thinking-header::-webkit-details-marker{display:none}
+.thinking-block[open] .thinking-toggle{transform:rotate(180deg)}
+.thinking-block[open] .thinking-content{max-height:none}
+.bilingual-block{margin-top:10px;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;background:var(--bg-secondary);contain:layout style}.bilingual-original{border-color:rgba(165,180,252,0.2);background:rgba(30,27,75,0.15)}.bilingual-translated{border-color:rgba(110,86,207,0.2);background:rgba(110,86,207,0.04)}.bilingual-header{display:flex;align-items:center;gap:var(--space-2);padding:6px var(--space-3);cursor:pointer;user-select:none;transition:background var(--transition)}.bilingual-header:hover{background:var(--bg-hover)}.bilingual-label{font-size:var(--font-size-sm);color:var(--text-tertiary);flex:1;display:flex;align-items:center;gap:0}.bilingual-type{opacity:.5;transition:opacity .2s}.bilingual-type.active{opacity:1;color:var(--text-secondary);font-weight:600}.bilingual-sep{opacity:.3;margin:0 var(--space-1);font-size:10px}.bilingual-model{margin-left:var(--space-2);font-size:10px;font-weight:500;color:var(--accent);background:rgba(139,92,246,0.1);padding:1px 7px;border-radius:8px;font-family:'JetBrains Mono',monospace;letter-spacing:.02em;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bilingual-toggle{font-size:10px;color:var(--text-tertiary);opacity:.5;transition:transform .3s ease}.bilingual-block.expanded .bilingual-toggle{transform:rotate(180deg)}.bilingual-body{max-height:0;overflow:hidden;transition:max-height .4s ease}.bilingual-block.expanded .bilingual-body{max-height:none}.bilingual-body .md-content{padding:0 var(--space-3) 10px;font-size:var(--font-size-md);opacity:.85}.bilingual-copy-btn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:none;border-radius:4px;background:transparent;color:var(--text-tertiary);cursor:pointer;opacity:.5;transition:all .2s ease;flex-shrink:0}.bilingual-copy-btn:hover{opacity:1;background:var(--bg-hover);color:var(--text-secondary)}.bilingual-copy-btn.copied{opacity:1;color:#34d399}
+/* ── Live auto-translation indicator ──
+ * Streams the 译文 in as it arrives, then morphs into the purple
+ * bilingual block. Tinted with the same accent (139,92,246) as
+ * .bilingual-* so the transition is seamless; colors lean on CSS
+ * variables / low-alpha accent so they hold up on light/tofu themes. */
+.translate-loading{margin-top:10px;border:1px solid var(--accent-subtle);border-radius:var(--radius-sm);background:linear-gradient(180deg,rgba(110,86,207,0.07),rgba(110,86,207,0.02));overflow:hidden;position:relative;contain:layout style}
+.translate-loading::before{content:"";position:absolute;top:0;left:-40%;width:40%;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);animation:translate-sheen 1.8s ease-in-out infinite;opacity:.7}
+@keyframes translate-sheen{0%{left:-40%}100%{left:100%}}
+.translate-loading-head{display:flex;align-items:center;gap:var(--space-2);padding:9px 13px}
+.translate-loading.has-preview .translate-loading-head{border-bottom:1px solid var(--accent-subtle)}
+.translate-loading-label{font-size:var(--font-size-sm);font-weight:600;letter-spacing:.02em;color:var(--accent);background:linear-gradient(90deg,var(--accent) 0%,var(--text-secondary) 50%,var(--accent) 100%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:translate-shimmer 2.4s linear infinite}
+@keyframes translate-shimmer{to{background-position:-200% 0}}
+.translate-spinner{width:13px;height:13px;border:2px solid var(--accent-subtle);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}@keyframes spin{to{transform:rotate(360deg)}}
+.translate-status-sub{font-size:var(--font-size-xs);color:var(--thinking-text);display:flex;align-items:center;gap:var(--space-1);padding:2px 13px var(--space-2)}
+.translate-preview{padding:10px 14px var(--space-3);max-height:440px;overflow-y:auto;overscroll-behavior:contain;contain:content;animation:translate-fade-in .25s ease}
+.translate-preview::-webkit-scrollbar{width:6px}.translate-preview::-webkit-scrollbar-track{background:transparent}.translate-preview::-webkit-scrollbar-thumb{background:transparent;border-radius:3px}.translate-preview:hover::-webkit-scrollbar-thumb{background:var(--border)}
+@keyframes translate-fade-in{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
+.translate-preview .md-content{font-size:13.5px;color:var(--text-primary);line-height:1.7}
+.translate-preview .md-content>:first-child{margin-top:0}.translate-preview .md-content>:last-child{margin-bottom:0}
+.translate-caret{display:inline-block;width:7px;height:14px;margin-left:3px;vertical-align:text-bottom;background:var(--accent);border-radius:2px;animation:translate-blink 1s step-end infinite;box-shadow:0 0 6px var(--accent-subtle)}
+@keyframes translate-blink{0%,100%{opacity:1}50%{opacity:0}}
+
+/* ── Streaming auto-translate render UNIFICATION (2026-07-07) ──
+ * During an agent task with auto-translate ON, the incremental translator's
+ * Chinese-so-far renders as the PRIMARY body in the [data-zone="translatedPrimary"]
+ * slot (ABOVE the English content zone) — the same role Chinese has in the
+ * SETTLED bilingual view. The still-untranslated English tail (current round)
+ * is DEMOTED in the content zone below, styled to read as the quiet live edge
+ * of the translation rather than a competing full body. Because the streaming
+ * bubble already has the settled structure, finalize is a visual no-op.
+ * Understated by design: no boxes, no extra chrome — just typographic weight. */
+.stream-translated-body{animation:translate-fade-in .25s ease}
+.stream-translated-body .md-content{color:var(--text-primary)}
+.stream-translated-body .md-content>:first-child{margin-top:0}
+/* The live Chinese edge: a soft blinking caret trailing the last block. */
+.stream-translated-body .md-content>:last-child::after{content:"";display:inline-block;width:6px;height:1em;margin-left:3px;vertical-align:text-bottom;background:var(--accent);border-radius:2px;opacity:.75;animation:translate-blink 1s step-end infinite}
+/* English tail: demoted to a quiet, smaller, dimmed continuation directly
+ * under the Chinese — no separator box, so the two read as one flowing body
+ * that is converging to Chinese round-by-round. */
+.stream-content-demoted{margin-top:2px}
+.stream-content-demoted .md-content{font-size:12.5px;color:var(--text-tertiary);opacity:.72;transition:opacity .3s ease}
+.stream-content-demoted .md-content>:first-child{margin-top:0}
+/* Finalize handoff: the closing round's English is hidden the instant the
+ * worker starts assembling the final Chinese, so it never doubles. */
+.stream-content-tail-hidden{display:none}
+
+/* Send-path auto-translate failed → original text was sent. Quiet amber pill
+   under the user bubble; clicking it retranslates just that message. */
+.translate-failed-notice{display:inline-flex;align-items:center;gap:7px;margin-top:var(--space-2);padding:5px 11px;font-size:11.5px;line-height:1.3;color:#fbbf24;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.22);border-radius:999px;cursor:pointer;user-select:none;transition:background .2s ease,border-color .2s ease}
+.translate-failed-notice:hover{background:rgba(245,158,11,0.14);border-color:rgba(245,158,11,0.4)}
+.translate-failed-notice .tfn-icon{flex-shrink:0;opacity:.9}
+.translate-failed-notice .tfn-text{opacity:.92}
+.translate-failed-notice .tfn-retry{margin-left:2px;padding-left:var(--space-2);border-left:1px solid rgba(245,158,11,0.3);font-weight:600;opacity:.85}
+.translate-failed-notice:hover .tfn-retry{opacity:1;text-decoration:underline}
+/* Display-translation terminal failure (assistant / critic / VU bubble): a
+   quiet borderless inline retry line — no filled pill, no box, matching the
+   "just typographic weight" understatement of the translate family. Muted
+   tertiary text at rest; lifts to the accent color + spins its glyph on
+   hover/focus to read as "click to retry". The full upstream error (429/402
+   quota etc.) sits on the title tooltip. */
+.translate-retry-line{display:inline-flex;align-items:center;gap:6px;margin-top:7px;font-size:11.5px;line-height:1.3;color:var(--text-tertiary);cursor:pointer;user-select:none;border-radius:var(--radius-sm);transition:color .18s ease}
+.translate-retry-line:hover,.translate-retry-line:focus-visible{color:var(--accent);outline:none}
+.translate-retry-line .trl-icon{flex-shrink:0;display:block;opacity:.75;transition:opacity .18s ease,transform .5s ease}
+.translate-retry-line:hover .trl-icon,.translate-retry-line:focus-visible .trl-icon{opacity:1;transform:rotate(-180deg)}
+.translate-retry-line .trl-text{opacity:.9}
+.translate-retry-line:hover .trl-text{text-decoration:underline;text-underline-offset:2px}
+/* Subtle inline translating indicator on user message — replaces the old separate ✨ bubble */
+@keyframes translatePulse{0%,100%{opacity:.4}50%{opacity:1}}
+/* ★ Perf: content-visibility:auto on search blocks — off-screen blocks skip layout/paint.
+ * contain-intrinsic-size provides estimated height to preserve scrollbar accuracy. */
+.search-result-item{padding:10px 14px;border-top:1px solid rgba(59,130,246,0.1);transition:background var(--transition)}.search-result-item:hover{background:rgba(59,130,246,0.04)}.search-result-title{font-size:var(--font-size-md);font-weight:600;color:#93c5fd;display:flex;align-items:center;gap:6px;flex-wrap:wrap}.search-result-title a{color:#93c5fd;text-decoration:none}.search-result-title a:hover{text-decoration:underline;color:#bfdbfe}.search-result-source{font-size:10px;color:var(--text-tertiary);padding:1px 6px;background:var(--bg-tertiary);border-radius:4px;font-family:'JetBrains Mono',monospace}.search-result-snippet{font-size:var(--font-size-sm);color:var(--text-secondary);margin-top:var(--space-1);line-height:1.5;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.search-result-url{font-size:10px;color:var(--text-tertiary);margin-top:3px;font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.search-result-fetched{font-size:9px;color:#34d399;background:rgba(52,211,153,0.1);padding:1px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;margin-left:var(--space-1);white-space:nowrap}.search-result-fetched.pdf{color:#f59e0b;background:rgba(245,158,11,0.1)}
+
+/* ── Vertical-domain card (HF Papers / Semantic Scholar / arXiv / etc.) ── */
+.vertical-card{margin:6px 14px 10px;border:1px solid rgba(168,85,247,0.25);border-radius:var(--radius-sm);background:linear-gradient(180deg,rgba(168,85,247,0.06),rgba(99,102,241,0.04));overflow:hidden}
+.vertical-card-header{display:flex;align-items:center;gap:var(--space-2);padding:7px var(--space-3);background:rgba(168,85,247,0.08);border-bottom:1px solid rgba(168,85,247,0.15);font-size:var(--font-size-sm)}
+.vertical-card-icon{display:inline-flex;align-items:center;color:#c4b5fd;flex-shrink:0}
+.vertical-card-title{font-weight:600;color:#c4b5fd;letter-spacing:0.2px}
+.vertical-card-sources{font-size:var(--font-size-xs);color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.vertical-card-count{font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-muted);background:rgba(168,85,247,0.10);padding:1px 7px;border-radius:8px}
+.vertical-card-body{padding:var(--space-1) 0}
+.vertical-row{padding:7px 14px;border-top:1px solid rgba(168,85,247,0.10)}
+.vertical-row:first-child{border-top:none}
+.vertical-row:hover{background:rgba(168,85,247,0.04)}
+.vertical-row-title{font-size:var(--font-size-md);font-weight:600;color:#ddd6fe;line-height:1.35}
+.vertical-row-title a{color:#ddd6fe;text-decoration:none}
+.vertical-row-title a:hover{text-decoration:underline;color:#ede9fe}
+.vertical-row-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:3px}
+.vertical-meta-pill{font-size:10px;color:#c4b5fd;background:rgba(168,85,247,0.10);padding:1px 7px;border-radius:4px;font-family:'JetBrains Mono',monospace;white-space:nowrap}
+.vertical-row-snippet{font-size:var(--font-size-sm);color:var(--text-secondary);margin-top:var(--space-1);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.vertical-card-more{padding:6px 14px;font-size:var(--font-size-xs);color:var(--text-muted);text-align:center;font-style:italic}
+.ptool-badge.vertical-badge{background:rgba(168,85,247,0.15);color:#c4b5fd;border:1px solid rgba(168,85,247,0.25);text-transform:capitalize;max-width:40%;overflow:hidden;text-overflow:ellipsis;flex-shrink:1;min-width:0}
+
+/* ── Vertical card: light/tofu theme contrast overrides ──
+ *    The default palette is tuned for the dark theme (pale lavender on
+ *    translucent purple).  On the cream (tofu) and light themes that text
+ *    washes out to near-invisible, so we darken titles/meta and warm the
+ *    card to match each theme. */
+[data-theme="light"] .vertical-card{border-color:rgba(124,58,237,0.28);background:linear-gradient(180deg,rgba(124,58,237,0.05),rgba(99,102,241,0.03))}
+[data-theme="light"] .vertical-card-header{background:rgba(124,58,237,0.07);border-bottom-color:rgba(124,58,237,0.16)}
+[data-theme="light"] .vertical-card-icon,[data-theme="light"] .vertical-card-title{color:#6d28d9}
+[data-theme="light"] .vertical-card-count{color:#6d28d9;background:rgba(124,58,237,0.1)}
+[data-theme="light"] .vertical-row{border-top-color:rgba(124,58,237,0.1)}
+[data-theme="light"] .vertical-row:hover{background:rgba(124,58,237,0.05)}
+[data-theme="light"] .vertical-row-title,[data-theme="light"] .vertical-row-title a{color:#5b21b6}
+[data-theme="light"] .vertical-row-title a:hover{color:#4c1d95}
+[data-theme="light"] .vertical-meta-pill{color:#6d28d9;background:rgba(124,58,237,0.1)}
+[data-theme="light"] .ptool-badge.vertical-badge{color:#6d28d9;background:rgba(124,58,237,0.12);border-color:rgba(124,58,237,0.28)}
+
+[data-theme="tofu"] .vertical-card{border:2px solid rgba(150,120,170,0.4);border-radius:var(--radius);background:rgba(150,120,170,0.05);box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .vertical-card-header{background:rgba(150,120,170,0.1);border-bottom-color:rgba(150,120,170,0.25)}
+[data-theme="tofu"] .vertical-card-icon,[data-theme="tofu"] .vertical-card-title{color:#7A5C8A}
+[data-theme="tofu"] .vertical-card-sources{color:#716A55}
+[data-theme="tofu"] .vertical-card-count{color:#7A5C8A;background:rgba(150,120,170,0.14);border-radius:var(--radius)}
+[data-theme="tofu"] .vertical-row{border-top-color:rgba(150,120,170,0.14)}
+[data-theme="tofu"] .vertical-row:hover{background:rgba(150,120,170,0.06)}
+[data-theme="tofu"] .vertical-row-title,[data-theme="tofu"] .vertical-row-title a{color:#5E4670}
+[data-theme="tofu"] .vertical-row-title a:hover{color:#4A3656}
+[data-theme="tofu"] .vertical-row-snippet{color:#716A55}
+[data-theme="tofu"] .vertical-meta-pill{color:#7A5C8A;background:rgba(150,120,170,0.12);border-radius:var(--radius-sm)}
+[data-theme="tofu"] .ptool-badge.vertical-badge{color:#7A5C8A;background:rgba(150,120,170,0.12);border:1px solid rgba(150,120,170,0.3);border-radius:var(--radius-sm);box-shadow:var(--clay-sm)}
+
+/* ── Engine Breakdown section (inside search results panel) ── */
+.eb-section{border-top:1px solid rgba(59,130,246,0.15);margin-top:var(--space-1);padding:0}.eb-toggle{display:flex;align-items:center;gap:6px;padding:var(--space-2) 14px;font-size:var(--font-size-xs);color:var(--text-tertiary);cursor:pointer;user-select:none;transition:background var(--transition)}.eb-toggle:hover{background:rgba(59,130,246,0.04)}.eb-total{font-size:10px;color:var(--text-muted);font-family:'JetBrains Mono',monospace}.eb-arrow{font-size:10px;margin-left:auto;transition:transform .2s ease}.eb-section.eb-expanded .eb-arrow{transform:rotate(90deg)}.eb-content{max-height:0;overflow:hidden;transition:max-height .3s ease}.eb-section.eb-expanded .eb-content{max-height:2000px}.eb-engine{padding:var(--space-1) 14px 6px}.eb-engine-name{font-size:var(--font-size-xs);font-weight:600;color:#60a5fa;margin-bottom:2px}.eb-engine-count{font-weight:400;color:var(--text-tertiary);font-size:10px}.eb-engine-urls{padding-left:var(--space-2);border-left:2px solid rgba(59,130,246,0.15)}.eb-url-item{padding:2px 0 2px var(--space-2);font-size:var(--font-size-xs);line-height:1.4}.eb-url-item a{color:var(--text-secondary);text-decoration:none}.eb-url-item a:hover{text-decoration:underline;color:#93c5fd}.eb-url-text{font-size:9px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.error-block{padding:var(--space-3) var(--space-4);border:1px solid var(--error-border);border-radius:var(--radius-sm);background:var(--error-bg);font-size:var(--font-size-md);color:var(--error-text);overflow:hidden;word-break:break-word;white-space:pre-wrap;line-height:1.55}.stream-status{font-size:var(--font-size-xs);color:var(--text-tertiary);padding:var(--space-1) 0;display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono',monospace}.stream-status .pulse{width:6px;height:6px;background:var(--thinking-text);border-radius:50%;animation:pulse 1.5s infinite}.stream-phase{display:flex;align-items:flex-start;gap:var(--space-2);padding:var(--space-2) 14px;margin-top:var(--space-2);border-radius:var(--radius-sm);background:linear-gradient(135deg,rgba(110,86,207,0.08),rgba(59,130,246,0.08));border:1px solid rgba(110,86,207,0.15);font-size:var(--font-size-sm);line-height:1.5;font-family:'JetBrains Mono',monospace;color:var(--accent);transition:opacity .3s ease}.stream-phase-icon{flex-shrink:0;display:inline-flex;align-items:center;height:1.5em}.stream-phase-text{flex:1;min-width:0;opacity:0.85;line-height:1.5;white-space:normal;overflow-wrap:anywhere;word-break:break-word}.stream-phase-ctx{display:inline;margin-left:6px;opacity:0.6;font-size:var(--font-size-xs)}.stream-phase-dots{display:inline-flex;gap:1px;margin-left:2px}.stream-phase-dots span{animation:phaseDot 1.4s infinite;opacity:0;font-weight:bold}.stream-phase-dots span:nth-child(2){animation-delay:0.2s}.stream-phase-dots span:nth-child(3){animation-delay:0.4s}@keyframes phaseDot{0%,80%,100%{opacity:0}40%{opacity:1}}@keyframes phaseIconPulse{0%,100%{opacity:0.6;transform:scale(1)}50%{opacity:1;transform:scale(1.1)}}.stream-phase-retrying{background:linear-gradient(135deg,rgba(245,158,11,0.10),rgba(234,179,8,0.06));border-color:rgba(245,158,11,0.20);color:#f59e0b}.stream-phase-retrying .stream-phase-icon{animation:phaseIconPulse 1.5s ease-in-out infinite}.stream-phase-thinking{background:linear-gradient(135deg,rgba(168,85,247,0.10),rgba(139,92,246,0.06));border-color:rgba(168,85,247,0.20)}.stream-phase-thinking .stream-phase-icon{animation:phaseIconPulse 2s ease-in-out infinite}.stream-phase-counter{display:inline-block;margin-left:var(--space-2);padding:1px 7px;border-radius:8px;background:rgba(168,85,247,0.15);font-size:10px;font-weight:600;color:rgba(196,167,255,0.85);letter-spacing:0.3px;min-width:48px;text-align:center;transition:background .2s ease}@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}@keyframes searchOrbit{0%{transform:rotate(0deg) translateX(10px) rotate(0deg)}100%{transform:rotate(360deg) translateX(10px) rotate(-360deg)}}.search-orbit-container{width:22px;height:22px;position:relative;display:inline-block;flex-shrink:0}.search-orbit-center{position:absolute;inset:6px;border-radius:50%;background:var(--search-blue);opacity:.6;animation:pulse 1.2s infinite}.search-orbit-dot{position:absolute;width:4px;height:4px;border-radius:50%;top:50%;left:50%;margin:-2px;animation:searchOrbit 1.2s linear infinite}.search-orbit-dot:nth-child(2){background:#60a5fa}.search-orbit-dot:nth-child(3){background:#a78bfa;animation-delay:-.4s}.search-orbit-dot:nth-child(4){background:#34d399;animation-delay:-.8s}

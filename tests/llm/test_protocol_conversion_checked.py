@@ -3,6 +3,7 @@ from copy import deepcopy
 
 import pytest
 
+from lib.conversation_sync.settled_rows import settle
 from lib.llm.conversion import ProtocolConversionError
 from lib.llm.anthropic_outbound import (
     openai_body_to_anthropic, openai_body_to_anthropic_checked,
@@ -202,12 +203,15 @@ def test_short_name_and_two_long_names_never_collide():
     assert [result.tool_name_reverse.get(name, name) for name in wire_names] == names
 
 
-def test_payload_is_independent_of_input():
+def test_conversion_never_writes_its_input():
+    """Adapters build new containers around shared values: a deep-frozen
+    input (any in-place write raises) converts like a mutable one."""
     body = {'messages': [{'role': 'user', 'content': 'hello'}], 'output_config': {
         'format': {'type': 'json_schema', 'schema': {'type': 'object'}}}}
     original = deepcopy(body)
-    result = openai_body_to_anthropic_checked(body)
-    result.payload['output_config']['format']['schema']['type'] = 'string'
+    result = openai_body_to_anthropic_checked(settle(body))
+    assert result.payload['output_config'] == original['output_config']
+    assert result.payload == openai_body_to_anthropic_checked(body).payload
     assert body == original
 
 
@@ -254,11 +258,10 @@ def test_anthropic_schema_and_default_serial_choice_preserve_native_effort():
         'parallel_tool_calls': False, 'effort': 'high',
         'output_config': {'effort': 'low'}}
     before = deepcopy(body)
-    wire = openai_body_to_anthropic_checked(body).require_payload()
+    wire = openai_body_to_anthropic_checked(settle(body)).require_payload()
     assert wire['output_config'] == {'effort': 'high', 'format': {
         'type': 'json_schema', 'schema': schema}}
     assert wire['tool_choice'] == {'type': 'auto', 'disable_parallel_tool_use': True}
-    wire['output_config']['format']['schema']['type'] = 'string'
     assert body == before
 
 

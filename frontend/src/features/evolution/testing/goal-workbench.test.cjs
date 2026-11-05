@@ -31,6 +31,17 @@ test('missing, null and zero limits are unlimited telemetry, never fabricated pr
  assert.equal(observation.runTelemetry(run(),{...workspace,budget:{max_tokens:200}},copy).tokenLimit,'200');
  assert.equal(observation.runTelemetry(run({actuals:{tokens:NaN}}),undefined,copy).tokens,'0');
 });
+test('a waiting run labels its current task by the wait, never by the parked turn archived verdict',()=>{
+ const receipts=[{task_id:'task-a',stage:'executing',status:'done',terminal_verdict:'completed'},{task_id:'old',stage:'executing',terminal_verdict:'completed'}];
+ const status=(value,id='task-a')=>observation.taskRecords(value,copy).find(record=>record.taskId===id).status;
+ const wait={operation_id:'job-7',task_id:'task-a',parked:true,next_poll_at:0};
+ assert.equal(status(run({compute_wait:wait,receipts})),copy('waitingCompute'));
+ assert.equal(status(run({compute_wait:{...wait,last_error:'ModuleNotFoundError'},receipts})),copy('computeStalled'));
+ assert.equal(status(run({compute_wait:wait,receipts}),'old'),copy('sourceCompletedShort'),'earlier turns keep their own verdict');
+ assert.equal(status(run({background_wait:true,receipts})),copy('waitingBackground'));
+ assert.equal(status(run({receipts})),copy('sourceCompletedShort'));
+ assert.equal(observation.computeStallFacts(run({compute_wait:wait}),copy).length,0,'a readable wait has no stall facts');
+});
 test('terminal task labels use receipt status or terminal run fallback, never execution stage',()=>{
  const completed=run({status:'completed',receipts:[{task_id:'task-a',stage:'executing',status:'completed'}]});
  assert.equal(observation.taskRecords(completed,copy)[0].status,'Completed');
@@ -50,31 +61,46 @@ test('stage admission waiting and refused recovery expose different next actions
  assert.match(observation.failureReason('stage_launch_recovery_refused: missing archive',copy),/could not be verified/);
  assert.match(observation.failureReason('stage_launch_recovery_refused: missing archive',copy),/Recorded work is preserved/);
 });
-test('mission panel is factual, safe, and exposes shared controls with explicit terminal actions',()=>{
- const d=new JSDOM('<aside id="mission"></aside><div id="details"></div>');Object.assign(global,{window:d.window,document:d.window.document});
- const opened=[];let stopped=0,retried=0;
- const host=document.getElementById('mission');
- const panel=load('studio/goal-command-panel').mountGoalCommandPanel(host,{copy,openTask:id=>opened.push(id),stop:()=>stopped++,retry:()=>retried++,details(){},conversation(){},create(){}});
+test('inspector sections render only their own facts, escape content and never treat a compute park as a deliverable',()=>{
+ const d=new JSDOM('<div id="work"></div><div id="review"></div><div id="delivery"></div>');Object.assign(global,{window:d.window,document:d.window.document});
+ const opened=[];const {mountGoalRunInspector}=load('studio/goal-run-inspector');
+ const host=document.getElementById('work');
+ const work=mountGoalRunInspector(host,{copy,openTask:id=>opened.push(id),sections:['status','latest','telemetry','records']});
  const state={run:run(),workspace,coordination:{updates:[{seq:1,origin:'agent',content:'Verified <script>not markup</script>'},{seq:2,origin:'user',content:'Unacknowledged user claim'}]}};
- panel.update(state);
- assert.match(host.textContent,/Investigate/);assert.match(host.textContent,/Verified <script>/);assert.equal(host.querySelector('script'),null);
- assert.doesNotMatch(host.textContent,/Unacknowledged user claim/);assert.equal(host.querySelector('[role=progressbar], [role=meter]'),null);
- const execution=host.querySelector('[data-mission-action=execution]');assert.ok(execution.classList.contains('ui-btn'));execution.click();assert.deepEqual(opened,['task-a']);
- host.querySelector('[data-mission-action=stop]').click();assert.equal(stopped,1);assert.equal(retried,0);
- assert.equal(host.querySelector('[data-mission-action=retry]').hidden,true);
- execution.focus();panel.update(state);assert.equal(document.activeElement,execution);
- panel.update({...state,run:run({status:'failed',error:'budget_exceeded',receipts:[{task_id:'task-a',stage:'executing',status:'failed'}]})});
- assert.equal(host.querySelector('[data-mission-action=stop]').hidden,true);
- assert.equal(host.querySelector('[data-mission-action=retry]').hidden,false);
- assert.doesNotMatch(host.textContent,/budget_exceeded/);
- host.querySelector('[data-mission-action=retry]').click();assert.equal(retried,1);assert.equal(stopped,1);
- const details=document.getElementById('details');const inspector=load('studio/goal-run-inspector').mountGoalRunInspector(details,{copy,openTask:id=>opened.push(id),detailed:true});
- inspector.update({...state,run:run({status:'failed',error:'budget_exceeded',receipts:[{task_id:'task-a',stage:'executing',status:'failed'}]})});
- assert.match(details.querySelector('details').textContent,/budget_exceeded/);
- assert.match(details.querySelector('[data-task-id]').textContent,/Failed/);
- inspector.update({...state,run:run({status:'completed',result:'Delivered',review:{outcome:'success',criterion_results:[{criterion_id:'test',outcome:'pass',evidence_ref:'12 tests passed'}]}})});
- assert.match(details.textContent,/Regression suite passes/);assert.match(details.textContent,/12 tests passed/);assert.equal(details.querySelector('.evo-mission-diagnosis'),null);
- d.window.close();
+ work.update(state);
+ assert.match(host.textContent,/Verified <script>/);assert.equal(host.querySelector('script'),null);
+ assert.doesNotMatch(host.textContent,/Unacknowledged user claim/);
+ assert.doesNotMatch(host.textContent,/Reproduce before making changes/,'plan steps belong to the plan tab');
+ assert.equal(host.querySelector('[role=progressbar], [role=meter]'),null);
+ const task=host.querySelector('[data-task-id="task-a"][data-inspector-action=task]');assert.ok(task.classList.contains('ui-btn'));task.click();assert.deepEqual(opened,['task-a']);
+ task.focus();work.update({...state,run:run({actuals:{tokens:5,tool_calls:1,wall_clock_seconds:1}})});assert.equal(document.activeElement,task);
+ work.update({...state,run:run({status:'failed',error:'budget_exceeded',receipts:[{task_id:'task-a',stage:'executing',status:'failed'}]})});
+ assert.match(host.querySelector('.evo-diagnosis p').textContent,/configured execution limit/);
+ assert.match(host.querySelector('details.evo-technical').textContent,/budget_exceeded/);
+ assert.match(host.querySelector('[data-task-id]').textContent,/Failed/);
+ const parked=run({compute_wait:{operation_id:'job-7',task_id:'task-a',parked:true,next_poll_at:0,last_error:"ModuleNotFoundError: No module named 'tofu_mtsso_auth'",
+  last_error_origin:'tofu_yourprovider_environments/__init__.py:23 in __call__',failed_since:1700000000},
+  result:'Compute dependency pending; no completion or scientific acceptance.',receipts:[{task_id:'task-a',stage:'executing',terminal_verdict:'completed'}]});
+ work.update({...state,run:parked});
+ assert.match(host.textContent,/job-7/);assert.match(host.textContent,/ModuleNotFoundError/);assert.match(host.textContent,new RegExp(copy('computeStalled')));
+ const status=host.querySelector('[data-inspection-section=status]');
+ assert.equal(status.querySelector('[data-fact=at] dd').textContent,`${copy('stallReadingStatus')} · job-7`);
+ assert.equal(status.querySelector('[data-fact=origin] dd').textContent,'tofu_yourprovider_environments/__init__.py:23 in __call__');
+ assert.ok(status.querySelector('[data-fact=since] dd').textContent,'the status section says since when the read fails');
+ const parkedRow=host.querySelector('[data-task-id="task-a"][data-inspector-action=task]').textContent;
+ assert.match(parkedRow,new RegExp(copy('computeStalled')));
+ assert.doesNotMatch(parkedRow,new RegExp(copy('sourceCompletedShort')),'a parked turn is not a finished delivery');
+ const deliveryHost=document.getElementById('delivery');
+ const delivery=mountGoalRunInspector(deliveryHost,{copy,openTask(){},sections:['deliverable']});
+ delivery.update({run:parked});assert.equal(deliveryHost.querySelector('.evo-deliverable'),null);
+ delivery.update({run:run({status:'completed',result:'Delivered <b>report</b>'})});
+ assert.equal(deliveryHost.querySelector('.evo-deliverable').textContent,'Delivered <b>report</b>');assert.equal(deliveryHost.querySelector('b'),null);
+ const reviewHost=document.getElementById('review');
+ const review=mountGoalRunInspector(reviewHost,{copy,openTask(){},sections:['review']});
+ review.update({...state,run:run({status:'completed',review:{outcome:'success',criterion_results:[{criterion_id:'test',outcome:'pass',evidence_ref:'12 tests passed'}]}})});
+ assert.match(reviewHost.textContent,/Regression suite passes/);assert.match(reviewHost.textContent,/12 tests passed/);
+ assert.equal(reviewHost.querySelector('.evo-diagnosis'),null);
+ work.dispose();delivery.dispose();review.dispose();d.window.close();
 });
 
 test('interrupted consumption is shown as a lower bound and recovery refusal has an explicit next action',()=>{
@@ -96,7 +122,7 @@ test('format failure remains visible alongside completed provider task status',(
 test('material review objections are escaped and remain visible on unchanged polling',()=>{
  const d=new JSDOM('<div id="details"></div>');Object.assign(global,{window:d.window,document:d.window.document});
  const host=document.getElementById('details');
- const inspector=load('studio/goal-run-inspector').mountGoalRunInspector(host,{copy,openTask(){},detailed:true});
+ const inspector=load('studio/goal-run-inspector').mountGoalRunInspector(host,{copy,openTask(){},sections:['review']});
  const evidence_audit={complete:false,objections:[{criterion_id:'evidence',classification:'contradicted',claim:'Four declarations, not <script>zero</script>.',evidence_ref:'Frozen audit: 4 <img src=x onerror=alert(1)> declarations.'},{criterion_id:'objective',classification:'unverified',claim:'The baseline is competent.',evidence_ref:'No qualification experiment was supplied.'}]};
  const state={loading:false,run:run({status:'needs_attention',learning:{complete:false,steps:{refetch:{result:{deferred:true}}}},review:{outcome:'failure',criterion_results:[],evidence_audit}}),workspace,coordination:{updates:[]}};
  inspector.update(state);assert.match(host.textContent,/Source contradicts this claim/);assert.match(host.textContent,/Evidence remains unverified/);assert.match(host.textContent,/Evidence audit incomplete/);assert.match(host.textContent,/no new sources have been gathered/);assert.match(host.textContent,/Four declarations, not <script>zero<\/script>/);assert.equal(host.querySelector('script, img'),null);

@@ -12,6 +12,7 @@
     {"model_id": "qwen3.8-max", "capabilities": ["text", "vision", "thinking", "cheap"]},
     {"model_id": "qwen3.7-plus", "capabilities": ["text", "vision", "thinking", "cheap"]},
     {"model_id": "qwen3.8-flash", "capabilities": ["text", "vision", "thinking", "cheap"]},
+    {"model_id": "qwen3.8-27b", "display_name": "Qwen3.8-27B", "capabilities": ["text", "vision", "video", "thinking", "cheap"], "context_window": 1000000},
     {"model_id": "qwen3.7-flash", "capabilities": ["text", "thinking"], "context_window": 1000000},
     {"model_id": "qwen-long", "capabilities": ["text", "cheap"], "context_window": 10000000}
   ]

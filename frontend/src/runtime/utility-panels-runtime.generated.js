@@ -1849,7 +1849,7 @@ let _timerPushWired = false;
 let _timerRefreshTimer = null;
 let _timerRefreshAfterFlight = false;
 /* In-flight row operations (): timerId →
- *   'cancelling' | 'triggering'. Consulted by _renderTimerList so the busy
+ *   'cancelling' | 'checking' | 'triggering'. Consulted by _renderTimerList so the busy
  *   state SURVIVES the panel's 30s auto-refresh — a one-off DOM patch would
  *   be silently reverted by it. _timerLastTimers caches the last fetched rows
  *   so the pending re-render is synchronous (no refetch on the click frame). */
@@ -1991,8 +1991,11 @@ function _renderTimerList(timers) {
      translated label (and every parameterized template) must be captured
      here, before the loop. */
   const _jumpHint = t('timer.jumpHint');
-  const _cancellingLabel = t('timer.cancelling');
-  const _triggeringLabel = t('timer.triggering');
+  const _pendingLabels = {
+    cancelling: t('timer.cancelling'),
+    checking: t('timer.checking'),
+    triggering: t('timer.triggering'),
+  };
   const _statusLabels = {
     active: t('timer.statusActive'),
     triggered: t('timer.statusTriggered'),
@@ -2007,6 +2010,10 @@ function _renderTimerList(timers) {
     error: t('timer.decisionError'),
     parse_error: t('timer.decisionError'),
     dispatch_failed: t('timer.decisionError'),
+    /* A triggered timer keeps its delivery receipt in last_poll_decision so
+       the row says HOW the continuation reached the conversation. */
+    steered: t('timer.decisionSteered'),
+    queued: t('timer.decisionQueued'),
   };
   const _progressLine = (count, max, interval, elapsed) =>
     t('timer.progress', { count, max, interval, elapsed });
@@ -2025,6 +2032,8 @@ function _renderTimerList(timers) {
   const _cmdNone = t('timer.cmdNone');
   const _logBtn = t('timer.logBtn');
   const _logHint = t('timer.logHint');
+  const _checkBtn = t('timer.checkBtn');
+  const _checkHint = t('timer.checkHint');
   const _triggerBtn = t('timer.triggerBtn');
   const _triggerHint = t('timer.triggerHint');
   const _cancelBtn = t('timer.cancelBtn');
@@ -2094,13 +2103,16 @@ function _renderTimerList(timers) {
       // on THIS row is in flight (click frame → background completion).
       const _pending = _timerPending[t.id];
       if (_pending) {
-        html += `<div class="tpi-actions"><span class="tpi-pending">${escapeHtml(_pending === 'cancelling' ? _cancellingLabel : _triggeringLabel)}</span></div></div>`;
+        html += `<div class="tpi-actions"><span class="tpi-pending">${escapeHtml(_pendingLabels[_pending] || _pending)}</span></div></div>`;
       } else {
         html += `<div class="tpi-actions">
           <button data-tofu-action="_viewTimerLog('${t.id}')" class="tpi-btn tpi-btn-log" title="${escapeHtml(_logHint)}">${Icon('clipboard', 11)} ${escapeHtml(_logBtn)}</button>`;
         if (t.status === "active") {
+          /* Checking runs the watcher's own condition and is the default
+             action; forced delivery skips it and is labelled as such. */
           html += `
-          <button data-tofu-action="_triggerTimer('${t.id}')" class="tpi-btn tpi-btn-trigger" title="${escapeHtml(_triggerHint)}">▶ ${escapeHtml(_triggerBtn)}</button>
+          <button data-tofu-action="_checkTimer('${t.id}')" class="tpi-btn tpi-btn-check" title="${escapeHtml(_checkHint)}">${Icon('search', 11)} ${escapeHtml(_checkBtn)}</button>
+          <button data-tofu-action="_triggerTimer('${t.id}')" class="tpi-btn tpi-btn-trigger" title="${escapeHtml(_triggerHint)}">${Icon('zap', 11)} ${escapeHtml(_triggerBtn)}</button>
           <button data-tofu-action="_cancelTimer('${t.id}')" class="tpi-btn tpi-btn-cancel" title="${escapeHtml(_cancelHint)}">✖ ${escapeHtml(_cancelBtn)}</button>`;
         }
         html += `</div></div>`;
@@ -2110,23 +2122,100 @@ function _renderTimerList(timers) {
 }
 
 // ── Actions ──
+/* A click must always produce a visible answer. The timer's delivery lane
+   (own turn / injected into the running turn / queued behind it) is the
+   thing the operator actually wants to know, and a silent roll-back reads
+   as a broken button. */
+function _timerAnnounce(key, type, vars) {
+  if (typeof showToast !== 'function') return;
+  showToast(t(key, vars), type);
+}
+function _timerAnnounceDelivery(delivery) {
+  const key = {
+    steered: 'timer.deliverySteeredToast',
+    queued: 'timer.deliveryQueuedToast',
+    started: 'timer.deliveryStartedToast',
+  }[delivery];
+  _timerAnnounce(key || 'timer.deliveryStartedToast', "success");
+}
+/* Announce a rejected request by its contract code; returns the code. */
+function _timerAnnounceRefusal(error, failedKey) {
+  const code = (error && ((error.problem && error.problem.code)
+    || (error.envelope && error.envelope.kind)
+    || (error.body && (error.body.error_code || error.body.code)))) || '';
+  if (code === 'timer_delivery_retry') {
+    /* Nothing was lost: the watcher keeps its ready verdict and will deliver
+       on its own, so name that instead of showing an unactionable failure. */
+    _timerAnnounce('timer.triggerRetryToast', "info");
+  } else if (code === 'timer_inactive') {
+    _timerAnnounce('timer.triggerClosedToast', "info");
+  } else {
+    _timerAnnounce(failedKey, "error");
+  }
+  return code;
+}
+
+async function _checkTimer(timerId) {
+  /* INSTANT-UI: the row shows 检查中… on the click frame. The watcher's
+     own condition runs once; only a met condition delivers the next step. */
+  _timerSetPending(timerId, 'checking');
+  try {
+    const data = await Api.timer.check(timerId);
+    await _refreshTimerPanel(true);
+    _timerClearPending(timerId);
+    if (!data || !data.ok) {
+      _timerAnnounce('timer.checkFailedToast', "error");
+      debugLog(`⏱️ Check failed: ${data && data.error}`, "error");
+      return;
+    }
+    if (data.ready) {
+      debugLog(`⏱️ Timer ${timerId} ready, delivered: ${data.delivery}`, "success");
+      _timerAnnounceDelivery(data.delivery);
+      return;
+    }
+    const failed = data.decision === 'error' || data.decision === 'parse_error';
+    const reason = String(data.reason || t('timer.noReason')).slice(0, 140);
+    debugLog(`⏱️ Timer ${timerId} checked: ${data.decision} — ${reason}`, "info");
+    _timerAnnounce(failed ? 'timer.checkErrorToast' : 'timer.checkNotReadyToast',
+      failed ? "error" : "info", { reason });
+  } catch (e) {
+    _timerClearPending(timerId);         // restore the row
+    const code = _timerAnnounceRefusal(e, 'timer.checkFailedToast');
+    debugLog(`⏱️ Check error: ${code || e.message}`, "error");
+    try { await _refreshTimerPanel(true); } catch (_) { /* row already restored */ }
+  }
+}
+
 async function _triggerTimer(timerId) {
-  /* INSTANT-UI (): the row shows 触发中… on the CLICK
-   *   frame; the POST + refresh run in the background. */
+  /* INSTANT-UI (): the row shows 投递中… on the CLICK
+   *   frame; the POST + refresh run in the background. Forced delivery skips
+   *   the watcher's condition; _checkTimer is the checked path. The receipt
+   *   lives on the row (last_poll_decision), so this stays correct for both
+   *   v1 and v4 without new wire fields. */
   _timerSetPending(timerId, 'triggering');
+  const _deliveryOf = (id) => {
+    const row = (_timerLastTimers || []).find((item) => item.id === id);
+    return (row && row.last_poll_decision) || '';
+  };
   try {
     const data = await Api.timer.trigger(timerId);
     if (data && data.ok) {
-      debugLog(`⏱️ Timer ${timerId} triggered! Execution: ${data.execution_task_id}`, "success");
       await _refreshTimerPanel(true);
       _timerClearPending(timerId);
-    } else {
-      _timerClearPending(timerId);       // restore the row
-      debugLog(`⏱️ Trigger failed: ${data && data.error}`, "error");
+      const delivery = _deliveryOf(timerId) || 'started';
+      debugLog(`⏱️ Timer ${timerId} delivered: ${delivery}`, "success");
+      _timerAnnounceDelivery(delivery);
+      return;
     }
+    _timerClearPending(timerId);         // restore the row
+    await _refreshTimerPanel(true);
+    _timerAnnounce('timer.triggerFailedToast', "error");
+    debugLog(`⏱️ Trigger failed: ${data && data.error}`, "error");
   } catch (e) {
     _timerClearPending(timerId);         // restore the row
-    debugLog(`⏱️ Trigger error: ${e.message}`, "error");
+    const code = _timerAnnounceRefusal(e, 'timer.triggerFailedToast');
+    debugLog(`⏱️ Trigger error: ${code || e.message}`, "error");
+    try { await _refreshTimerPanel(true); } catch (_) { /* row already restored */ }
   }
 }
 
@@ -2351,6 +2440,7 @@ runtimeScope._renderSettingsUpdatePill = _renderSettingsUpdatePill;
 // END GENERATED LAZY RUNTIME PORTS
 // BEGIN GENERATED LAZY RUNTIME ACTIONS — utility-panels
 runtimeScope._cancelTimer = _cancelTimer;
+runtimeScope._checkTimer = _checkTimer;
 runtimeScope._copyUpdateLog = _copyUpdateLog;
 runtimeScope._jumpToTimerConv = _jumpToTimerConv;
 runtimeScope._lcDecide = _lcDecide;

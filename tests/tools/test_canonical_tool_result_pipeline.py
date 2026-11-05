@@ -51,6 +51,22 @@ def test_host_error_serialization_preserves_status_without_changing_wire_bytes(
     assert json.loads(text)['status'] == 'error'
 
 
+@pytest.mark.parametrize('status', ['error', 'ok'])
+def test_capture_records_an_envelope_object_as_its_envelope_text(status):
+    from lib.tools.result_envelope import ToolResultEnvelopeV2, typed_tool_error
+    from lib.tools.result_value import tool_result_failure_verdict
+
+    envelope = (typed_tool_error('rate_limited', retryable=True, next_action='Wait')
+                if status == 'error' else ToolResultEnvelopeV2(status='ok', summary='observed'))
+    captured = capture_result(envelope)
+    expected = capture_result(envelope.to_envelope_text())
+    assert captured.execution_status == expected.execution_status == status
+    assert captured.parts == expected.parts
+    assert capture_result(envelope, execution_status='aborted').execution_status == 'aborted'
+    assert tool_result_failure_verdict(envelope) == tool_result_failure_verdict(
+        envelope.to_envelope_text()) == ('error' if status == 'error' else None)
+
+
 def test_redacting_budgeted_error_shaped_data_never_promotes_its_envelope_marker():
     from lib.tools.result_envelope import typed_tool_error
     from lib.tools.result_value import posthook_result

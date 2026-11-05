@@ -7,7 +7,8 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
-def clean():
+def clean(monkeypatch):
+    monkeypatch.setenv('MTSSO_AUTH_MODE', 'official')
     auth.clear()
     yield
     auth.clear()
@@ -25,8 +26,10 @@ def test_failure_never_accepts_ticket(status, body, code):
         auth._parse(status, json.dumps(body))
     result = caught.value.envelope()
     assert result["error_code"] == code
-    assert result["login_required"] is False
-    assert result["retryable"] is False
+    assert "login_required" not in result
+    pending = code == "MOA_AUTH_REQUEST_PENDING"
+    assert result["auth_state"] == ("pending" if pending else "blocked")
+    assert result["retryable"] is pending
     assert "secret" not in json.dumps(result)
 
 

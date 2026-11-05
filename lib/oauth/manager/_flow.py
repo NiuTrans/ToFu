@@ -237,9 +237,20 @@ def start_oauth_flow(provider: str, *, owner_user_id: int,
 
 
 def get_oauth_status(
-    provider: str, *, owner_user_id: int | None = None,
+    provider: str, *, owner_user_id: int | None = None, provider_status=None,
 ) -> dict:
-    """Get current OAuth status for a provider."""
+    """Get current OAuth status for a provider.
+
+    ``provider_status`` reuses a routing readiness projection the caller
+    already computed for this response (e.g. by reconciliation).
+    """
+    return _get_oauth_status(provider, owner_user_id=owner_user_id,
+                             provider_status=provider_status)
+
+
+def _get_oauth_status(
+    provider: str, *, owner_user_id: int | None, provider_status=None,
+) -> dict:
     from lib.oauth.token_store import load_token
 
     with _flows_lock:
@@ -289,9 +300,10 @@ def get_oauth_status(
             auth_issue = 'access_expired_no_refresh'
         elif access_expired:
             auth_issue = 'access_expired'
-    from lib.oauth.outbound import managed_oauth_provider_status
-    provider_status = managed_oauth_provider_status(
-        provider, owner_user_id=owner_user_id)
+    if provider_status is None:
+        from lib.oauth.outbound import managed_oauth_provider_status
+        provider_status = managed_oauth_provider_status(
+            provider, owner_user_id=owner_user_id)
 
     return {
         'provider': provider,
@@ -331,9 +343,18 @@ def get_oauth_status(
     }
 
 
-def get_all_oauth_status(*, owner_user_id: int | None = None) -> dict:
-    """Get OAuth status for all supported providers."""
-    return {
-        'claude': get_oauth_status('claude', owner_user_id=owner_user_id),
-        'codex': get_oauth_status('codex', owner_user_id=owner_user_id),
-    }
+def get_all_oauth_status(*, owner_user_id: int | None = None,
+                         provider_statuses: dict | None = None) -> dict:
+    """Get OAuth status for all supported providers.
+
+    ``provider_statuses`` reuses the readiness projection a reconciliation
+    pass returned for this same response instead of reading the routing
+    authority again.
+    """
+    from lib.oauth.outbound import managed_oauth_provider_statuses
+
+    statuses = (provider_statuses if provider_statuses is not None
+                else managed_oauth_provider_statuses(owner_user_id=owner_user_id))
+    return {provider: _get_oauth_status(
+        provider, owner_user_id=owner_user_id, provider_status=status)
+        for provider, status in statuses.items()}

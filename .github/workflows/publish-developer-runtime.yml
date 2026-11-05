@@ -80,25 +80,14 @@ jobs:
       - name: Install checksum-pinned uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
-          version: '0.12.5'
+          version: '0.13.5'
           enable-cache: true
 
       - name: Verify one release version
         shell: bash
-        run: |
-          python - <<'PY'
-          import json
-          import pathlib
-          import tomllib
-
-          root = pathlib.Path('.')
-          expected = (root / 'VERSION').read_text().strip()
-          tag = '${{ github.ref_name }}'
-          assert tag == f'v{expected}', (tag, expected)
-          assert tomllib.loads((root / 'pyproject.toml').read_text())['project']['version'] == expected
-          assert tomllib.loads((root / 'clients/python/pyproject.toml').read_text())['project']['version'] == expected
-          assert json.loads((root / 'clients/typescript/package.json').read_text())['version'] == expected
-          PY
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/check_monorepo.py --release-identity --tag "$RELEASE_TAG"
 
       - name: Build and validate Python distributions
         run: |

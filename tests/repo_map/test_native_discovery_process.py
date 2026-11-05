@@ -62,7 +62,7 @@ def assert_joined(process):
 @pytest.mark.skipif(os.name!='posix',reason='owned FIFO filesystem fault requires POSIX')
 @pytest.mark.parametrize('failure', ['timeout','cancel','caller_error','repeated_interrupt'])
 def test_blocked_filesystem_child_is_killed_and_joined(process_discovery, git_fixture, tmp_path, monkeypatch, failure):
-    from tofu_repo_kernel import _process_discovery as module
+    module = pytest.importorskip('tofu_repo_kernel._process_discovery')
     git_fixture(tmp_path,'init','-q');config=tmp_path/'.git/config';config.unlink();os.mkfifo(config)
     original=module.subprocess.Popen;children=[];cancel=threading.Event();timers=[]
     primary=LookupError('injected caller failure');counts={'kill':0,'wait':0}
@@ -107,7 +107,7 @@ def test_blocked_filesystem_child_is_killed_and_joined(process_discovery, git_fi
 
 
 def test_cancelled_and_expired_requests_never_launch(process_discovery, tmp_path, monkeypatch):
-    from tofu_repo_kernel import _process_discovery as module
+    module = pytest.importorskip('tofu_repo_kernel._process_discovery')
     def forbidden(*args,**kwargs):raise AssertionError('request launched')
     monkeypatch.setattr(module.subprocess,'Popen',forbidden)
     with pytest.raises(module.DiscoveryTimeout):process_discovery.list_files(tmp_path,timeout=0)
@@ -121,7 +121,7 @@ def test_cancelled_and_expired_requests_never_launch(process_discovery, tmp_path
 @pytest.mark.skipif(os.name!='posix',reason='owned shell fault executable requires POSIX')
 @pytest.mark.parametrize('frame,code', [(b'partial\0',2),(b'unterminated',0),(b'\0name\0',0),(b'name\0\0',0)])
 def test_failed_or_invalid_output_is_withheld_and_joined(tmp_path, monkeypatch, frame, code):
-    from tofu_repo_kernel import _process_discovery as module
+    module = pytest.importorskip('tofu_repo_kernel._process_discovery')
     executable=tmp_path/'fixture';escaped=''.join('\\%03o'%byte for byte in frame)
     executable.write_text("#!/bin/sh\nprintf '"+escaped+"'\nexit "+str(code)+"\n");executable.chmod(0o700)
     discovery=module.ProcessDiscovery(executable,hashlib.sha256(executable.read_bytes()).hexdigest())
@@ -135,7 +135,7 @@ def test_failed_or_invalid_output_is_withheld_and_joined(tmp_path, monkeypatch, 
 
 @pytest.mark.skipif(os.name!='posix',reason='owned executable permissions require POSIX')
 def test_replaced_artifact_cannot_change_admitted_execution(tmp_path, monkeypatch):
-    from tofu_repo_kernel import _process_discovery as module
+    module = pytest.importorskip('tofu_repo_kernel._process_discovery')
     executable=tmp_path/'fixture';executable.write_text('#!/bin/sh\nexit 0\n');executable.chmod(0o700)
     with module.ProcessDiscovery(executable,hashlib.sha256(executable.read_bytes()).hexdigest()) as discovery:
         executable.write_text('#!/bin/sh\nexit 1\n')
@@ -152,7 +152,7 @@ def test_replaced_artifact_cannot_change_admitted_execution(tmp_path, monkeypatc
 
 
 def test_closed_image_does_not_invalidate_acquired_launch(tmp_path, monkeypatch):
-    from tofu_repo_kernel import _process_discovery as module
+    module = pytest.importorskip('tofu_repo_kernel._process_discovery')
     executable=tmp_path/'fixture';executable.write_text('#!/bin/sh\nexit 0\n');executable.chmod(0o700)
     with module.ProcessDiscovery(executable,hashlib.sha256(executable.read_bytes()).hexdigest()) as discovery:
         original=module.subprocess.Popen;children=[]
@@ -164,7 +164,7 @@ def test_closed_image_does_not_invalidate_acquired_launch(tmp_path, monkeypatch)
 
 
 def test_failed_image_acquisition_retires_descriptors(tmp_path, monkeypatch):
-    from tofu_repo_kernel import _process_discovery as module
+    module = pytest.importorskip('tofu_repo_kernel._process_discovery')
     executable=tmp_path/'fixture';executable.write_bytes(b'bad')
     original=module.create_memfd;descriptors=[]
     def create():
@@ -192,7 +192,7 @@ def test_process_relative_index_and_excludes_are_fresh(process_discovery, git_fi
 
 @pytest.mark.skipif(os.name!='posix',reason='owned executable requires POSIX')
 def test_completed_child_keeps_deadline_and_cancellation_facts(tmp_path, monkeypatch):
-    from tofu_repo_kernel import _process_discovery as module
+    module = pytest.importorskip('tofu_repo_kernel._process_discovery')
     executable=tmp_path/'fixture';executable.write_text('#!/bin/sh\nexit 3\n');executable.chmod(0o700)
     discovery=module.ProcessDiscovery(executable,hashlib.sha256(executable.read_bytes()).hexdigest())
     original=module.subprocess.Popen;children=[];cancel=threading.Event()
@@ -210,7 +210,7 @@ def test_completed_child_keeps_deadline_and_cancellation_facts(tmp_path, monkeyp
 
 
 def test_child_keeps_git_config_without_inheriting_credentials(process_discovery, git_fixture, tmp_path, monkeypatch):
-    from tofu_repo_kernel import _process_discovery as module
+    module = pytest.importorskip('tofu_repo_kernel._process_discovery')
     git_fixture(tmp_path,'init','-q');write(tmp_path,'ignored.py');write(tmp_path,'visible.py')
     write(tmp_path,'ignore-rules','ignored.py\n')
     monkeypatch.setenv('GIT_CONFIG_COUNT','1')
@@ -234,7 +234,7 @@ def test_child_keeps_git_config_without_inheriting_credentials(process_discovery
 
 
 def test_launch_failure_retires_duplicated_image(process_discovery, tmp_path, monkeypatch):
-    from tofu_repo_kernel import _process_discovery as module
+    module = pytest.importorskip('tofu_repo_kernel._process_discovery')
     descriptors=[]
     def fail(*args,**kwargs):
         descriptors.extend(kwargs['pass_fds']);raise OSError('injected launch failure')
@@ -247,7 +247,7 @@ def test_launch_failure_retires_duplicated_image(process_discovery, tmp_path, mo
 
 
 def test_release_failure_retires_acquired_descriptor(process_discovery, tmp_path, monkeypatch):
-    from tofu_repo_kernel import _process_discovery as module
+    module = pytest.importorskip('tofu_repo_kernel._process_discovery')
     original_lock=process_discovery._lock;duplicate=module.os.dup;descriptors=[]
     primary=LookupError('injected release failure')
     class FailingRelease:

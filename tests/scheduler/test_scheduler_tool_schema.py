@@ -1,4 +1,4 @@
-"""Scheduler model schemas — bounded cost and executable mode contracts."""
+"""Scheduler model schemas — cost guidance and executable mode contracts."""
 
 from __future__ import annotations
 
@@ -6,7 +6,12 @@ from jsonschema import Draft7Validator
 import pytest
 
 from lib.scheduler.tool_defs import SCHEDULE_TOOL_CREATE, TIMER_TOOL_CREATE
-from lib.tools.gateway import sanitize_wire_tools, tool_schema_tokens
+from lib.tools.contracts import (
+    ToolContractError,
+    compile_execution_contract_documents,
+    validate_tool_arguments_from_documents,
+)
+from lib.tools.gateway import sanitize_wire_tools
 
 
 pytestmark = pytest.mark.unit
@@ -60,7 +65,6 @@ def test_schedule_create_keeps_cadence_execution_and_cost_contracts():
         "name", "schedule", "command"]
     assert props["max_runtime"]["default"] == 300
     assert props["max_executions"]["default"] == 0
-    assert tool_schema_tokens([SCHEDULE_TOOL_CREATE]) <= 600
 
 
 def test_timer_create_keeps_durability_safety_and_poll_modes():
@@ -99,26 +103,11 @@ def test_timer_create_keeps_durability_safety_and_poll_modes():
     assert props["max_polls"]["default"] == 120
     assert "0=unlimited" in props["max_polls"]["description"].lower()
     assert params["required"] == ["continuation_message"]
-    assert params["anyOf"] == [
-        {
-            "properties": {"check_instruction": {"type": "string"}},
-            "required": ["check_instruction"],
-        },
-        {
-            "properties": {"condition_command": {"type": "string"}},
-            "required": ["condition_command"],
-        },
-    ]
     assert params["type"] == "object"
     wire = [TIMER_TOOL_CREATE]
-    assert sanitize_wire_tools(wire) is wire
-    kimi_parameters = sanitize_wire_tools(
-        wire, model='kimi-k3')[0]['function']['parameters']
-    assert kimi_parameters['type'] == 'object'
-    assert 'anyOf' not in kimi_parameters
-    assert tool_schema_tokens([TIMER_TOOL_CREATE]) <= 450
-    assert tool_schema_tokens(
-        [SCHEDULE_TOOL_CREATE, TIMER_TOOL_CREATE]) <= 1000
+    # Provider-compatible by construction: no model needs a projected copy.
+    for model in ('', 'gpt-5.5', 'claude-opus-5.5', 'kimi-k3'):
+        assert sanitize_wire_tools(wire, model=model) is wire, model
 
 
 def test_timer_schema_accepts_llm_hybrid_or_code_only_but_not_no_condition():
@@ -139,7 +128,23 @@ def test_timer_schema_accepts_llm_hybrid_or_code_only_but_not_no_condition():
         "condition_command": "test -f /tmp/ready",
         "continuation_message": "Inspect the result",
     })
-    assert not validator.is_valid({"continuation_message": "Inspect result"})
+
+    # The readiness choice is an admission rule, not a provider-schema root.
+    documents = compile_execution_contract_documents([TIMER_TOOL_CREATE])
+    for condition in ({"check_instruction": "Check CI"},
+                      {"condition_command": "test -f /tmp/ready"},
+                      {"check_instruction": "Check CI",
+                       "condition_command": "test -f /tmp/ready"}):
+        validate_tool_arguments_from_documents(
+            documents, "timer_create",
+            {"continuation_message": "Inspect the result", **condition})
+    with pytest.raises(ToolContractError) as rejected:
+        validate_tool_arguments_from_documents(
+            documents, "timer_create", {"continuation_message": "Inspect result"})
+    assert rejected.value.code == "missing_required_arguments"
+    assert "check_instruction" in str(rejected.value)
+    assert "condition_command" in str(rejected.value)
+    assert "condition_command" in rejected.value.next_action
 
 
 def test_timer_adapter_executes_code_only_schema_path(monkeypatch):

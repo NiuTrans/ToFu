@@ -24,6 +24,8 @@ Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest \
      tests/tasks_pkg/test_empty_assistant_ghost_wire.py -p no:cacheprovider
 """
 
+from copy import deepcopy
+
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -68,6 +70,40 @@ def test_error_ghost_between_users_dropped_and_users_merged():
     users = [m for m in wire if m['role'] == 'user']
     assert len(users) == 1, f'neighbour users not merged after drop: {users}'
     assert users[0]['content'] == 'first question\n\nretry the task'
+
+
+def test_interrupted_reply_seam_is_designed_not_unexpected(caplog):
+    """Production 2026-10-23 (mvi1k9ske5mdda): the owner stopped a background
+    completion wake before any output, then typed a new request. The empty
+    interrupted reply is dropped, the wake prompt and the next request become
+    adjacent across explicit Turn boundaries, and the final merge logged
+    'UNEXPECTED pair' on every later round. The history projection created
+    that seam on purpose, so it declares it; real adjacency still warns."""
+    import logging
+    raw = [
+        {'role': 'user', 'content': 'first question', '_turnId': 't1'},
+        {'role': 'assistant', 'content': 'answer', '_turnId': 't2'},
+        {'role': 'user', 'content': 'The background commands finished.',
+         '_turnId': 't3', 'origin': {'initiator': 'proactive'}},
+        {'role': 'assistant', 'content': '', 'toolRounds': [],
+         '_turnId': 't4', '_turnStatus': 'interrupted'},
+        {'role': 'user', 'content': 'just give me the report', '_turnId': 't5'},
+    ]
+    wire = _transform_messages(raw, {})
+    with caplog.at_level(logging.WARNING, logger='lib.llm_sanitize._messages'):
+        body = build_body('kimi-k3', wire, max_tokens=1024)
+    assert 'UNEXPECTED' not in caplog.text
+    users = [m for m in body['messages'] if m['role'] == 'user']
+    assert users[-1]['content'] == (
+        'The background commands finished.\n\njust give me the report')
+    assert all(set(m) <= {'role', 'content'} for m in body['messages'])
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger='lib.llm_sanitize._messages'):
+        build_body('kimi-k3', [{'role': 'user', 'content': 'a', '_turnId': 'x'},
+                               {'role': 'user', 'content': 'b', '_turnId': 'y'}],
+                   max_tokens=1024)
+    assert 'UNEXPECTED' in caplog.text
 
 
 def test_multiple_ghosts_all_dropped():
@@ -153,6 +189,39 @@ def test_guard_keeps_tool_and_reasoning_turns(extra):
     msg = dict({'role': 'assistant', 'content': ''}, **extra)
     out = _drop_empty_assistant_messages([msg])
     assert out == [msg]
+
+
+@pytest.mark.parametrize(('field', 'items'), [
+    ('_responses_items', [
+        {'type': 'reasoning', 'id': 'rs-synthetic',
+         'encrypted_content': 'synthetic-opaque-a', 'summary': []},
+        {'type': 'reasoning', 'id': 'rs-synthetic',
+         'encrypted_content': 'synthetic-opaque-b', 'summary': []},
+        {'type': 'reasoning', 'id': 'rs-synthetic',
+         'encrypted_content': 'synthetic-opaque-a', 'summary': []},
+    ]),
+    ('_anthropic_content_blocks', [
+        {'type': 'redacted_thinking', 'data': 'synthetic-opaque-a'},
+        {'type': 'redacted_thinking', 'data': 'synthetic-opaque-b'},
+        {'type': 'redacted_thinking', 'data': 'synthetic-opaque-a'},
+    ]),
+], ids=['responses', 'anthropic'])
+def test_guard_keeps_opaque_only_replay_sidecars(field, items):
+    """Native state is meaningful without text/tools, including repeated items."""
+    messages = [
+        {'role': 'user', 'content': 'first question'},
+        {'role': 'assistant', 'content': '', field: items},
+        {'role': 'user', 'content': 'next question'},
+    ]
+    original = deepcopy(messages)
+
+    out = _drop_empty_assistant_messages(messages)
+
+    assert messages == original
+    assert out is not messages
+    assert out == original
+    assert build_body('gpt-4o', messages, max_tokens=1024)['messages'] == original
+    assert messages == original
 
 
 def test_guard_keeps_content_and_other_roles():

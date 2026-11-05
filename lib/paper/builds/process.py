@@ -21,6 +21,10 @@ import time
 from .budget import compile_memory_bytes
 from .errors import BuildError, check_cancelled
 from .process_worker import WORKER_FLAG
+from lib.runtime.pinned_helper_source import PinnedHelperSource
+
+# The argv built below and the supervisor that parses it share one import.
+_PROCESS_WORKER = PinnedHelperSource(Path(__file__).with_name('process_worker.py'))
 
 
 @dataclass
@@ -31,7 +35,7 @@ class CommandUsage:
 
 
 def _command(command, cwd, memory, seconds, file_bytes, ready, log):
-    mode = [WORKER_FLAG] if getattr(sys, 'frozen', False) else ['-m', 'lib.paper.builds.process_worker']
+    mode = [WORKER_FLAG] if getattr(sys, 'frozen', False) else [_PROCESS_WORKER.path()]
     return [sys.executable, *mode, str(memory), str(seconds), str(file_bytes),
             str(os.getpid()), str(ready), str(log), str(cwd), *command]
 

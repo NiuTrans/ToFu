@@ -14,6 +14,7 @@ through ``_pkg()`` at call time so a patch on ``lib.mcp.client`` is honoured.
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 import os
@@ -44,6 +45,7 @@ from lib.mcp.types import (
     MCP_STDIO_IDLE_SECONDS,
     MCPToolInfo,
     make_namespaced_name,
+    namespaced_tool_names,
     parse_namespaced_name,
 )
 
@@ -125,6 +127,41 @@ def _result_catalog_version(result) -> str:
         meta.get('catalogVersion') or meta.get('catalog_version')
         or getattr(result, 'catalogVersion', None)
         or getattr(result, 'catalog_version', None) or '')
+
+
+def _release_handshake_read_deadline(session) -> bool:
+    """Drop the session-level read deadline once the handshake has finished.
+
+    The connect path passes the handshake budget as the session-level
+    ``read_timeout_seconds`` so a silent server cannot hang ``initialize``.
+    The MCP SDK applies that session value to every later request whose own
+    ``read_timeout_seconds`` is ``None`` (SDK 2.x ``ClientSession.send_request``
+    and SDK 1.x ``BaseSession`` both fall back to
+    ``_session_read_timeout_seconds``), so left in place the handshake budget
+    silently becomes a deadline on every un-budgeted tool call -- a WAIT,
+    contradicting ``MCP_CALL_TIMEOUT = None``. A per-server ``timeout`` still
+    reaches each call explicitly. Accepts the SDK 2.x ``Client`` (which owns a
+    ``ClientSession``) or a 1.x ``ClientSession``; returns ``True`` when a
+    session-level deadline was found and released.
+    """
+    released = False
+    seen = set()
+    candidates = [session]
+    for attr in ('session', '_session'):
+        try:
+            candidates.append(getattr(session, attr, None))
+        except Exception as exc:  # noqa: BLE001 - an unentered SDK client may refuse the property
+            logger.debug('[MCP] Session property %s unavailable during handshake '
+                         'deadline release (%s)', attr, type(exc).__name__)
+            continue
+    for target in candidates:
+        if target is None or id(target) in seen:
+            continue
+        seen.add(id(target))
+        if hasattr(target, '_session_read_timeout_seconds'):
+            target._session_read_timeout_seconds = None
+            released = True
+    return released
 
 
 def _schema_hash(tool) -> str:
@@ -254,6 +291,10 @@ class MCPBridge:
         self._tool_catalog_rows_cache: tuple[dict[str, Any], ...] | None = None
         self._tool_catalog_fingerprint_cache = ''
         self._tool_catalog_search_text_cache: Mapping[str, str] | None = None
+        # Exact identity of that projection: every invalidation advances it.
+        # The frozen definitions are one isolated copy per generation.
+        self._tool_catalog_generation = 0
+        self._tool_catalog_frozen_defs: tuple[int, tuple[dict[str, Any], ...]] | None = None
 
         # Per-server reconnect serialization: prevents the reactive
         # (call_tool) and proactive (keepalive) recovery paths from
@@ -332,6 +373,8 @@ class MCPBridge:
         self._tool_catalog_rows_cache = None
         self._tool_catalog_fingerprint_cache = ''
         self._tool_catalog_search_text_cache = None
+        self._tool_catalog_generation = getattr(self, '_tool_catalog_generation', 0) + 1
+        self._tool_catalog_frozen_defs = None
 
     def _replace_server_catalog(self, name: str, handle: _MCPServerHandle,
                                 tools: list, *, catalog_version: str = '') -> bool:
@@ -343,22 +386,38 @@ class MCPBridge:
                 'schemaHash': _schema_hash(tool),
                 'meta': _tool_meta(tool),
             })
-        payload = json.dumps({
+        from lib.mcp.registry import reviewed_read_only_tools
+        reviewed = reviewed_read_only_tools(name, getattr(handle, 'config', None))
+        live_names = {row['name'] for row in rows}
+        identity = {
             'server': name, 'catalogVersion': catalog_version,
             'tools': sorted(rows, key=lambda row: row['name']),
-        }, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        }
+        if reviewed:
+            # A changed review must rebuild the index even when the server's
+            # own catalog is byte-identical.
+            identity['reviewedReadOnly'] = sorted(reviewed & live_names)
+        payload = json.dumps(
+            identity, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
         import hashlib
         fingerprint = hashlib.sha256(payload.encode('utf-8')).hexdigest()
         changed = fingerprint != getattr(handle, 'catalog_fingerprint', '')
         if not changed:
             return False
 
+        absent = reviewed - live_names
+        if absent:
+            logger.info('[MCP] %s: %d reviewed read-only tool(s) absent from the '
+                        'live catalog (vendor drift), e.g. %s', name, len(absent),
+                        ', '.join(sorted(absent)[:5]))
+        ns_names = namespaced_tool_names(
+            name, (tool.name for tool in tools or ()))
         with self._lock:
             for key in [key for key, info in self._tool_index.items()
                         if info['server_name'] == name]:
                 self._tool_index.pop(key, None)
             for tool in tools or ():
-                ns_name = make_namespaced_name(name, tool.name)
+                ns_name = ns_names[tool.name]
                 meta = _tool_meta(tool)
                 self._tool_index[ns_name] = MCPToolInfo(
                     server_name=name,
@@ -366,8 +425,9 @@ class MCPBridge:
                     namespaced_name=ns_name,
                     description=tool.description or '',
                     input_schema=_tool_input_schema(tool),
-                    openai_def=self._tool_to_openai(name, tool),
-                    read_only_hint=_extract_read_only_hint(tool),
+                    openai_def=self._tool_to_openai(name, tool, ns_name=ns_name),
+                    read_only_hint=(_extract_read_only_hint(tool)
+                                    or tool.name in reviewed),
                     annotations=_extract_annotations(tool),
                     output_schema=_extract_output_schema(tool),
                     meta=meta,
@@ -744,7 +804,12 @@ class MCPBridge:
             # A successful (re)connect clears any circuit-breaker backoff and
             # records the working config for future retries.
             with self._lock:
+                disabled_before = self._disabled_tools_for(name)
                 self._configs[name] = dict(srv_cfg)
+                if self._disabled_tools_for(name) != disabled_before:
+                    # A reconnect with a changed per-tool grant changes the
+                    # visible catalog even when the server's catalog did not.
+                    self._invalidate_tool_catalog_projection_locked()
                 if self._breaker.pop(name, None) is not None:
                     logger.info('[MCP] Circuit breaker reset for %s (reconnected)', name)
             self._start_keepalive()
@@ -1189,7 +1254,7 @@ class MCPBridge:
 
                     from lib.mcp.stdio_environment import build_stdio_environment
                     from lib.tools.process_environment import resolve_executable
-                    env = build_stdio_environment(srv_cfg)
+                    env = build_stdio_environment(srv_cfg, owner_user_id=self._owner_user_id)
 
                     # Configuration wins before readiness checks. Resolve the exact
                     # final PATH and pass the absolute result to the transport.
@@ -1323,6 +1388,14 @@ class MCPBridge:
                     session.list_tools(), timeout=handshake_budget
                 )
 
+                # The handshake (initialize + tools/list above) is over; from
+                # here on the session serves WAITS, which only an explicit
+                # per-server budget may bound.
+                if not _release_handshake_read_deadline(session):
+                    logger.warning(
+                        '[MCP] Server %s: SDK session exposes no session-level '
+                        'read deadline to release; un-budgeted calls follow the '
+                        'SDK default', name)
                 handle.session = session
                 handle.tools = response.tools
                 handle.catalog_version = _result_catalog_version(response)
@@ -1588,7 +1661,8 @@ class MCPBridge:
     # ── Tool translation ──────────────────────────────────
 
     @staticmethod
-    def _tool_to_openai(server_name: str, tool) -> dict[str, Any]:
+    def _tool_to_openai(server_name: str, tool, *,
+                        ns_name: str | None = None) -> dict[str, Any]:
         """Translate an MCP Tool to OpenAI function-calling format.
 
         MCP tool schema::
@@ -1600,7 +1674,7 @@ class MCPBridge:
             {"type": "function", "function": {"name": "mcp__tavily__search",
              "description": "[MCP:tavily] ...", "parameters": {...}}}
         """
-        ns_name = make_namespaced_name(server_name, tool.name)
+        ns_name = ns_name or make_namespaced_name(server_name, tool.name)
         desc = tool.description or f'MCP tool: {tool.name}'
         # Prefix description with server name for disambiguation
         tagged_desc = f'[MCP:{server_name}] {desc}'
@@ -1692,6 +1766,32 @@ class MCPBridge:
         with self._lock:
             return [row['openai_def']
                     for row in self._tool_catalog_rows_locked()]
+
+    def get_frozen_openai_tool_defs(self) -> tuple[int, tuple[dict[str, Any], ...]]:
+        """Return the catalog generation and its frozen model-visible definitions.
+
+        One isolated deep copy per generation is shared by every assembly of
+        that generation, so a round with unchanged MCP state copies nothing.
+        Callers treat the definitions as immutable values and copy before
+        changing a field; the bridge's own index stays private. The generation
+        advances whenever the projection is invalidated: a connect or
+        reconnect that changes a server's catalog or its per-tool grants, a
+        disconnect that removes tools, ``disconnect_all`` and a per-tool
+        enable/disable change. Order and bytes match ``get_openai_tool_defs``.
+        """
+        with self._lock:
+            generation = getattr(self, '_tool_catalog_generation', 0)
+            frozen = getattr(self, '_tool_catalog_frozen_defs', None)
+            if frozen is not None and frozen[0] == generation:
+                return frozen
+            definitions = [row['openai_def']
+                           for row in self._tool_catalog_rows_locked()]
+        # Index rows are replaced, never mutated, so copy outside the lock.
+        frozen = (generation, tuple(copy.deepcopy(definitions)))
+        with self._lock:
+            if getattr(self, '_tool_catalog_generation', 0) == generation:
+                self._tool_catalog_frozen_defs = frozen
+        return frozen
 
     def get_enabled_tool_summary(self) -> dict[str, Any]:
         """Return a compact, deterministic count of model-visible MCP tools.
@@ -1896,7 +1996,10 @@ class MCPBridge:
             parked = server_name in getattr(self, '_parked', ())
             if handle is None and not (known_config and info is not None):
                 raise ValueError(f'MCP server not connected: {server_name}')
-            if tool_name in self._disabled_tools_for(server_name):
+            # Users disable the server's raw tool name; the namespaced name
+            # may be its provider-safe projection.
+            raw_tool_name = info['tool_name'] if info is not None else tool_name
+            if raw_tool_name in self._disabled_tools_for(server_name):
                 raise ValueError(
                     f'MCP tool disabled by user: {namespaced_name} '
                     f'(re-enable it in Settings → MCP)')

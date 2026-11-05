@@ -32,6 +32,7 @@
   "roundNum": 1,
   "seq": 1,
   "spooling": true,
+  "status": "s",
   "stream": "s",
   "tStart": 1.5,
   "taskId": "s",

@@ -32,7 +32,7 @@ export interface TransientTurnPresentation {
   goalProgress?: {
     iteration: string; role: string; rootSummary: boolean;
     currentPhase?: Omit<TransientTurnPresentation, 'goalProgress'>;
-    workers: ReadonlyArray<{ text: string; phase: string; waitReason: string; latestTool?: string; toolError?: string }>;
+    workers: ReadonlyArray<{ text: string; status: string; phase: string; waitReason: string; latestTool?: string; toolError?: string }>;
   };
 }
 

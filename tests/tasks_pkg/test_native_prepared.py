@@ -23,21 +23,32 @@ def prepared():
         temperature=None,max_tokens=512,response_format=None,project_path='',project_enabled=False,search_enabled=False)
 
 
-@pytest.mark.parametrize('cited',[False,True])
-def test_prepared_projection_reuses_source_policy_before_terminal_commit(cited):
+OPENED_ROUNDS=({'toolName':'fetch_url','status':'done','cacheSource':'prefetch','results':[
+    {'url':'https://example.test/page#part','fetched':True},{'url':'https://example.test/page','fetched':True}]},)
+SEARCHED_ROUNDS=({'toolName':'web_search','status':'done','results':[
+    {'url':'https://m.imdb.com/title/tt0732097','fetched':True}]},)
+
+
+@pytest.mark.parametrize('rounds,content,footer',[
+    (OPENED_ROUNDS,'answer',True),
+    (OPENED_ROUNDS,'answer https://example.test/page',False),
+    (SEARCHED_ROUNDS,'answer',False)])
+def test_prepared_projection_reuses_source_policy_before_terminal_commit(rounds,content,footer):
     async def run():
-        request=prepared();request.all_search_results_text.extend([
-            'URL: https://example.test/page#part','URL: https://example.test/page'])
+        request=prepared();request.task['toolRounds']=[dict(row) for row in rounds]
+        # The gateway's search/fetch corpus names every engine hit; only a
+        # settled page-reading round proves the model opened a page.
+        request.all_search_results_text.append('[1] Unrelated\n    URL: https://m.imdb.com/title/tt0732097')
         client=SimpleNamespace(principal=principal(),protocol_version='tofu.native-agent-stdio/v1')
-        content='answer https://example.test/page' if cited else 'answer'
         async def execute(client,route,configuration,**kwargs):
             assert kwargs['gateway'].search_results is request.all_search_results_text
             candidate=TerminalRequest(principal(),'prepared','commit',1,json.dumps({
                 'type':'done','status':'done','result':{'messages':[{'role':'assistant','content':content}],'usage':[]}}).encode(),
                 b'{"invariants_satisfied":true}')
             kwargs['project_terminal'](request.task,candidate)
-            assert request.task['content'].count('https://example.test/page')==1
-            assert ('**来源 / Sources**' in request.task['content']) is not cited
+            assert request.task['content'].count('https://example.test/page')==int(rounds is OPENED_ROUNDS)
+            assert ('**来源 / Sources**' in request.task['content']) is footer
+            assert 'imdb' not in request.task['content']
             assert request.task['messages'][-1]['content']==content
             return 'committed'
         with ThreadPoolExecutor(max_workers=1) as executor,patch('lib.tasks_pkg.native_prepared.run_native_task',side_effect=execute):

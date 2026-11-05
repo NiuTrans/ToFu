@@ -98,9 +98,10 @@ def test_restore_write_failure_preserves_last_good_file(base, monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             OSError('injected replace failure')))
 
-    ok, detail = fh_api._restore_one(base, 'document.txt', 1)
+    # A failed write is a fault for the caller to report, not a refusal reason.
+    with pytest.raises(OSError, match='injected replace failure'):
+        fh_api._restore_one(base, 'document.txt', 1)
 
-    assert ok is False and 'injected replace failure' in detail
     with open(target, 'rb') as handle:
         assert handle.read() == b'last-good'
     assert not [name for name in os.listdir(base)

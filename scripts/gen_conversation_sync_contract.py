@@ -71,6 +71,16 @@ def _load_contract() -> dict[str, Any]:
         raise ValueError('conversation sync contract must declare eventsUrl')
     if document.get('x-tofu-stream', {}).get('eventSource') != event_operation['path']:
         raise ValueError('x-tofu-stream.eventSource must equal the eventsUrl path')
+    multiplexed_operation = next(
+        (item for item in operations if item['client_name'] == 'multiplexedEventsUrl'),
+        None,
+    )
+    if (multiplexed_operation is None
+            or document.get('x-tofu-stream', {}).get('multiplexedEventSource')
+            != multiplexed_operation['path']):
+        raise ValueError(
+            'x-tofu-stream.multiplexedEventSource must equal the '
+            'multiplexedEventsUrl path')
     _command_retry_policy(document)
     _validate_turn_document_owners(schemas)
     return document
@@ -866,21 +876,45 @@ def _render_typescript_client(document: dict[str, Any]) -> str:
 
         response_schema = str(operation['response_schema'])
 
+        if operation['event_stream'] and name == 'multiplexedEventsUrl':
+            if fixed_query != {'diagnosticPayload': 'none'}:
+                raise ValueError('the browser EventSource must omit diagnostic bodies')
+            if path_names or query_names != ['streamClientId', 'streams', 'diagnosticPayload']:
+                raise ValueError(
+                    'the multiplexed EventSource operation must declare '
+                    'streamClientId, streams and diagnosticPayload in order'
+                )
+            interface_lines.append(
+                f'  {name}(streamClientId: string, '
+                'streams: ReadonlyArray<ConversationEventSubscription>): string;'
+            )
+            implementation_lines.extend((
+                f'  {name}(streamClientId, streams) {{',
+                f'    const base = resolvePath({_typescript_request_route(operation)});',
+                '    return `${base}&streamClientId=${encodeURIComponent(streamClientId)}`',
+                '      + `&streams=${encodeURIComponent(JSON.stringify(streams))}`;',
+                '  },',
+            ))
+            continue
+
         if operation['event_stream']:
-            if fixed_query:
-                raise ValueError('the EventSource operation cannot fix query values')
+            if fixed_query != {'diagnosticPayload': 'none'}:
+                raise ValueError('the browser EventSource must omit diagnostic bodies')
             expected_query_names = [
-                'after', 'streamClientId', 'streamGeneration',
+                'after', 'streamClientId', 'streamGeneration', 'diagnosticPayload',
+                'windowBytes', 'cursorSource',
             ]
             if name != 'eventsUrl' or query_names != expected_query_names:
                 raise ValueError(
                     'the EventSource operation must declare after, '
-                    'streamClientId, and streamGeneration in order'
+                    'streamClientId, streamGeneration, diagnosticPayload, '
+                    'windowBytes, and cursorSource in order'
                 )
             params.extend((
                 'after?: string',
                 'streamClientId?: string',
                 'streamGeneration?: number',
+                "catchUp?: { windowBytes?: number; cursorSource?: 'snapshot' }",
             ))
             interface_lines.append(f'  {name}({", ".join(params)}): string;')
             implementation_params = [
@@ -888,18 +922,23 @@ def _render_typescript_client(document: dict[str, Any]) -> str:
                 "after = ''",
                 "streamClientId = ''",
                 'streamGeneration = 0',
+                'catchUp = {}',
             ]
             implementation_lines.extend((
                 f'  {name}({", ".join(implementation_params)}) {{',
-                f'    const base = resolvePath({_typescript_route(operation["path"])});',
+                f'    const base = resolvePath({_typescript_request_route(operation)});',
                 '    const query = [',
                 "      after ? `after=${encodeURIComponent(after)}` : '',",
                 '      streamClientId',
                 "        ? `streamClientId=${encodeURIComponent(streamClientId)}` : '',",
                 '      streamGeneration > 0',
                 "        ? `streamGeneration=${encodeURIComponent(String(streamGeneration))}` : '',",
+                '      catchUp.windowBytes',
+                "        ? `windowBytes=${encodeURIComponent(String(catchUp.windowBytes))}` : '',",
+                '      catchUp.cursorSource',
+                "        ? `cursorSource=${encodeURIComponent(catchUp.cursorSource)}` : '',",
                 "    ].filter(Boolean).join('&');",
-                '    return query ? `${base}?${query}` : base;',
+                '    return query ? `${base}&${query}` : base;',
                 '  },',
             ))
             continue

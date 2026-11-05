@@ -1,7 +1,7 @@
 """Task-turn original inputs and explicit computed JSON working values.
 
-Entry points: retain_program_result after post-hook capture; read_program_result
-for explicit guest reuse; keep_program_value freezes computed JSON;
+Entry points: retain_program_result after post-hook capture (replayed_program_input
+for cached replays of a retained capture); read_program_result for explicit guest reuse; keep_program_value freezes computed JSON;
 list_program_inputs discovers owned handles without reading source bodies.
 CanonicalReceipt holds a runtime-only descriptor of
 original or computed data; serialized metadata carries no native authority.
@@ -187,6 +187,15 @@ def retain_program_result(task, name, arguments, call_id, canonical, *, user_id)
     if size < _LARGE_RESULT_BYTES and json_type not in {'array', 'object'}:
         return
     key, binding_json = binding
+    with task.setdefault('_programResultLock', threading.RLock()):
+        index = task.get('_programResultRefs')
+        current = index.get(key) if isinstance(index, dict) else None
+        if (isinstance(current, _ProgramInputReceipt) and current.canonical is not None
+                and current.canonical.text() == source):
+            # The same call returned the same bytes (prefetch or re-execution):
+            # keep the ref already advertised for it valid instead of retiring it.
+            index[key] = index.pop(key)
+            return current
     input_ref = 'input_' + uuid.uuid4().hex
     entry = _ProgramInputReceipt(ownerId=int(user_id),toolName=name,
         callId=str(call_id),bytes=size,resultId=canonical.result_id,
@@ -195,6 +204,34 @@ def retain_program_result(task, name, arguments, call_id, canonical, *, user_id)
         json_type=json_type)
     if _admit(task, key, entry):
         return entry
+
+
+def replayed_program_input(task, name, arguments, content):
+    """Return the retained capture named by a replayed host envelope.
+
+    A dedup/prefetch replay settles the earlier internal envelope rather than
+    the original capture, so it cannot be retained again. Its host-issued ref
+    selects the same turn-bank entry only while that entry still binds this
+    exact call; an evicted or replaced capture is never re-advertised.
+    """
+    from lib.tools.result_envelope import TOOL_RESULT_CONTRACT_VERSION, ToolResultProgramInputV2
+    index = task.get('_programResultRefs') if isinstance(task, dict) else None
+    key = _key(name, arguments)
+    if (not isinstance(index, dict) or key is None or not isinstance(content, str)
+            or len(content) > MAX_OUTPUT_BYTES):
+        return None
+    try:
+        value = json.loads(content)
+    except ValueError:
+        return None
+    if not isinstance(value, dict) or value.get('contractVersion') != TOOL_RESULT_CONTRACT_VERSION:
+        return None
+    metadata = ToolResultProgramInputV2.from_dict(value.get('programInput'))
+    entry = index.get(key)
+    if (metadata is None or not isinstance(entry, _ProgramInputReceipt)
+            or entry.input_ref != metadata.ref):
+        return None
+    return entry
 
 
 def describe_program_input(task, entry, *, user_id, catalog_names):

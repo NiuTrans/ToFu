@@ -26,6 +26,8 @@ real task pipeline and disposable Sidecar persistence.
 
 from __future__ import annotations
 
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+
 import os
 import sys
 
@@ -453,6 +455,29 @@ class TestInjectedNotes:
             if s.get('llmRound') == 0 and s['type'] in (SEG_THINKING, SEG_TOOL_USE))
         assert prose_idx < note_idx < first_round0_content
 
+    def test_note_follows_the_vetoed_thinking_as_well_as_its_text(self):
+        """A vetoed round that reasoned first is still one unit: its thinking
+        and its text both precede the nudge that re-drove it (conv
+        mvyttf2hwfzppy rendered the stall note above its answer)."""
+        task = _task_multi_round()
+        record_continuation_prose(task, llm_round=0,
+                                  content='I will stop here.',
+                                  thinking='The tool failed; answer anyway.')
+        record_injected_note(task, llm_round=0, kind=NOTE_INTENT_STALL,
+                             text='[SYSTEM: UNRESOLVED TOOL FAILURE]')
+        segs = assemble_segments(task)
+        ids = [s.get('blockId') for s in segs]
+        note_idx = next(i for i, s in enumerate(segs)
+                        if s['type'] == SEG_SYSTEM_NOTE)
+        first_round0_content = next(
+            i for i, s in enumerate(segs)
+            if s.get('llmRound') == 0
+            and s['type'] in (SEG_THINKING, SEG_TOOL_USE)
+            and 'continuation-' not in s['blockId'])
+        assert (ids.index('thinking:continuation-0')
+                < ids.index('text:continuation-0')
+                < note_idx < first_round0_content)
+
     def test_channels_stay_byte_identical_with_notes(self):
         """Notes ride alongside the three channels without perturbing them —
         the loss-less projection guarantee extends to noted turns."""
@@ -756,7 +781,7 @@ class TestGroundTruthRealRunTask:
         def _stub_search(query, user_question='', freshness='', **kwargs):
             return [{'title': 'GT stub', 'snippet': 'deterministic', 'url': 'https://x.invalid', 'source': 'stub'}]
 
-        monkeypatch.setattr(llm_fb, 'stream_llm_response', _stub)
+        monkeypatch.setattr(_fallback_transport, 'stream_llm_response', _stub)
         monkeypatch.setattr(tofu_search, 'perform_web_search', _stub_search)
         monkeypatch.setattr(search_core, 'perform_web_search', _stub_search)
 
@@ -789,12 +814,11 @@ class TestGroundTruthRealRunTask:
             assert derive_tool_rounds(segs) == persisted_rounds
 
             # The produced turn actually ran a tool round + a deliverable answer.
-            # NOTE: the real run_task legitimately POST-PROCESSES task['content']
-            # (here it appends a Sources footer at orchestrator.py:456 because
-            # the stubbed answer cited none of the pages it opened). So we assert
-            # the streamed answer is PRESENT — not that content equals it exactly.
-            # This is the ground-truth test earning its keep: a hand fixture
-            # would never have surfaced the footer post-processing.
+            # NOTE: the real run_task may legitimately POST-PROCESS
+            # task['content'] (e.g. a Sources footer when the turn opened pages
+            # the answer did not cite; this search-only turn opened none). So
+            # we assert the streamed answer is PRESENT — not that content
+            # equals it exactly.
             assert 'The answer is 42, per the search results.' in task['content']
             tool_uses = [s for s in segs if s['type'] == SEG_TOOL_USE]
             assert any(s['name'] == 'web_search' for s in tool_uses), \

@@ -57,23 +57,37 @@ def task_user_id(task):
     return owner_user_id
 
 
+def _registration_stage(name: str):
+    """Time one sub-stage of task ``registration`` (route, mint, checkpoint).
+
+    Nested inside the caller's ``registration`` span, the paired
+    ``[TaskStartupTiming]`` records inherit its identity.
+    """
+    from lib.observability import measure_task_startup
+    return measure_task_startup(f'registration_{name}')
+
+
 def is_carrier_task(task: dict) -> bool:
     """Return whether a task is an internal holder, not restart-blocking work."""
     return bool(task.get('_inline_messages') or task.get('_vu_subtask'))
 
 
 def create_task(conv_id, messages, config, *, user_id=None, principal=None,
-                supersede=True, transient=False, execution_clock=None,
+                supersede=True, transient=False, saved_conversation=True,
+                execution_clock=None,
                 require_durable_cancellation=False, birth_checkpoint_budget_seconds=None,
-                automation_chain=(), automation_project_id=None, model_routing_repository=None):
+                automation_chain=(), automation_project_id=None, model_routing_repository=None,
+                execution_profile=None):
     """Register an ordinary chat task, applying prompt hooks exactly once."""
     return _create_chat_task(conv_id, messages, config, user_id=user_id,
                             principal=principal, supersede=supersede,
-                            transient=transient, execution_clock=execution_clock,
+                            transient=transient, saved_conversation=saved_conversation,
+                            execution_clock=execution_clock,
                             require_durable_cancellation=require_durable_cancellation,
                             birth_checkpoint_budget_seconds=birth_checkpoint_budget_seconds,
                             automation_chain=automation_chain, automation_project_id=automation_project_id,
-                            model_routing_repository=model_routing_repository)
+                            model_routing_repository=model_routing_repository,
+                            execution_profile=execution_profile)
 
 
 def _create_chat_task(
@@ -85,6 +99,7 @@ def _create_chat_task(
     principal=None,
     supersede=True,
     transient: bool = False,
+    saved_conversation: bool = True,
     execution_clock=None,
     prepared_task_id=None,
     require_durable_cancellation=False,
@@ -92,6 +107,7 @@ def _create_chat_task(
     automation_chain=(),
     automation_project_id=None,
     model_routing_repository=None,
+    execution_profile=None,
 ):
     """Create (and register) a chat task.
 
@@ -113,7 +129,17 @@ def _create_chat_task(
     task still has an explicit principal and the normal in-memory lifecycle,
     but it is never mirrored to task-results, event-log, affinity, project, or
     conversation authorities.
+
+    ``saved_conversation=False`` declares that ``conv_id`` is a headless
+    request's job label, never a saved conversation; deferred-completion lanes
+    are then refused (see ``lib.tasks_pkg.conversation_delivery``).
+
+    ``execution_profile`` narrows the task below its owner's account
+    (``lib.tasks_pkg.execution_profile``): its config replaces ``config``.
     """
+    from lib.tasks_pkg.execution_profile import (
+        mark_task, restricted_task_config, validate_execution_profile)
+    validate_execution_profile(execution_profile)
     from lib.identity import PrincipalContext, require_user_id
     if principal is None:
         owner_user_id = require_user_id(user_id, context='create_task')
@@ -128,8 +154,11 @@ def _create_chat_task(
         if user_id is not None and require_user_id(
                 user_id, context='create_task') != owner_user_id:
             raise ValueError('create_task principal/user_id mismatch')
-    config = dict(config or {})
+    config = (restricted_task_config(config or {}) if execution_profile
+              else dict(config or {}))
     config['userId'] = owner_user_id
+    if prepared_task_id is None and '_projectDispatchWorkspaceTaskId' in config:
+        prepared_task_id = config['_projectDispatchWorkspaceTaskId']
     task_id = prepared_task_id or str(uuid.uuid4())
     # ── Extract the user's original question from the last user message ──
     # This is passed to the content filter alongside the search query so
@@ -238,16 +267,16 @@ def _create_chat_task(
         '_contentEpoch': 0,
         'finishReason': None, 'usage': None, 'toolSummary': None,
         'phase': None,                # current phase for polling fallback
-        # Timing anchor: when the task was created (route thread). Used by
-        #   run_task / stream_llm_response to log queue-wait, prep time, and
-        #   time-to-first-token so the "waiting" window can be analysed.
-        '_t_created': time.time(),
+        # Monotonic creation anchor (route thread) for run_task's queue-wait
+        #   line; a duration never subtracts wall-clock readings.
+        '_t_created_monotonic': time.monotonic(),
         'lastUserQuery': last_user_query,
         '_initial_msg_count': len(messages or []),  # cross-talk detection
         '_premature_retry_count_phase': 0,
         # '_force_rotate_pair' is set transiently by analyse_stream_result
         # and consumed (cleared) by stream_llm_response on the next call.
     })
+    mark_task(task, execution_profile)
     # Turn-native browser commands carry the same structured model reference
     # as the native API. Bind one owner-scoped v2 candidate group before any
     # durable-at-birth write or worker launch; ordinary chat cannot pin a
@@ -319,6 +348,7 @@ def _create_chat_task(
                         _routing.get('cache_affinity_connection_id') or ''),
                 ),
                 owner_tag=f'task:{task_id}',
+                observe_stage=_registration_stage,
             )
             task['_pinned_provider_id'] = _route_group.pin_id
             task['_model_routing_group'] = _route_group
@@ -364,6 +394,9 @@ def _create_chat_task(
         # contacting the application storage stack.
         task['_inline_messages'] = True
         task['_transientRuntime'] = True
+    if not saved_conversation:
+        from lib.tasks_pkg.conversation_delivery import mark_no_saved_conversation
+        mark_no_saved_conversation(task)
     try:
         from lib.log import req_id as _current_request_id
         task['_requestId'] = _current_request_id() or task.get('_requestId', '')
@@ -448,13 +481,16 @@ def _create_chat_task(
                 _birth_meta['userId'] = str(task['_userId'])
             if task.get('_requestId'):
                 _birth_meta['requestId'] = task['_requestId']
-            _upsert_task_row(
-                task, conv_id or '', content='', thinking='', status='pending',
-                error_json=None, tr_json=None,
-                meta_json=(json.dumps(_birth_meta, ensure_ascii=False)
-                           if _birth_meta else None),
-                **({'admission_budget_seconds':birth_checkpoint_budget_seconds}
-                   if birth_checkpoint_budget_seconds is not None else {}))
+            with _registration_stage('checkpoint'):
+                _upsert_task_row(
+                    task, conv_id or '', content='', thinking='', status='pending',
+                    error_json=None, tr_json=None,
+                    meta_json=(json.dumps(_birth_meta, ensure_ascii=False)
+                               if _birth_meta else None),
+                    # A uuid4 minted above has no row; a prepared id may.
+                    fresh_birth=prepared_task_id is None,
+                    **({'admission_budget_seconds':birth_checkpoint_budget_seconds}
+                       if birth_checkpoint_budget_seconds is not None else {}))
         except Exception as e:
             logger.warning(
                 '[Task %s] durable-at-birth row write failed (non-fatal): %s',
@@ -771,51 +807,6 @@ def make_provider_abort_check(task: dict):
     return make_task_abort_check(task, nonblocking_storage=True)
 
 
-def write_carrier_terminal_row(task, status: str) -> None:
-    """Persist a terminal ``task_results`` row for a synchronous CARRIER task.
-
-    The autopilot VU sub-task (and any future row-producing carrier) runs
-    under ``_flow_managed=True``, which BY DESIGN suppresses the
-    orchestrator's terminal-status flip + ``persist_task_result`` — the
-    carrier's own finalize early-returns. Its per-round
-    ``checkpoint_task_partial`` writes therefore leave the row at
-    ``status='running'`` forever (the ms2gipv5 zombie generator,
-    ): the in-memory ``discard_task`` only cleans the registry,
-    and the next startup recovery sweep collects the stale row as a
-    crash-interrupted turn.
-
-    The carrier's LIFECYCLE OWNER (``autopilot.run_virtual_user``'s
-    finally) calls this right after ``discard_task`` so the row reaches a
-    terminal state in the same breath as the registry cleanup. Idempotent,
-    last-writer-wins (keyed on task_id, same ``_upsert_task_row`` channel as
-    ``_write_aborted_terminal_floor``); best-effort — a settle failure must
-    never break the owner's finally.
-
-    ``status`` is derived by the caller from the carrier's end state:
-    'done' (turn completed — the normal path), 'aborted' (parent abort /
-    real-message preemption), 'error' (died before any finish reason).
-    """
-    if status not in ('done', 'aborted', 'error'):
-        logger.warning('[Task %s] write_carrier_terminal_row: unexpected status %r '
-                       '— defaulting to done', (task.get('id') or '?')[:8], status)
-        status = 'done'
-    try:
-        conv_id = task.get('convId', '') or ''
-        tr_json = (None if _tool_rounds_have_dedicated_home(task)
-                   else json.dumps(_merge_tool_rounds(task), ensure_ascii=False))
-        meta = build_result_meta(task)
-        meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
-        error_json = _err_to_json(task['error']) if task.get('error') is not None else None
-        _upsert_task_row(task, conv_id, content=task.get('content') or '',
-                         thinking=task.get('thinking') or '', status=status,
-                         error_json=error_json, tr_json=tr_json, meta_json=meta_json)
-        logger.info('[Task %s] conv=%s Carrier terminal row settled: status=%s',
-                    task['id'][:8], conv_id[:8], status)
-    except Exception as e:
-        logger.warning('[Task %s] Failed to settle carrier terminal row: %s',
-                       (task.get('id') or '?')[:8], e, exc_info=True)
-
-
 def list_running_tasks(
     exclude_conv_id: str | None = None,
     *,
@@ -839,17 +830,17 @@ def list_running_tasks(
         the sidebar never lights a dot for it). Counting it made the restart
         dialog report "N conversations running" that the user could see nowhere.
       * **Running activity filter (same judge as the reaper).** A running task
-        whose BOTH
-        liveness clocks (``_t_last_event`` and ``_dispatch_heartbeat``) have
-        been silent past ``_stuck_task_max_silent_secs()`` is WEDGED — the exact
-        signal ``reap_stuck_running_tasks`` uses to force-fail it. Such a task
-        is excluded here too, so a just-died zombie does not block a restart for
+        that ``lib.tasks_pkg.liveness.is_wedged`` reports — the exact verdict
+        ``reap_stuck_running_tasks`` acts on, including its explained waits
+        (storage, writer admission, a live child, a stale filesystem) — is
+        excluded here too, so a just-died zombie does not block a restart for
         the whole 30-minute reaper window (it would otherwise be counted until
-        the next reaper tick flips it terminal). ``status=='running'`` alone is
-        NOT liveness — it is exactly the false signal that produced the "63
-        other conversations have running tasks" phantom. If the reaper is
-        disabled (threshold ``<=0``) no task is treated as wedged (mirrors the
-        reaper), so behaviour is unchanged there.
+        the next reaper tick flips it terminal), while a task that is merely
+        waiting still counts as work a restart would kill. ``status=='running'``
+        alone is NOT liveness — it is exactly the false signal that produced
+        the "63 other conversations have running tasks" phantom. If the reaper
+        is disabled (threshold ``<=0``) no task is treated as wedged (mirrors
+        the reaper), so behaviour is unchanged there.
       * **Per-conversation dedup.** A single conversation (autopilot especially)
         can spawn dozens of tasks; counting per-task turned "3 busy convs" into
         "63". Entries are keyed by ``convId`` so the count is the number of
@@ -870,13 +861,8 @@ def list_running_tasks(
         live conversation (representative = the earliest-created live task of
         that conv). Best-effort snapshot taken through ``TaskRuntime``.
     """
-    try:
-        from lib.tasks_pkg.manager._maintenance import _stuck_task_max_silent_secs
-        max_silent = _stuck_task_max_silent_secs()
-    except Exception as e:
-        logger.debug('[Manager] list_running_tasks: reaper threshold lookup failed '
-                     '(%s) — skipping activity filter', e)
-        max_silent = 0
+    from lib.tasks_pkg.liveness import is_wedged, stall_threshold_seconds
+    max_silent = stall_threshold_seconds()
 
     now = time.time()
     # Keyed by dedup identity so one conversation counts once. Keep the
@@ -900,17 +886,11 @@ def list_running_tasks(
         if exclude_conv_id and conv == exclude_conv_id:
             continue
         created = t.get('created_at', now)
-            # Activity filter — exclude WEDGED tasks (both clocks stale), the
-            # same predicate reap_stuck_running_tasks uses. Either clock fresh
-            # = alive. Disabled (max_silent<=0) → never treat as wedged.
         # Pending work owns a real queue position and has not entered the
         # reaper's running-only liveness domain yet. Its queue wait can exceed
         # the worker-silence threshold without becoming a zombie.
-        if max_silent > 0 and t.get('status') == 'running':
-            last_event = t.get('_t_last_event', created)
-            heartbeat = t.get('_dispatch_heartbeat', created)
-            if (now - last_event) >= max_silent and (now - heartbeat) >= max_silent:
-                continue
+        if t.get('status') == 'running' and is_wedged(t, now=now, threshold=max_silent):
+            continue
             # Dedup key: real conversations collapse by convId; convId-less
             # tasks each stay distinct (keyed on their unique task id).
         key = conv if conv else ('\x00task:' + tid)
@@ -936,6 +916,68 @@ def notify_terminal_conversation_change(task) -> None:
     except Exception as e:
         logger.debug('[Manager] terminal busy notify failed task=%s: %s',
                      ((task or {}).get('id') or '?')[:8], e)
+
+
+def hint_scheduled_compaction(
+    conv_id: str, *, user_id: int, eligible, request_id: str = '',
+) -> tuple[int, bool]:
+    """Wake live tasks to re-read a conversation's scheduled-compaction marker.
+
+    Call only after the durable marker write or delete committed: the marker
+    stays the authority and ``_scheduledCompactionRefresh`` is only a wake
+    hint consumed before the task's next model call. ``eligible`` is the
+    compaction owner's pure task predicate (it runs under the registry lock).
+    Returns how many eligible live tasks were woken and whether any of them
+    had already claimed ``request_id`` (its application is then in flight or
+    done; a hint cannot withdraw it).
+    """
+    claimed = False
+
+    def _matches(task):
+        return (
+            task.get('convId') == conv_id
+            and task_user_id(task) == int(user_id)
+            and task.get('status') in ('pending', 'running')
+            and not task.get('aborted')
+            and eligible(task)
+        )
+
+    def _wake(task):
+        nonlocal claimed
+        claimed = claimed or bool(
+            request_id and task.get('_scheduledCompactionAttempted') == request_id)
+        task['_scheduledCompactionRefresh'] = True
+
+    woken = chat_task_runtime.update_matching(predicate=_matches, updater=_wake)
+    return len(woken), claimed
+
+
+def claim_scheduled_compaction(task: dict, request_id: str) -> bool:
+    """Atomically mark ``request_id`` attempted by ``task``.
+
+    Refused while a schedule/cancel hint is pending, so the caller first
+    re-reads the marker; a cancel committed before the claim is therefore
+    never applied. A task outside the registry cannot receive hints and
+    claims directly.
+    """
+    registered = False
+
+    def _matches(candidate):
+        nonlocal registered
+        if candidate is not task:
+            return False
+        registered = True
+        return not candidate.get('_scheduledCompactionRefresh')
+
+    def _claim(candidate):
+        candidate['_scheduledCompactionAttempted'] = request_id
+
+    if chat_task_runtime.update_matching(predicate=_matches, updater=_claim):
+        return True
+    if registered:
+        return False
+    task['_scheduledCompactionAttempted'] = request_id
+    return True
 
 
 def abort_running_tasks_for_conv(

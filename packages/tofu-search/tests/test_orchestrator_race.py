@@ -108,3 +108,36 @@ def test_pipeline_handles_empty_fetch(monkeypatch, stub_engines):
     assert len(out._unverified_candidates) >= 5
     assert out._search_diag['unverified_count'] == len(out._unverified_candidates)
     assert all(not r.get("full_content") for r in out._unverified_candidates)
+
+
+def test_race_to_n_counts_only_established_evidence(monkeypatch):
+    """Fast off-topic pages must not end the wait before relevant pages land."""
+    import time
+
+    from tofu_search.config import get_config
+
+    rows = [{'title': f'item{i}alpha item{i}beta item{i}gamma',
+             'snippet': f'item{i}delta item{i}epsilon item{i}zeta',
+             'url': f'https://host{i}.example/a', 'source': 'stub'} for i in range(6)]
+    monkeypatch.setattr(orchestrator, 'search_ddg_html', lambda q, n=6, freshness='': rows)
+    for name in ('search_brave', 'search_bing', 'search_ddg_api',
+                 'search_searxng', 'search_marginalia'):
+        monkeypatch.setattr(orchestrator, name, lambda q, n=6, freshness='': [])
+    monkeypatch.setattr(orchestrator, 'xhs_search_available', lambda: False)
+    monkeypatch.setattr(orchestrator, 'is_deepen_enabled', lambda: False)
+
+    def fetch(url, **kwargs):
+        idx = int(url.split('host', 1)[1].split('.', 1)[0])
+        if idx < 4:  # fast, readable, and unrelated to the query
+            return ' '.join(f'garden{idx}_{k}' for k in range(60))
+        time.sleep(0.4)
+        return (f'Quasar latency benchmark result {idx}. '
+                + ' '.join(f'measure{idx}_{k}' for k in range(60)))
+
+    monkeypatch.setattr(orchestrator, 'fetch_page_content', fetch)
+    cfg = get_config().copy(prefetch_gate_enabled=False, search_deadline_secs=10)
+
+    out = perform_web_search('quasar latency benchmark', max_results=2,
+                             filter_pages=False, rerank=False, config=cfg)
+
+    assert {r['url'] for r in out} == {'https://host4.example/a', 'https://host5.example/a'}

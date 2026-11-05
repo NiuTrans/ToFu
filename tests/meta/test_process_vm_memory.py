@@ -7,12 +7,14 @@ import subprocess
 import pytest
 
 from benchmarks.process_vm_memory import LinuxMemoryKernel,StoppedTree,VmSamplingError
+from tests.support.host_capabilities import require_pidfd_host
 
 pytestmark=pytest.mark.api
 
 
 @pytest.fixture
 def probe(tmp_path):
+    require_pidfd_host()
     compiler=shutil.which('cc')
     if not compiler:pytest.skip('C compiler required for disposable VM lifecycle probe')
     executable=tmp_path/'probe'

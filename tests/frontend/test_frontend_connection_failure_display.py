@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
@@ -27,13 +26,6 @@ STORAGE_MONITOR = native_module_path(
 )
 NET_LATENCY = runtime_section_path('net-latency.js')
 ZH_I18N = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json')
-
-
-def _node_deps_available() -> bool:
-    return bool(
-        shutil.which('node')
-        and os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
-    )
 
 
 _STORAGE_HARNESS = r"""
@@ -214,7 +206,6 @@ def _run_harness(tmp_path, name: str, source: str, *args: str) -> str:
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(), reason='node + jsdom required')
 def test_storage_banner_clears_on_recovery(tmp_path):
     output = _run_harness(
         tmp_path,
@@ -227,7 +218,6 @@ def test_storage_banner_clears_on_recovery(tmp_path):
     assert output.count('PASS') == 7
 
 
-@pytest.mark.skipif(not _node_deps_available(), reason='node + jsdom required')
 def test_net_latency_projects_owned_events_without_a_second_clock(tmp_path):
     output = _run_harness(
         tmp_path,

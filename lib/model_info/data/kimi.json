@@ -17,6 +17,16 @@
       ]
     },
     {
+      "model_id": "kimi-k3.1-pro",
+      "capabilities": [
+        "text",
+        "vision",
+        "video",
+        "thinking",
+        "cheap"
+      ]
+    },
+    {
       "model_id": "kimi-k2.7-code",
       "capabilities": [
         "text",

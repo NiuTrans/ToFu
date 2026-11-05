@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from quart import Blueprint
 
+from lib.error_envelope import BadRequest
 from lib.api_response import api_bad_request, api_ok, api_forbidden
 from lib.auth_mode import (
     ALL_MODES, MODE_OPEN, MODE_PRIVATE, MODE_MULTI_USER,
@@ -110,7 +111,7 @@ def put_auth_mode():
         set_by = ctx.name or ctx.key_id or ''
     try:
         new_state = set_mode(new_mode, set_by=set_by)
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e), field='mode')
     audit_log('auth_mode_route_changed', mode=new_state.mode,
               set_by=set_by, prev_source=get_state().source)

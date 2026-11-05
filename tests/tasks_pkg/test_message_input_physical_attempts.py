@@ -63,8 +63,8 @@ def mailbox(request, monkeypatch):
             def __init__(self, *args):
                 pass
 
-            def load(self):
-                return {'messages': [{'id': 'm', 'sender': 'sender'}]}, None
+            def find(self, ids):
+                return {item: {'id': item, 'sender': 'sender'} for item in ids if item == 'm'}
 
             def confirm(self, *args, **kwargs):
                 state['acks'].append(args)

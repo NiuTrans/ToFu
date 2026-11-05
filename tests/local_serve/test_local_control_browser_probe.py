@@ -27,7 +27,7 @@ THE INVARIANT PINNED HERE
 -------------------------
 **A control that cannot achieve what it claims must not invite the click.**
 ``static/js/local-control.js`` states this rule in its own header and
-enforces it for the two capability switches; this route's button was the one
+enforces it for the desktop capability switch; this route's button was the one
 place that broke it. So the fix is not a nicer failure message — the button
 must NOT EXIST when the probe cannot find a browser to drive.
 
@@ -54,6 +54,7 @@ import time
 from pathlib import Path
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -62,6 +63,8 @@ from tests._runtime_sections import runtime_section_path
 
 LC_JS = Path(runtime_section_path('local-control.js'))
 STYLES = ROOT / "static" / "styles.css"
+STYLE_ROOT = ROOT / "frontend" / "src" / "styles" / "application"
+LOCAL_CONTROL_FEATURE_ENTRY = 'frontend/src/features/local-control.ts'
 
 # ══════════════════════════════════════════════════════════
 #  Backend: the probe is the single source of truth
@@ -274,18 +277,8 @@ def test_open_extensions_launches_the_probes_own_url(flask_client,
 
 def _node() -> str:
     exe = shutil.which("node")
-    if not exe:
-        pytest.skip("node not available")
+    require_node_modules('jsdom')
     return exe
-
-
-def _has_jsdom() -> bool:
-    try:
-        subprocess.run([_node(), "-e", "require('jsdom')"], cwd=ROOT,
-                       capture_output=True, timeout=30, check=True)
-        return True
-    except Exception:
-        return False
 
 
 _SETUP_HTML = (
@@ -293,7 +286,6 @@ _SETUP_HTML = (
     '<span class="lc-status-text"></span></div>'
     '<div id="lcBrowserAbout"></div>'
     '<div id="lcBrowserSetup"></div>'
-    '<button id="lcBrowserSwitch"><span class="lc-switch-knob"></span></button>'
     '<div id="localControlBadge"></div><div id="localControlToggle"></div>'
 )
 
@@ -337,8 +329,7 @@ _HARNESS = textwrap.dedent(r"""
 
 
 def _render_cases(cases: dict) -> dict:
-    if not _has_jsdom():
-        pytest.skip("jsdom not installed")
+    require_node_modules('jsdom')
     script = _HARNESS % {
         'html': json.dumps(_SETUP_HTML),
         'lc': json.dumps(str(LC_JS)),
@@ -519,6 +510,21 @@ def test_stale_banner_ignores_other_devices_stale_extensions():
 #  CSS rendering: .lc-substep must carry its own typography
 # ══════════════════════════════════════════════════════════
 
+def _local_control_css() -> str:
+    """The cascade an open Local Control modal runs under: the critical sheet,
+    then the deferred sheets its feature entry imports (the dialog body moved
+    out of the critical sheet in e7f266f04; Vite admits it before the modal
+    shows, so its rules follow the critical sheet in document order)."""
+    manifest = json.loads((STYLE_ROOT / 'manifest.json').read_text(encoding='utf-8'))
+    sheets = [STYLES.read_text(encoding='utf-8')]
+    for row in manifest['deferredSections']:
+        if row.get('featureEntry') == LOCAL_CONTROL_FEATURE_ENTRY:
+            sheets.append((STYLE_ROOT / row['path']).read_text(encoding='utf-8'))
+    assert len(sheets) > 1, (
+        f'no deferred sheet is imported by {LOCAL_CONTROL_FEATURE_ENTRY}')
+    return '\n'.join(sheets)
+
+
 def _decl(selector: str) -> dict:
     """Effective declarations for ``selector``, merged across ALL rules.
 
@@ -532,7 +538,7 @@ def _decl(selector: str) -> dict:
     All the selectors involved here are single classes (specificity 0,1,0), so
     document order alone decides the winner — no specificity model needed.
     """
-    css = STYLES.read_text(encoding='utf-8')
+    css = _local_control_css()
     # Strip comments FIRST. Without this, the selector capture below swallows
     # any preceding /* ... */ block, so ".lc-step" ends up glued to the comment
     # text and no longer compares equal to a bare selector part.
@@ -548,7 +554,7 @@ def _decl(selector: str) -> dict:
             if ':' in decl:
                 k, v = decl.split(':', 1)
                 out[k.strip()] = v.strip()
-    assert hits, f"selector {selector} not found in styles.css"
+    assert hits, f"selector {selector} not found in the Local Control cascade"
     return out
 
 

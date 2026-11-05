@@ -276,6 +276,12 @@ def _normalized_recovery_policy(value: Any) -> str:
     return policy if policy in {"artifact", "source", "none"} else "artifact"
 
 
+def _result_policy_token_limit(recovery_policy: str) -> int:
+    """Use the current declared-policy ceiling at every result fitting stage."""
+    return (SOURCE_TOOL_RESULT_V2_MAX_TOKENS if recovery_policy == "source"
+            else TOOL_RESULT_V2_MAX_TOKENS)
+
+
 def _bounded_source_arguments(
     tool_name: str,
     tool_arguments: Mapping[str, Any] | None,
@@ -720,7 +726,7 @@ def budget_tool_result_v2(tool_name, content, *, user_id, **kwargs):
             content, user_id=user_id,
             source_coverage='partial' if metadata.get('truncated') else metadata.get('sourceCoverage'))
         policy = _normalized_recovery_policy(kwargs.get('recovery_policy', 'artifact'))
-        limit = SOURCE_TOOL_RESULT_V2_MAX_TOKENS if policy == 'source' else TOOL_RESULT_V2_MAX_TOKENS
+        limit = _result_policy_token_limit(policy)
         if _model_result_tokens(content, kwargs.get('model', '')) <= limit:
             return content
         old = json.loads(content)
@@ -848,9 +854,7 @@ def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
     guard still enforces the same round ceiling when siblings run in parallel.
     """
     recovery_policy = _normalized_recovery_policy(recovery_policy)
-    token_budget = (
-        SOURCE_TOOL_RESULT_V2_MAX_TOKENS
-        if recovery_policy == "source" else TOOL_RESULT_V2_MAX_TOKENS)
+    token_budget = _result_policy_token_limit(recovery_policy)
     if isinstance(content, dict) and content.get('__screenshot__'):
         # A screenshot dict must never be JSON-encoded into the text stream:
         # the dataUrl would dominate the envelope and any spilled artifact
@@ -1182,38 +1186,33 @@ def enforce_round_aggregate_budget_v2(
             source_freshness.get("observedAtMs") or 0)
         source_world_version = str(
             source_freshness.get("worldVersion") or "")
-        if recovery is not None and not failed_execution:
-            reduced_summary = (
-                f"{tool_name} result exceeded the shared round budget; "
-                f"rerun {tool_name} with a narrower query or range for "
-                "omitted source evidence."
-            )
-        elif artifact_ref:
-            reduced_summary = (
-                f"{tool_name} result moved behind the round aggregate "
-                "budget; continue with read_tool_artifact using artifactRef "
-                "as artifact_ref and cursor, or search_tool_artifact."
-            )
-        else:
-            source_summary = (str(value.get("summary") or "")
-                              if isinstance(value, dict) else "")
-            preview = _fit_summary(
-                source_summary or content, token_budget=512, model=model,
-                marker=_UNAVAILABLE_RESULT_MARKER)
+        # Refit the evidence already acquired, including successful structured
+        # items, instead of spending the remaining allowance on a fixed notice.
+        # Old presentation suffixes describe a different preview/recovery view;
+        # the shared fitter issues the current marker and cursor together.
+        trusted_envelope = isinstance(content, TrustedResultText) and content.envelope
+        reduced_summary = str(value.get("summary") or "") if trusted_envelope else content
+        if trusted_envelope:
+            for marker in (_ARTIFACT_RESUME_MARKER, _ARTIFACT_CONTINUATION_MARKER,
+                           _NARROWER_QUERY_MARKER, _UNAVAILABLE_RESULT_MARKER):
+                if reduced_summary.endswith(marker):
+                    reduced_summary = reduced_summary[:-len(marker)]
+                    break
+        if not artifact_ref and (recovery is None or failed_execution):
             if recovery_policy == "none":
                 reduced_summary = (
                     "Result reduced by the shared round budget; this tool "
-                    "declares no overflow recovery.\n" + preview)
+                    "declares no overflow recovery.\n" + reduced_summary)
             elif recovery_policy == "source":
                 reduced_summary = (
                     "Diagnostic reduced by the shared round budget; "
-                    "follow the original error's recovery advice.\n" + preview)
+                    "follow the original error's recovery advice.\n" + reduced_summary)
             else:
                 reduced_summary = (
                     "Full aggregate result unavailable because artifact "
                     "persistence failed; inspect the prior outcome before "
                     "deciding whether to repeat the operation.\n"
-                    + preview
+                    + reduced_summary
                 )
         source_items = (value.get("items")
                         if isinstance(value, dict) else None)
@@ -1230,7 +1229,7 @@ def enforce_round_aggregate_budget_v2(
         # Required metadata may be irreducible; adoption below uses its actual
         # model projection rather than claiming an unattainable reduction.
         result_budget = min(
-            TOOL_RESULT_V2_MAX_TOKENS, max(1, limit - (total - before)))
+            _result_policy_token_limit(recovery_policy), max(1, limit - (total - before)))
         reduced_status = "error" if retained_error is not None else "partial"
         from lib.tools.result_envelope import ToolResultProgramInputV2
         program_input = ToolResultProgramInputV2.from_dict(value.get('programInput'))
@@ -1261,8 +1260,7 @@ def enforce_round_aggregate_budget_v2(
                 world_version=source_world_version,
                 evidence_id=evidence_id,
                 model=model,
-                # Aggregate pressure may remove previews, never identities.
-                max_preview_chars=0,
+                # Share available preview space while preserving identities.
                 recovery=recovery,
                 error=retained_error, failed_execution=failed_execution,
                 token_budget=result_budget, finalize_view=finalize_view,
@@ -1271,7 +1269,7 @@ def enforce_round_aggregate_budget_v2(
             reduced = _materialize_envelope(
                 status=reduced_status,
                 summary=reduced_summary,
-                items=(source_items or []) if retained_error is not None else [],
+                items=source_items or [],
                 artifact_ref=artifact_ref, truncated=True,
                 raw_bytes=raw_bytes or len(content.encode("utf-8")),
                 observed_at_ms=max(
@@ -1280,6 +1278,9 @@ def enforce_round_aggregate_budget_v2(
                 evidence_id=evidence_id, model=model,
                 recovery=recovery, error=retained_error,
                 failed_execution=failed_execution, token_budget=result_budget,
+                # Only raw text artifacts use byte offsets. Canonical manifests
+                # and synthesized summaries retain their safe starting cursor.
+                artifact_content="" if isinstance(content, TrustedResultText) else content,
                 finalize_view=finalize_view,
             )
         from lib.tools.result_value import TrustedResultText

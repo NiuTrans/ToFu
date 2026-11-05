@@ -23,7 +23,7 @@ import importlib.abc,sys
 attempts=[]
 class ForbiddenPdf(importlib.abc.MetaPathFinder):
     def find_spec(self,fullname,path=None,target=None):
-        if fullname.split('.')[0] in {'pymupdf','pymupdf4llm','onnxruntime','rapidocr'}:
+        if fullname.split('.')[0] in {'pypdf','pymupdf','pymupdf4llm','onnxruntime','rapidocr'}:
             attempts.append(fullname)
             raise AssertionError('Web-only use attempted optional PDF/OCR import')
 sys.meta_path.insert(0,ForbiddenPdf())
@@ -40,7 +40,7 @@ import importlib.abc,sys
 attempts=[]
 class MissingPdf(importlib.abc.MetaPathFinder):
     def find_spec(self,fullname,path=None,target=None):
-        if fullname.split('.')[0] in {'pymupdf','pymupdf4llm'}:
+        if fullname.split('.')[0] in {'pypdf','pymupdf','pymupdf4llm'}:
             attempts.append(fullname)
             raise ModuleNotFoundError(fullname)
 sys.meta_path.insert(0,MissingPdf())
@@ -51,7 +51,7 @@ def unavailable():
     try:
         extract_pdf_text(b'synthetic')
     except PDFExtractionError as exc:
-        assert 'pymupdf not installed' in str(exc)
+        assert 'pypdf dependency' in str(exc)
     else:
         raise AssertionError('Missing dependency was returned as source evidence')
 unavailable()
@@ -121,8 +121,5 @@ assert 'pymupdf' in sys.modules
 assert extract_pdf_text(PAYLOAD)==first
 limited=extract_pdf_text(PAYLOAD,max_chars=8)
 assert '[...truncated at ' in limited
-if RICH:
-    assert '[...truncated at 8 chars, page 1/1]' in limited
-else:
-    assert 'Cold PDF activation marker' in limited
+assert limited.startswith(first[:8] + '\n[...truncated at 8 chars, page 1/1]')
 ''')

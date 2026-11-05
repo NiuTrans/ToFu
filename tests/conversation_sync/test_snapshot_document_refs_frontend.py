@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -12,6 +11,7 @@ import pytest
 from lib.conversation_sync import validation as contract_validation
 from lib.conversation_sync.generated_contract import OPENAPI_SCHEMAS
 from tests._runtime_sections import native_module_path
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -20,8 +20,7 @@ SOURCE = ROOT / "frontend/src/conversation/domain/tool-segment-references.ts"
 
 
 def _run(harness: str) -> dict:
-    if not shutil.which("node"):
-        pytest.skip("node is required")
+    require_node_modules('vite')
     bundle = native_module_path("snapshot-tool-document-refs.js", SOURCE)
     completed = subprocess.run(
         ["node", "-e", harness, bundle],
@@ -35,8 +34,9 @@ def _run(harness: str) -> dict:
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
-def test_shared_documents_restore_exact_round_and_segment_objects():
-    result = _run(r"""
+@pytest.mark.parametrize("status", ["completed", "interrupted", "pending", "running"])
+def test_shared_documents_restore_exact_round_and_segment_objects(status):
+    result = _run("const status = " + json.dumps(status) + ";\n" + r"""
 const fs = require('fs');
 (0, eval)(fs.readFileSync(process.argv[1], 'utf8'));
 
@@ -46,6 +46,7 @@ const sharedContent = 'shared result';
 const sharedResults = [{title: 'source'}];
 const documents = {[contentKey]: sharedContent, [resultsKey]: sharedResults};
 const makeTurn = (ordinal) => ({
+  status,
   turnId: `turn-${ordinal}`,
   projection: {
     toolRounds: [{
@@ -291,8 +292,7 @@ console.log(JSON.stringify({
 
 
 def test_generated_browser_schema_enforces_reference_shape_and_capacity():
-    if not shutil.which("node"):
-        pytest.skip("node is required")
+    require_node_modules('vite')
     bundle = native_module_path(
         "conversation-sync-contract-validation.js",
         ROOT / "frontend/src/api/conversation-sync.generated.ts",
@@ -397,8 +397,7 @@ console.log(JSON.stringify({
 
 def test_generated_browser_fast_path_matches_python_diagnostics():
     """All generated schemas agree across runtimes on representative JSON."""
-    if not shutil.which("node"):
-        pytest.skip("node is required")
+    require_node_modules('vite')
     bundle = native_module_path(
         "conversation-sync-contract-validation.js",
         ROOT / "frontend/src/api/conversation-sync.generated.ts",
@@ -514,9 +513,9 @@ console.log(JSON.stringify({caseCount: cases.length, mismatches}));
     assert result == {"caseCount": len(cases), "mismatches": []}
 
 
-def test_projection_patch_copies_a_shared_terminal_round_before_updating_it():
-    if not shutil.which("node"):
-        pytest.skip("node is required")
+@pytest.mark.parametrize("status", ["interrupted", "pending", "running"])
+def test_projection_patch_copies_a_shared_round_before_updating_it(status):
+    require_node_modules('vite')
     reference_bundle = native_module_path(
         "snapshot-tool-document-refs-for-patch.js",
         SOURCE,
@@ -525,25 +524,27 @@ def test_projection_patch_copies_a_shared_terminal_round_before_updating_it():
         "projection-patch-for-shared-documents.js",
         ROOT / "frontend/src/core/projection-patch.ts",
     )
-    harness = r"""
+    harness = "const status = " + json.dumps(status) + ";\n" + r"""
 const fs = require('fs');
 (0, eval)(fs.readFileSync(process.argv[1], 'utf8'));
 (0, eval)(fs.readFileSync(process.argv[2], 'utf8'));
 const resultsKey = `sha256:${'b'.repeat(64)}`;
+const contentKey = `sha256:${'a'.repeat(64)}`;
+const sharedContent = 'exact base';
 const sharedResults = [{id: 1}];
 const makeTurn = (ordinal) => ({
-  status: 'interrupted',
+  status,
   projection: {
     toolRounds: [{
       toolCallId: `call-${ordinal}`,
-      _snapshotDocumentRefs: {results: resultsKey},
+      _snapshotDocumentRefs: {results: resultsKey, toolContent: contentKey},
     }],
     segments: [],
   },
 });
 const materialized = materializeSnapshotReferences({
   turns: [makeTurn(1), makeTurn(2)],
-  sharedToolDocuments: {[resultsKey]: sharedResults},
+  sharedToolDocuments: {[resultsKey]: sharedResults, [contentKey]: sharedContent},
 });
 const first = materialized.turns[0].projection;
 const second = materialized.turns[1].projection;
@@ -553,9 +554,21 @@ const patched = applyProjectionPatch(first, {
     op: 'append',
     path: ['toolRounds', 0, 'results'],
     value: [{id: 2}],
+  }, {
+    op: 'append_text', path: ['toolRounds', 0, 'toolContent'], value: ' next',
   }],
 });
+const expected = applyProjectionPatch({toolRounds: [{toolCallId: 'call-1',
+  results: [{id: 1}], toolContent: 'exact base'}], segments: []}, {
+  version: 1, operations: [
+    {op: 'append', path: ['toolRounds', 0, 'results'], value: [{id: 2}]},
+    {op: 'append_text', path: ['toolRounds', 0, 'toolContent'], value: ' next'},
+  ],
+});
 console.log(JSON.stringify({
+  replayMatchesFull: JSON.stringify(patched.toolRounds) === JSON.stringify(expected.toolRounds),
+  originalTextRetained: first.toolRounds[0].toolContent === 'exact base'
+    && second.toolRounds[0].toolContent === 'exact base',
   startedShared: first.toolRounds[0].results === second.toolRounds[0].results,
   copiedProjection: patched !== first,
   copiedRounds: patched.toolRounds !== first.toolRounds,
@@ -576,6 +589,8 @@ console.log(JSON.stringify({
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert json.loads(completed.stdout.strip().splitlines()[-1]) == {
+        "replayMatchesFull": True,
+        "originalTextRetained": True,
         "startedShared": True,
         "copiedProjection": True,
         "copiedRounds": True,

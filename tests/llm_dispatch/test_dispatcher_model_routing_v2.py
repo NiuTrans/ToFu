@@ -179,7 +179,8 @@ def _build(monkeypatch, document=None, *, mode='personal', credential_secrets=No
         'runtime_guards.load_deployment_configuration',
         lambda: SimpleNamespace(mode=mode))
     dispatcher = LLMDispatcher()
-    dispatcher._build_slots_from_model_routing()
+    dispatcher.slots, dispatcher._logical_index = (
+        dispatcher._build_slots_from_model_routing())
     dispatcher._initialized = True
     return dispatcher
 
@@ -246,9 +247,9 @@ def test_slot_build_indexes_document_once_and_resolves_each_secret_once(
     monkeypatch.setattr(repository, 'resolve_secret', counting_resolve)
 
     dispatcher = LLMDispatcher()
-    dispatcher._build_slots_from_model_routing()
+    slots, _ = dispatcher._build_slots_from_model_routing()
 
-    assert len(dispatcher.slots) == 3
+    assert len(slots) == 3
     assert compiler_inits == 1
     assert secret_reads == ['shared-secret']
 
@@ -335,6 +336,7 @@ def test_distributed_mode_has_no_shared_owner_pool(monkeypatch):
 def test_key_health_identity_is_owner_and_credential_scoped(monkeypatch):
     from lib.key_stats import _state as key_state
     from lib.llm_dispatch.slot import Slot
+    from lib.llm_dispatch.slot_pool import SlotPool
 
     first = Slot(
         key_name='request-random-a',
@@ -358,8 +360,7 @@ def test_key_health_identity_is_owner_and_credential_scoped(monkeypatch):
     )
     monkeypatch.setattr(
         'lib.llm_dispatch.factory.get_dispatcher',
-        lambda: SimpleNamespace(slots=[first, second]))
-    key_state._siblings_cache.update({'ts': 0.0, 'by_provider': {}})
+        lambda: SimpleNamespace(slots=SlotPool([first, second])))
 
     assert first.key_stats_provider_id() == (
         'owner:11:provider-shared-name')

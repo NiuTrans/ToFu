@@ -15,7 +15,7 @@ pytestmark = pytest.mark.unit
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 INDEX_HTML = ROOT / 'index.html'
-MAIN = ROOT / 'frontend/src/main.ts'
+MAIN = ROOT / 'frontend/src/application.ts'
 MANIFEST = ROOT / 'frontend/src/runtime/sections/manifest.json'
 UTILITY_FEATURE = ROOT / 'frontend/src/features/utility-panels.ts'
 
@@ -60,10 +60,8 @@ def test_badge_entries_route_to_the_utility_feature():
     assert match
     for name in ('toggleOptimizerPanel', 'toggleTimerPanel'):
         assert f"'{name}'" in match.group(1)
-    assert (
-        "if (utilityPanelEntries.has(name)) return () => "
-        "import('./features/utility-panels');"
-    ) in main
+    assert 'if (utilityPanelEntries.has(name)) return domainLoaders.utilityPanels;' in main
+    assert "utilityPanels: () => import('./features/utility-panels')" in main
     assert "import '../runtime/utility-panels-runtime.generated.js';" in (
         UTILITY_FEATURE.read_text(encoding='utf-8')
     )

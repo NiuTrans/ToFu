@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -23,6 +24,9 @@ from typing import Any
 TOOL_DISCLOSURE_STATE_CONTRACT = "tofu.tool-disclosure-state/v1"
 TOOL_DISCLOSURE_STATE_TASK_KEY = "_toolDisclosureState"
 TOOL_DISCLOSURE_STATE_MAXIMUM = 512
+# Concurrent searches of one round fold their items into the same task state.
+# Leaf lock: nothing is called while it is held.
+_DISCLOSURE_STATE_LOCK = threading.Lock()
 
 
 def schema_fingerprint(schema: Any) -> str:
@@ -159,43 +163,44 @@ def record_search_items(
         name = str(function.get("name") or "").strip()
         if name:
             catalog_schemas[name] = function.get("parameters")
-    entries = _normalized_entries(task.get(TOOL_DISCLOSURE_STATE_TASK_KEY))
-    order = [row["name"] for row in entries]
-    fingerprints = {
-        row["name"]: row["schemaFingerprint"] for row in entries
-    }
-    signatures = {
-        row["name"]: row["signature"] for row in entries if row.get("signature")
-    }
-    for item in items:
-        if not isinstance(item, Mapping):
-            continue
-        name = str(item.get("name") or "").strip()[:160]
-        if not name:
-            continue
-        schema = catalog_schemas.get(name, item.get("arguments_schema"))
-        if name in fingerprints:
-            order.remove(name)
-        order.append(name)
-        fingerprints[name] = schema_fingerprint(schema)
-        signature = _argument_signature(schema)
-        if signature:
-            signatures[name] = signature
-        else:
-            signatures.pop(name, None)
-    order = order[-TOOL_DISCLOSURE_STATE_MAXIMUM:]
-    task[TOOL_DISCLOSURE_STATE_TASK_KEY] = {
-        "contractVersion": TOOL_DISCLOSURE_STATE_CONTRACT,
-        "entries": [
-            {
-                "name": name,
-                "schemaFingerprint": fingerprints[name],
-                **({"signature": signatures[name]}
-                   if signatures.get(name) else {}),
-            }
-            for name in order
-        ],
-    }
+    with _DISCLOSURE_STATE_LOCK:
+        entries = _normalized_entries(task.get(TOOL_DISCLOSURE_STATE_TASK_KEY))
+        order = [row["name"] for row in entries]
+        fingerprints = {
+            row["name"]: row["schemaFingerprint"] for row in entries
+        }
+        signatures = {
+            row["name"]: row["signature"] for row in entries if row.get("signature")
+        }
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            name = str(item.get("name") or "").strip()[:160]
+            if not name:
+                continue
+            schema = catalog_schemas.get(name, item.get("arguments_schema"))
+            if name in fingerprints:
+                order.remove(name)
+            order.append(name)
+            fingerprints[name] = schema_fingerprint(schema)
+            signature = _argument_signature(schema)
+            if signature:
+                signatures[name] = signature
+            else:
+                signatures.pop(name, None)
+        order = order[-TOOL_DISCLOSURE_STATE_MAXIMUM:]
+        task[TOOL_DISCLOSURE_STATE_TASK_KEY] = {
+            "contractVersion": TOOL_DISCLOSURE_STATE_CONTRACT,
+            "entries": [
+                {
+                    "name": name,
+                    "schemaFingerprint": fingerprints[name],
+                    **({"signature": signatures[name]}
+                       if signatures.get(name) else {}),
+                }
+                for name in order
+            ],
+        }
 
 
 __all__ = [

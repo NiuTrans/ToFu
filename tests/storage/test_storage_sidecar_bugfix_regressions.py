@@ -198,6 +198,55 @@ def test_compacted_pre_turn_transcript_survives_delete_and_restore(session):
     assert document['metadata']['msg_count'] == 1
 
 
+def test_pre_turn_transcript_survives_clone(session):
+    """A clone of a frozen pre-turn conversation carries its transcript.
+
+    The frozen ``messages_json`` is the only durable transcript of such a
+    conversation; a clone that reports success must not be an empty copy.
+    """
+    from lib.storage_authority_sql.operations_pkg._common import _dump
+    from lib.storage_authority_sql.operations_pkg._conversations import (
+        _conversation_clone,
+        _conversation_get,
+        _conversation_list,
+    )
+
+    archived = [
+        {'role': 'user', 'content': 'pre-turn question'},
+        {'role': 'assistant', 'content': 'pre-turn answer'},
+    ]
+    session.execute(
+        'INSERT INTO storage_conversations('
+        'id,user_id,title,messages_json,created_at_ms,updated_at_ms,'
+        'settings_json,msg_count,search_text,rev) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?)',
+        ('legacy-source', 1, 'Legacy', _dump(archived), 1000, 2000,
+         _dump({}), len(archived), '', 3),
+    )
+
+    cloned = _conversation_clone(session, {
+        'conv_id': 'legacy-source',
+        'destination_conv_id': 'legacy-copy',
+        'user_id': 1,
+    })
+    assert cloned['cloned'] is True
+
+    document = _conversation_get(
+        session, {'conv_id': 'legacy-copy', 'user_id': 1})
+    assert document['messages'] == archived
+    assert document['metadata']['msg_count'] == len(archived)
+    listed = _conversation_list(
+        session, {'user_id': 1, 'include_messages': False})
+    counts = {
+        item['metadata']['id']: item['metadata']['msg_count']
+        for item in listed
+    }
+    assert counts['legacy-copy'] == len(archived)
+    source = _conversation_get(
+        session, {'conv_id': 'legacy-source', 'user_id': 1})
+    assert source['messages'] == archived
+
+
 def test_worker_job_now_rejects_far_future_clock():
     """A caller clock far ahead of the authority must not strand a job."""
     from lib.storage_authority_sql.operations_pkg._worker_jobs import (

@@ -49,14 +49,15 @@ _OAUTH_RECONCILE_MIN_INTERVAL_S = 30.0
 _oauth_reconcile_state = {'at': 0.0}
 
 
-def _reconcile_oauth_throttled(owner_user_id: int) -> None:
+def _reconcile_oauth_throttled(owner_user_id: int) -> dict | None:
+    """Return the post-repair provider statuses, or None when throttled."""
     import time as _time
     now = _time.monotonic()
     if now - _oauth_reconcile_state['at'] < _OAUTH_RECONCILE_MIN_INTERVAL_S:
-        return
+        return None
     _oauth_reconcile_state['at'] = now
     from lib.oauth.outbound import reconcile_oauth_providers
-    reconcile_oauth_providers(owner_user_id=owner_user_id)
+    return reconcile_oauth_providers(owner_user_id=owner_user_id)
 
 
 def _with_egress_state(status: dict, provider: str, user_id: str) -> dict:
@@ -140,21 +141,28 @@ def oauth_status():
         context='OAuth status')
     owner_scope = str(owner_user_id)
     try:
-        _reconcile_oauth_throttled(owner_user_id)
         from lib.oauth.manager import get_all_oauth_status, get_oauth_status
-        provider = request.args.get('provider', '')
-        if provider:
-            if provider not in ('claude', 'codex'):
-                return api_bad_request('Invalid provider', field='provider')
-            return api_ok(_with_quota_state(_with_egress_state(
-                get_oauth_status(provider, owner_user_id=owner_user_id),
-                provider, owner_scope),
-                provider, owner_scope))
-        all_status = get_all_oauth_status(owner_user_id=owner_user_id)
-        return api_ok({p: _with_quota_state(
-                           _with_egress_state(s, p, owner_scope),
-                           p, owner_scope)
-                       for p, s in all_status.items()})
+        from lib.oauth.token_store import token_snapshot
+        # One credential read per provider serves reconciliation, the cards
+        # and the reset offer of this response.
+        with token_snapshot():
+            reconciled = _reconcile_oauth_throttled(owner_user_id)
+            provider = request.args.get('provider', '')
+            if provider:
+                if provider not in ('claude', 'codex'):
+                    return api_bad_request('Invalid provider', field='provider')
+                return api_ok(_with_quota_state(_with_egress_state(
+                    get_oauth_status(
+                        provider, owner_user_id=owner_user_id,
+                        provider_status=(reconciled or {}).get(provider)),
+                    provider, owner_scope),
+                    provider, owner_scope))
+            all_status = get_all_oauth_status(
+                owner_user_id=owner_user_id, provider_statuses=reconciled)
+            return api_ok({p: _with_quota_state(
+                               _with_egress_state(s, p, owner_scope),
+                               p, owner_scope)
+                           for p, s in all_status.items()})
     except Exception as e:
         logger.error('[OAuth.v1] status check failed: %s', e, exc_info=True)
         return api_internal_error(e, source='api_v1.oauth.status')

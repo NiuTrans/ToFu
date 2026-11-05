@@ -27,10 +27,48 @@ pub use crate::generated_storage_v2::{
     MAX_NATIVE_FASTPATH_SYNC_INTERVAL_MS, MIN_NATIVE_FASTPATH_SYNC_INTERVAL_MS,
 };
 use crate::generated_storage_v2::{
-    MIN_NATIVE_FASTPATH_FSYNC_SPEEDUP, NATIVE_FASTPATH_MARKER_MAX_BYTES,
+    MAX_NATIVE_FASTPATH_FSYNC_REGRESSION, MIN_NATIVE_FASTPATH_FSYNC_SPEEDUP,
+    MIN_NATIVE_FASTPATH_METADATA_SPEEDUP, NATIVE_FASTPATH_MARKER_MAX_BYTES,
 };
 const MARKER_LIMIT: u64 = NATIVE_FASTPATH_MARKER_MAX_BYTES;
 const FORMAT: &str = "tofu.native-fastpath.v1";
+
+/// A first-activation refusal raised before any durable fastpath state for
+/// this selection exists. Under `--fastpath-admission auto` the daemon then
+/// serves the classic authority instead of failing the launch; lineage,
+/// integrity and fenced (FASTPATH) errors are never admission refusals.
+#[derive(Debug)]
+pub struct AdmissionRefusal {
+    pub reason: &'static str,
+    pub detail: String,
+}
+
+impl std::fmt::Display for AdmissionRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "native fastpath admission refused ({}): {}", self.reason, self.detail)
+    }
+}
+
+impl std::error::Error for AdmissionRefusal {}
+
+fn refusal(kind: io::ErrorKind, reason: &'static str, detail: impl Into<String>) -> io::Error {
+    io::Error::new(kind, AdmissionRefusal { reason, detail: detail.into() })
+}
+
+/// The typed pre-relocation refusal carried by `error`, if any.
+pub fn admission_refusal(error: &io::Error) -> Option<&AdmissionRefusal> {
+    error.get_ref().and_then(|inner| inner.downcast_ref::<AdmissionRefusal>())
+}
+
+/// Whether launch admission may fall back to the classic authority.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FastpathAdmission {
+    /// Every refusal fails the launch (explicit operator selection).
+    #[default]
+    Required,
+    /// Pre-relocation refusals serve the classic authority (automatic selection).
+    Auto,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -175,7 +213,9 @@ impl FastpathConfig {
                 self.local_authority.parent().unwrap().parent().unwrap(),
             ) != crate::resource_probe::VolumeClass::Local
         {
-            return Err(invalid(
+            return Err(refusal(
+                io::ErrorKind::InvalidInput,
+                "local-volume-unobserved",
                 "native fastpath requires an observed local filesystem",
             ));
         }
@@ -227,24 +267,33 @@ impl FastpathConfig {
             None
         };
         if self.local_authority.exists() || (self.shadow_directory.exists() && pending.is_none()) {
-            return Err(invalid(
+            return Err(refusal(
+                io::ErrorKind::AlreadyExists,
+                "unclaimed-artifacts",
                 "unclaimed fastpath artifacts exist; verify/export them before activation",
             ));
         }
-        let mut source = Engine::open_with_key(&self.durable_authority, key.clone())?;
-        if let Some(marker) = pending.as_ref() {
-            self.validate_marker(marker)?;
-            validate_seed(source.state(), marker)?;
-        }
+        // The probes are cheap; measure before the source open and corpus walk
+        // so a refused candidate never pays for either.
         if probe {
             measure_candidate(
                 &self.durable_authority,
                 self.local_authority.parent().unwrap().parent().unwrap(),
             )?;
         }
-        let bytes = backup::bounded_directory_bytes(&self.durable_authority)?;
+        let mut source = Engine::open_with_key(&self.durable_authority, key.clone())?;
+        if let Some(marker) = pending.as_ref() {
+            self.validate_marker(marker).map_err(|error| {
+                refusal(io::ErrorKind::InvalidData, "pending-selection-differs", error.to_string())
+            })?;
+            validate_seed(source.state(), marker).map_err(|error| {
+                refusal(io::ErrorKind::InvalidData, "stale-preparation", error.to_string())
+            })?;
+        }
+        let bytes = backup::bounded_directory_bytes(&self.durable_authority)
+            .map_err(corpus_walk_refusal)?;
         let retained = if pending.is_some() && self.shadow_directory.exists() {
-            backup::bounded_directory_bytes(&self.shadow_directory)?
+            backup::bounded_directory_bytes(&self.shadow_directory).map_err(corpus_walk_refusal)?
         } else {
             0
         };
@@ -441,6 +490,12 @@ fn publish_marker_with_vfs(path: &Path, marker: &Marker, vfs: &dyn Vfs) -> io::R
     sync_directory_barrier(vfs, path.parent().unwrap())
 }
 
+/// Whether `data_dir` carries the durable relocation fence. A fenced
+/// authority is never served classically, so no admission mode may decline.
+pub(crate) fn relocation_is_fenced(data_dir: &Path) -> bool {
+    fs::symlink_metadata(data_dir.join(MARKER)).is_ok()
+}
+
 pub(crate) fn require_classic_authority(data_dir: &Path, vfs: &dyn Vfs) -> io::Result<()> {
     match vfs.metadata(&data_dir.join(MARKER)) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -496,15 +551,36 @@ fn require_capacity(path: &Path, bytes: u64) -> io::Result<()> {
     }
     let available = crate::resource_probe::probe_launch_resources(ancestor)
         .volume_free_bytes
-        .ok_or_else(|| invalid("native fastpath requires observed free space"))?;
+        .ok_or_else(|| {
+            refusal(
+                io::ErrorKind::InvalidInput,
+                "capacity-unobserved",
+                "native fastpath requires observed free space",
+            )
+        })?;
     let reserve = (bytes / 20).max(crate::resource_probe::MIN_WRITABLE_VOLUME_FREE_BYTES);
     if available < bytes.saturating_add(reserve) {
-        return Err(io::Error::new(
+        return Err(refusal(
             io::ErrorKind::StorageFull,
-            "native fastpath lacks copy space and reserve",
+            "capacity",
+            format!(
+                "native fastpath lacks copy space and reserve at {} ({available} free, {} required)",
+                path.display(),
+                bytes.saturating_add(reserve)
+            ),
         ));
     }
     Ok(())
+}
+
+/// The capacity walk refuses a corpus beyond its directory bound before any
+/// relocation state exists; other walk errors stay fatal.
+fn corpus_walk_refusal(error: io::Error) -> io::Error {
+    if error.kind() == io::ErrorKind::InvalidInput {
+        refusal(io::ErrorKind::InvalidInput, "authority-too-large", error.to_string())
+    } else {
+        error
+    }
 }
 
 fn require_nonvolatile_local_volume(path: &Path) -> io::Result<()> {
@@ -524,7 +600,9 @@ fn require_nonvolatile_local_volume(path: &Path) -> io::Result<()> {
             (information.f_type as u64) & 0xffff_ffff,
             0x0102_1994 | 0x8584_58f6
         ) {
-            return Err(invalid(
+            return Err(refusal(
+                io::ErrorKind::InvalidInput,
+                "memory-volume",
                 "native fastpath cannot acknowledge durable commits on tmpfs or ramfs",
             ));
         }
@@ -536,10 +614,64 @@ fn require_nonvolatile_local_volume(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Median durations of the two costs a relocated authority changes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CandidateProbe {
+    pub durable_fsync: Duration,
+    pub local_fsync: Duration,
+    pub durable_lookup: Duration,
+    pub local_lookup: Duration,
+}
+
+impl CandidateProbe {
+    /// Admission: a decisive commit-barrier win, or a decisive metadata win
+    /// (segment opens, stats and directory probes dominate a network-mounted
+    /// authority) that does not trade it for a materially slower barrier.
+    pub(crate) fn admits(&self) -> bool {
+        let fsync_win = self.durable_fsync
+            >= self.local_fsync.saturating_mul(MIN_NATIVE_FASTPATH_FSYNC_SPEEDUP);
+        let metadata_win = self.durable_lookup
+            >= self.local_lookup.saturating_mul(MIN_NATIVE_FASTPATH_METADATA_SPEEDUP)
+            && self.local_fsync
+                <= self.durable_fsync.saturating_mul(MAX_NATIVE_FASTPATH_FSYNC_REGRESSION);
+        fsync_win || metadata_win
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "durable_fsync_us={} local_fsync_us={} durable_lookup_us={} local_lookup_us={}",
+            self.durable_fsync.as_micros(),
+            self.local_fsync.as_micros(),
+            self.durable_lookup.as_micros(),
+            self.local_lookup.as_micros()
+        )
+    }
+}
+
+/// Median uncached lookup: fresh random names miss every client cache, so
+/// this observes the round trip each segment open/stat pays on the volume.
+fn median_lookup(directory: &Path) -> io::Result<Duration> {
+    let mut samples = Vec::with_capacity(24);
+    for _ in 0..24 {
+        let probe = directory.join(format!(".native-fastpath-lookup-{}", Uuid::new_v4().simple()));
+        let start = Instant::now();
+        match fs::symlink_metadata(&probe) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(invalid("native fastpath lookup probe name already exists")),
+            Err(error) => return Err(error),
+        }
+        samples.push(start.elapsed());
+    }
+    samples.sort();
+    Ok(samples[samples.len() / 2])
+}
+
 fn measure_candidate(durable: &Path, local: &Path) -> io::Result<()> {
     require_nonvolatile_local_volume(local)?;
     if crate::resource_probe::volume_class(local) != crate::resource_probe::VolumeClass::Local {
-        return Err(invalid(
+        return Err(refusal(
+            io::ErrorKind::InvalidInput,
+            "local-volume-unobserved",
             "native fastpath requires an observed local filesystem",
         ));
     }
@@ -570,18 +702,25 @@ fn measure_candidate(durable: &Path, local: &Path) -> io::Result<()> {
             Err(error) => Err(error),
         }
     };
-    let slow = measure(durable)?;
-    let fast = measure(local)?;
-    if slow < fast.saturating_mul(MIN_NATIVE_FASTPATH_FSYNC_SPEEDUP) {
-        return Err(invalid(
-            "native fastpath fsync probe did not show a 3x improvement",
+    let probe = CandidateProbe {
+        durable_fsync: measure(durable)?,
+        local_fsync: measure(local)?,
+        durable_lookup: median_lookup(durable)?,
+        local_lookup: median_lookup(local)?,
+    };
+    if !probe.admits() {
+        return Err(refusal(
+            io::ErrorKind::InvalidInput,
+            "speedup-insufficient",
+            format!(
+                "native fastpath probe showed neither a {MIN_NATIVE_FASTPATH_FSYNC_SPEEDUP}x fsync win nor a \
+                 {MIN_NATIVE_FASTPATH_METADATA_SPEEDUP}x metadata win within a \
+                 {MAX_NATIVE_FASTPATH_FSYNC_REGRESSION}x fsync bound ({})",
+                probe.describe()
+            ),
         ));
     }
-    eprintln!(
-        "native_fastpath_probe durable_fsync_us={} local_fsync_us={}",
-        slow.as_micros(),
-        fast.as_micros()
-    );
+    eprintln!("native_fastpath_probe {}", probe.describe());
     Ok(())
 }
 

@@ -93,15 +93,48 @@ receipt. It checks the immutable task-level enabled catalog.
 
 ## WebSocket mode
 
-`responses.transport=websocket` uses a task-local persistent connection for a
-sync agent tool loop. Later rounds send `previous_response_id` plus only new
-application-authored input (normally `function_call_output`). Connections are
-never shared across tasks, credentials, or upstream URLs.
+`lib/llm/responses_websocket.py` runs a sync agent tool loop on a task-local
+persistent connection. Public routes opt in with `responses.transport=websocket`;
+the Codex subscription profile always uses it for task rounds, because Codex
+CLI's built-in provider does (`supports_websockets`, handshake
+`OpenAI-Beta: responses_websockets=2026-02-06`). That public flag does not
+govern the Codex contract. Connections are never shared across tasks,
+credentials, accounts, models, or upstream URLs.
 
-If the socket cannot open before `response.create` is sent, the same request
-falls back to SSE. A failure after send is treated as a retryable transport
-failure; it is not silently replayed on SSE inside the attempt. A terminal
-assistant response closes the task-local connection.
+Frames are the flat `{"type": "response.create", ...body}` envelope. A round
+continues the chain (`previous_response_id` plus only the delta) when all of
+these hold, mirroring Codex CLI's `prepare_websocket_request`:
+
+- every non-input field is unchanged (`input`, `previous_response_id`,
+  `stream`, `client_metadata` and `generate` may differ);
+- the previous input is an exact prefix of the new input;
+- the next items match the previous response's `output`, compared by
+  model-visible identity (reasoning ciphertext; call id, name and arguments;
+  message role, phase and text);
+- the remainder is non-empty application input (tool outputs, user/developer
+  messages).
+
+Anything else (compaction, L1 pruning, tool or instruction drift) resets the
+chain with the complete input. With `store=false` the server keeps only the
+latest response in connection memory: a refused continuation ("Invalid
+`previous_response_id`", `previous_response_not_found`) or the 60-minute
+`websocket_connection_limit_reached` arrives before any output, so the
+transport reconnects and resends the complete request once.
+
+The sealed request stays the complete HTTP body. If the socket cannot open
+before `response.create` is sent (desktop egress relay, subscription adapter,
+missing `websockets`, refused upgrade), the same request uses SSE and the task
+keeps SSE for its remaining rounds; a socket that fails after a send raises a
+retryable failure (never replayed inside the attempt) and also moves the task
+to SSE. The socket follows the HTTP transport's egress decision (desktop
+relay, healthiest subscription route, configured proxy). A terminal assistant
+response and task-lane teardown close the connection without waiting for the
+peer's closing handshake.
+
+On Codex the socket also carries the turn's `x-codex-turn-state` in
+`client_metadata`, records `codex.rate_limits` frames as subscription quota
+(`source: websocket_event`), and consumes `codex.response.metadata` /
+`responsesapi.websocket_timing` frames as transport metadata.
 
 ## Composable Multi-agent routing
 
@@ -169,8 +202,9 @@ structured-output constraints remain fail-closed. Reports never enter wire JSON.
 
 ## Operational prerequisite
 
-Native Programmatic Tool Calling, native Tool Search, Pro mode, WebSocket and
-native Multi-agent require a real public Responses provider. Provider-neutral
+Native Programmatic Tool Calling, native Tool Search, Pro mode and native
+Multi-agent require a real public Responses provider; WebSocket mode is also
+the Codex subscription's first-party transport. Provider-neutral
 PTC and Multi-agent semantics do not: other tool-capable faces receive the
 local `execute_tools` JavaScript and `spawn_agents` backends under the same
 authority and budget contracts. Codex subscription and compatible Responses

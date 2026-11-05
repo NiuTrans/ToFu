@@ -51,17 +51,13 @@ function extractEmbed(source) {
   return match[1].trim();
 }
 
-async function main() {
-  const mode = process.argv[2] || '--check';
-  if (!['--check', '--write'].includes(mode)) {
-    throw new Error('usage: check_note_presentation_parity.mjs [--check|--write]');
-  }
+export async function syncSystemNotePresentationEmbed({ check = true } = {}) {
   const registry = readRegistry();
   const expected = renderEmbed(registry);
   const source = await fs.readFile(runtimePath, 'utf8');
   const actual = extractEmbed(source);
   if (actual !== expected) {
-    if (mode === '--write') {
+    if (!check) {
       const marker = /(BEGIN GENERATED \(registry note_presentations\) \*\/\s*\n)([\s\S]*?)(\n\/\* END GENERATED \*\/)/g;
       if ([...source.matchAll(marker)].length !== 1) {
         throw new Error('Expected exactly one owned note-presentation embed');
@@ -71,16 +67,18 @@ async function main() {
       process.stdout.write('system-note runtime presentation embed generated\n');
       return;
     }
-    process.stderr.write(
-      'system-note reason chip embed in tool_rounds.js has drifted from the registry.\n'
-      + 'Regenerate the typed contract with `npm run generate:note-presentation` and '
-      + 'sync the GENERATED block (or run with --write).\n',
+    throw new Error(
+      'system-note reason chip embed in tool_rounds.js has drifted from the registry. '
+      + 'Run npm run generate:note-presentation.',
     );
-    process.exit(1);
   }
   process.stdout.write('system-note presentation parity verified (registry ↔ TS ↔ JS runtime)\n');
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  await main();
+  const mode = process.argv[2] || '--check';
+  if (!['--check', '--write'].includes(mode)) {
+    throw new Error('usage: check_note_presentation_parity.mjs [--check|--write]');
+  }
+  await syncSystemNotePresentationEmbed({ check: mode === '--check' });
 }

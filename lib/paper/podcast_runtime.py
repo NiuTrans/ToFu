@@ -38,23 +38,11 @@ def _podcast_index_get(
         (user_id, paper_hash, mode, lang, voice, model or ''))
 
 
-def _podcast_index_register(
-    paper_hash, mode, lang, voice, model, task_id, *, user_id: int,
-):
-    _production.index_register((user_id, paper_hash, mode, lang, voice, model or ''),
-                               task_id)
-
-
-def _new_podcast_task(
-    task_id, paper_hash, mode, lang, voice, model, *, user_id: int,
-):
-    """Create and register a pending podcast task for the worker."""
-    return _production.create_task(
-        task_id,
-        user_id=user_id,
-        meta={'paper_hash': paper_hash, 'mode': mode, 'lang': lang,
+def _podcast_task_shape(paper_hash, mode, lang, voice, model):
+    return {
+        'meta': {'paper_hash': paper_hash, 'mode': mode, 'lang': lang,
               'voice': voice, 'model': model},
-        fields={
+        'fields': {
             'paper_hash': paper_hash,
             'mode': mode,
             'lang': lang,
@@ -66,7 +54,16 @@ def _new_podcast_task(
             'duration_sec': 0.0,
             'script_only': False,
             'progress': {'done': 0, 'total': 0},
-        })
+        },
+    }
+
+
+def _claim_podcast_task(paper_hash, mode, lang, voice, model, *, user_id: int):
+    """Atomically join or create the owner/model-specific production task."""
+    return _production.claim_task(
+        (user_id, paper_hash, mode, lang, voice, model or ''),
+        _production.new_task_id(), user_id=user_id,
+        **_podcast_task_shape(paper_hash, mode, lang, voice, model))
 
 
 def _append_podcast_event(task, event):
@@ -79,17 +76,11 @@ def _cleanup_stale_podcast_tasks():
     return _production.cleanup_stale()
 
 
-def _podcast_task_id():
-    return _production.new_task_id()
-
-
 __all__ = [
     '_production',
     '_podcast_runtime',
     '_podcast_index_get',
-    '_podcast_index_register',
-    '_new_podcast_task',
+    '_claim_podcast_task',
     '_append_podcast_event',
     '_cleanup_stale_podcast_tasks',
-    '_podcast_task_id',
 ]

@@ -15,6 +15,7 @@ import { renderSendAgentMessageHtml } from './send-agent-message-presentation';
 
 import { renderToolArtifactHeaderHtml, renderToolArtifactRequestHtml } from './tool-artifact-presentation';
 import { toolFailureText } from './tool-failure-presentation';
+import { toolEffectOutcome } from './tool-effect-presentation';
 import { renderRepoMapHeaderHtml } from './tool-repo-map-presentation';
 import { resolveToolResultText, toolResultSurfacePolicy } from './tool-result-surfaces';
 import type { Translator } from '../../i18n';
@@ -1157,12 +1158,18 @@ export function createToolResultPresentation(
 
     const awaitScopeBadgeHtml = renderAwaitScopeBadgeHtml(round, translate);
     const queryHtml = renderRepoMapHeaderHtml(round, translate) || header.queryHtml;
-    const failure = failed ? toolFailureText(authoritative.text, translate(
+    const effectOutcome = toolEffectOutcome(round.executionEffect, stringField(round, 'status'));
+    // An unknown effect is named by the header chip and explained by the
+    // effect notice; a reason line here would only repeat the chip.
+    const failure = failed && effectOutcome === 'not_started'
+      ? toolFailureText(authoritative.text, translate('tool.notStartedTip'))
+      : failed && effectOutcome ? ''
+      : failed ? toolFailureText(authoritative.text, translate(
       renderToolArtifactHeaderHtml(round, translate) ? 'toolArtifact.failureDetails' : 'tool.failedTip',
     )) : '';
     const failureHtml = failure
-      ? `<span class="ptool-artifact-failure ptool-error-reason">${escapeHtmlText(failure)}</span>` : '';
-    const openingHtml = `<details class="ptool-result-block"${failure ? ' data-tool-failure-evidence="collapsed"' : ''}${isDeferred ? ' data-lazy-tool-result=""' : ''} data-tool-result-authority="${
+      ? `<span class="ptool-artifact-failure ptool-error-reason"${effectOutcome ? ` data-tool-effect-outcome="${effectOutcome}"` : ''}>${escapeHtmlText(failure)}</span>` : '';
+    const openingHtml = `<details class="ptool-result-block"${failed ? ' data-tool-failure-evidence="collapsed"' : ''}${isDeferred ? ' data-lazy-tool-result=""' : ''} data-tool-result-authority="${
       authoritative.source
     }" data-rn="${escapeHtmlText(round.roundNum)}">
        <summary class="ptool-line ptool-result-header">

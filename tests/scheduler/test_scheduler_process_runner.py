@@ -138,10 +138,10 @@ def test_maintenance_dispatch_does_not_block_scheduler_tick(monkeypatch):
     task = {'id': 'maintenance-task', 'task_type': 'storage_backup', 'user_id': 1}
 
     before = time.monotonic()
-    assert manager._dispatch_maintenance_task(task) is True
+    assert manager._dispatch_claimed_task(task) is True
     assert time.monotonic() - before < 0.5
     assert started.wait(1)
-    assert manager._dispatch_maintenance_task(task) is False
+    assert manager._dispatch_claimed_task(task) is False
 
     release.set()
     assert manager.stop(timeout=2) is True

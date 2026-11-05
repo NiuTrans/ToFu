@@ -19,7 +19,6 @@ def test_child_round_reset_and_inspector_survive_graph_settlement_reload(storage
     from lib.tasks_pkg.child_invocation import run_child_invocation
     import lib.tasks_pkg.child_invocation as child_owner
     from lib.tasks_pkg.manager import append_event
-    from lib.tasks_pkg.invocation import invocation_output_projection
     from lib.tasks_pkg.orchestrator._finalize import _discard_pretool_prose
     from lib.tasks_pkg.round_evidence import begin_round_evidence, build_round_evidence
 
@@ -75,6 +74,11 @@ def test_child_round_reset_and_inspector_survive_graph_settlement_reload(storage
         append_event(child, {'type': 'tool_start', **{key: value for key, value in row.items()
                      if key not in ('assistantContent', 'thinking')}})
         _discard_pretool_prose(child, 0)
+        # parse_tool_calls' post-parse mirror refresh, then its tool_exec phase.
+        from lib.tasks_pkg.segments import assemble_segments
+        from lib.tasks_pkg.tool_dispatch._labels import emit_tool_exec_phase
+        child['segments'] = assemble_segments(child)
+        emit_tool_exec_phase(child, [({}, 'read_files', 'one-occurrence', {}, 1, row, None)])
         assert task['content'] == task['thinking'] == ''
         assert [b['text'] for b in task['segments'] if b['type'] in ('text', 'thinking')] == [
             'Check the evidence', 'Inspecting files']
@@ -133,3 +137,83 @@ def test_child_round_reset_and_inspector_survive_graph_settlement_reload(storage
     for turn in reloaded['turns']:
         decode('TurnProjection', turn['projection'])
     assert run_child_invocation is child_owner.run_child_invocation
+
+
+def test_early_announced_tool_prose_survives_the_pretool_reset(storage, monkeypatch):  # noqa: F811
+    """Real loop order: early tool_start, prelude reset, THEN parse stamps prose.
+
+    The Goal turn renders the child's own state, so the prose the parse step
+    re-homes onto the tool row is visible for the whole tool execution.
+    """
+    from lib import turn_lifecycle as lifecycle
+    from lib.orchestration.agent_runner import OrchestrationAgentRunnerConfig, OrchestrationInvocationRunner
+    from lib.orchestration.chat_event_sink import OrchestrationChatTaskEventSink
+    from lib.orchestration.chat_flow_adapter import FlowEventAdapter
+    from lib.orchestration.chat_turn_persistence import OrchestrationChatTurnPersistence
+    import lib.tasks_pkg.child_invocation as child_owner
+    from lib.tasks_pkg.manager import append_event
+    from lib.tasks_pkg.orchestrator._finalize import _discard_pretool_prose
+    from lib.tasks_pkg.tool_dispatch._labels import emit_tool_exec_phase
+
+    monkeypatch.setattr('lib.storage.get_storage_client', lambda write=False: storage.client)
+    monkeypatch.setenv('TOFU_TURN_DELTA_RECORD_MIN_INTERVAL_S', '0')
+    created = lifecycle.create_turn_pair(
+        'goal-prose', command_id='goal-prose-create', user_id=1,
+        input_projection={'content': 'Survey the engine'}, config={},
+        conversation_defaults={'allowCreate': True, 'title': 'Goal prose', 'createdAt': 1, 'settings': {}})
+    task = {'id': 'goal-prose-parent', 'convId': 'goal-prose', '_userId': 1,
+            '_turnId': created['turn']['turnId'], '_attemptId': created['attempt']['attemptId'],
+            'config': {}, 'content': '', 'thinking': ''}
+    storage.client.command('turn.attempt.bind', {
+        'attempt_id': task['_attemptId'], 'user_id': 1, 'task_id': task['id'],
+    }, 'goal-prose-bind')
+
+    def persist_event(owner, event):
+        from lib.agent_core.events import check_event
+        check_event(event)
+        assert lifecycle.record_task_event(owner, event)
+    sink = OrchestrationChatTaskEventSink(task, persist_event)
+    persistence = OrchestrationChatTurnPersistence(
+        task, store_turns=lambda owner, turns: owner.update(_flow_turns=turns),
+        sync_turns=lifecycle.sync_visible_run_turns)
+    adapter = FlowEventAdapter(emit=persistence, on_stream=sink, projection='autopilot')
+    persistence.bind(adapter.messages)
+    adapter.on_event({'type': 'step_start', 'role': 'worker', 'node_id': 'worker'})
+    worker_turn = (task.get('_flowLiveTurn') or {}).get('turnId') or task['_turnId']
+    during_tools = []
+
+    def scripted_execution(child, *, policy):
+        child['content'] = 'Surveying the engine'
+        append_event(child, {'type': 'delta', 'content': child['content']})
+        row = {'toolName': 'run_command', 'toolCallId': 'long-command', 'roundNum': 1,
+               'llmRound': 0, 'taskId': child['id'], 'query': 'git log', 'toolArgs': '{}',
+               'status': 'searching'}
+        child['toolRounds'] = [row]
+        append_event(child, {'type': 'tool_start', **row})
+        _discard_pretool_prose(child, 0)
+        row['assistantContent'] = 'Surveying the engine'
+        from lib.tasks_pkg.segments import assemble_segments
+        child['segments'] = assemble_segments(child)
+        emit_tool_exec_phase(child, [({}, 'run_command', 'long-command', {}, 1, row, None)])
+        live = lifecycle.get_turn(task['convId'], worker_turn, user_id=1)['projection']
+        during_tools.append((
+            [b['text'] for b in task.get('segments') or () if b['type'] == 'text'],
+            [b['text'] for b in live.get('segments') or () if b['type'] == 'text' and b['text']]))
+        row.update(status='done', toolContent='log output')
+        append_event(child, {'type': 'tool_complete', 'roundNum': 1, 'toolCallId': 'long-command',
+                             'toolName': 'run_command', 'toolContent': 'log output', 'status': 'done'})
+        append_event(child, {'type': 'round_end', 'roundNum': 0, 'reason': 'tools'})
+        child.update(content='Final answer', status='done', finishReason='stop',
+                     streamState='provider_finished')
+        append_event(child, {'type': 'delta', 'content': 'Final answer'})
+        from lib.tasks_pkg.segments import assemble_segments
+        child['segments'] = assemble_segments(child)
+        append_event(child, {'type': 'done', 'finishReason': 'stop', 'usage': {}})
+
+    monkeypatch.setattr(child_owner, 'execute_invocation', scripted_execution)
+    result = OrchestrationInvocationRunner(
+        OrchestrationAgentRunnerConfig(parent_task=task, model='fixture-model', model_routing_policy='selected'),
+        emit=adapter.on_event, abort_check=lambda: False)(
+            {'id': 'worker', 'role': 'worker'}, '', 1)
+    assert result.status == 'completed'
+    assert during_tools == [(['Surveying the engine'], ['Surveying the engine'])]

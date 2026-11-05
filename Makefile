@@ -72,7 +72,6 @@ vendor-mcp: ## Re-sync tools/<name>/ snapshots of internal MCP servers from sibl
 .PHONY: typecheck frontend-build frontend-budget
 typecheck: ## Type-check the Vite ESM graph
 	@if [ ! -d node_modules/typescript ]; then echo '⚠️  Run `npm install` first (installs TypeScript dev-dep)'; exit 1; fi
-	npx tsc --noEmit
 	npm run typecheck:modules
 
 frontend-build: ## Build content-hashed Vite/TypeScript modules

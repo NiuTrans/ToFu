@@ -12,6 +12,8 @@ export const CONVERSATION_SYNC_STREAM_POLICY = {
   "reconnectGraceMs": 37500,
   "replayRetentionMs": 604800000,
   "eventSource": "/api/v4/conversations/{conversationId}/events",
+  "multiplexedEventSource": "/api/v4/conversation-events",
+  "streamClosedEvent": "stream.closed",
   "gapEvent": "sync.reset_required",
   "streamClientIdQuery": "streamClientId",
   "streamGenerationQuery": "streamGeneration",
@@ -154,7 +156,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
           },
           "event": {
             "additionalProperties": true,
-            "description": "Raw durable evidence frame (e.g. messages_snapshot,\ntool_compacted) committed inside the same authority\ntransaction as this attempt event. Diagnostic only: it never\nmutates the turn projection, and its durability is what lets\nlive and replayed attempt-event streams carry it.\n",
+            "description": "Raw durable evidence frame (e.g. messages_snapshot,\ntool_compacted) committed inside the same authority\ntransaction as this attempt event. Diagnostic only: it never\nmutates the turn projection, and its durability is what lets\nlive and replayed attempt-event streams carry it.\nThe diagnosticPayload=none stream representation omits this\noptional body; it never changes durable evidence or projection.\n",
             "properties": {
               "type": {
                 "maxLength": 128,
@@ -520,6 +522,47 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     ],
     "type": "string"
   },
+  "ConversationEventSubscription": {
+    "additionalProperties": false,
+    "properties": {
+      "after": {
+        "type": "string"
+      },
+      "conversationId": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "cursorSource": {
+        "enum": [
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "streamGeneration": {
+        "maximum": 2147483647,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "windowBytes": {
+        "maximum": 16777216,
+        "minimum": 65536,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "conversationId",
+      "streamGeneration"
+    ],
+    "type": "object"
+  },
+  "ConversationEventSubscriptions": {
+    "items": {
+      "$ref": "#/components/schemas/ConversationEventSubscription"
+    },
+    "minItems": 1,
+    "type": "array"
+  },
   "ConversationInvalidation": {
     "additionalProperties": false,
     "properties": {
@@ -730,6 +773,39 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     ],
     "type": "object"
   },
+  "ConversationStreamClosed": {
+    "additionalProperties": false,
+    "description": "One multiplexed stream stopped. status is the HTTP status its own connection would have answered (204 superseded or ended, 400 invalid cursor, 404, storage 503, 500); code is the stop reason.",
+    "properties": {
+      "code": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "contract": {
+        "const": "tofu.conversation-sync.stream-closed/v1"
+      },
+      "conversationId": {
+        "type": "string"
+      },
+      "status": {
+        "maximum": 599,
+        "minimum": 200,
+        "type": "integer"
+      },
+      "type": {
+        "const": "stream.closed"
+      }
+    },
+    "required": [
+      "contract",
+      "type",
+      "conversationId",
+      "status",
+      "code"
+    ],
+    "type": "object"
+  },
   "ConversationSyncEvent": {
     "oneOf": [
       {
@@ -740,6 +816,16 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       },
       {
         "$ref": "#/components/schemas/SyncResetRequired"
+      }
+    ]
+  },
+  "ConversationSyncMultiplexedEvent": {
+    "oneOf": [
+      {
+        "$ref": "#/components/schemas/ConversationSyncEvent"
+      },
+      {
+        "$ref": "#/components/schemas/ConversationStreamClosed"
       }
     ]
   },
@@ -799,7 +885,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       },
       "sharedToolDocuments": {
         "$ref": "#/components/schemas/SnapshotSharedToolDocuments",
-        "description": "Request-local content-addressed values removed from repeated tool round fields. Omitted unless segmentPayload=refs finds a repeated document large enough to amortize its reference."
+        "description": "Request-local content-addressed values removed from repeated tool round fields, including active Turns whose exact fields are restored before replay. Omitted unless segmentPayload=refs finds a repeated document large enough to amortize its reference."
       },
       "snapshotProjectionRefs": {
         "$ref": "#/components/schemas/SnapshotProjectionReferences",
@@ -1107,7 +1193,8 @@ export const CONVERSATION_SYNC_SCHEMAS = {
           "ready",
           "not_applicable",
           "operation_unconfirmed",
-          "configuration_unavailable"
+          "configuration_unavailable",
+          "budget_insufficient"
         ],
         "type": "string"
       },
@@ -2353,7 +2440,8 @@ export const CONVERSATION_SYNC_SCHEMAS = {
           "cursor_expired",
           "cursor_invalid",
           "server_restarted",
-          "protocol_mismatch"
+          "protocol_mismatch",
+          "replay_exceeds_window"
         ],
         "type": "string"
       },
@@ -2743,6 +2831,10 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "minimum": 0,
         "type": "integer"
       },
+      "envelopeKind": {
+        "maxLength": 160,
+        "type": "string"
+      },
       "failureStage": {
         "maxLength": 80,
         "type": "string"
@@ -3030,6 +3122,31 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "type": "string"
       }
     },
+    "type": "object"
+  },
+  "TurnChannelOrigin": {
+    "additionalProperties": false,
+    "properties": {
+      "channel": {
+        "type": "string"
+      },
+      "eventIds": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "thread": {
+        "type": "string"
+      },
+      "title": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel",
+      "thread"
+    ],
     "type": "object"
   },
   "TurnClientPerceptionObservation": {
@@ -3488,6 +3605,28 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     ],
     "type": "object"
   },
+  "TurnForwardedFrom": {
+    "additionalProperties": false,
+    "properties": {
+      "conversationId": {
+        "type": "string"
+      },
+      "instructionId": {
+        "type": "string"
+      },
+      "steerId": {
+        "type": "string"
+      },
+      "turnId": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "conversationId",
+      "turnId"
+    ],
+    "type": "object"
+  },
   "TurnImageAttachment": {
     "additionalProperties": true,
     "properties": {
@@ -3815,6 +3954,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         },
         "type": "array"
       },
+      "author": {
+        "$ref": "#/components/schemas/TurnSteerAuthor"
+      },
       "blockId": {
         "type": "string"
       },
@@ -3982,6 +4124,12 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "brain": {
         "$ref": "#/components/schemas/TurnBrainDispatch"
       },
+      "channel": {
+        "$ref": "#/components/schemas/TurnChannelOrigin"
+      },
+      "forwardedFrom": {
+        "$ref": "#/components/schemas/TurnForwardedFrom"
+      },
       "initiator": {
         "enum": [
           "human",
@@ -3991,7 +4139,8 @@ export const CONVERSATION_SYNC_SCHEMAS = {
           "brain",
           "peer",
           "operator",
-          "swarm"
+          "swarm",
+          "channel"
         ],
         "type": "string"
       },
@@ -4915,6 +5064,27 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     ],
     "type": "string"
   },
+  "TurnSteerAuthor": {
+    "additionalProperties": false,
+    "properties": {
+      "actor": {
+        "$ref": "#/components/schemas/TurnActor"
+      },
+      "origin": {
+        "$ref": "#/components/schemas/TurnOrigin"
+      },
+      "text": {
+        "description": "Complete authored text (originalContent before any input translation).",
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "actor",
+      "text"
+    ],
+    "type": "object"
+  },
   "TurnSystemNoteSegment": {
     "additionalProperties": true,
     "properties": {
@@ -5071,6 +5241,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         ]
       },
       "signature": {
+        "description": "Opaque provider signature of this reasoning. Never rendered; refs views of completed Turns omit it.",
         "type": "string"
       },
       "taskId": {
@@ -5388,12 +5559,22 @@ export const CONVERSATION_SYNC_SCHEMAS = {
   "TurnTimingSummary": {
     "additionalProperties": false,
     "properties": {
+      "admissionWaitMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
       "approvalWaitMs": {
         "maximum": 9007199254740991,
         "minimum": 0,
         "type": "integer"
       },
       "compactionMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "finalizeMs": {
         "maximum": 9007199254740991,
         "minimum": 0,
         "type": "integer"
@@ -5408,12 +5589,42 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "minimum": 0,
         "type": "integer"
       },
+      "orchestrationMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
       "overBudget": {
         "items": {
           "$ref": "#/components/schemas/TurnTimingOverBudgetSpan"
         },
         "maxItems": 256,
         "type": "array"
+      },
+      "retryWaitMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "roundPrepMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "roundSettleMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "spawnWaitMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "startupMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
       },
       "toolMs": {
         "maximum": 9007199254740991,
@@ -5685,7 +5896,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       },
       "_snapshotDocumentRefs": {
         "$ref": "#/components/schemas/SnapshotDocumentReferences",
-        "description": "Snapshot-only references for repeated, immutable browser fields. The generated browser client resolves every entry from ConversationSyncSnapshot.sharedToolDocuments before TurnStore."
+        "description": "Snapshot-only references for repeated, immutable request-local browser fields, including pending and running Turns. The generated browser client restores every entry from ConversationSyncSnapshot.sharedToolDocuments before TurnStore or replay patch application; live base fields are never deferred."
       },
       "_snapshotToolResult": {
         "$ref": "#/components/schemas/SnapshotToolResultReference"
@@ -5845,6 +6056,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "type": "string"
       },
       "thinkingSignature": {
+        "description": "Opaque provider replay evidence. Model requests read it from storage; refs views of completed Turns omit it.",
         "type": "string"
       },
       "toolArgs": {},
@@ -6051,6 +6263,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       },
       "maxTokens": {
         "default": 100000,
+        "description": "Finite renewal sized for saved input and output; a smaller explicit source cap is never increased.",
         "maximum": 9007199254740991,
         "minimum": 1,
         "type": "integer"
@@ -6471,7 +6684,14 @@ export type TurnMessageInjection = {
   "queueId"?: string;
   "agentIds"?: ReadonlyArray<string>;
   "previews"?: ReadonlyArray<TurnInjectionPreview>;
+  "author"?: TurnSteerAuthor;
   [key: string]: unknown;
+};
+
+export type TurnSteerAuthor = {
+  "actor": TurnActor;
+  "text": string;
+  "origin"?: TurnOrigin;
 };
 
 export type TurnStallInjection = {
@@ -6571,13 +6791,29 @@ export type TurnBrainDispatch = {
 
 export type TurnOrigin = {
   "blockId": string;
-  "initiator": "human" | "autopilot" | "proactive" | "timer" | "brain" | "peer" | "operator" | "swarm";
+  "initiator": "human" | "autopilot" | "proactive" | "timer" | "brain" | "peer" | "operator" | "swarm" | "channel";
   "sourceConversationId"?: string;
   "peerHuman"?: boolean;
   "brain"?: TurnBrainDispatch;
   "autopilotRunId"?: string;
   "boardTaskId"?: string;
   "scheduledTaskId"?: string;
+  "channel"?: TurnChannelOrigin;
+  "forwardedFrom"?: TurnForwardedFrom;
+};
+
+export type TurnChannelOrigin = {
+  "channel": string;
+  "thread": string;
+  "eventIds"?: ReadonlyArray<string>;
+  "title"?: string;
+};
+
+export type TurnForwardedFrom = {
+  "conversationId": string;
+  "turnId": string;
+  "steerId"?: string;
+  "instructionId"?: string;
 };
 
 export type TurnContextSnapshot = {
@@ -6768,6 +7004,7 @@ export type TurnActivityEntry = {
   "routeMode"?: string;
   "routeDecision"?: string;
   "failureStage"?: string;
+  "envelopeKind"?: string;
   "count": number;
   "durationMs"?: number;
   "statusCode"?: number;
@@ -6820,6 +7057,14 @@ export type TurnTimingSummary = {
   "approvalWaitMs": number;
   "unattributedMs": number;
   "flowStepMs"?: number;
+  "admissionWaitMs"?: number;
+  "retryWaitMs"?: number;
+  "spawnWaitMs"?: number;
+  "orchestrationMs"?: number;
+  "startupMs"?: number;
+  "roundPrepMs"?: number;
+  "roundSettleMs"?: number;
+  "finalizeMs"?: number;
   "ttftMs": number;
   "overBudget": ReadonlyArray<TurnTimingOverBudgetSpan>;
 };
@@ -7266,10 +7511,30 @@ export type SyncResetRequired = {
   "type": "sync.reset_required";
   "conversationId": string;
   "cursor": string;
-  "reason": "cursor_expired" | "cursor_invalid" | "server_restarted" | "protocol_mismatch";
+  "reason": "cursor_expired" | "cursor_invalid" | "server_restarted" | "protocol_mismatch" | "replay_exceeds_window";
 };
 
 export type ConversationSyncEvent = (ConversationChange) | (SyncHeartbeat) | (SyncResetRequired);
+
+export type ConversationEventSubscription = {
+  "conversationId": string;
+  "after"?: string;
+  "streamGeneration": number;
+  "windowBytes"?: number;
+  "cursorSource"?: "snapshot";
+};
+
+export type ConversationEventSubscriptions = ReadonlyArray<ConversationEventSubscription>;
+
+export type ConversationStreamClosed = {
+  "contract": "tofu.conversation-sync.stream-closed/v1";
+  "type": "stream.closed";
+  "conversationId": string;
+  "status": number;
+  "code": string;
+};
+
+export type ConversationSyncMultiplexedEvent = (ConversationSyncEvent) | (ConversationStreamClosed);
 
 export type ActiveAttemptPhase = {
   "turnId": string;
@@ -7446,7 +7711,7 @@ export type ConversationUsageRecovery = {
   "sourceTurnId": string;
   "sourceProjectionRevision": number;
   "state": "ready" | "blocked";
-  "reason": "ready" | "not_applicable" | "operation_unconfirmed" | "configuration_unavailable";
+  "reason": "ready" | "not_applicable" | "operation_unconfirmed" | "configuration_unavailable" | "budget_insufficient";
   "budget": UsageRecoveryBudget;
 };
 
@@ -7893,7 +8158,8 @@ async function idempotentCommand<T>(
 
 export interface ConversationSyncApi {
   snapshot(conversationId: string, options?: RequestOptions): Promise<ConversationSyncSnapshot>;
-  eventsUrl(conversationId: string, after?: string, streamClientId?: string, streamGeneration?: number): string;
+  eventsUrl(conversationId: string, after?: string, streamClientId?: string, streamGeneration?: number, catchUp?: { windowBytes?: number; cursorSource?: 'snapshot' }): string;
+  multiplexedEventsUrl(streamClientId: string, streams: ReadonlyArray<ConversationEventSubscription>): string;
   createTurn(conversationId: string, body: CreateTurnRequest, options?: RequestOptions): Promise<TurnCommandResponse>;
   usageRecovery(conversationId: string, turnId: string, options?: RequestOptions): Promise<ConversationUsageRecovery>;
   recoverUsage(conversationId: string, turnId: string, body: RecoverUsageRequest, options?: RequestOptions): Promise<TurnCommandResponse>;
@@ -7933,16 +8199,25 @@ export const conversationSyncApi = Object.freeze<ConversationSyncApi>({
     );
     return assertConversationSyncSchema<ConversationSyncSnapshot>('ConversationSyncSnapshot', value);
   },
-  eventsUrl(conversationId, after = '', streamClientId = '', streamGeneration = 0) {
-    const base = resolvePath(`/api/v4/conversations/${segment(conversationId)}/events`);
+  eventsUrl(conversationId, after = '', streamClientId = '', streamGeneration = 0, catchUp = {}) {
+    const base = resolvePath(`/api/v4/conversations/${segment(conversationId)}/events?diagnosticPayload=none`);
     const query = [
       after ? `after=${encodeURIComponent(after)}` : '',
       streamClientId
         ? `streamClientId=${encodeURIComponent(streamClientId)}` : '',
       streamGeneration > 0
         ? `streamGeneration=${encodeURIComponent(String(streamGeneration))}` : '',
+      catchUp.windowBytes
+        ? `windowBytes=${encodeURIComponent(String(catchUp.windowBytes))}` : '',
+      catchUp.cursorSource
+        ? `cursorSource=${encodeURIComponent(catchUp.cursorSource)}` : '',
     ].filter(Boolean).join('&');
-    return query ? `${base}?${query}` : base;
+    return query ? `${base}&${query}` : base;
+  },
+  multiplexedEventsUrl(streamClientId, streams) {
+    const base = resolvePath(`/api/v4/conversation-events?diagnosticPayload=none`);
+    return `${base}&streamClientId=${encodeURIComponent(streamClientId)}`
+      + `&streams=${encodeURIComponent(JSON.stringify(streams))}`;
   },
   async createTurn(conversationId, body, options = {}) {
     const command = snapshotConversationCommand<CreateTurnRequest>('CreateTurnRequest', body);

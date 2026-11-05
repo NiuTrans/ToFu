@@ -7,6 +7,7 @@
   "durationMs": 1,
   "emits": "s",
   "emittedAt": 1.5,
+  "envelopeKind": "s",
   "errorDetail": "s",
   "errorKind": "s",
   "errorUrl": "s",

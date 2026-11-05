@@ -14,7 +14,8 @@ import json
 from jsonschema import Draft202012Validator
 
 from lib.storage.errors import StorageError
-from .source_index import ReceiptSourceIndex, empty_reference, normalize_reference, receipt_key, receipt_digest, digest, encoded
+from .source_index import (ReceiptSourceIndex, empty_reference, normalize_reference, receipt_key,
+                           receipt_digest, digest, encoded, PREPARATION_WINDOW_RECEIPTS)
 from .execution_observation import execution_state_parser, normalize_execution_observation, provider_scope_for_tool, STATE_VALUES
 
 SOURCE_NAMESPACE = 'research.pending_source_nodes.v1'
@@ -23,20 +24,11 @@ STATE_HASHES = {state: digest({'state': state}) for state in STATE_VALUES}
 HASH_STATES = {value: key for key, value in STATE_HASHES.items()}
 
 
-class PendingIndex(ReceiptSourceIndex):
-    def _write(self, node):
-        sha = super()._write(node)
-        self.cache.pop(sha, None)
-        if self._read(sha) != node:
-            raise StorageError('database_integrity', 'Research pending index node was not exactly acknowledged')
-        return sha
-
-
-class PendingSources(PendingIndex):
+class PendingSources(ReceiptSourceIndex):
     namespace = SOURCE_NAMESPACE
 
 
-class PendingJobs(PendingIndex):
+class PendingJobs(ReceiptSourceIndex):
     namespace = JOB_NAMESPACE
 
     def set_state(self, reference, key, state):
@@ -92,13 +84,16 @@ class ProgressIndexes:
         """Index only verified appended rows; callers must publish roots with their receipt head."""
         from .program import _normalize_tool_receipts
         result = normalize_progress(progress); parse = execution_state_parser(bindings)
-        for receipt in receipts:
+        sources = self.sources.prepare(); jobs = self.jobs.prepare()
+        for number, receipt in enumerate(receipts):
+            if number and number % PREPARATION_WINDOW_RECEIPTS == 0:
+                sources.persist(result['sources']); jobs.persist(result['jobs'])
             canonical = _normalize_tool_receipts([receipt])
             if len(canonical) != 1 or encoded(canonical[0]) != encoded(receipt):
                 raise ValueError('Research pending index requires canonical complete receipts')
             key = receipt_key(receipt)
             if key:
-                result['sources'] = self.sources.insert(result['sources'], key, receipt_digest(receipt))
+                result['sources'] = sources.insert(result['sources'], key, receipt_digest(receipt))
             result['receipts'] += 1
             state = parse(receipt)
             if state is None:
@@ -112,14 +107,16 @@ class ProgressIndexes:
                 continue
             scope = observation.get('provider_scope') or provider_scope_for_tool(receipt.get('tool') or '')
             job_key = digest({'scope':scope, 'job_id':observation['job_id']})
-            previous = self.jobs.lookup(result['jobs'],job_key)
+            previous = jobs.lookup(result['jobs'],job_key)
             if previous is not None:
                 if previous not in HASH_STATES:
                     raise StorageError('database_integrity','Research indexed job state is invalid')
                 result['job_counts'][HASH_STATES[previous]] -= 1
-            result['jobs'] = self.jobs.set_state(result['jobs'],job_key,state)
+            result['jobs'] = jobs._assign(result['jobs'],job_key,STATE_HASHES[state],replace=True)
             result['job_counts'][state] += 1
-        return normalize_progress(result)
+        result = normalize_progress(result)
+        sources.persist(result['sources']); jobs.persist(result['jobs'])
+        return result
 
     def preview_status(self, progress, receipts, bindings=()):
         """Read-only fold of a bounded current window; old jobs use trie lookups."""

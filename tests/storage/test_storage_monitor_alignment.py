@@ -31,11 +31,13 @@ def _no_external_connection_file(monkeypatch):
     monkeypatch.delenv('TOFU_STORAGE_CONNECTION_FILE', raising=False)
 
 
-def _wired_supervisor(*, interval=0.01, deadline=0.01, threshold=3):
+def _wired_supervisor(*, interval=0.01, deadline=0.01, threshold=3, unresponsive=0.0):
     supervisor = StorageSupervisor()
     supervisor._liveness_interval_seconds = interval
     supervisor._liveness_probe_deadline_seconds = deadline
     supervisor._liveness_failure_threshold = threshold
+    # Count-threshold mechanics by default; budget specs pass their own.
+    supervisor._liveness_unresponsive_seconds = unresponsive
     return supervisor
 
 
@@ -260,7 +262,9 @@ def test_external_single_transient_failure_does_not_detach():
 
 
 def test_external_threshold_failures_detach_and_fire_callbacks(caplog):
-    supervisor = _external_supervisor(threshold=3)
+    # No published PID/start identity (SQL co-container): exit cannot be told
+    # from starvation, so the unresponsiveness budget does not apply.
+    supervisor = _external_supervisor(threshold=3, unresponsive=3600.0)
     client = _ScriptedHealthClient(['unready'] * 10)
     crashes = []
     supervisor.add_crash_callback(crashes.append)
@@ -279,3 +283,107 @@ def test_external_threshold_failures_detach_and_fire_callbacks(caplog):
     assert 'liveness probe failed (2/3)' in text
     assert 'failed 3 consecutive liveness probes; detaching' in text
     assert 'became unavailable' in text
+
+
+# ── External attachment liveness policy (2026-10-27) ─────────────────────
+
+
+@pytest.fixture
+def healthy_host(monkeypatch):
+    monkeypatch.setattr(supervisor_mod, '_host_overload_detail', lambda *args: None)
+
+
+def _published_engine(supervisor, *, alive):
+    """Attach to a published engine identity: this process, or a dead PID."""
+    import os
+    from server_manager import proc_start_ticks
+    pid = os.getpid()
+    supervisor._external_pid = pid
+    supervisor._external_process_start = proc_start_ticks(pid) + (0 if alive else 1)
+
+
+def test_external_starved_engine_keeps_its_attachment_and_recovers(healthy_host, caplog):
+    """06:58:10-12 replay: three failed probes of a live engine are not death."""
+    supervisor = _external_supervisor(threshold=3, unresponsive=30.0)
+    _published_engine(supervisor, alive=True)
+    client = _ScriptedHealthClient(['raise'] * 12 + ['ready'] * 200)
+    crashes = []
+    supervisor.add_crash_callback(crashes.append)
+    supervisor._client = client
+
+    with caplog.at_level(logging.INFO, logger='tofu.storage.supervisor'):
+        thread = _run_external_monitor(supervisor, client)
+        assert not threading.Event().wait(0.5)
+        supervisor._external_monitor_stop.set()
+        thread.join(timeout=5)
+
+    assert crashes == []
+    assert supervisor._client is client
+    assert supervisor._external_attached
+    text = '\n'.join(r.getMessage() for r in caplog.records)
+    assert 'liveness probe failed (1/3)' in text
+    assert 'detaching' not in text
+    assert 'liveness recovered after 12 failed probe(s)' in text
+
+
+def test_external_engine_exit_detaches_on_the_first_failed_probe(healthy_host, caplog):
+    supervisor = _external_supervisor(threshold=3, unresponsive=3600.0)
+    _published_engine(supervisor, alive=False)
+    client = _ScriptedHealthClient(['raise'] * 10)
+    crashes = []
+    supervisor.add_crash_callback(crashes.append)
+    supervisor._client = client
+
+    with caplog.at_level(logging.WARNING, logger='tofu.storage.supervisor'):
+        thread = _run_external_monitor(supervisor, client)
+        thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert client.calls == 1
+    assert crashes == [-1]
+    assert supervisor._client is None
+    assert not supervisor._external_attached
+    assert 'exited; detaching' in '\n'.join(r.getMessage() for r in caplog.records)
+
+
+def test_external_unresponsive_engine_detaches_after_the_budget(healthy_host, caplog):
+    import time
+
+    supervisor = _external_supervisor(threshold=3, unresponsive=0.3)
+    _published_engine(supervisor, alive=True)
+    client = _ScriptedHealthClient(['unready'] * 1000)
+    crashes = []
+    supervisor.add_crash_callback(crashes.append)
+    supervisor._client = client
+
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger='tofu.storage.supervisor'):
+        thread = _run_external_monitor(supervisor, client)
+        thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert time.monotonic() - started >= 0.3
+    assert crashes == [-1]
+    assert 'consecutive liveness probes; detaching' in '\n'.join(
+        r.getMessage() for r in caplog.records)
+
+
+def test_external_attachment_survives_host_overload_beyond_the_budget(monkeypatch):
+    """Starvation attribution matches the managed monitor's suppression."""
+    monkeypatch.setattr(
+        supervisor_mod, '_host_overload_detail', lambda *args: 'synthetic overload')
+    supervisor = _external_supervisor(threshold=3, unresponsive=0.05)
+    _published_engine(supervisor, alive=True)
+    client = _ScriptedHealthClient(['raise'] * 1000)
+    crashes = []
+    supervisor.add_crash_callback(crashes.append)
+    supervisor._client = client
+
+    thread = _run_external_monitor(supervisor, client)
+    assert not threading.Event().wait(0.4)
+    supervisor._external_monitor_stop.set()
+    thread.join(timeout=5)
+
+    assert client.calls > 10
+    assert crashes == []
+    assert supervisor._external_attached

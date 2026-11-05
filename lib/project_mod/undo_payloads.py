@@ -189,12 +189,13 @@ def reclaim_removed(session_dir, before, after):
         os.close(directory)
 
 
-def reclaim_orphans(session_dir, records, *, max_entries, minimum_age_seconds=60):
-    """Bounded cold-read cleanup of unreferenced crash artifacts, under admission.
+def reclaim_orphans(session_dir, records, *, minimum_age_seconds=60):
+    """One complete pass over unreferenced crash artifacts, under admission.
 
+    ``records`` is the complete committed history read under the same admission.
     Referenced packs are durable user state and are never candidates. Young
     unreferenced files remain untouched; only our exact private naming patterns
-    qualify. A truncated pass can resume through later cold reads after deletes.
+    qualify.
     """
     referenced = {value['pack'] for row in records for field in FIELDS
                   if is_reference(value := row.get(field))}
@@ -205,9 +206,7 @@ def reclaim_orphans(session_dir, records, *, max_entries, minimum_age_seconds=60
     removed = 0
     try:
         with os.scandir(directory) as entries:
-            for index, entry in enumerate(entries):
-                if index >= max_entries:
-                    break
+            for entry in entries:
                 pack = re.fullmatch(r'([0-9a-f]{64})\.pack', entry.name)
                 stage = re.fullmatch(r'\.payload-[0-9a-f]{32}', entry.name)
                 if (not pack and not stage) or (pack and pack[1] in referenced):

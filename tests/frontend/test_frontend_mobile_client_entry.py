@@ -23,6 +23,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -35,22 +36,8 @@ CORE_PANEL = ROOT / 'frontend/src/features/settings/core-panel.ts'
 
 def _node() -> str:
     exe = shutil.which("node")
-    if not exe:
-        pytest.skip("node not available")
+    require_node_modules('jsdom')
     return exe
-
-
-def _has_jsdom() -> bool:
-    try:
-        subprocess.run(
-            [_node(), "-e", "require('jsdom')"],
-            cwd=ROOT,
-            capture_output=True,
-            check=True,
-        )
-        return True
-    except Exception:
-        return False
 
 
 def _extract_render_snippet() -> str:
@@ -166,7 +153,6 @@ def _run(snippet: str) -> dict:
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_mobile_client_card_renders_only_when_url_present():
     out = _run(_extract_render_snippet())
     assert out["shown"] is True, "card must be visible when URL present"
@@ -186,7 +172,6 @@ def test_mobile_client_card_renders_only_when_url_present():
     assert out["hidden"] is True, "card must stay hidden when URL absent"
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NC_gate_removed_leaks_dead_card():
     """Neuter: drop the `if (url)` gate → absent-URL case wrongly renders."""
     snippet = _extract_render_snippet()

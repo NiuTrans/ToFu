@@ -1,0 +1,162 @@
+/* Channel Settings panels: 大象 (settings-panels/dx.html, features/settings/
+   dx-channel.ts) and GitHub (settings-panels/github.html, github-channel.ts)
+   share one layout through features/settings/channel-settings-view.ts.
+   Layout and status tone only; controls come from the UI kit. */
+
+.channel-settings-subtitle {
+  margin: var(--space-2) 0 var(--space-5);
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-md);
+  line-height: var(--leading-body);
+}
+
+.channel-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.channel-settings .channel-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--s-line);
+  border-radius: var(--radius-sm);
+  background: var(--s-white);
+  font-size: var(--font-size-md);
+}
+
+.channel-settings .channel-card-title {
+  color: var(--s-ink);
+  font-size: var(--font-size-xl);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-title);
+}
+
+.channel-settings .channel-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--s-ink);
+  font-size: var(--font-size-lg);
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.channel-settings .channel-status[data-tone="bad"] {
+  color: var(--error-text);
+}
+
+.channel-settings .channel-status-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--s-line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--s-skin);
+}
+
+.channel-settings .channel-status[data-tone="ok"] .channel-status-dot {
+  background: var(--s-done);
+}
+
+.channel-settings .channel-status[data-tone="bad"] .channel-status-dot {
+  background: var(--s-danger);
+}
+
+.channel-settings .channel-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-2) var(--space-4);
+  align-items: center;
+  margin: 0;
+}
+
+.channel-settings .channel-facts dt {
+  color: var(--s-ink-soft);
+}
+
+.channel-settings .channel-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-settings .channel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: flex-end;
+}
+
+.channel-settings .channel-field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.channel-settings .channel-hint {
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+}
+
+.channel-settings .channel-link {
+  color: var(--s-ink);
+  font-weight: var(--weight-medium);
+  text-decoration: underline;
+}
+
+.channel-settings .channel-advanced > summary {
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.channel-settings .channel-advanced[open] > summary {
+  margin-bottom: var(--space-3);
+}
+
+.channel-settings .channel-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: end;
+  padding: var(--space-3) 0;
+}
+
+.channel-settings .channel-row + .channel-row,
+.channel-settings .channel-outbox-item + .channel-outbox-item {
+  border-top: 1px solid var(--s-line);
+}
+
+.channel-settings .channel-row-title {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.channel-settings .channel-key {
+  color: var(--s-ink-soft);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.channel-settings .channel-outbox-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+}
+
+.channel-settings .channel-outbox-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .channel-settings .channel-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

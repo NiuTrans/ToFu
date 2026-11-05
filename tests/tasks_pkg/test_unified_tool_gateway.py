@@ -821,7 +821,7 @@ def test_builtin_specs_carry_per_function_private_search_hints():
     from lib.tools.registry import all_specs
 
     by_key = {spec.key: spec for spec in all_specs()}
-    assert 'symbol references' in by_key['project'].search_hints['grep_search']
+    assert 'symbol references' in by_key['project'].search_hints['search_files']
     assert 'previous decision' in by_key['memory'].search_hints[
         'search_memories']
     assert 'cancel stop' in by_key['scheduler'].search_hints[
@@ -998,7 +998,7 @@ def test_round_assembly_admits_hidden_execute_without_exposing_schema(
     prep.assemble_round_tools({}, task, mcfg)
 
     assert set(task['_tool_gateway_names']) == {
-        EXECUTE_TOOLS_NAME, SEARCH_TOOLS_NAME}
+        EXECUTE_TOOLS_NAME, SEARCH_TOOLS_NAME, 'execute_program'}
 
 
 def test_execute_gateway_has_quiet_display(caplog):
@@ -1403,6 +1403,8 @@ def test_local_program_reduces_pre_compaction_result_on_bounded_private_lane(
     import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
     import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     from lib.tools.programmatic import ProgrammaticResultBudget
+    from lib.tools.result_projection_text import load_text_field
+    from lib.tools.result_surfaces_generated import CONTRACT
 
     raw = (
         'RAW_INTERNAL_PREFIX\n'
@@ -1449,7 +1451,13 @@ def test_local_program_reduces_pre_compaction_result_on_bounded_private_lane(
     assert model_visible != raw
     assert 'RAW_INTERNAL_PREFIX' in model_visible
     assert 'RAW_INTERNAL_TAIL' not in model_visible
-    assert json.loads(model_visible)['artifactRef'].startswith('tool-result:')
+    try:
+        view = json.loads(model_visible)
+    except json.JSONDecodeError:
+        view = load_text_field(
+            model_visible, CONTRACT['partialProjectionText']['bodyField'])
+    assert view is not None
+    assert view['artifactRef'].startswith('tool-result:')
 
 
 def test_provider_boundary_injects_execute_only_for_local_search():

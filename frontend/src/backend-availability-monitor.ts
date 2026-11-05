@@ -15,6 +15,8 @@ export type BackendAvailabilityPhase = 'online' | 'suspect' | 'offline';
 
 export interface BackendPushReading {
   readonly connected?: boolean;
+  /** Timestamp of an actual inbound frame, never the reading's publication. */
+  readonly lastInboundAt?: number;
 }
 
 export interface BackendAvailabilityCopy {
@@ -104,14 +106,14 @@ const COPY_KEYS = Object.freeze({
 });
 
 const FALLBACK_COPY = Object.freeze({
-  backendOfflineTitle: '后端服务器已离线',
+  backendOfflineTitle: '暂时无法连接服务器',
   networkOfflineTitle: '本机网络已断开',
   networkOfflineDescription: '浏览器报告网络已断开。检查网络连接；恢复后页面会自动重连。',
   retryNow: '立即重试',
   snooze: '暂时隐藏',
-  restoredTitle: '后端已恢复',
+  restoredTitle: '连接已恢复',
   restoredDescription: '正在重新连接并同步进行中的对话…',
-  backendTitlePrefix: '【后端离线】',
+  backendTitlePrefix: '【连接中断】',
   networkTitlePrefix: '【网络断开】',
 });
 
@@ -150,6 +152,7 @@ export function createBackendAvailabilityMonitor(
     elapsedTimer: null as number | null,
     started: false,
     generation: 0,
+    lastPushInboundAt: 0,
     plannedInterruption: false,
   };
   let cleanups: Array<() => void> = [];
@@ -175,7 +178,7 @@ export function createBackendAvailabilityMonitor(
       Math.round(BACKEND_AVAILABILITY_POLICY.recoveryPollMs / 1_000),
     ),
     COPY_KEYS.backendOfflineDescription,
-    `所有进行中的回复已暂停。每 ${Math.round(
+    `页面暂时无法获取最新状态，后台任务可能仍在运行。每 ${Math.round(
       BACKEND_AVAILABILITY_POLICY.recoveryPollMs / 1_000,
     )} 秒自动重试，恢复后会自动重连并同步结果。`,
   );
@@ -222,7 +225,7 @@ export function createBackendAvailabilityMonitor(
     state.elapsedElement.textContent = copyOrFallback(
       () => ports.copy.offlineElapsed(duration),
       COPY_KEYS.offlineElapsed,
-      `已离线 ${duration}`,
+      `连接中断 ${duration}`,
     );
   };
 
@@ -241,8 +244,34 @@ export function createBackendAvailabilityMonitor(
     return button;
   };
 
+  const offlineTitle = (): string => networkIsDown()
+    ? copyOrFallback(
+      ports.copy.networkOfflineTitle,
+      COPY_KEYS.networkOfflineTitle,
+      FALLBACK_COPY.networkOfflineTitle,
+    )
+    : copyOrFallback(
+      ports.copy.backendOfflineTitle,
+      COPY_KEYS.backendOfflineTitle,
+      FALLBACK_COPY.backendOfflineTitle,
+    );
+
+  const offlineDescription = (): string => ` — ${networkIsDown()
+    ? copyOrFallback(
+      ports.copy.networkOfflineDescription,
+      COPY_KEYS.networkOfflineDescription,
+      FALLBACK_COPY.networkOfflineDescription,
+    )
+    : backendOfflineDescription()}`;
+
   const showBanner = (): void => {
-    if (state.banner?.isConnected) return;
+    if (state.banner?.isConnected) {
+      const title = state.banner.querySelector('strong');
+      const description = state.banner.querySelector('.bom-desc');
+      if (title) title.textContent = offlineTitle();
+      if (description) description.textContent = offlineDescription();
+      return;
+    }
     browserDocument.getElementById(OFFLINE_BANNER_ID)?.remove();
     const banner = browserDocument.createElement('div');
     banner.id = OFFLINE_BANNER_ID;
@@ -259,31 +288,14 @@ export function createBackendAvailabilityMonitor(
     icon.innerHTML = ports.offlineIconHtml();
     const message = browserDocument.createElement('span');
     const title = browserDocument.createElement('strong');
-    const down = networkIsDown();
-    title.textContent = down
-      ? copyOrFallback(
-        ports.copy.networkOfflineTitle,
-        COPY_KEYS.networkOfflineTitle,
-        FALLBACK_COPY.networkOfflineTitle,
-      )
-      : copyOrFallback(
-        ports.copy.backendOfflineTitle,
-        COPY_KEYS.backendOfflineTitle,
-        FALLBACK_COPY.backendOfflineTitle,
-      );
+    title.textContent = offlineTitle();
     const elapsed = browserDocument.createElement('span');
     elapsed.className = 'bom-elapsed';
     elapsed.style.opacity = '.9';
     const description = browserDocument.createElement('span');
     description.className = 'bom-desc';
     description.style.opacity = '.92';
-    description.textContent = ` — ${down
-      ? copyOrFallback(
-        ports.copy.networkOfflineDescription,
-        COPY_KEYS.networkOfflineDescription,
-        FALLBACK_COPY.networkOfflineDescription,
-      )
-      : backendOfflineDescription()}`;
+    description.textContent = offlineDescription();
     message.append(title, ' ', elapsed, description);
     banner.append(
       icon,
@@ -376,7 +388,7 @@ export function createBackendAvailabilityMonitor(
     hideBanner();
     restoreTitle();
     ports.log.info(
-      `[BackendAvailability] backend recovered (${reason}) after ${formatDuration(
+      `[BackendAvailability] connection recovered (${reason}) after ${formatDuration(
         downMilliseconds,
       )}`,
     );
@@ -424,7 +436,8 @@ export function createBackendAvailabilityMonitor(
     state.snoozedUntil = 0;
     clearConfirmationTimer();
     ports.log.error(
-      `[BackendAvailability] backend offline confirmed (${reason}) after ` +
+      `[BackendAvailability] connection unavailable (${reason}, ` +
+      `${networkIsDown() ? 'browser_offline' : 'health_unreachable'}) after ` +
       `${state.consecutiveFailures} failed probes`,
     );
     showBanner();
@@ -489,7 +502,7 @@ export function createBackendAvailabilityMonitor(
         verdictReason = `proxy_auth_${status}`;
         ports.log.warn(
           `[BackendAvailability] health probe reached an outer proxy but was ` +
-          `denied (HTTP ${status}); backend remains online`,
+          `denied (HTTP ${status}); not evidence of a backend outage`,
         );
       } else {
         alive = response?.ok === true;
@@ -607,23 +620,48 @@ export function createBackendAvailabilityMonitor(
     }
   };
 
+  const acceptPushHeartbeat = (reading: BackendPushReading): boolean => {
+    const receivedAt = reading.lastInboundAt;
+    const age = ports.schedule.now() - Number(receivedAt);
+    if (reading.connected !== true || typeof receivedAt !== 'number'
+        || !Number.isFinite(receivedAt) || receivedAt <= state.lastPushInboundAt
+        || age < 0 || age > BACKEND_AVAILABILITY_POLICY.probeTimeoutMs) return false;
+    state.lastPushInboundAt = receivedAt;
+    // New server bytes supersede any older pending HTTP failure. A bare open
+    // socket or a re-published cached reading cannot provide this evidence.
+    state.generation += 1;
+    state.probing = false;
+    handleAlive('push_heartbeat');
+    return true;
+  };
+
+  const refreshOfflinePresentation = (): void => {
+    if (state.phase !== 'offline') return;
+    if (state.banner) showBanner();
+    prefixTitle();
+  };
+
   const start = (): void => {
     if (state.started) return;
     state.started = true;
     state.generation += 1;
     cleanups = [];
     ownSubscription(() => ports.subscribePushReading((reading) => {
-      if (!reading) return;
+      if (!reading || !state.started || state.plannedInterruption) return;
       if (reading.connected === false) markSuspect('push_drop');
-      else if (state.phase !== 'online') void probe('push_reconnected');
+      else if (!acceptPushHeartbeat(reading) && state.phase !== 'online') {
+        void probe('push_reconnected');
+      }
     }));
     ownSubscription(() => ports.subscribePushReconnect(() => {
       if (state.phase !== 'online') void probe('push_reopen');
     }));
     addListener(ports.browserEvents, 'offline', () => {
+      refreshOfflinePresentation();
       markSuspect('browser_offline');
     });
     addListener(ports.browserEvents, 'online', () => {
+      refreshOfflinePresentation();
       if (state.phase !== 'online') void probe('browser_online');
     });
     addListener(browserDocument, 'visibilitychange', () => {
@@ -668,6 +706,7 @@ export function createBackendAvailabilityMonitor(
     state.probing = false;
     state.offlineSince = 0;
     state.snoozedUntil = 0;
+    state.lastPushInboundAt = 0;
     state.plannedInterruption = false;
     browserDocument.documentElement.removeAttribute(
       'data-tofu-planned-interruption',

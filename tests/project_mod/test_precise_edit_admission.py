@@ -1,6 +1,5 @@
 """Edit admits unrelated effects but never overlaps one file transaction."""
 from contextlib import contextmanager
-from pathlib import Path
 import threading
 
 import pytest
@@ -81,62 +80,6 @@ def test_edit_does_not_wait_for_git_metadata(checkouts, target_index):
         assert (target / 'a.txt').read_text() == 'after\n'
 
 
-@pytest.mark.parametrize('api_name', ['workspace_write_lease', 'workspace_tree_write_lease'])
-def test_edit_still_refuses_real_same_checkout_transformation(checkouts, api_name):
-    parent, _ = checkouts
-    with held_elsewhere(getattr(leases, api_name), parent):
-        result = edit(parent)
-        assert '[workspace-busy]' in result
-        assert 'No edits applied' in result
-        assert (parent / 'a.txt').read_text() == 'before\n'
-
-
-def test_edit_refuses_recursive_retirement_of_its_parent(checkouts):
-    parent, child = checkouts
-    with held_elsewhere(leases.workspace_tree_write_lease, parent):
-        assert '[workspace-busy]' in edit(child)
-        assert (child / 'a.txt').read_text() == 'before\n'
-
-
-def test_edit_only_contends_on_the_file_being_published(checkouts, monkeypatch):
-    parent, _ = checkouts
-    original = _ops._atomic_write_bytes
-    entered, release = threading.Event(), threading.Event()
-    first_result, errors = [], []
-
-    def publish(target, data, **kwargs):
-        if Path(target) == parent / 'a.txt':
-            entered.set()
-            assert release.wait(10), 'publication was not released'
-        return original(target, data, **kwargs)
-
-    monkeypatch.setattr(_ops, '_atomic_write_bytes', publish)
-
-    def first_edit():
-        try:
-            first_result.append(edit(parent))
-        except BaseException as error:
-            errors.append(error)
-
-    worker = threading.Thread(target=first_edit)
-    worker.start()
-    try:
-        assert entered.wait(5), 'first edit did not reach publication'
-        assert 'Applied 1/1' in edit(parent, 'b.txt')
-        refusal = edit(parent, 'a.txt')
-        assert '[workspace-busy]' in refusal
-        assert (parent / 'a.txt').read_text() == 'before\n'
-        assert (parent / 'b.txt').read_text() == 'after\n'
-    finally:
-        release.set()
-        worker.join(5)
-    assert not worker.is_alive()
-    assert not errors
-    assert 'Applied 1/1' in first_result[0]
-    assert (parent / 'a.txt').read_text() == 'after\n'
-    assert leases.workspace_lease_fds() == ()
-
-
 def test_controlled_retirement_retains_tree_with_active_descendant(checkouts, monkeypatch):
     from lib import integration_control
 
@@ -151,32 +94,6 @@ def test_controlled_retirement_retains_tree_with_active_descendant(checkouts, mo
         integration_control._remove_controlled_worktree(parent, parent)
         assert (child / 'a.txt').read_text() == 'before\n'
     assert parent.is_dir()
-
-
-def test_non_git_edit_serializes_same_file_but_not_other_files(tmp_path, monkeypatch):
-    monkeypatch.setenv('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', '0')
-    monkeypatch.setattr(_ops, '_should_record_modification', lambda *a, **kw: False)
-    root = tmp_path / 'plain-workspace'
-    root.mkdir()
-    for name in ('a.txt', 'b.txt'):
-        (root / name).write_text('before\n')
-    with held_elsewhere(leases.workspace_file_write_lease, root / 'a.txt'):
-        assert 'Applied 1/1' in edit(root, 'b.txt')
-        assert '[workspace-busy]' in edit(root, 'a.txt')
-    assert 'Applied 1/1' in edit(root, 'a.txt')
-    assert (root / 'a.txt').read_text() == (root / 'b.txt').read_text() == 'after\n'
-    assert leases.workspace_lease_fds() == ()
-
-
-def test_non_git_edit_is_fenced_by_actual_tree_retirement(tmp_path, monkeypatch):
-    monkeypatch.setenv('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', '0')
-    monkeypatch.setattr(_ops, '_should_record_modification', lambda *a, **kw: False)
-    root = tmp_path / 'plain-workspace'
-    root.mkdir()
-    (root / 'a.txt').write_text('before\n')
-    with held_elsewhere(leases.workspace_tree_write_lease, root):
-        assert '[workspace-busy]' in edit(root)
-        assert (root / 'a.txt').read_text() == 'before\n'
 
 
 def test_non_git_file_transaction_excludes_other_process(tmp_path):

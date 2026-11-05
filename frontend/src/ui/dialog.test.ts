@@ -70,3 +70,61 @@ describe('backdrop dismissal requires the gesture to start outside', () => {
     expect(closeSpy).not.toHaveBeenCalled();
   });
 });
+
+describe.each([
+  ['dialog', () => createDialog({ title: 't', body: 'b' })],
+  ['drawer', () => createDrawer({ title: 't', body: 'b' })],
+] as const)('%s backdrop gesture boundary', (_name, create) => {
+  it('ignores an outside click without an outside press', () => {
+    const { el } = create();
+    const close = setup(el);
+    fire(el, 'click', OUTSIDE);
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('consumes a gesture even when it ends inside', () => {
+    const { el } = create();
+    const close = setup(el);
+    fire(el, 'mousedown', OUTSIDE);
+    fire(el, 'click', INSIDE);
+    fire(el, 'click', OUTSIDE);
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('keeps the exact dialog edges inside its box', () => {
+    const { el } = create();
+    const close = setup(el);
+    fire(el, 'mousedown', { clientX: BOX.left, clientY: BOX.top });
+    fire(el, 'click', OUTSIDE);
+    fire(el, 'mousedown', OUTSIDE);
+    fire(el, 'click', { clientX: BOX.right, clientY: BOX.bottom });
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('keeps pressed state local to each control', () => {
+    const first = create(), second = create();
+    const closeFirst = setup(first.el), closeSecond = setup(second.el);
+    fire(first.el, 'mousedown', OUTSIDE);
+    fire(second.el, 'click', OUTSIDE);
+    fire(first.el, 'click', OUTSIDE);
+    expect(closeSecond).not.toHaveBeenCalled();
+    expect(closeFirst).toHaveBeenCalledTimes(1);
+    fire(first.el, 'click', OUTSIDE);
+    expect(closeFirst).toHaveBeenCalledTimes(1);
+  });
+
+  it('measures on press and only measures a click after an outside press', () => {
+    const { el } = create();
+    const close = setup(el);
+    const measure = vi.spyOn(el, 'getBoundingClientRect');
+    fire(el, 'mousedown', INSIDE);
+    fire(el, 'click', OUTSIDE);
+    expect(measure).toHaveBeenCalledTimes(1);
+    fire(el, 'mousedown', OUTSIDE);
+    // Use the current geometry at release, rather than retaining press geometry.
+    measure.mockReturnValue(new DOMRect(0, 0, 30, 30));
+    fire(el, 'click', OUTSIDE);
+    expect(measure).toHaveBeenCalledTimes(3);
+    expect(close).not.toHaveBeenCalled();
+  });
+});

@@ -27,8 +27,9 @@ pub const TASK_RESULT_CHECKPOINT_GUARD_CONTRACT: &str = "tofu.task-results.check
 pub const TASK_RESULT_CACHE_SETTINGS_CONTRACT: &str =
     "tofu.task-results.checkpoint.cache-settings/v1";
 pub const MAX_TASK_RESULT_CACHE_FACT: u64 = 2147483647;
-pub const ACTIVE_LOG_MAX_BYTES: u64 = 67108864;
+pub const ACTIVE_LOG_CHECKPOINT_BYTES: u64 = 67108864;
 pub const ACTIVE_LOG_ROTATE_BYTES: u64 = 62914560;
+pub const WAL_RECOVERY_READ_BUFFER_BYTES: usize = 131072;
 pub const MAX_CHECKPOINT_MATERIALIZE_BATCH_BYTES: u64 = 8388608;
 pub const HISTORY_PREPARATION_TARGET_BYTES: usize = 262144;
 pub const MAX_HISTORY_PREPARATION_BYTES: usize = 4194304;
@@ -90,16 +91,14 @@ pub const RESOURCE_GATE_REFERENCE_PEAK_RSS_BYTES: u64 = 536870912;
 pub const RESOURCE_GATE_REFERENCE_RETAINED_BYTES: u64 = 1073741824;
 pub const RESOURCE_GATE_REFERENCE_COMMIT_MEAN_MICROS: u64 = 5000;
 pub const RESOURCE_GATE_REFERENCE_TOTAL_MICROS: u64 = 300000000;
-pub const MAX_BLOCK_PAYLOAD_CACHE_ENTRIES: usize = 65536;
-pub const MAX_BLOCK_PAYLOAD_CACHE_RECENCY_RECORDS: usize = 131072;
+pub const BLOCK_PAYLOAD_CACHE_ENTRY_OVERHEAD_BYTES: usize = 256;
 pub const MAX_RECOVERY_PACKED_LOCATIONS: usize = 65536;
 pub const PAYLOAD_SEGMENT_CACHE_BYTES: usize = 67108864;
-pub const PAYLOAD_SEGMENT_MEMBERSHIP_BUDGET_DIVISOR: usize = 4;
 pub const MAX_PAYLOAD_SEGMENT_CACHE_SEGMENTS: usize = 4096;
 pub const MAX_PAYLOAD_SEGMENT_CACHE_RECENCY_RECORDS: usize = 8192;
 pub const PAYLOAD_SEGMENT_FILTER_BITS_PER_BLOCK: usize = 16;
 pub const MIN_PAYLOAD_SEGMENT_FILTER_BITS: usize = 64;
-pub const PAYLOAD_SEGMENT_FILTER_HASH_ROUNDS: usize = 2;
+pub const PAYLOAD_SEGMENT_FILTER_HASH_ROUNDS: usize = 4;
 pub const MAX_PAYLOAD_SEGMENT_FILTER_BYTES: usize = 131072;
 pub const MAX_AUTHORITY_GC_SESSION_CALLS: u32 = 4096;
 pub const MAX_AUTHORITY_GC_OPERATOR_MILLISECONDS: u64 = 600000;
@@ -109,7 +108,6 @@ pub const MAX_AUTHORITY_GC_TEMPORARY_BYTES: u64 = 1073741824;
 pub const AUTHORITY_GC_TEMPORARY_FREE_SPACE_PERCENT: u64 = 2;
 pub const LEAN_AUTHORITY_GC_TEMPORARY_BYTES: u64 = 67108864;
 pub const MAX_AUTHORITY_GC_BLOCKS_PER_ROUND: usize = 65536;
-pub const MAX_AUTHORITY_GC_PHYSICAL_BLOCKS: usize = 20000000;
 pub const AUTHORITY_GC_RPC_PHYSICAL_BLOCKS_PER_REQUESTED_MILLISECOND: usize = 256;
 pub const MAX_AUTHORITY_GC_TEMPORARY_BLOCK_FILES_REMOVED: usize = 1;
 pub const MAX_AUTHORITY_GC_PAYLOAD_SEGMENT_FILES_SCANNED: usize = 4163;
@@ -243,6 +241,8 @@ pub const MAX_SWARM_AGENT_ID_CHARACTERS: usize = 512;
 pub const MAX_SWARM_OBJECTIVE_CHARACTERS: usize = 100000;
 pub const MAX_SWARM_AGENT_IDS_PER_DELIVERY: usize = 1000;
 pub const MAX_SWARM_ROUNDS_USED: u64 = 1000000;
+pub const SWARM_CHECKPOINT_MARKER_RESULT_FIELDS: &[&str] = &["actuals_complete", "checkpoint_phase", "completion_tokens", "cost_usd", "elapsed_seconds", "prompt_tokens", "rounds_used", "total_tokens"];
+pub const MAX_SWARM_CHECKPOINT_MARKER_TEXT_CHARACTERS: usize = 64;
 pub const INTEGRATION_WORKSPACE_NAMESPACE: &str = "integration_workspace_documents";
 pub const INTEGRATION_NATURAL_CLAIM_NAMESPACE: &str = "integration_workspace_natural_claims";
 pub const INTEGRATION_ROW_LOCATOR_NAMESPACE: &str = "integration_workspace_row_locators";
@@ -477,6 +477,8 @@ pub const RAW_ARCHIVE_TASK_ROUND_INDEX_NAMESPACE: &str = "raw_archives_by_task_r
 pub const RAW_ARCHIVE_ATTEMPT_INDEX_NAMESPACE: &str = "raw_archives_by_attempt_created";
 pub const RAW_ARCHIVE_CONVERSATION_INDEX_NAMESPACE: &str = "raw_archives_by_conversation_created";
 pub const RAW_ARCHIVE_CONVERSATION_STATS_NAMESPACE: &str = "raw_archive_conversation_stats";
+pub const RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE: &str = "raw_archives_by_owner_created";
+pub const RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE: &str = "raw_archive_owner_age_backfill";
 pub const MAX_RAW_ARCHIVE_STORED_BYTES: usize = 16777216;
 pub const MAX_RAW_ARCHIVE_DOCUMENT_BYTES: usize = 25165824;
 pub const MAX_RAW_ARCHIVE_DECODED_PART_BYTES: usize = 67108864;
@@ -487,6 +489,8 @@ pub const MAX_RAW_ARCHIVES_PER_CONVERSATION: usize = 1792;
 pub const MAX_RAW_ARCHIVE_SUMMARY_BYTES: usize = 65536;
 pub const MAX_RAW_ARCHIVE_SUMMARY_KEYS: usize = 32;
 pub const MAX_RAW_ARCHIVE_LIST_ROWS: usize = 64;
+pub const MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT: usize = 64;
+pub const MAX_RAW_ARCHIVE_AGE_BACKFILL_ROWS_PER_PUT: usize = 512;
 pub const RAW_ARCHIVE_FREE_SPACE_WIRE_MAX_BYTES: u64 = 1000000000000000;
 pub const RESEARCH_ARTIFACT_DOCUMENT_NAMESPACE: &str = "research_artifact_documents";
 pub const RESEARCH_ARTIFACT_STATE_NAMESPACE: &str = "research_artifact_state";
@@ -659,6 +663,7 @@ pub const MAX_TIMING_TRACE_CLIENT_OBSERVATIONS: usize = 64;
 pub const MAX_TIMING_TRACE_PERSISTED_BYTES: usize = 98304;
 pub const MAX_TIMING_TRACE_COUNTER: u64 = 2147483647;
 pub const TURN_PROJECTION_HEAD_NAMESPACE: &str = "turn_projection_heads";
+pub const TURN_METADATA_SUMMARY_NAMESPACE: &str = "turn_metadata_summaries";
 pub const MAX_TURN_PROJECTION_INLINE_LIVE_BYTES: usize = 65536;
 pub const MAX_TURN_PROJECTION_HEAD_PATCHES: usize = 64;
 pub const MAX_TURN_PROJECTION_TEXT_PAGE_BYTES: usize = 16384;
@@ -714,6 +719,7 @@ pub static EXECUTABLE_STORAGE_OPERATIONS: &[&str] = &[
     "billing.ledger.find",
     "billing.ledger.list",
     "billing.ledger.recompute",
+    "billing.payment.bind",
     "billing.payment.find",
     "billing.payment.list",
     "billing.payment.record",
@@ -780,6 +786,7 @@ pub static EXECUTABLE_STORAGE_OPERATIONS: &[&str] = &[
     "integration.event.record",
     "integration.status",
     "integration.workspace.claim_next",
+    "integration.workspace.delivery_action_page",
     "integration.workspace.delivery_page",
     "integration.workspace.discard",
     "integration.workspace.get",
@@ -979,8 +986,13 @@ pub static EXECUTABLE_STORAGE_OPERATIONS: &[&str] = &[
     "scheduler.task.record_result",
     "scheduler.task.settle_execution",
     "scheduler.task.update",
+    "swarm.agent.append",
+    "swarm.agent.checkpoint.mark",
     "swarm.agent.save",
+    "swarm.agent.state.get",
+    "swarm.agents.acknowledge_results",
     "swarm.agents.mark_delivered",
+    "swarm.agents.page",
     "swarm.resumable.list",
     "swarm.session.delete",
     "swarm.session.get",
@@ -1037,6 +1049,7 @@ pub static EXECUTABLE_STORAGE_OPERATIONS: &[&str] = &[
     "turn.create_pair",
     "turn.delete",
     "turn.event.record",
+    "turn.event.record_batch",
     "turn.events.list",
     "turn.events.prune",
     "turn.exists",
@@ -1061,6 +1074,7 @@ pub static EXECUTABLE_STORAGE_OPERATIONS: &[&str] = &[
     "turn.timing_trace.get",
     "turn.timing_trace.list",
     "turn.visible.sync",
+    "worker_job.claim_horizon",
     "worker_job.claim_next",
     "worker_job.claim_state",
     "worker_job.complete",

@@ -17,7 +17,7 @@ from lib.log import get_logger
 _MODULE_LOG = get_logger(__name__)
 
 
-def _shutdown_loaded_module(module_name: str, close_name: str) -> None:
+def _shutdown_loaded_module(module_name: str, close_name: str, **kwargs: Any) -> None:
     """Join an optional owner's in-flight import on the shutdown worker."""
     if module_name not in sys.modules:
         return
@@ -25,7 +25,50 @@ def _shutdown_loaded_module(module_name: str, close_name: str) -> None:
     # sys.modules publishes a module before its body finishes. Normal import
     # acquires the existing import lock; direct attribute access does not.
     module = importlib.import_module(module_name)
-    getattr(module, close_name)()
+    getattr(module, close_name)(**kwargs)
+
+
+async def _stop_independent_producers(log: logging.Logger) -> None:
+    """Join independent producer loops together, before retiring consumers.
+
+    Each owner retains its existing stop deadline and error policy. Optional
+    owners stay unloaded; a partial import joins through the normal import lock.
+    Storage, event delivery, HTTP and automation remain live until all finish.
+    """
+    owners = (
+        ('lib.swarm.integration', 'stop_swarm_cleanup_timer', 'swarm cleanup timer', 2.0),
+        ('lib.swarm.integration', 'stop_swarm_output_cleanup', 'swarm output cleanup', 2.0),
+        ('lib.netpath', 'stop_prober', 'netpath prober', None),
+        ('lib.server.server_background_services', 'stop_lan_discovery_responder', 'LAN discovery responder', 2.0),
+        ('lib.llm_dispatch.health_local', 'stop_local_health_checker', 'local-health checker', 2.0),
+        ('lib.fs_keepalive', 'stop_fs_keepalive', 'filesystem keepalive', 2.0),
+        ('lib.tasks_pkg.manager._presence_keepalive', 'stop_keepalive', 'presence keepalive', 2.0),
+        ('lib.presence', 'stop_sweeper', 'presence sweeper', 2.0),
+        ('lib.integration_control', 'stop_worker', 'integration worker', 2.0),
+    )
+
+    async def stop(module, function, label, timeout):
+        try:
+            options = {} if timeout is None else {'timeout': timeout}
+            await asyncio.to_thread(_shutdown_loaded_module, module, function, **options)
+        except Exception as exc:
+            log.warning('[Server] %s stop failed: %s', label, exc)
+
+    # Cancelling to_thread only abandons its awaiter; the physical cleanup
+    # keeps running. Preserve its join before cancellation can retire the loop.
+    joining = asyncio.gather(*(stop(*owner) for owner in owners), return_exceptions=True)
+    interrupted = False
+    while not joining.done():
+        try:
+            await asyncio.shield(joining)
+        except asyncio.CancelledError:
+            interrupted = True
+    outcomes = joining.result()
+    if interrupted:
+        raise asyncio.CancelledError
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException):
+            raise outcome
 
 
 def graceful_shutdown_signals() -> list[int]:
@@ -288,56 +331,13 @@ async def shutdown_production_runtime(
     except Exception as exc:
         log.warning('[Server] search browser shutdown failed: %s', exc)
         raise  # Keep dependencies live if browser work is still physically owned.
+    await _stop_independent_producers(log)
     try:
-        from lib.swarm.integration import stop_swarm_cleanup_timer
-        await asyncio.to_thread(stop_swarm_cleanup_timer, timeout=2.0)
-    except Exception as exc:
-        log.warning('[Server] swarm cleanup timer stop failed: %s', exc)
-    try:
-        from lib.swarm.integration import stop_swarm_output_cleanup
-        await asyncio.to_thread(stop_swarm_output_cleanup, timeout=2.0)
-    except Exception as exc:
-        log.warning('[Server] swarm output cleanup stop failed: %s', exc)
-    try:
-        from lib.netpath import stop_prober
-        await asyncio.to_thread(stop_prober)
-    except Exception as exc:
-        log.warning('[Server] netpath prober stop failed: %s', exc)
-    try:
-        from lib.server.server_background_services import stop_lan_discovery_responder
-        await asyncio.to_thread(stop_lan_discovery_responder, timeout=2.0)
-    except Exception as exc:
-        log.warning('[Server] LAN discovery responder stop failed: %s', exc)
-    try:
-        from lib.cgroup_guard import stop_monitor
-        await asyncio.to_thread(stop_monitor, timeout=2.0)
+        if 'lib.cgroup_guard' in sys.modules:
+            from lib.cgroup_guard import stop_monitor
+            await asyncio.to_thread(stop_monitor, timeout=2.0)
     except Exception as exc:
         log.warning('[Server] cgroup monitor stop failed: %s', exc)
-    try:
-        from lib.llm_dispatch.health_local import stop_local_health_checker
-        await asyncio.to_thread(stop_local_health_checker, timeout=2.0)
-    except Exception as exc:
-        log.warning('[Server] local-health checker stop failed: %s', exc)
-    try:
-        from lib.fs_keepalive import stop_fs_keepalive
-        await asyncio.to_thread(stop_fs_keepalive, timeout=2.0)
-    except Exception as exc:
-        log.warning('[Server] filesystem keepalive stop failed: %s', exc)
-    try:
-        from lib.tasks_pkg.manager._presence_keepalive import stop_keepalive
-        await asyncio.to_thread(stop_keepalive, timeout=2.0)
-    except Exception as exc:
-        log.warning('[Server] presence keepalive stop failed: %s', exc)
-    try:
-        from lib.presence import stop_sweeper
-        await asyncio.to_thread(stop_sweeper, timeout=2.0)
-    except Exception as exc:
-        log.warning('[Server] presence sweeper stop failed: %s', exc)
-    try:
-        from lib.integration_control import stop_worker as stop_integration_worker
-        await asyncio.to_thread(stop_integration_worker, timeout=2.0)
-    except Exception as exc:
-        log.warning('[Server] integration worker stop failed: %s', exc)
     if app is not None:
         try:
             automation_runtime = sys.modules.get('lib.automations.runtime')
@@ -350,29 +350,40 @@ async def shutdown_production_runtime(
             raise
 
         try:
-            from routes import stop_registered_background_services
-            route_stop_started = time.monotonic()
+            from lib.server.server_background_services import (
+                stop_registered_background_services,
+            )
+            service_stop_started = time.monotonic()
             await asyncio.wait_for(
                 asyncio.to_thread(
                     stop_registered_background_services, app, timeout=2.0),
                 timeout=10.0,
             )
-            route_stop_elapsed = time.monotonic() - route_stop_started
-            log.info('[Server] route background services stop took %.1fs',
-                     route_stop_elapsed)
-            if route_stop_elapsed >= 0.5:
+            if app.extensions.get('tofu_registered_background_services'):
+                raise RuntimeError('Process background services have not quiesced')
+            service_stop_elapsed = time.monotonic() - service_stop_started
+            log.info('[Server] process background services stop took %.1fs',
+                     service_stop_elapsed)
+            if service_stop_elapsed >= 0.5:
                 _shutdown_timing_to_stderr(
-                    f'route background services stop took {route_stop_elapsed:.1f}s')
+                    f'process background services stop took {service_stop_elapsed:.1f}s')
         except TimeoutError:
-            log.warning('[Server] route background shutdown exceeded 10s')
-            _shutdown_timing_to_stderr('route background services stop exceeded 10s')
+            log.warning('[Server] process background shutdown exceeded 10s')
+            _shutdown_timing_to_stderr('process background services stop exceeded 10s')
+            raise
         except Exception as exc:
-            log.warning('[Server] route background shutdown failed: %s', exc)
+            log.warning('[Server] process background shutdown failed: %s', exc)
+            raise  # A scheduler/bootstrap writer still owns its storage context.
     try:
         from lib.storage.warmup import stop_keep_warm
         await asyncio.to_thread(stop_keep_warm, timeout=2.0)
     except Exception as exc:
         log.warning('[Server] storage warm-up shutdown failed: %s', exc)
+    try:
+        from lib.storage.mcp_declarations import stop_legacy_slot_compaction
+        await asyncio.to_thread(stop_legacy_slot_compaction, timeout=2.0)
+    except Exception as exc:
+        log.warning('[Server] MCP declaration compaction shutdown failed: %s', exc)
     try:
         from lib.pricing import stop_pricing_refresh
         await asyncio.to_thread(stop_pricing_refresh, timeout=2.0)
@@ -416,6 +427,20 @@ async def shutdown_production_runtime(
             await asyncio.to_thread(runtime_close)
     except Exception as exc:
         log.warning('[Server] runtime-state stop failed: %s', exc)
+    # Key-health and per-key API usage counters are coalesced in memory.
+    # Persist each once every dispatch producer and client pool has stopped,
+    # independently so one failed flush cannot skip the other; an unused
+    # owner stays unloaded.
+    try:
+        await asyncio.to_thread(
+            _shutdown_loaded_module, 'lib.key_stats', 'shutdown_key_stats')
+    except Exception as exc:
+        log.warning('[Server] key-stats flush failed: %s', exc)
+    try:
+        await asyncio.to_thread(
+            _shutdown_loaded_module, 'lib.usage_tracker', 'flush')
+    except Exception as exc:
+        log.warning('[Server] usage-counter flush failed: %s', exc)
 
     try:
         from lib.tasks_pkg.event_log import (

@@ -1,0 +1,110 @@
+<!-- Source: frontend/src/settings-panels/knowledge.html. Static delivery is generated; edit this source only. -->
+<div class="settings-tab-panel" id="settingsTab_knowledge">
+  <div class="kb-overlay" id="knowledgeModal" role="region" aria-labelledby="knowledgeTitle">
+    <section class="kb-workbench" data-has-docs="false">
+      <header class="kb-header">
+        <div class="kb-heading">
+          <span class="kb-heading-icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h7M9 11h7M9 15h4"/></svg>
+          </span>
+          <div>
+            <div class="kb-eyebrow" data-i18n="knowledge.localPrivate">LOCAL · PRIVATE</div>
+            <h2 id="knowledgeTitle" data-i18n="knowledge.title">本地知识库</h2>
+            <p data-i18n="knowledge.workspaceIntro">集中管理长期资料，检索结果只来自你在这台服务器上建立的本地索引。</p>
+          </div>
+        </div>
+        <div class="kb-header-actions">
+          <div class="kb-access-copy">
+            <span class="kb-access-title" data-i18n="knowledge.modelAccess">允许模型检索</span>
+            <span class="kb-access-hint" id="knowledgeAccessHint" data-i18n="knowledge.accessEmpty">添加资料后即可使用</span>
+          </div>
+          <button class="kb-switch" id="knowledgeEnabled" type="button" role="switch" aria-checked="false" data-tofu-action="_knowledgeToggle()" data-i18n-title="knowledge.toggleTitle" title="启用或停用本地知识检索"><span></span></button>
+        </div>
+      </header>
+
+      <div class="kb-stats" id="knowledgeStats" aria-live="polite" data-empty="true">
+        <span class="kb-stats-text"></span>
+      </div>
+
+      <div class="kb-body">
+        <main class="kb-library">
+          <div class="kb-section-head">
+            <div>
+              <h3 data-i18n="knowledge.library">资料库</h3>
+              <p id="knowledgeFormatHint" data-i18n="knowledge.formatHint">支持 PDF、Office、OpenDocument、EPUB、邮件和常见文本格式。</p>
+            </div>
+            <button class="kb-primary-btn" id="knowledgeUploadBtn" type="button" data-tofu-action="document.getElementById('knowledgeFileInput').click()">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 8l5-5 5 5"/><path d="M5 21h14a2 2 0 0 0 2-2v-4M3 15v4a2 2 0 0 0 2 2"/></svg>
+              <span data-i18n="knowledge.upload">添加资料</span>
+            </button>
+            <input id="knowledgeFileInput" type="file" multiple hidden data-tofu-action-change="_knowledgeUpload(this.files);this.value=''">
+          </div>
+
+          <div class="kb-dropzone" id="knowledgeDropzone" tabindex="0" role="button" data-tofu-action="document.getElementById('knowledgeFileInput').click()" data-tofu-action-keydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}" data-tofu-action-dragenter="_knowledgeDrag(event,true)" data-tofu-action-dragover="_knowledgeDrag(event,true)" data-tofu-action-dragleave="_knowledgeDrag(event,false)" data-tofu-action-drop="_knowledgeDrop(event)">
+            <span class="kb-drop-icon">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M8 8l4-4 4 4"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>
+            </span>
+            <span><strong data-i18n="knowledge.dropTitle">拖放文件到这里</strong><small data-i18n="knowledge.dropHint">也可以点击选择；自动识别真实格式，不依赖文件后缀</small></span>
+          </div>
+
+          <div class="kb-upload-report" id="knowledgeUploadReport" aria-live="polite"></div>
+          <div class="kb-catalog-toolbar">
+            <form class="kb-catalog-search" id="knowledgeCatalogForm" data-tofu-action-submit="_knowledgeApplyCatalog(event)" role="search">
+              <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+              <input id="knowledgeCatalogQuery" type="search" maxlength="200" autocomplete="off" data-tofu-action-input="_knowledgeDebounceCatalog()" data-i18n-placeholder="knowledge.catalogSearchPlaceholder" placeholder="按文件名筛选资料">
+              <button class="kb-catalog-clear" id="knowledgeCatalogClear" type="button" data-tofu-action="_knowledgeClearCatalog()" data-i18n-title="knowledge.clearFilter" title="清除筛选" aria-label="清除筛选">×</button>
+            </form>
+            <label class="kb-sort-field">
+              <span data-i18n="knowledge.sortLabel">排序</span>
+              <select id="knowledgeCatalogSort" data-tofu-action-change="_knowledgeSetSort(this.value)">
+                <option value="updated_desc" data-i18n="knowledge.sortUpdated">最近更新</option>
+                <option value="created_desc" data-i18n="knowledge.sortCreated">最近添加</option>
+                <option value="name_asc" data-i18n="knowledge.sortName">文件名</option>
+                <option value="size_desc" data-i18n="knowledge.sortSize">文件大小</option>
+              </select>
+            </label>
+          </div>
+          <div class="kb-category-tabs" id="knowledgeCategories" role="toolbar" aria-label="文件类型"></div>
+          <div class="kb-catalog-summary" id="knowledgeCatalogSummary" aria-live="polite"></div>
+          <div class="kb-doc-list" id="knowledgeDocs" aria-live="polite">
+            <div class="kb-loading"><span class="kb-spinner"></span><span data-i18n="knowledge.loading">正在读取本地索引…</span></div>
+          </div>
+          <nav class="kb-pagination" id="knowledgePagination" aria-label="资料库分页"></nav>
+        </main>
+
+        <aside class="kb-search-panel">
+          <div class="kb-search-head">
+            <h3 data-i18n="knowledge.testSearch">测试检索</h3>
+            <p data-i18n="knowledge.testSearchHint">先确认能找到正确证据，再允许模型使用。</p>
+          </div>
+          <form class="kb-search-form" data-tofu-action-submit="_knowledgeSearch(event)">
+            <label for="knowledgeSearchInput" data-i18n="knowledge.searchLabel">问题、术语或精确值</label>
+            <div class="kb-search-row">
+              <input id="knowledgeSearchInput" type="search" maxlength="1000" autocomplete="off" data-i18n-placeholder="knowledge.searchPlaceholder" placeholder="例如：差旅报销需要几天内提交？">
+              <button id="knowledgeSearchBtn" type="submit" data-i18n="knowledge.search">检索</button>
+            </div>
+          </form>
+          <div class="kb-search-results" id="knowledgeSearchResults" aria-live="polite">
+            <div class="kb-search-empty">
+              <span>⌕</span>
+              <p data-i18n="knowledge.searchEmpty">检索结果会在这里显示来源、章节和原文片段。</p>
+            </div>
+          </div>
+          <div class="kb-panel-foot">
+            <div class="kb-vision-row">
+              <div class="kb-vision-copy">
+                <strong data-i18n="knowledge.visualTitle">视觉内容理解</strong>
+                <span id="knowledgeVisualHint" data-i18n="knowledge.visualOffHint">默认关闭；图片不会发送给模型提供商。</span>
+              </div>
+              <button class="kb-switch" id="knowledgeVisualEnrichment" type="button" role="switch" aria-checked="false" data-tofu-action="_knowledgeToggleVisual()" data-i18n-title="knowledge.visualToggleTitle" title="允许视觉模型生成可检索图片描述"><span></span></button>
+            </div>
+            <p class="kb-privacy-note">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+              <span data-i18n="knowledge.privacyNote">原文件、图片和索引保存在本地。只有明确开启“视觉内容理解”时，图片才会发送给你配置的视觉模型提供商。</span>
+            </p>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </div>
+</div>

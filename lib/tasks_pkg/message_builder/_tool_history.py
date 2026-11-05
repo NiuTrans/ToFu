@@ -16,6 +16,7 @@ from lib.tool_results.tool_round_replay import normalize_replay_tool_arguments
 from lib.error_envelope import make_envelope
 from lib.llm.llm_errors import RequestScopedError
 from lib.model_info import (
+    model_requires_reasoning_content_replay,
     model_requires_thinking_signature_replay,
     model_requires_thought_signature_on_tool_calls,
 )
@@ -90,7 +91,9 @@ def _tool_history_json_text(value) -> str | None:
 #                       |                 |   thinking; else API 400 |  turn)
 #   Gemini (openai-     | required        | extra_content.google.    | tolerated
 #   compat proxy)       |                 |   thought_signature on   | (best-effort)
-#   OpenAI / DeepSeek / | standard        | NOT re-accepted          | tolerated
+#   DeepSeek           | required        | unsigned reasoning text  | tolerated
+#                       |                 | must be replayed         | (best-effort)
+#   OpenAI /           | standard        | NOT re-accepted          | tolerated
 #   Qwen / GLM / Kimi / | tool_calls +    |   (reasoning_content     | (best-effort
 #   Doubao / MiniMax    | tool role msgs  |   stripped server-side)  |  — the model
 #   ERNIE / LongCat     |                 |                          |  may or may
@@ -174,6 +177,7 @@ def prepare_tool_history(cfg, task, model) -> PreparedContinueToolHistory:
 
     # Per-provider capability gates — None→Python-bool so log output is clean.
     _wants_thinking_block = model_requires_thinking_signature_replay(model)
+    _wants_reasoning = model_requires_reasoning_content_replay(model)
     _wants_thought_sig = model_requires_thought_signature_on_tool_calls(model)
 
     injected_msgs = []
@@ -388,6 +392,11 @@ def prepare_tool_history(cfg, task, model) -> PreparedContinueToolHistory:
             # `signature` is the field name the Anthropic API expects on
             # the thinking block — keep the wire name stable for the proxy.
             clean_assistant['thinking_signature'] = th_sig
+            _thinking_blocks_attached += 1
+        elif th_text and _wants_reasoning:
+            # DeepSeek needs the exact text without a Claude signature on
+            # either Chat Completions or its Messages-compatible route.
+            clean_assistant['reasoning_content'] = th_text
             _thinking_blocks_attached += 1
         elif th_text and not _wants_thinking_block:
             logger.debug(

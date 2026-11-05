@@ -6,7 +6,7 @@ export function createTasksEndpoints(ports: EndpointPorts) {
     convWire: (convId: string) =>
       get(`/api/v4/tasks/conv-wire/${encodeURIComponent(convId)}`,
           { onError: 'null' }),
-    getRequestPayload: (taskId: string, roundNum: number, turn: number, kind: string, fold: boolean) =>
+    getRequestPayload: (taskId: string, roundNum: number, turn?: string, kind?: string, fold?: boolean) =>
       get(`/api/v4/tasks/${encodeURIComponent(taskId)}/requests/${encodeURIComponent(roundNum)}`,
           { query: { ...(turn ? { turn } : {}), ...(kind ? { kind } : {}),
                      ...(fold ? { fold: 1 } : {}) } }),

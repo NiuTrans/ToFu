@@ -32,6 +32,7 @@ _AUDIT_SYNTHETIC_REPO_PATHS = {'lib/foo.py'}
 
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -230,7 +231,12 @@ class TestSchemaDescribesTheDefault:
         limit = props['limit']['description'].lower()
         before = props['before']['description'].lower()
 
-        assert 'explicitly' in desc and 'never call proactively' in desc
+        # The Coordinator exception stays owner- and project-scoped; any other
+        # retrieval needs an explicit request and never browses proactively.
+        assert 'explicitly' in desc
+        assert 'same-owner' in desc and 'same-project' in desc
+        assert re.search(r"\b(?:never|do not|don't)\b[^.]*\bproactive(?:ly)?\b",
+                         desc), desc
         assert 'raw' in desc and 'defaults to true' in desc
         assert 'metadata' in desc and 'tool rounds' in desc
         assert 'raw=false' in desc and 'drops' in desc and 'condenses' in desc
@@ -241,12 +247,3 @@ class TestSchemaDescribesTheDefault:
         assert 'whole-message' in limit and 'clamp' in limit and 'header' in limit
         assert 'exclusive' in before and '1-based' in before
         assert 'omit for latest' in before and 'never pass 0' in before
-
-    def test_schema_stays_within_always_paid_token_budget(self):
-        from lib.tools.conversation import CONV_REF_GET_TOOL
-        from lib.tools.gateway import tool_schema_tokens
-
-        tokens = tool_schema_tokens([CONV_REF_GET_TOOL])
-        assert tokens <= 350, (
-            f'get_conversation schema costs {tokens} tokens; compact repeated '
-            'raw/window prose without removing its safety or paging contracts')

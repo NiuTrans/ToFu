@@ -1,0 +1,15 @@
+{
+  "responsibility": "Single source of truth for selectable UI languages. The picker follows this order. Source locales are authored by developers and share one key set; derived locales are translated from both sources by scripts/translate_i18n_locales.py and completed from the fallback locale at delivery time.",
+  "default": "zh",
+  "fallback": "en",
+  "sources": ["zh", "en"],
+  "languages": [
+    { "code": "zh", "tag": "zh-CN", "name": "中文", "englishName": "Simplified Chinese" },
+    { "code": "en", "tag": "en", "name": "English", "englishName": "English" },
+    { "code": "ja", "tag": "ja", "name": "日本語", "englishName": "Japanese" },
+    { "code": "ko", "tag": "ko", "name": "한국어", "englishName": "Korean" },
+    { "code": "fr", "tag": "fr", "name": "Français", "englishName": "French" },
+    { "code": "de", "tag": "de", "name": "Deutsch", "englishName": "German" },
+    { "code": "ru", "tag": "ru", "name": "Русский", "englishName": "Russian" }
+  ]
+}

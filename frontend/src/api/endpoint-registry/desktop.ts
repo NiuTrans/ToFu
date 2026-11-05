@@ -1,5 +1,6 @@
 /** desktop endpoint facade. Owns wire paths and projections; transport/retry policy arrives through explicit ports. */
 import type { EndpointPorts, JsonObject } from './contracts';
+import type {RequestOptions} from '../transport';
 export function createDesktopEndpoints(ports: EndpointPorts) {
   const { request, get, post, del } = ports;
   const desktop = {
@@ -9,13 +10,20 @@ export function createDesktopEndpoints(ports: EndpointPorts) {
      * an Apple Silicon Mac reports "Intel Mac OS X" in its UA, so without this
      * the server must offer BOTH DMGs rather than guess wrong. Omit it and the
      * ambiguous (correct, two-choice) answer comes back. */
-    status:      (arch: string) => get('/api/v4/desktop/status',
-                              { onError: 'null', query: arch ? { arch: arch } : {} }),
+    status: (arch = '', options: Pick<RequestOptions, 'signal'> = {}) =>
+      get('/api/v4/desktop/status', {onError: 'null', query: arch ? {arch} : {}, ...options}),
     devices:     () => get('/api/v4/desktop/devices', {
       onError: 'null', coalesce: true
     }),
     mintToken:   (name: string) => post('/api/v4/desktop/token', { name: name || '' }),
     revokeToken: (keyId: string) => del(`/api/v4/desktop/token/${encodeURIComponent(keyId)}`),
+    /* Conversations waiting for one of the owner's devices (await_device);
+     * wire shapes: contracts/device_waits_v1.schema.json. */
+    deviceWaits: (cursor = '') => get('/api/v4/desktop/device-waits', {
+      onError: 'null', query: cursor ? { cursor } : {},
+    }),
+    cancelDeviceWait: (waitId: string) => post(
+      `/api/v4/desktop/device-waits/${encodeURIComponent(waitId)}/cancel`, {}),
     /* The diagnostics inbox (2026-08-06): the agent's「复制诊断信息」bundle,
      * pasted in the Local Control panel, stored server-side for debugging. */
     submitDiag:  (text: string) => post('/api/v4/desktop/client-diag', { text: text }),

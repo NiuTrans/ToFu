@@ -2,7 +2,7 @@
 /** Minimal consultation safety specs: no paid calls, explicit human admission only. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoordinationBinding } from '../api/project-coordination.generated';
-import type { ProjectDispatchRequest, ProjectDispatchView } from '../api/project-dispatch.generated';
+import type { ProjectDispatchHistoryRow, ProjectDispatchRequest, ProjectDispatchView } from '../api/project-dispatch.generated';
 import type { ProjectDispatchPorts } from './project-dispatch';
 import { createProjectEndpoints } from '../api/endpoint-registry/project';
 import type { EndpointPorts } from '../api/endpoint-registry/contracts';
@@ -203,9 +203,9 @@ describe('assignment receipt actions', () => {
     await api.coordinationAssignments('/project'); await api.grantAssignment(request, 'same-key');
 
     await api.coordinationAssignments('/project', 'same-key');
-    expect(get).toHaveBeenCalledWith('/api/v4/project/coordination/assignments', { query: { path: '/project', commandId: 'same-key' }, onError: 'throw' });
+    expect(get).toHaveBeenCalledWith('/api/v4/project/coordination/assignments', expect.objectContaining({ query: { path: '/project', commandId: 'same-key' }, onError: 'throw' }));
     await api.revokeAssignment({ projectPath: '/project', assignmentId: 'assignment', expectedRevision: 3 });
-    expect(get).toHaveBeenCalledWith('/api/v4/project/coordination/assignments', { query: { path: '/project' }, onError: 'throw' });
+    expect(get).toHaveBeenCalledWith('/api/v4/project/coordination/assignments', expect.objectContaining({ query: { path: '/project' }, onError: 'throw' }));
     expect(post).toHaveBeenCalledWith('/api/v4/project/coordination/assignments', request, {
       headers: { 'Idempotency-Key': 'same-key' }, onError: 'throw' });
     expect(post).toHaveBeenCalledWith('/api/v4/project/coordination/assignments/revoke', {
@@ -296,7 +296,7 @@ describe('explicit bounded file work', () => {
       else if (changed === 'reworkOf') copy.reworkOf = { assignmentId: 'other', grantRevision: 2, resultRevision: 3 };
       else if (changed === 'mode') copy.profile!.mode = 'consult';
       else if (changed === 'tools') copy.profile!.tools = ['read_files'];
-      else if (changed === 'maxToolCalls') copy.profile!.maxToolCalls++;
+      else if (changed === 'maxToolCalls') copy.profile!.maxToolCalls = (copy.profile!.maxToolCalls ?? 0) + 1;
       else copy.profile![changed as 'readPaths' | 'writePaths'] = ['other'];
       return copy;
     };
@@ -400,6 +400,34 @@ describe('fresh rework and explicit publication', () => {
   });
 });
 
+
+// The contract's historyRequest fields; a history page omits every other request field.
+const HISTORY_REQUEST_FIELDS = ['projectPath', 'coordinatorId', 'recipientId', 'brief', 'profile', 'reworkOf', 'dependencies'] as const;
+const historyRow = (receipt: ProjectDispatchView): ProjectDispatchHistoryRow => ({ ...structuredClone(receipt),
+  request: Object.fromEntries(HISTORY_REQUEST_FIELDS.filter(name => name in receipt.request)
+    .map(name => [name, structuredClone(receipt.request[name])])) as ProjectDispatchHistoryRow['request'] });
+async function listedAndDrafted(receipt: ProjectDispatchHistoryRow) {
+  document.body.replaceChildren();
+  const { p } = setup(); p.list = vi.fn(async () => ({ olderCursor: null, newerCursor: null, assignments: [receipt] }));
+  await flushed(); button('projectDispatch.refresh').click(); await flushed();
+  const html = () => document.body.innerHTML.replace(/ui-field-control-\d+/g, 'ui-field-control');
+  const listed = html();
+  button('projectDispatch.prepareRework').click(); await flushed();
+  return { listed, drafted: html(), controls: ['brief', 'recipientId', 'mode', 'readPaths', 'writePaths', 'maxToolCalls',
+    'read_files', 'write_file', 'edit_file'].map(name => [name, control(name).value, control(name).checked]) };
+}
+describe('history list projection', () => {
+  it('rows render, pin dependencies and draft rework identically without the omitted request fields', async () => {
+    const receipt = fileResult(); receipt.review = { decision: 'rework', note: '', resultRevision: 11 };
+    receipt.request.dependencies = [{ assignmentId: 'old-dep', grantRevision: 2, resultRevision: 3 }];
+    const row = historyRow(receipt);
+    expect(Object.keys(row.request).sort()).toEqual(['brief', 'coordinatorId', 'dependencies', 'profile', 'projectPath', 'recipientId']);
+    const complete = await listedAndDrafted(receipt);
+    expect(complete.controls).toContainEqual(['brief', 'Fix src/task.ts', false]);
+    expect(complete.controls).toContainEqual(['edit_file', 'on', true]);
+    expect(await listedAndDrafted(row)).toEqual(complete);
+  });
+});
 
 const dependencyInput = (id: string) => document.querySelector<HTMLInputElement>(`[name=dependency][data-assignment-id="${id}"]`)!;
 function selectDependency(id: string, checked = true) {

@@ -1,0 +1,6 @@
+// Linux system SQLite binding. Apple builds use the SDK's SQLite3 module.
+module CSQLite [system] {
+    header "sqlite.h"
+    link "sqlite3"
+    export *
+}

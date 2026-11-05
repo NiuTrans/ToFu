@@ -232,12 +232,11 @@ def test_extension_reuses_cdp_and_inspects_without_running_getters():
         };
         const context = vm.createContext({
           chrome, console, crypto: webcrypto, navigator: {userAgent: 'Chrome/140'},
-          URL, AbortController, TextDecoder, Uint8Array,
+          URL, AbortController, TextEncoder, TextDecoder, Uint8Array,
           setTimeout, clearTimeout, fetch: async () => { throw new Error('unexpected fetch'); },
           atob: (v) => Buffer.from(v, 'base64').toString('binary'),
         });
-        vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), context,
-                        {filename: process.argv[1]});
+        require('./tests/support/browser_worker_loader.cjs').loadBrowserWorker(context, process.argv[1]);
         (async () => {
           const observed = await vm.runInContext(`Promise.all([
             executeCommand('devtools', {tabId: 7, action: 'console_read', observeMs: 50}),

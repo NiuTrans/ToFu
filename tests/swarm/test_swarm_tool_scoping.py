@@ -37,7 +37,7 @@ def _make_full_tool_list():
     }
     grep_stub = {
         "type": "function",
-        "function": {"name": "grep_search", "description": "...", "parameters": {}},
+        "function": {"name": "search_files", "description": "...", "parameters": {}},
     }
     fetch_stub = {
         "type": "function",
@@ -93,8 +93,96 @@ def test_coder_role_excludes_denylist_even_when_hint_empty_match():
     scoped = scope_tools_for_role('coder', full)
     names = set(_names(scoped))
     assert 'read_files' in names
-    assert 'grep_search' in names
+    assert 'search_files' in names
     assert names.isdisjoint(SUB_AGENT_DENYLIST)
+
+
+def test_explicit_allowlist_keeps_renamed_tool_without_widening():
+    """A spawn allowlist naming the retired ``grep_search`` still selects
+    ``search_files``, but only where the role scope already keeps it."""
+    from lib.swarm.protocol import SubTaskSpec
+    from lib.swarm.registry import scope_tools_for_spec
+
+    full = _make_full_tool_list()
+    coder = SubTaskSpec(role='coder', objective='x',
+                        tools=['read_files', 'grep_search'])
+    assert set(_names(scope_tools_for_spec(coder, full))) == {
+        'read_files', 'search_files'}
+    researcher = SubTaskSpec(role='researcher', objective='x',
+                             tools=['grep_search'])
+    assert _names(scope_tools_for_spec(researcher, full)) == []
+
+
+def _stub(name):
+    return {'type': 'function',
+            'function': {'name': name, 'description': '...', 'parameters': {}}}
+
+
+def test_explicit_run_command_allowlist_keeps_its_command_controls():
+    """Narrowing to run_command keeps a backgrounded command collectable and
+    stoppable; it never grants controls the role scope removed."""
+    from lib.swarm.protocol import SubTaskSpec
+    from lib.swarm.registry import scope_tools_for_spec
+
+    full = _make_full_tool_list() + [_stub('run_command'), _stub('poll'), _stub('kill')]
+    coder = SubTaskSpec(role='coder', objective='x', tools=['run_command'])
+    assert set(_names(scope_tools_for_spec(coder, full))) == {'run_command', 'poll', 'kill'}
+    reader = SubTaskSpec(role='coder', objective='x', tools=['read_files'])
+    assert _names(scope_tools_for_spec(reader, full)) == ['read_files']
+    researcher = SubTaskSpec(role='researcher', objective='x', tools=['run_command'])
+    assert _names(scope_tools_for_spec(researcher, full)) == []
+
+
+@pytest.mark.parametrize('role,commands', [
+    ('coder', True), ('analyst', True), ('reviewer', True), ('general', True),
+    ('researcher', False), ('writer', False),
+])
+def test_worker_catalog_from_the_real_registry_carries_scoped_command_controls(role, commands):
+    """Registry catalog -> SubAgent role scope -> child tool assembly -> wire."""
+    from lib.swarm.agent import SubAgent
+    from lib.swarm.protocol import SubTaskSpec
+    from lib.tasks_pkg.child_invocation import create_child_invocation
+    from lib.tasks_pkg.manager import discard_task
+    from lib.tasks_pkg.orchestrator._tool_assembly_prep import assemble_round_tools
+    from lib.tools.gateway import preserve_background_wire_tools
+    from lib.tools.registry import ToolContext, assemble_tool_list
+
+    ctx = ToolContext(
+        cfg={}, task_id='worker-catalog', project_path='/workspace',
+        project_enabled=True, search_mode='off', search_enabled=False,
+        fetch_enabled=False, code_exec_enabled=False, browser_enabled=False,
+        desktop_enabled=False, enabled_plugins=set())
+    assemble_tool_list(ctx)
+    parent = {'id': 'coordinator-task', 'convId': 'coordinator-conv', '_userId': 7,
+              '_transientRuntime': True,
+              'config': {'memoryEnabled': False, 'searchMode': 'off'}}
+    agent = SubAgent(SubTaskSpec(role=role, objective='Run the suite'), parent_task=parent,
+                     all_tools=ctx.executable_tool_catalog, model='fixture-model')
+    controls = {'run_command', 'poll', 'kill'} & set(_names(agent.tools))
+    assert controls == ({'run_command', 'poll', 'kill'} if commands else set())
+    if not commands:
+        return
+    child = create_child_invocation(
+        parent, model='fixture-model', tools=agent.tools, objective='Run the suite',
+        event_sink=lambda event: None, abort_check=lambda: False)
+    try:
+        tools, _ = assemble_round_tools(dict(child['config']), child, {})
+        catalog = child['_executable_tool_catalog']
+        wire = preserve_background_wire_tools(tools, authority_catalog=catalog)
+        for surface in (catalog, wire):
+            functions = {tool['function']['name']: tool['function'] for tool in surface}
+            assert {'run_command', 'poll', 'kill'} <= set(functions)
+            poll, kill = functions['poll']['description'], functions['kill']['description']
+            assert 'background shell commands you started' in poll
+            assert 'swarm sub-agents' not in poll and 'other conversations' not in poll
+            assert 'a bg_* background command you started' in kill
+            assert 'swarm sub-agent' not in kill
+            background = functions['run_command']['parameters']['properties'][
+                'background']['description']
+            assert '`poll`' in background and '`kill`' in background
+            assert 'Nothing delivers its completion to this task automatically' in background
+    finally:
+        discard_task(child['id'])
 
 
 def test_browser_role_exposes_declared_download_without_privileged_tools():

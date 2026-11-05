@@ -51,20 +51,51 @@ def test_server_zero_config_executor_defaults_fit_personal_hosts(monkeypatch):
         'TOFU_AGENT_WORKERS', {}, logger) == 4
 
 
-def test_server_numeric_runtime_defaults_are_bounded_and_overridable(
-        monkeypatch):
+_NUMERIC_LIBRARY_THREADS = ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS',
+                            'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS')
+
+
+def _own_numeric_library_environment(monkeypatch):
+    """Start without library ceilings; undo restores each prior value.
+
+    The installer writes ``os.environ`` directly. ``delenv`` records nothing
+    for an absent name, so undo would keep the exported ceilings for every
+    later test on the worker; ``setenv`` records the absence first.
+    """
+    for name in _NUMERIC_LIBRARY_THREADS:
+        monkeypatch.setenv(name, '')
+        monkeypatch.delenv(name)
+
+
+@pytest.mark.parametrize('configured', [None, '', '0', '-3', 'bad', 'UNLIMITED'])
+def test_server_numeric_threads_default_unlimited_leaves_libraries_untouched(
+        monkeypatch, configured):
+    import runtime_guards
     import server
 
-    for name in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS',
-                 'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv('TOFU_NUMERIC_THREADS', '999')
-    assert server._install_numeric_thread_defaults() == 32
-    assert all(os.environ[name] == '32' for name in (
-        'OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS',
-        'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS'))
+    monkeypatch.setattr(runtime_guards, 'probe_system_resources',
+                        lambda *_args, **_kwargs: pytest.fail('numeric threads must not probe'))
+    _own_numeric_library_environment(monkeypatch)
+    monkeypatch.setenv('OMP_NUM_THREADS', '7')
+    if configured is None:
+        monkeypatch.delenv('TOFU_NUMERIC_THREADS', raising=False)
+    else:
+        monkeypatch.setenv('TOFU_NUMERIC_THREADS', str(
+            runtime_guards.UNLIMITED) if configured == 'UNLIMITED' else configured)
+    assert server._install_numeric_thread_defaults() == runtime_guards.UNLIMITED
+    assert os.environ['OMP_NUM_THREADS'] == '7'
+    assert not {'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+                'NUMEXPR_NUM_THREADS'} & set(os.environ)
 
-    # Inherited host settings cannot bypass Tofu's aggregate resource ceiling.
+
+def test_server_numeric_threads_explicit_operator_ceiling_is_honored(monkeypatch):
+    import server
+
+    _own_numeric_library_environment(monkeypatch)
+    monkeypatch.setenv('TOFU_NUMERIC_THREADS', '999')
+    assert server._install_numeric_thread_defaults() == 999
+    assert all(os.environ[name] == '999' for name in _NUMERIC_LIBRARY_THREADS)
+
     monkeypatch.setenv('OPENBLAS_NUM_THREADS', '7')
     monkeypatch.setenv('OMP_NUM_THREADS', '1')
     monkeypatch.setenv('TOFU_NUMERIC_THREADS', '2')
@@ -74,19 +105,32 @@ def test_server_numeric_runtime_defaults_are_bounded_and_overridable(
     assert os.environ['OMP_NUM_THREADS'] == '1'
 
 
-def test_every_server_child_launcher_installs_allocator_budget():
+def test_every_server_child_launcher_installs_allocator_budget(
+        monkeypatch, tmp_path):
     root = Path(__file__).parents[2]
     launchers = (
         root / 'server_manager.py',
         root / 'bootstrap_pkg' / 'launcher.py',
         root / 'desktop' / 'launcher.py',
-        root / 'supervisor.py',
         root / 'lib' / 'storage' / 'supervisor.py',
     )
     for launcher in launchers:
         source = launcher.read_text(encoding='utf-8')
         assert 'install_process_resource_defaults(' in source, launcher
-    assert 'MALLOC_ARENA_MAX=2' in (
+    # Supervisor-managed workers compose their environment through the one
+    # shared lifecycle helper, which must itself install the budget.
+    assert 'managed_worker_environment(' in (
+        root / 'supervisor.py').read_text(encoding='utf-8')
+    from server_manager import managed_worker_environment
+    monkeypatch.delenv('MALLOC_ARENA_MAX', raising=False)
+    monkeypatch.delenv('TOFU_MALLOC_ARENA_MAX', raising=False)
+    composed = managed_worker_environment(str(tmp_path), {}, {})
+    # The arena count is a fixed contract value, never probe-derived; the
+    # container image cannot run the launcher first, so it pins the same value.
+    from bootstrap_pkg.resource_policy_generated import RESOURCE_FALLBACKS
+    arenas = RESOURCE_FALLBACKS['personal']['TOFU_MALLOC_ARENA_MAX']
+    assert composed['MALLOC_ARENA_MAX'] == str(arenas)
+    assert f'MALLOC_ARENA_MAX={arenas} ' in (
         root / 'Dockerfile').read_text(encoding='utf-8')
     server_source = (root / 'server.py').read_text(encoding='utf-8')
     assert server_source.index('\n_load_early_resource_environment()\n') \

@@ -328,7 +328,6 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason='node not installed')
 def test_settled_timeline_renders_chip_at_anchor():
     out = _run_node(_L4_HARNESS, {'FN_SRC': _extract_timeline_fns()})
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
@@ -359,7 +358,6 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason='node not installed')
 def test_NC_settled_timeline_drops_chip_without_extraction():
     out = _run_node(_L4_NC_HARNESS, {'FN_SRC': _extract_timeline_fns()})
     assert 'PASS nc_chip_absent_without_extraction' in out, (

@@ -59,8 +59,9 @@ def manual_probe_bundle(
         raise ModelRoutingError(message, kind="provider_probe_invalid_target",
                                 field="targets")
 
-    if not isinstance(targets, list) or not 1 <= len(targets) <= 1024:
-        invalid("Select between 1 and 1024 request names to detect.")
+    # The startProviderProbeCells contract bounds the list at the HTTP boundary.
+    if not isinstance(targets, list) or not targets:
+        invalid("Select at least one request name to detect.")
     offerings = {row["offering_id"]: row for row in bundle["offerings"]}
     connections = {row["connection_id"]: row for row in bundle["connections"]}
     deployments = []
@@ -112,8 +113,9 @@ def matrix_probe_plan(
     Returns engine inputs plus explicit request_contexts (per wire) and
     credential_contexts (per column); these private contexts carry secrets and
     never appear in public probe snapshots.
-    Automatic callers skip disabled Offerings and Connections. Explicit manual
-    diagnostics include them without enabling, saving or granting anything.
+    All callers skip disabled Offerings and Connections. Explicit manual
+    diagnostics retain draft request names without enabling, saving or granting
+    anything.
     Every request name is independent of credential grants and historical probe
     evidence. Retired ``Deployment.enabled`` is ignored in both modes.
     ``api_keys[i]`` is the resolved plaintext key for column i (never leaves
@@ -186,7 +188,7 @@ def matrix_probe_plan(
             rows.append(wire_id)
     models: list[dict[str, Any]] = []
     for offering in bundle["offerings"]:
-        if not manual and not offering.get("enabled", True):
+        if not offering.get("enabled", True):
             continue
         root_id = str((offering.get("model") or {}).get("model_id")
                       or offering.get("pending_model_id") or "")

@@ -237,8 +237,8 @@ def test_staged_frontend_uses_canonical_graph_and_source_validation(tmp_path, mo
         vite_assets.I18N_CATALOG_DIGEST_FIELD: vite_assets._source_i18n_catalog_digest(),
         vite_assets.VITE_AUTHORING_DIGEST_FIELD: '0' * 64 if stale else vite_assets._source_vite_authoring_digest(),
     })
-    files = {'static/vite/manifest.json': json.dumps(manifest),
-             'static/vite/assets/main.js': '// main', 'static/vite/assets/admin.js': '// admin'}
+    files = {'static/vite/manifest.json': json.dumps(manifest)}
+    files.update({f'static/vite/assets/{name}.js': f'// {name}' for name in vite_assets.VITE_ENTRIES})
     archive, checksum = _archive(tmp_path, files)
     if stale:
         with pytest.raises(vite_assets.ViteAssetError, match='stale'):

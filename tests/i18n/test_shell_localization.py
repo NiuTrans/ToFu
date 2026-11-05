@@ -36,16 +36,38 @@ const { window, document, check, report } = setup({
     escapeHtml(value){return String(value ?? '');},
   },
 });
-global._conversationDisplayTitle = conversationDisplayTitle;
+const roles = {'globalRouter.entry':'总负责人', 'routerWatchdog.entry':'故障巡检',
+  'projectCoordination.coordinator':'项目负责人'};
+const translate = key => roles[key] || key;
+// The runtime prelude binds the catalog the same way.
+global._conversationDisplayTitle = (title, fallback) => conversationDisplayTitle(title, fallback, translate);
 global.renderConversationList = window.renderConversationList = () => {};
 check('sentinel title localized',
   conversationDisplayTitle('New Chat', '新对话') === '新对话');
 check('real title unchanged',
   conversationDisplayTitle('Release notes', '新对话') === 'Release notes');
+check('server role titles localized',
+  conversationDisplayTitle('Global Router', '新对话', translate) === '总负责人'
+  && conversationDisplayTitle('Watchdog', '新对话', translate) === '故障巡检'
+  && conversationDisplayTitle('Project coordinator', '新对话', translate) === '项目负责人');
+check('role titles keep their stored text before the catalog loads',
+  conversationDisplayTitle('Global Router', '新对话', key => key) === 'Global Router');
+check('only exact role titles are mapped',
+  conversationDisplayTitle('constructor', '新对话', translate) === 'constructor'
+  && conversationDisplayTitle('Global Router notes', '新对话', translate) === 'Global Router notes');
 check('today localized', formatConvTime(Date.now()).includes('今天'));
+const topbar = document.getElementById('topbarTitle');
 window.dispatchEvent(new window.CustomEvent('tofu:language-change'));
-check('active default topbar repainted',
-  document.getElementById('topbarTitle').textContent === '新对话');
+check('active default topbar repainted', topbar.textContent === '新对话');
+conversations.push({id:'conv-router', title:'Global Router'}, {id:'conv-real', title:'Release notes'});
+global.activeConvId = 'conv-router';
+topbar.textContent = 'Global Router';
+window.dispatchEvent(new window.CustomEvent('tofu:language-change'));
+check('active role topbar repainted', topbar.textContent === '总负责人');
+global.activeConvId = 'conv-real';
+topbar.textContent = 'Renamed while open';
+window.dispatchEvent(new window.CustomEvent('tofu:language-change'));
+check('ordinary topbar left to its own writers', topbar.textContent === 'Renamed while open');
 report();
 """
 
@@ -59,7 +81,7 @@ def test_default_conversation_title_and_date_are_presentation_localized():
         localization_bundle,
         _TITLE_HARNESS,
         extra_targets=[os.path.join(JS_DIR, 'ui', 'conversation_list.js')],
-        expect_pass=4,
+        expect_pass=9,
         label='shell localization',
     )
 

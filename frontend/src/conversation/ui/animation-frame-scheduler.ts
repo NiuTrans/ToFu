@@ -43,12 +43,38 @@ export function scheduleAnimationFrame(
   };
 }
 
+/** DOM work must settle even when native frames are withheld (hidden tabs or
+ * embedded hosts). This timer is not paint evidence: perception uses the
+ * frame-only adapter above and still requires a visible paint opportunity. */
+const MAX_RENDER_FRAME_WAIT_MS = 100;
+
 export function createAnimationFrameScheduler(
   host: AnimationFrameHost,
 ): ConversationRenderScheduler {
   return {
     schedule(render) {
-      return scheduleAnimationFrame(host, render);
+      let finished = false;
+      let cancelFrame: (() => void) | undefined;
+      let deadline: number | undefined;
+      const cancel = (): void => {
+        cancelFrame?.();
+        if (deadline !== undefined) {
+          const handle = deadline;
+          deadline = undefined;
+          try { host.clearTimeout(handle); }
+          catch { /* Cancellation failure cannot prevent or duplicate a commit. */ }
+        }
+      };
+      const run = (): void => {
+        if (finished) return;
+        finished = true;
+        cancel();
+        render();
+      };
+      cancelFrame = scheduleAnimationFrame(host, run);
+      if (finished) cancelFrame();
+      else deadline = host.setTimeout(run, MAX_RENDER_FRAME_WAIT_MS);
+      return () => { if (!finished) { finished = true; cancel(); } };
     },
   };
 }

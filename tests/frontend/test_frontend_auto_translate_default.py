@@ -100,24 +100,16 @@ console.log(out.join('\n'));
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_conv_auto_translate_default():
-    harness = os.path.join(HERE, '_auto_translate_default_harness.js')
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
-    try:
-        proc = subprocess.run(
-            ['node', harness,
-             QUERY_BUNDLE,                                      # argv[2]
-             ],
-            capture_output=True, text=True, timeout=60,
-        )
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
+def test_conv_auto_translate_default(tmp_path):
+    harness = tmp_path / 'auto_translate_default_harness.cjs'
+    harness.write_text(_HARNESS, encoding='utf-8')
+    proc = subprocess.run(
+        ['node', str(harness), str(QUERY_BUNDLE)],
+        capture_output=True, text=True, timeout=60,
+    )
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
-    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
+    checks = [ln for ln in output.splitlines() if ln.startswith(('PASS ', 'FAIL '))]
+    fails = [ln for ln in checks if ln.startswith('FAIL ')]
     assert not fails, 'convAutoTranslate default/precedence failures:\n' + output
-    assert output.count('PASS') >= 10, f'expected >=10 PASS lines, got:\n{output}'
+    assert len(checks) == 10, f'expected exactly 10 checks, got:\n{output}'

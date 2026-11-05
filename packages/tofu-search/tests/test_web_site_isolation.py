@@ -20,10 +20,10 @@ def rig(monkeypatch):
         {'id': 'xiaohongshu', 'aliases': ['xhs']},
     ]
     site.search.return_value = []
-    monkeypatch.setattr(providers, '_site_search_provider', site)
+    providers.register_site_search_provider(site)
     browser = Mock(spec=providers.BrowserProvider)
     browser.bind.return_value = browser
-    monkeypatch.setattr(providers, '_browser_provider', browser)
+    providers.register_browser_provider(browser)
     mocks = {}
     for name in ('search_ddg_html', 'search_ddg_api', 'search_brave',
                  'search_bing', 'search_searxng', 'search_marginalia',
@@ -98,17 +98,17 @@ def test_native_constraints_rejected_before_discovery_or_navigation(rig, engine,
     browser.scrape.assert_not_called()
 
 
-def test_explicit_xhs_uses_provider_and_keeps_guard_cache(rig, monkeypatch):
+def test_explicit_xhs_reenters_native_provider_for_each_call(rig, monkeypatch):
     site, browser, mocks = rig
     monkeypatch.setattr(orch, 'search_xhs', xhs.search_xhs)
     monkeypatch.setattr(orch, 'xhs_search_available', xhs.xhs_search_available)
-    monkeypatch.setattr(xhs, '_GUARD', xhs._RiskGuard())
     monkeypatch.setattr(xhs, '_get_source', lambda: None)
     site.search.return_value = [
         {'title': 'Model', 'url': 'https://www.xiaohongshu.com/explore/model'}]
     assert search(engines=['Xiaohongshu'])
     assert search(engines=['Xiaohongshu'])
-    site.search.assert_called_once_with('xiaohongshu', 'model', max_results=10)
+    assert site.search.call_count == 2
+    site.search.assert_called_with('xiaohongshu', 'model', max_results=10)
     browser.scrape.assert_not_called()
     mocks['search_ddg_html'].assert_not_called()
     mocks['search_brave'].assert_not_called()

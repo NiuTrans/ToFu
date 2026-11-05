@@ -1,9 +1,10 @@
 /** oauth endpoint facade. Owns wire paths and projections; transport/retry policy arrives through explicit ports. */
 import type { EndpointPorts, JsonObject } from './contracts';
+import type {RequestOptions} from '../transport';
 export function createOauthEndpoints(ports: EndpointPorts) {
   const { request, get, post } = ports;
   const oauth = {
-    status:      ()                 => get('/api/v4/oauth/status', { onError: 'null' }),
+    status:      (options: Pick<RequestOptions, 'signal'> = {}) => get('/api/v4/oauth/status', { ...options, onError: 'null' }),
     loginPost:   (provider: string, preferConsole: boolean) =>
       post<Response | null>('/api/oauth/login',
            preferConsole ? { provider, prefer_console: true } : { provider },

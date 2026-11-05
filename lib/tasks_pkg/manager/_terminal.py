@@ -181,6 +181,43 @@ def stamp_chat_task_terminal(
     return first
 
 
+def _publish_terminal_projections(
+    task: dict, event: dict, *, log_context: str, busy_context: str,
+    append_event_fn: Callable[[dict, dict], Any],
+    persist_task_result_fn: Callable[[dict], Any],
+    notify_terminal_fn: Callable[[dict], Any],
+) -> dict:
+    """Attempt every projection in order; persistence refusal retains retry debt."""
+    try:
+        append_event_fn(task, event)
+    except Exception as exc:
+        logger.error(
+            '[Task %s] %s event failed: %s',
+            (task.get('id') or '?')[:8], log_context, exc, exc_info=True,
+        )
+    try:
+        persisted = persist_task_result_fn(task)
+        if persisted is False:
+            task['_terminalPersistencePending'] = True
+            task['_terminalPersistenceRetryReady'] = True
+    except Exception as exc:
+        task['_terminalPersistencePending'] = True
+        task['_terminalPersistenceRetryReady'] = True
+        logger.error(
+            '[Task %s] %s persistence failed: %s',
+            (task.get('id') or '?')[:8], log_context, exc, exc_info=True,
+        )
+    try:
+        notify_terminal_fn(task)
+    except Exception as exc:
+        logger.debug(
+            '[Task %s] %s busy projection failed: %s',
+            (task.get('id') or '?')[:8],
+            busy_context, exc,
+        )
+    return event
+
+
 def finalize_chat_task_error(
     task: dict,
     error: Any,
@@ -230,33 +267,12 @@ def finalize_chat_task_error(
     if task.get('model'):
         event['model'] = task['model']
 
-    try:
-        append_event_fn(task, event)
-    except Exception as exc:
-        logger.error(
-            '[Task %s] terminal error event failed: %s',
-            (task.get('id') or '?')[:8], exc, exc_info=True,
-        )
-    try:
-        persisted = persist_task_result_fn(task)
-        if persisted is False:
-            task['_terminalPersistencePending'] = True
-            task['_terminalPersistenceRetryReady'] = True
-    except Exception as exc:
-        task['_terminalPersistencePending'] = True
-        task['_terminalPersistenceRetryReady'] = True
-        logger.error(
-            '[Task %s] terminal error persistence failed: %s',
-            (task.get('id') or '?')[:8], exc, exc_info=True,
-        )
-    try:
-        notify_terminal_fn(task)
-    except Exception as exc:
-        logger.debug(
-            '[Task %s] terminal busy projection failed: %s',
-            (task.get('id') or '?')[:8], exc,
-        )
-    return event
+    return _publish_terminal_projections(
+        task, event, log_context='terminal error', busy_context='terminal',
+        append_event_fn=append_event_fn,
+        persist_task_result_fn=persist_task_result_fn,
+        notify_terminal_fn=notify_terminal_fn,
+    )
 
 
 def finalize_chat_task_aborted(
@@ -291,33 +307,12 @@ def finalize_chat_task_aborted(
             task.pop('_terminalPersistencePending', None)
         return None
     event = build_event(EventType.DONE, finishReason='aborted')
-    try:
-        append_event_fn(task, event)
-    except Exception as exc:
-        logger.error(
-            '[Task %s] queued-abort event failed: %s',
-            (task.get('id') or '?')[:8], exc, exc_info=True,
-        )
-    try:
-        persisted = persist_task_result_fn(task)
-        if persisted is False:
-            task['_terminalPersistencePending'] = True
-            task['_terminalPersistenceRetryReady'] = True
-    except Exception as exc:
-        task['_terminalPersistencePending'] = True
-        task['_terminalPersistenceRetryReady'] = True
-        logger.error(
-            '[Task %s] queued-abort persistence failed: %s',
-            (task.get('id') or '?')[:8], exc, exc_info=True,
-        )
-    try:
-        notify_terminal_fn(task)
-    except Exception as exc:
-        logger.debug(
-            '[Task %s] queued-abort busy projection failed: %s',
-            (task.get('id') or '?')[:8], exc,
-        )
-    return event
+    return _publish_terminal_projections(
+        task, event, log_context='queued-abort', busy_context='queued-abort',
+        append_event_fn=append_event_fn,
+        persist_task_result_fn=persist_task_result_fn,
+        notify_terminal_fn=notify_terminal_fn,
+    )
 
 
 def reject_unstarted_chat_task(

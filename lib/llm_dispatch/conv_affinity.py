@@ -232,12 +232,17 @@ def conv_affinity(conv_id: str | None):
 
 
 @contextlib.contextmanager
-def isolated_conv_affinity(scope_id: str):
+def isolated_conv_affinity(scope_id: str, *, ephemeral: bool = True):
     """An invocation owns its routing preference and diagnostic, not its parent.
 
-    Existing routing TTL/count bounds apply during execution. On exit discard
-    this ephemeral scope's entries and restore both thread-local facts, even
-    when nested task teardown cleared them or the model raised BaseException.
+    Existing routing TTL/count bounds apply during execution. On exit restore
+    both thread-local facts, even when nested task teardown cleared them or
+    the model raised BaseException. A child invocation's scope is ephemeral
+    (``ephemeral=True``): its routing entries are discarded on exit. A root
+    invocation's scope IS the conversation itself (``ephemeral=False``):
+    discarding its entries at turn end would destroy the warm-key affinity
+    the next turn relies on — that conversation is exactly what the recency
+    TTL exists to carry.
     """
     previous = get_conv_affinity()
     previous_pick = get_pick_decision()
@@ -248,10 +253,11 @@ def isolated_conv_affinity(scope_id: str):
     finally:
         set_conv_affinity(previous)
         _state.pick_decision = previous_pick
-        with _conv_lock:
-            for key in list(_conv_keys):
-                if key == scope_id or (isinstance(key, tuple) and key[0] == scope_id):
-                    del _conv_keys[key]
+        if ephemeral:
+            with _conv_lock:
+                for key in list(_conv_keys):
+                    if key == scope_id or (isinstance(key, tuple) and key[0] == scope_id):
+                        del _conv_keys[key]
 
 
 @contextlib.contextmanager
@@ -312,12 +318,12 @@ def get_preferred_key(conv_id: str, *, route_key: str = '') -> str | None:
         entry = _conv_keys.get(map_key)
         # Deliberately NO fallback to the legacy unscoped ``conv_id`` alias:
         # ``key_name`` is already provider-specific (a CatPaw key is a distinct
-        # key from any sankuai key), but an unscoped alias records only "the
+        # key from any example-corp key), but an unscoped alias records only "the
         # last key that served this conv on ANY provider". Honouring it here
         # let a conversation that once landed on provider X re-pick X's key on
         # a later turn whose preset preferred provider Y — the scoped pick then
         # re-seeded ``(conv, model)`` to X, so the wrong provider became sticky
-        # (conv mtxxaf2l, CatPaw re-picked over preferred sankuai). Affinity is
+        # (conv mtxxaf2l, CatPaw re-picked over preferred example-corp). Affinity is
         # exact-or-absent; a missing scoped entry falls through to score-based
         # selection, which honours the preset's provider rank.
         if not entry:

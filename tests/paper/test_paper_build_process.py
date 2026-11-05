@@ -1,8 +1,10 @@
 """Native TeX demand, explicit overrides and joined process-tree retirement."""
 from __future__ import annotations
 
+import importlib.util
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import threading
@@ -14,6 +16,7 @@ import pytest
 from lib.paper.builds.budget import compile_memory_bytes
 from lib.paper.builds.contract import limit
 from lib.paper.builds.errors import BuildError
+from lib.paper.builds import process as process_owner
 from lib.paper.builds.process import CommandUsage, run_command
 
 pytestmark = pytest.mark.unit
@@ -48,6 +51,39 @@ def test_command_observes_tree_usage_and_allows_artifacts_larger_than_its_log(tm
     assert usage.peak_processes >= 1
     assert (tmp_path / 'artifact.pdf').stat().st_size == 2 * MIB
     assert not list(tmp_path.glob('.paper-command-*'))
+
+
+def test_loaded_runner_never_executes_a_supervisor_changed_on_disk(tmp_path, monkeypatch):
+    loaded = tmp_path / 'loaded'
+    loaded.mkdir()
+    shutil.copyfile(process_owner.__file__, loaded / 'process.py')
+    source = Path(process_owner.__file__).with_name('process_worker.py').read_text()
+    # The supervisor version this runner was imported with identifies itself. Its
+    # marker path comes from the environment so the pinned revision keeps one digest.
+    loaded_version_ran = tmp_path / 'loaded-supervisor-ran'
+    (loaded / 'process_worker.py').write_text(source.replace(
+        'from __future__ import annotations\n',
+        'from __future__ import annotations\nimport os as _marker_os\n'
+        'open(_marker_os.environ["LOADED_SUPERVISOR_MARKER"], "w").close()\n', 1))
+    # A server imports the runner once, then the checkout changes beneath it.
+    module_name = 'lib.paper.builds._process_loaded_before_checkout_update'
+    spec = importlib.util.spec_from_file_location(module_name, loaded / 'process.py')
+    runner = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, runner)
+    spec.loader.exec_module(runner)
+    executed = tmp_path / 'updated-supervisor-executed'
+    (loaded / 'process_worker.py').write_text(
+        f'import pathlib\npathlib.Path({str(executed)!r}).write_text("x")\n'
+        'raise SystemExit("unsupported supervisor arguments")\n')
+    workspace = tmp_path / 'build'
+    workspace.mkdir()
+    usage = runner.run_command([sys.executable, '-c', "open('artifact.pdf', 'wb').write(b'%PDF')"],
+        cwd=workspace, environment={**environment(), 'LOADED_SUPERVISOR_MARKER': str(loaded_version_ran)},
+        log=workspace / 'command.log', timeout=8, log_bytes=None)
+    assert usage.returncode == 0
+    assert (workspace / 'artifact.pdf').read_bytes() == b'%PDF'
+    assert loaded_version_ran.exists()
+    assert not executed.exists()
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='POSIX aggregate RSS and native allocation fixture')

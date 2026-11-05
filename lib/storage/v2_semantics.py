@@ -9,13 +9,13 @@ from __future__ import annotations
 from typing import Any, Mapping
 from lib.storage.errors import StorageError
 from lib.conversation_sync.settings_policy import public_conversation_settings
-from lib.storage.protocol import validate_finite_json_numbers
+from lib.storage.protocol import validate_finite_json_numbers, wire_payload
 from tofu_db.generated_v2 import COMMIT_NOTICE_CONTRACT, MAX_COMMIT_NOTICE_KEY_BYTES
 from lib.storage.generated_v2_semantics import BOUNDED_PROGRESS_OPERATIONS, OWNER_OMITTED_OPERATIONS, NOTIFICATION_TOPICS
 
 
 def request_payload(operation: str, payload: Mapping[str, Any] | None, *, owner_id: int) -> dict[str, Any]:
-    body = dict(payload or {})
+    body = wire_payload(payload)
     # Payload-free system queries and lease-fenced worker commands carry no
     # application owner field. The wire session still carries its authority
     # scope; adding an owner would violate these operations' strict contract.

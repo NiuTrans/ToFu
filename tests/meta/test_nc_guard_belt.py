@@ -152,6 +152,48 @@ def test_belt_noop_when_clean():
         assert healed == [], 'belt must not rewrite a file that never drifted'
 
 
+def test_belt_heals_poison_after_a_cached_clean_verification(monkeypatch):
+    """The belt skips re-reading a file whose stat signature is unchanged since
+    a read proved it clean. A later same-size poison must still be detected:
+    the write moves the file's ctime/mtime, so the cached signature misses."""
+    import time
+    same_size_poison = _PRISTINE.replace("'real'", "NC-ABC")
+    assert len(same_size_poison) == len(_PRISTINE)
+    with _belt_guarding_a_temp_file() as (ct, tmp):
+        old = os.stat(tmp).st_mtime - 60
+        os.utime(tmp, (old, old))
+        monkeypatch.setattr(ct, '_nc_clock_ns',
+                            lambda: time.time_ns() + 10_000_000_000)
+        assert ct.restore_drifted_nc_sources() == []
+        monkeypatch.undo()
+        assert tmp in ct._nc_verified_clean, (
+            'precondition: an old-mtime clean read is trusted by the stat cache')
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(same_size_poison)
+        healed = ct.restore_drifted_nc_sources()
+        assert any(os.path.basename(h) == os.path.basename(tmp) for h in healed)
+        with open(tmp, encoding='utf-8') as f:
+            assert f.read() == _PRISTINE
+
+
+def test_belt_does_not_trust_a_clean_read_inside_the_racy_window():
+    """A file modified within the timestamp-granularity window is re-read on
+    every pass: a same-second rewrite could otherwise keep its signature."""
+    with _belt_guarding_a_temp_file() as (ct, tmp):
+        assert ct.restore_drifted_nc_sources() == []
+        assert tmp not in ct._nc_verified_clean
+
+
+def test_belt_does_not_trust_an_old_mtime_with_a_recent_ctime():
+    """os.utime can rewind mtime after a same-size, same-second rewrite; only
+    ctime still records the write, so a recent ctime must block trust."""
+    with _belt_guarding_a_temp_file() as (ct, tmp):
+        old = os.stat(tmp).st_mtime - 60
+        os.utime(tmp, (old, old))
+        assert ct.restore_drifted_nc_sources() == []
+        assert tmp not in ct._nc_verified_clean
+
+
 def test_NC_belt_without_restore_leaves_poison():
     """Negative control: WITHOUT the belt's restore pass, the simulated crash
     leaves the file poisoned — proving the belt's restore is what heals it (not

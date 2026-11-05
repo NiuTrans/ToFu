@@ -2,9 +2,11 @@
 
 This module is the narrow bridge between an LLM-facing ``text``/``selector``
 target and the existing authenticated browser-to-server file transport.  It
-only reads a bounded set of link-like DOM attributes with a server-authored
-script; it never clicks, submits a form, parses page JavaScript, exposes cookie
-values, or grants a URL from a different owner/device.
+only reads a bounded set of link-like DOM attributes, or a media element's
+displayed resource (``lib.browser.media.MEDIA_ELEMENT_JS``), with a
+server-authored script; it never clicks, submits a form, parses page
+JavaScript, exposes cookie values, or grants a URL from a different
+owner/device.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from lib.browser._resolve import (
     resolve_work_tab,
 )
 from lib.browser.access import BrowserAccessDenied, browser_tool_access
+from lib.browser.media import MEDIA_ELEMENT_JS
 from lib.browser.tool_runtime import BrowserToolRuntime
 
 
@@ -89,12 +92,42 @@ def _owned_client(owner_user_id: str, requested_client_id: str) -> str:
     return str(selected.get('client_id') or '')
 
 
-def _link_reader_script(selector: str) -> str:
-    """Return a fixed read-only DOM projection with one data argument."""
+def _link_reader_script(selector: str, *, exact: bool = True) -> str:
+    """Return a fixed read-only DOM projection with one data argument.
+
+    An ``exact`` selector must match exactly one element, so a page that
+    gained a second match since the selector was read is refused instead of
+    staging a different element. Element discovery's concise selectors are
+    not unique by construction and name their first match (``exact=False``).
+    A media root (img, video, audio, source, picture -> img) yields its
+    displayed resource; any other root keeps link semantics; a container with
+    no link uses its single listed media descendant (``MEDIA_ELEMENT_JS``).
+    """
     selector_json = json.dumps(selector, ensure_ascii=False)
-    return f"""(() => {{
-      const root = document.querySelector({selector_json});
-      if (!root) return {{error: 'element_not_found'}};
+    ambiguity = ("\n      if (roots.length > 1) return {error: 'selector_ambiguous', "
+                 "count: roots.length};" if exact else '')
+    return f"""(() => {{{MEDIA_ELEMENT_JS}
+      const roots = document.querySelectorAll({selector_json});
+      if (!roots.length) return {{error: 'element_not_found'}};{ambiguity}
+      const root = roots[0];
+      const fromMedia = (media) => {{
+        const resource = displayedResource(media);
+        return resource.source === 'http'
+          ? {{url: resource.url, tag: media.localName, media: true}}
+          : {{error: 'media_not_addressable', source: resource.source}};
+      }};
+      const mediaRoot = (element) => {{
+        if (mediaKind(element)) return element;
+        if (element.localName === 'picture') return element.querySelector('img');
+        if (element.localName !== 'source') return null;
+        if (reflectedSrc(element)) return element;
+        const parent = element.parentElement;
+        if (!parent) return null;
+        return parent.localName === 'picture' ? parent.querySelector('img')
+          : mediaKind(parent) ? parent : null;
+      }};
+      const media = mediaRoot(root);
+      if (media) return fromMedia(media);
       const link = root.matches('a[href], area[href]')
         ? root
         : (root.closest('a[href], area[href]') || root.querySelector('a[href], area[href]'));
@@ -104,7 +137,15 @@ def _link_reader_script(selector: str) -> str:
         root.getAttribute('data-href'),
         root.getAttribute('data-url')
       ].filter(Boolean);
-      if (!candidates.length) return {{error: 'no_download_url'}};
+      if (!candidates.length) {{
+        // An action control is never a media container: its icon is not a file.
+        if (root.matches('button, [role="button"]')) return {{error: 'no_download_url'}};
+        const listed = Array.from(root.querySelectorAll('img, video, audio'))
+          .filter((element) => listedMedia(element));
+        if (listed.length === 1) return fromMedia(listed[0]);
+        if (listed.length > 1) return {{error: 'media_ambiguous', count: listed.length}};
+        return {{error: 'no_download_url'}};
+      }}
       try {{
         const resolved = new URL(candidates[0], document.baseURI);
         if (!['http:', 'https:'].includes(resolved.protocol))
@@ -167,6 +208,7 @@ def resolve_browser_download_element(
         ) from exc
 
     chosen_selector = str(selector or '').strip()
+    exact_selector = bool(chosen_selector)
     query = str(text or '').strip()
     if len(chosen_selector) > 2048 or len(query) > 500:
         raise BrowserDownloadTargetError(
@@ -242,13 +284,14 @@ def resolve_browser_download_element(
                 False,
                 f'Call browser_click with text={label!r} to perform the '
                 'action. browser_download_url_to_server only stages <a href> / '
-                'data-download-url file links.',
+                'data-download-url file links and <img>/<video>/<audio> media.',
             )
         chosen_selector = str(element.get('selector') or '')
 
     result, error = runtime.send(
         'execute_js',
-        {'tabId': resolved_tab, 'code': _link_reader_script(chosen_selector)},
+        {'tabId': resolved_tab,
+         'code': _link_reader_script(chosen_selector, exact=exact_selector)},
         timeout=10,
     )
     if error:
@@ -257,6 +300,40 @@ def resolve_browser_download_element(
             f'The browser could not read the download element: {error}',
             True,
             'Refresh the page, then retry the same text or selector.',
+        )
+    if isinstance(result, dict) and result.get('error') == 'media_not_addressable':
+        source = result.get('source')
+        source = source if source in ('blob', 'data', 'stream') else 'none'
+        raise BrowserDownloadTargetError(
+            'browser_download_media_not_addressable',
+            'The selected media element has no fetchable HTTP(S) URL '
+            f'(source: {source}).',
+            False,
+            'blob:, data: and MediaStream/MediaSource (stream-only) media, or '
+            'media without a loaded source, cannot be staged by URL. Use '
+            'browser_screenshot to capture a visual frame instead.',
+        )
+    if isinstance(result, dict) and result.get('error') == 'selector_ambiguous':
+        count = result.get('count')
+        count = count if isinstance(count, int) and not isinstance(count, bool) else 'several'
+        raise BrowserDownloadTargetError(
+            'browser_download_target_ambiguous',
+            f'The selector now matches {count} elements; exactly one is required.',
+            True,
+            'The page changed or the selector is too broad. Call '
+            'browser_read_page(mode="media") again and use the url or selector it '
+            'shows now, or pass a narrower selector that matches one element.',
+        )
+    if isinstance(result, dict) and result.get('error') == 'media_ambiguous':
+        count = result.get('count')
+        count = count if isinstance(count, int) and not isinstance(count, bool) else 'several'
+        raise BrowserDownloadTargetError(
+            'browser_download_target_ambiguous',
+            f'The selected container holds {count} listed media elements '
+            'and no link; one media element is required.',
+            True,
+            'Call browser_read_page(mode="media") and stage exactly one listed '
+            'item by the url or selector it shows.',
         )
     if not isinstance(result, dict) or result.get('error') or result.get('__error'):
         reason = str((result or {}).get('error') or (result or {}).get('message')
@@ -268,8 +345,9 @@ def resolve_browser_download_element(
             'This element is an action button, not a file link. To open the '
             'dialog or trigger the action, call browser_click with the same '
             'text/selector. Only use this download tool for an <a href> or '
-            'data-download-url element that points at a file. Form submissions '
-            'and click-triggered downloads are not guessed.',
+            'data-download-url element that points at a file, or an '
+            '<img>/<video>/<audio> element. Form submissions and '
+            'click-triggered downloads are not guessed.',
         )
     target_url = str(result.get('url') or '').strip()
     try:

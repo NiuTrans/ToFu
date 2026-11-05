@@ -1,4 +1,4 @@
-import DOMPurify from 'dompurify';
+import { DOMPurify, marked } from './markdown-vendors';
 // highlight.js ships as core + per-language grammars. The eager set below is
 // the high-frequency chat subset; every remaining `common` grammar registers
 // on demand via ensureHljsLanguage() so the main chunk stops paying for
@@ -18,7 +18,6 @@ import hljsSql from 'highlight.js/lib/languages/sql';
 import hljsTypescript from 'highlight.js/lib/languages/typescript';
 import hljsXml from 'highlight.js/lib/languages/xml';
 import hljsYaml from 'highlight.js/lib/languages/yaml';
-import * as marked from 'marked';
 // The code-highlight theme rides the main chunk alongside hljs itself; this
 // replaces the legacy static/vendor/github-dark.min.css stylesheet link.
 import 'highlight.js/styles/github-dark.css';

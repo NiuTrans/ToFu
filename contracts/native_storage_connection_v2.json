@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Private native storage service attachment",
+  "type": "object",
+  "additionalProperties": false,
+  "x-maxBytes": 65536,
+  "required": ["format", "protocol", "host", "port", "token", "backend", "ownerId", "tenantId", "pid", "processStartTime", "projectPath", "dataDirectory", "binarySha256", "serviceId", "searchProjectionDirectory", "nativeFastpath"],
+  "properties": {
+    "format": {"const": "tofu.storage-connection/v2"},
+    "protocol": {"const": 2},
+    "backend": {"const": "tofudb"},
+    "host": {"enum": ["127.0.0.1", "localhost", "::1"]},
+    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+    "token": {"type": "string", "minLength": 32, "maxLength": 256},
+    "ownerId": {"type": "integer", "minimum": 1},
+    "tenantId": {"type": ["integer", "null"], "minimum": 1},
+    "pid": {"type": "integer", "minimum": 1},
+    "processStartTime": {"type": "integer", "minimum": 1},
+    "projectPath": {"type": "string", "minLength": 1},
+    "dataDirectory": {"type": "string", "minLength": 1},
+    "binarySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "serviceId": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "searchProjectionDirectory": {"type": "string", "minLength": 1},
+    "nativeFastpath": {"type": ["object", "null"], "additionalProperties": false,
+      "required": ["durableAuthority", "localAuthority", "shadowDirectory", "syncIntervalMs"],
+      "properties": {
+        "durableAuthority": {"type": "string"}, "localAuthority": {"type": "string"},
+        "shadowDirectory": {"type": "string"}, "syncIntervalMs": {"type": ["integer", "null"], "minimum": 1}
+      }
+    }
+  },
+  "description": "A mode-0600 local capability published only after native v2 readiness. Attachment verifies configured backend, owner/tenant, project, executable digest and live PID/start identity before authenticated v2 health negotiation. Application detach never stops the service. A changed engine or authority configuration requires draining the worker and replacing the service. This is reconstructible transport metadata, never a database authority."
+}

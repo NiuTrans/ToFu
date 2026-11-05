@@ -1,9 +1,11 @@
 //! History pruning with immutable payload promotion outside the authority mutex.
 //!
 //! Engine reserves its existing physical-publication lane; the maintenance
-//! worker encodes bounded source-sized payload segments and publishes CONTROL
-//! outside authority; Engine then reconciles the current logical state.
+//! worker packs each slice's carried payloads into payload segments and
+//! publishes CONTROL outside authority; Engine then reconciles the current
+//! logical state.
 use super::*;
+use std::collections::btree_map;
 
 pub(crate) struct PreparedHistoryCompaction {
     history_id: BlockId,
@@ -18,8 +20,19 @@ pub(crate) struct PreparedHistoryCompaction {
     wal_cover: Option<crate::wal::PublicationWalCover>,
     restart_required: Arc<std::sync::atomic::AtomicBool>,
     completed: bool,
+    incremental_routing: bool,
+    /// The launch materialization budget that already sizes an automatic
+    /// slice; it bounds the source bytes one promotion group keeps resident.
+    promotion_group_bytes: u64,
     #[cfg(test)]
     payload_segment_test_ids: Vec<Uuid>,
+}
+impl PreparedHistoryCompaction {
+    /// Operator compaction may retire the entire history. Preserve its
+    /// streaming memory bound instead of retaining every source's locations.
+    pub(super) fn use_streaming_routing_retirement(&mut self) {
+        self.incremental_routing = false;
+    }
 }
 #[cfg(test)]
 impl PreparedHistoryCompaction {
@@ -52,7 +65,7 @@ impl Engine {
     ) -> io::Result<Option<PreparedHistoryCompaction>> {
         self.require_usable_authority()?;
         self.require_physical_maintenance_available()?;
-        if maximum == 0 || maximum > crate::history::MAX_HISTORY_SEGMENTS {
+        if maximum == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "history retained-segment bound is invalid",
@@ -99,10 +112,13 @@ impl Engine {
             wal_cover: self.wal.publication_cover(Arc::clone(&self.vfs))?,
             restart_required: Arc::clone(&self.restart_required),
             completed: false,
+            incremental_routing: true,
+            promotion_group_bytes: self.checkpoint_materialize_batch_bytes,
             #[cfg(test)]
             payload_segment_test_ids: Vec::new(),
         };
         self.async_publication_in_flight = true;
+        self.open_publication_gc_window();
         Ok(Some(prepared))
     }
 
@@ -112,6 +128,7 @@ impl Engine {
         outcome: io::Result<HistoryCompactionOutcome>,
     ) -> io::Result<HistoryCompactionMetrics> {
         self.async_publication_in_flight = false;
+        self.close_publication_gc_window();
         prepared.completed = true;
         if let Err(error) = self.require_usable_authority() {
             self.restart_required.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -166,17 +183,26 @@ impl Engine {
     }
 }
 
-/// No Engine/authority borrow: at most one <=4 MiB history source and one
-/// bounded payload-segment encoder are resident at once. Existing payload
-/// catalog/GC handles the promoted bytes; no second lifetime registry exists.
+/// No Engine/authority borrow. Keeps one promotion group resident: the
+/// retired sources of one automatic slice, whose total the launch
+/// materialization budget bounds (a single larger source forms its own
+/// group), plus one payload-segment encoder and the exact retirement
+/// locations of an automatic slice. Bulk operator compaction streams group by
+/// group without collecting those locations. Existing payload catalog/GC owns
+/// promoted bytes; no new registry exists.
 pub(crate) fn encode_history_compaction(
     prepared: &PreparedHistoryCompaction,
 ) -> io::Result<HistoryCompactionOutcome> {
     let blocks = &prepared.blocks;
-    let mut references = prepared.payload_references.clone();
-    let mut changed = false;
-    #[cfg(test)]
-    let mut promotion_ordinal = 0;
+    let mut promotion = HistoryPromotion {
+        blocks: blocks.as_ref(),
+        references: prepared.payload_references.clone(),
+        promoted_segment_ids: Vec::new(),
+        #[cfg(test)]
+        test_segment_ids: prepared.payload_segment_test_ids.iter(),
+    };
+    let mut group = PromotionGroup::default();
+    let mut retired_locations = prepared.incremental_routing.then(BTreeSet::new);
     for reference in &prepared.current.segments[..prepared.first_retained] {
         if let Some(index_id) = reference.payload_index_block_id {
             let source = blocks.get_materialized_uncached(reference.block_id)?;
@@ -187,54 +213,28 @@ pub(crate) fn encode_history_compaction(
                     "history promotion offset witness mismatch",
                 ));
             }
-            for entries in index.entries.chunks(MAX_SEGMENT_BLOCKS) {
-                let read = |id: BlockId| -> io::Result<Vec<u8>> {
-                    let position =
-                        entries
-                            .binary_search_by_key(&id, |entry| entry.0)
-                            .map_err(|_| {
-                                io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    "history promotion block missing",
-                                )
-                            })?;
-                    let (_, offset, length) = entries[position];
-                    Ok(source[offset as usize..(offset + length) as usize].to_vec())
-                };
-                if blocks.payload_segment_store().is_ok()
+            if !index.entries.is_empty() {
+                if !group.units.is_empty()
+                    && group.source_bytes + source.len() as u64 > prepared.promotion_group_bytes
                 {
-                    let ids: Vec<_> = entries.iter().map(|entry| entry.0).collect();
-                    #[cfg(test)]
-                    let segment_id = {
-                        let id = prepared.payload_segment_test_ids.get(promotion_ordinal)
-                            .copied().unwrap_or_else(Uuid::new_v4);
-                        promotion_ordinal += 1;
-                        id
-                    };
-                    #[cfg(not(test))]
-                    let segment_id = Uuid::new_v4();
-                    // A full catalog is a packing problem, not a reason to
-                    // synchronously spill every carried block to a loose file.
-                    if promote_history_batch(blocks, &mut references, entries,
-                        source.as_slice(), segment_id)? {
-                        changed = true;
-                    } else {
-                        for &(id, _, _) in entries {
-                            crate::fsync_stats::note_history_promotion_loose_block();
-                            blocks.put_loose(&read(id)?)?;
-                        }
-                    }
-                } else {
-                    // Existing catalog capacity is a protocol bound. Durable
-                    // loose fallback stays outside the foreground mutex.
-                    for &(id, _, _) in entries {
-                        crate::fsync_stats::note_history_promotion_loose_block();
-                        blocks.put_loose(&read(id)?)?;
-                    }
+                    promote_history_group(&mut promotion, &std::mem::take(&mut group))?;
                 }
+                group.add(source, &index.entries)?;
+            }
+            // Retired locations leave routing only through this publication,
+            // which any failed promotion aborts. A duplicate payload in a
+            // retained source stays visible.
+            if let Some(locations) = &mut retired_locations {
+                locations.extend(index.entries.iter().map(|entry| (entry.0, index.source)));
             }
         }
     }
+    if !group.units.is_empty() {
+        promote_history_group(&mut promotion, &group)?;
+    }
+    drop(group);
+    let changed = !promotion.promoted_segment_ids.is_empty();
+    let HistoryPromotion { references, promoted_segment_ids, .. } = promotion;
     let segments = prepared.current.segments[prepared.first_retained..].to_vec();
     let routing = prepared
         .current
@@ -242,26 +242,25 @@ pub(crate) fn encode_history_compaction(
         .map(|id| {
             let root =
                 crate::history_payload::RoutingRoot::decode(&blocks.get_materialized_shared(id)?)?;
-            root.retain_sources(
-                blocks,
-                &segments
-                    .iter()
-                    .map(|reference| reference.block_id)
-                    .collect(),
-            )
+            match &retired_locations {
+                Some(locations) => root.remove_locations(blocks, locations),
+                None => root.retain_sources(blocks,
+                    &segments.iter().map(|reference| reference.block_id).collect()),
+            }
         })
         .transpose()?;
     let routing_id = routing
         .as_ref()
         .map(|root| blocks.put_loose(&root.encode()?))
         .transpose()?;
-    let history = HistoryManifest {
+    let mut history = HistoryManifest {
+        manifest_page_ids: Vec::new(),
         checkpoint_sequence: prepared.current.checkpoint_sequence,
         checkpoint_hash: prepared.current.checkpoint_hash,
         payload_index_root_id: routing_id,
         segments,
     };
-    let history_id = blocks.put_loose(&history.encode()?)?;
+    let history_id = history.store(&blocks)?;
     let payload = changed
         .then(|| PayloadManifest::new(references))
         .transpose()?;
@@ -288,11 +287,38 @@ pub(crate) fn encode_history_compaction(
         ..captured
     };
     control.publish(&published_state)?;
+    // A full catalog replaces its smallest fitting segments. Republish the
+    // new catalog into the fallback slot too, so no durable CONTROL
+    // generation names a replaced source once it is parked below.
+    let published_state = if payload.is_some() {
+        let stabilized = ControlState {
+            generation: published_state.generation.checked_add(1)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "CONTROL overflow"))?,
+            ..published_state
+        };
+        control.publish(&stabilized)?;
+        stabilized
+    } else {
+        published_state
+    };
     drop(control);
     // Route/filter preparation may open promoted segments. Like pack adoption,
     // install it outside authority after CONTROL owns the complete catalog.
     if let Some(payload) = &payload {
         blocks.install_payload_manifest(payload.clone())?;
+        // Replaced sources (including promotions superseded within this
+        // slice) take the same parked retirement as checkpoint merges and
+        // pack adoption. A failed park leaves an unreferenced file that the
+        // online collector's orphan lane reclaims.
+        let retained = payload.segments.iter().map(|reference| reference.segment_id)
+            .collect::<BTreeSet<_>>();
+        let store = blocks.payload_segment_store()?;
+        for segment_id in prepared.payload_references.iter().map(|reference| reference.segment_id)
+            .chain(promoted_segment_ids)
+            .filter(|segment_id| !retained.contains(segment_id))
+        {
+            let _ = store.defer_segment_retirement(segment_id);
+        }
     }
     Ok(HistoryCompactionOutcome {
         history,
@@ -304,58 +330,187 @@ pub(crate) fn encode_history_compaction(
     })
 }
 
-/// Pack a carried history batch using its authenticated source offsets. At the
-/// catalog ceiling, replace the smallest fitting segment through its exact
-/// verified handle. Old sources remain until ordinary CONTROL-aware GC; readers
-/// and fallback CONTROL slots must still be able to resolve them.
-fn promote_history_batch(
-    blocks: &BlockStore,
-    references: &mut Vec<PayloadSegmentReference>,
-    entries: &[(BlockId, u32, u32)],
-    source: &[u8],
-    segment_id: Uuid,
-) -> io::Result<bool> {
-    let batch_bytes = entries.iter().try_fold(0_u64, |total, (_, _, length)|
-        total.checked_add(u64::from(*length)).ok_or_else(||
-            io::Error::new(io::ErrorKind::InvalidData, "history batch size overflow")))?;
-    let replacement = if references.len() >= MAX_PAYLOAD_SEGMENTS {
-        let candidate = references.iter().enumerate().filter(|(_, old)|
-            old.block_count as usize + entries.len() <= MAX_SEGMENT_BLOCKS
-                && old.payload_bytes + batch_bytes <= MAX_SEGMENT_PAYLOAD_BYTES)
-            .min_by_key(|(_, old)| (old.payload_bytes, old.block_count));
-        let Some((slot, reference)) = candidate else { return Ok(false); };
-        let old = blocks.payload_segment_store()?.open_segment(reference.segment_id)?;
-        if PayloadSegmentReference::new(old.metadata(), old.first_block_id(), old.last_block_id())? != *reference {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "history promotion catalog source changed"));
+/// Catalog state shared by every promotion group of one compaction slice.
+struct HistoryPromotion<'a> {
+    blocks: &'a BlockStore,
+    references: Vec<PayloadSegmentReference>,
+    /// Every segment this slice sealed, in order. A later write of the same
+    /// slice may replace one of them; parking then retires it too.
+    promoted_segment_ids: Vec<Uuid>,
+    #[cfg(test)]
+    test_segment_ids: std::slice::Iter<'a, Uuid>,
+}
+
+/// Consecutive retired sources whose carried payloads share segment writes.
+/// The sources stay resident until the group is placed: a sealed segment
+/// stores its IDs in sorted order, which interleaves every source.
+#[derive(Default)]
+struct PromotionGroup {
+    sources: Vec<Arc<Vec<u8>>>,
+    source_bytes: u64,
+    /// First authenticated location of each carried ID: source, offset, length.
+    locations: BTreeMap<BlockId, (usize, u32, u32)>,
+    /// Retirement-ordered placement units: the IDs one source adds to the
+    /// group, split at `MAX_SEGMENT_BLOCKS` like the former per-source batches.
+    units: Vec<PromotionUnit>,
+}
+
+struct PromotionUnit {
+    ids: Vec<BlockId>,
+    bytes: u64,
+}
+
+impl PromotionGroup {
+    fn add(&mut self, source: Arc<Vec<u8>>, entries: &[(BlockId, u32, u32)]) -> io::Result<()> {
+        let index = self.sources.len();
+        self.source_bytes = self.source_bytes.checked_add(source.len() as u64)
+            .ok_or_else(promotion_size_overflow)?;
+        self.sources.push(source);
+        for chunk in entries.chunks(MAX_SEGMENT_BLOCKS) {
+            let mut unit = PromotionUnit { ids: Vec::new(), bytes: 0 };
+            for &(id, offset, length) in chunk {
+                if let btree_map::Entry::Vacant(slot) = self.locations.entry(id) {
+                    slot.insert((index, offset, length));
+                    unit.ids.push(id);
+                    unit.bytes = unit.bytes.checked_add(u64::from(length))
+                        .ok_or_else(promotion_size_overflow)?;
+                }
+            }
+            if !unit.ids.is_empty() { self.units.push(unit); }
         }
-        Some((slot, old))
-    } else { None };
-    let mut ids: Vec<_> = entries.iter().map(|entry| entry.0).collect();
-    if let Some((_, segment)) = &replacement { ids.extend(segment.block_ids()); }
-    ids.sort_unstable(); ids.dedup();
-    let store = blocks.payload_segment_store()?;
-    let segment = store.create(segment_id, ids, |id| {
-        if let Ok(position) = entries.binary_search_by_key(&id, |entry| entry.0) {
-            let (_, offset, length) = entries[position];
-            let start = usize::try_from(offset).map_err(|_| invalid_promotion_source())?;
-            let end = start.checked_add(length as usize).ok_or_else(invalid_promotion_source)?;
-            return source.get(start..end).map(<[u8]>::to_vec).ok_or_else(invalid_promotion_source);
+        Ok(())
+    }
+
+    fn payload(&self, id: BlockId) -> io::Result<Option<Vec<u8>>> {
+        let Some(&(source, offset, length)) = self.locations.get(&id) else { return Ok(None) };
+        let start = offset as usize;
+        start.checked_add(length as usize)
+            .and_then(|end| self.sources[source].get(start..end))
+            .map(|payload| Some(payload.to_vec()))
+            .ok_or_else(invalid_promotion_source)
+    }
+}
+
+/// Plans the next segment write for the leading `units`: how many it absorbs
+/// and which catalog slot it replaces (`None` appends). Metadata only.
+/// Below the ceiling a fresh segment takes the longest prefix the segment
+/// format admits. At the ceiling the smallest segment that can absorb every
+/// remaining unit takes all of them, so one slice rewrites one existing
+/// segment. Only when no segment can do that does the smallest segment that
+/// fits the first unit take the longest prefix it can hold. `None`: no
+/// segment can absorb even the first unit.
+fn plan_history_promotion(references: &[PayloadSegmentReference], units: &[PromotionUnit])
+    -> Option<(usize, Option<usize>)> {
+    let fitting = |blocks: u32, bytes: u64| {
+        let (mut blocks, mut bytes) = (blocks as usize, bytes);
+        units.iter().take_while(|unit| {
+            blocks += unit.ids.len();
+            bytes += unit.bytes;
+            blocks <= MAX_SEGMENT_BLOCKS && bytes <= MAX_SEGMENT_PAYLOAD_BYTES
+        }).count()
+    };
+    if references.len() < MAX_PAYLOAD_SEGMENTS {
+        let take = fitting(0, 0);
+        return (take > 0).then_some((take, None));
+    }
+    let smallest = |minimum: usize| references.iter().enumerate()
+        .filter(|(_, reference)| fitting(reference.block_count, reference.payload_bytes) >= minimum)
+        .min_by_key(|(_, reference)| (reference.payload_bytes, reference.block_count))
+        .map(|(slot, _)| slot);
+    if let Some(slot) = smallest(units.len()) {
+        return Some((units.len(), Some(slot)));
+    }
+    let slot = smallest(1)?;
+    Some((fitting(references[slot].block_count, references[slot].payload_bytes), Some(slot)))
+}
+
+/// Places one group with as few segment writes as the plan admits. A full
+/// catalog is a packing problem, not a reason to spill carried blocks to
+/// loose files; only a unit that no segment can absorb takes the durable
+/// loose fallback, outside the foreground mutex.
+fn promote_history_group(promotion: &mut HistoryPromotion, group: &PromotionGroup) -> io::Result<()> {
+    let mut units = group.units.as_slice();
+    while let Some(first) = units.first() {
+        // Without a segment directory, catalog capacity is a protocol bound.
+        let plan = match promotion.blocks.payload_segment_store() {
+            Ok(_) => plan_history_promotion(&promotion.references, units),
+            Err(_) => None,
+        };
+        let Some((take, slot)) = plan else {
+            for &id in &first.ids {
+                crate::fsync_stats::note_history_promotion_loose_block();
+                promotion.blocks.put_loose(&group.payload(id)?.ok_or_else(invalid_promotion_source)?)?;
+            }
+            units = &units[1..];
+            continue;
+        };
+        promotion.write_segment(group, &units[..take], slot)?;
+        units = &units[take..];
+    }
+    Ok(())
+}
+
+impl HistoryPromotion<'_> {
+    fn next_segment_id(&mut self) -> Uuid {
+        #[cfg(test)]
+        if let Some(id) = self.test_segment_ids.next() {
+            return *id;
         }
-        let (_, old) = replacement.as_ref().ok_or_else(invalid_promotion_source)?;
-        store.get_with_handle(old, id)?.ok_or_else(invalid_promotion_source)
-    })?;
-    let promoted = PayloadSegmentReference::new(segment.metadata(),
-        segment.first_block_id(), segment.last_block_id())?;
-    blocks.verify_payload_segment(&promoted)?;
-    blocks.note_packed(&entries.iter().map(|entry| entry.0).collect::<Vec<_>>())?;
-    crate::fsync_stats::note_history_promotion_pack(batch_bytes, replacement.is_some());
-    if let Some((slot, _)) = replacement { references[slot] = promoted; }
-    else { references.push(promoted); }
-    Ok(true)
+        Uuid::new_v4()
+    }
+
+    /// Seals `units` into one new segment using their authenticated source
+    /// offsets. A replacement also copies every block of the catalog segment
+    /// in `slot` through its exact verified handle. The replaced file stays
+    /// readable until the caller parks it after both CONTROL slots move.
+    fn write_segment(&mut self, group: &PromotionGroup, units: &[PromotionUnit], slot: Option<usize>)
+        -> io::Result<()> {
+        let blocks = self.blocks;
+        let store = blocks.payload_segment_store()?;
+        let replaced = match slot {
+            Some(slot) => {
+                let reference = self.references[slot];
+                let old = store.open_segment(reference.segment_id)?;
+                if PayloadSegmentReference::new(old.metadata(), old.first_block_id(), old.last_block_id())? != reference {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "history promotion catalog source changed"));
+                }
+                Some(old)
+            }
+            None => None,
+        };
+        let promoted_ids: Vec<BlockId> = units.iter().flat_map(|unit| unit.ids.iter().copied()).collect();
+        let promoted_bytes = units.iter().map(|unit| unit.bytes).sum::<u64>();
+        let mut ids = promoted_ids.clone();
+        if let Some(old) = &replaced { ids.extend(old.block_ids()); }
+        ids.sort_unstable();
+        ids.dedup();
+        let segment_id = self.next_segment_id();
+        let segment = store.create(segment_id, ids, |id| {
+            // Incoming authenticated history bytes win duplicate IDs.
+            if let Some(payload) = group.payload(id)? { return Ok(payload); }
+            let old = replaced.as_ref().ok_or_else(invalid_promotion_source)?;
+            store.get_with_handle(old, id)?.ok_or_else(invalid_promotion_source)
+        })?;
+        let promoted = PayloadSegmentReference::new(segment.metadata(),
+            segment.first_block_id(), segment.last_block_id())?;
+        blocks.verify_payload_segment(&promoted)?;
+        blocks.note_packed(&promoted_ids)?;
+        crate::fsync_stats::note_history_promotion_pack(promoted_bytes, slot.is_some());
+        match slot {
+            Some(slot) => self.references[slot] = promoted,
+            None => self.references.push(promoted),
+        }
+        self.promoted_segment_ids.push(segment_id);
+        Ok(())
+    }
 }
 
 fn invalid_promotion_source() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "history promotion source block is missing")
+}
+
+fn promotion_size_overflow() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "history promotion size overflow")
 }
 
 #[cfg(test)]
@@ -363,6 +518,38 @@ mod promotion_tests {
     use super::*;
     use crate::vfs::{DeterministicVfs, Operation, Vfs};
     use std::path::Path;
+
+    const NO_TEST_IDS: &[Uuid] = &[];
+
+    fn promotion(blocks: &BlockStore, references: Vec<PayloadSegmentReference>) -> HistoryPromotion<'_> {
+        HistoryPromotion { blocks, references, promoted_segment_ids: Vec::new(),
+            test_segment_ids: NO_TEST_IDS.iter() }
+    }
+
+    /// Retired sources in order, each laid out with authenticated offsets.
+    fn carried_group(sources: &[Vec<(BlockId, Vec<u8>)>]) -> PromotionGroup {
+        let mut group = PromotionGroup::default();
+        for payloads in sources {
+            let mut payloads = payloads.clone();
+            payloads.sort_by_key(|entry| entry.0);
+            let mut source = Vec::new(); let mut entries = Vec::new();
+            for (id, bytes) in &payloads {
+                entries.push((*id, source.len() as u32, bytes.len() as u32));
+                source.extend(bytes);
+            }
+            group.add(Arc::new(source), &entries).unwrap();
+        }
+        group
+    }
+
+    fn unit(blocks: usize, bytes: u64) -> PromotionUnit {
+        PromotionUnit { ids: vec![BlockId([0; 32]); blocks], bytes }
+    }
+
+    fn catalog_entry(segment: u128, block_count: u32, payload_bytes: u64) -> PayloadSegmentReference {
+        PayloadSegmentReference { segment_id: Uuid::from_u128(segment), shard: 0, block_count, payload_bytes,
+            file_bytes: payload_bytes, first_block_id: BlockId([0; 32]), last_block_id: BlockId([255; 32]) }
+    }
 
     #[test]
     fn full_catalog_history_promotion_uses_one_exact_source_and_keeps_old_reader() {
@@ -382,21 +569,18 @@ mod promotion_tests {
         unavailable.block_count = MAX_SEGMENT_BLOCKS as u32;
         let mut references = vec![unavailable; MAX_PAYLOAD_SEGMENTS];
         references[123] = old_ref;
-        let mut payloads: Vec<_> = (0..128).map(|i| {
+        let payloads: Vec<_> = (0..128).map(|i| {
             let bytes = format!("promoted-{i:03}").repeat(64).into_bytes();
             (BlockId::for_payload(&bytes), bytes)
         }).collect();
-        payloads.sort_by_key(|entry| entry.0);
-        let mut source = Vec::new(); let mut entries = Vec::new();
-        for (id, bytes) in &payloads {
-            entries.push((*id, source.len() as u32, bytes.len() as u32));
-            source.extend(bytes);
-        }
+        let group = carried_group(&[payloads.clone()]);
+        let mut promotion = promotion(&blocks, references);
         vfs.arm_fault(None).unwrap();
-        assert!(promote_history_batch(&blocks, &mut references, &entries, &source, Uuid::new_v4()).unwrap());
+        promote_history_group(&mut promotion, &group).unwrap();
         let trace = vfs.trace().unwrap();
         let opens = trace.iter().filter(|op| **op == Operation::Open).count();
         assert!(opens < 12, "known-source promotion reopened {opens} files");
+        let references = promotion.references;
         assert_eq!(references.len(), MAX_PAYLOAD_SEGMENTS);
         assert_ne!(references[123].segment_id, old_ref.segment_id);
         let merged = store.open_segment(references[123].segment_id).unwrap();
@@ -425,13 +609,18 @@ mod promotion_tests {
         let mut full = reference; full.block_count = MAX_SEGMENT_BLOCKS as u32;
         let references = { let mut r=vec![full;MAX_PAYLOAD_SEGMENTS];r[123]=reference;r };
         let new_bytes = b"carried new source"; let new_id=BlockId::for_payload(new_bytes);
-        let entries = [(new_id,0,new_bytes.len() as u32)];
+        // Three retired sources share the one replacement under every fault.
+        let group = carried_group(&[vec![(new_id, new_bytes.to_vec())],
+            vec![(BlockId::for_payload(b"second retired source"), b"second retired source".to_vec())],
+            vec![(BlockId::for_payload(b"third retired source"), b"third retired source".to_vec())]]);
         std::mem::forget(engine); seed.crash().unwrap();
         let baseline = Arc::new(seed.fork_durable().unwrap());
         let engine=Engine::open_with_vfs(Path::new("/data"),baseline.clone()).unwrap();
         baseline.arm_fault(None).unwrap();
-        assert!(promote_history_batch(&engine.block_store_shared(),&mut references.clone(),
-            &entries,new_bytes,Uuid::new_v4()).unwrap());
+        let blocks = engine.block_store_shared();
+        let mut packed = promotion(&blocks, references.clone());
+        promote_history_group(&mut packed, &group).unwrap();
+        assert_eq!(packed.promoted_segment_ids.len(), 1);
         let trace=baseline.trace().unwrap();
         for (index, operation) in trace.iter().enumerate() {
             let mut actions=vec![FaultAction::ErrorBefore(io::ErrorKind::Other)];
@@ -441,8 +630,8 @@ mod promotion_tests {
                 let vfs=Arc::new(seed.fork_durable().unwrap());
                 let engine=Engine::open_with_vfs(Path::new("/data"),vfs.clone()).unwrap();
                 vfs.arm_fault(Some(FaultRule{operation_number:index as u64+1,action})).unwrap();
-                let _=promote_history_batch(&engine.block_store_shared(),&mut references.clone(),
-                    &entries,new_bytes,Uuid::new_v4());
+                let blocks = engine.block_store_shared();
+                let _=promote_history_group(&mut promotion(&blocks, references.clone()), &group);
                 assert!(vfs.trace().unwrap().len()>index,"fault {index} {operation:?} was not reached");
                 std::mem::forget(engine);vfs.crash().unwrap();vfs.arm_fault(None).unwrap();
                 let recovered=Engine::open_with_vfs(Path::new("/data"),vfs).unwrap();
@@ -479,17 +668,16 @@ mod promotion_tests {
                 let old_ref = PayloadSegmentReference::new(old.metadata(), old.first_block_id(), old.last_block_id()).unwrap();
                 let mut unavailable = old_ref; unavailable.block_count = MAX_SEGMENT_BLOCKS as u32;
                 let mut references = vec![unavailable; MAX_PAYLOAD_SEGMENTS]; references[123] = old_ref;
-                let mut payloads: Vec<_> = (0..128).map(|i| {
+                let payloads: Vec<_> = (0..128).map(|i| {
                     let mut bytes = vec![i as u8;8192]; bytes[..8].copy_from_slice(&(i as u64).to_le_bytes());
                     (BlockId::for_payload(&bytes),bytes)
-                }).collect(); payloads.sort_by_key(|entry| entry.0);
-                let mut source = Vec::new(); let mut entries = Vec::new();
-                for (id, bytes) in &payloads {
-                    entries.push((*id, source.len() as u32, bytes.len() as u32)); source.extend(bytes);
-                }
+                }).collect();
+                let group = carried_group(&[payloads.clone()]);
                 let start = std::time::Instant::now();
                 if packed {
-                    assert!(promote_history_batch(&blocks, &mut references, &entries, &source, Uuid::new_v4()).unwrap());
+                    let mut promotion = promotion(&blocks, references);
+                    promote_history_group(&mut promotion, &group).unwrap();
+                    references = promotion.references;
                 } else {
                     for (_, bytes) in &payloads { blocks.put_loose(bytes).unwrap(); }
                 }
@@ -518,14 +706,135 @@ mod promotion_tests {
         let vfs = Arc::new(DeterministicVfs::new(None));
         vfs.create_dir(Path::new("/data")).unwrap(); vfs.sync_directory(Path::new("/")).unwrap();
         let engine = Engine::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
-        let reference = PayloadSegmentReference { segment_id: Uuid::new_v4(), shard: 0,
-            block_count: MAX_SEGMENT_BLOCKS as u32, payload_bytes: MAX_SEGMENT_PAYLOAD_BYTES,
-            file_bytes: MAX_SEGMENT_PAYLOAD_BYTES, first_block_id: BlockId([0;32]), last_block_id: BlockId([255;32]) };
-        let mut references = vec![reference; MAX_PAYLOAD_SEGMENTS];
+        let reference = catalog_entry(1, MAX_SEGMENT_BLOCKS as u32, MAX_SEGMENT_PAYLOAD_BYTES);
+        let references = vec![reference; MAX_PAYLOAD_SEGMENTS];
+        let id = BlockId::for_payload(b"x");
+        let group = carried_group(&[vec![(id, b"x".to_vec())]]);
+        // The refusal is a metadata decision: no candidate file is opened.
+        assert_eq!(plan_history_promotion(&references, &group.units), None);
+        let blocks = engine.block_store_shared();
+        let mut promotion = promotion(&blocks, references);
+        promote_history_group(&mut promotion, &group).unwrap();
+        assert!(promotion.promoted_segment_ids.is_empty());
+        assert!(promotion.references.iter().all(|entry| *entry == reference));
+        assert_eq!(blocks.get(id).unwrap().as_slice(), b"x", "the unit takes the durable loose fallback");
+    }
+
+    /// A whole automatic slice shares one replacement: eight retired sources
+    /// at the catalog ceiling seal one file and rewrite exactly the smallest
+    /// fitting segment, instead of one rewrite per source.
+    #[test]
+    fn full_catalog_slice_rewrites_one_segment_for_every_retired_source() {
+        let vfs = Arc::new(DeterministicVfs::new(None));
+        vfs.create_dir(Path::new("/data")).unwrap(); vfs.sync_directory(Path::new("/")).unwrap();
+        let engine = Engine::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+        let blocks = engine.block_store_shared();
+        let store = blocks.payload_segment_store().unwrap();
+        let small_bytes = b"smallest fitting catalog segment".to_vec();
+        let small_id = BlockId::for_payload(&small_bytes);
+        let small = store.create(Uuid::from_u128(1), vec![small_id], |_| Ok(small_bytes.clone())).unwrap();
+        let small_ref = PayloadSegmentReference::new(small.metadata(), small.first_block_id(), small.last_block_id()).unwrap();
+        let larger_bytes = b"a larger catalog segment that also fits".repeat(4);
+        let larger = store.create(Uuid::from_u128(2), vec![BlockId::for_payload(&larger_bytes)],
+            |_| Ok(larger_bytes.clone())).unwrap();
+        let larger_ref = PayloadSegmentReference::new(larger.metadata(), larger.first_block_id(), larger.last_block_id()).unwrap();
+        let mut unavailable = small_ref;
+        unavailable.block_count = MAX_SEGMENT_BLOCKS as u32;
+        let mut references = vec![unavailable; MAX_PAYLOAD_SEGMENTS];
+        references[7] = larger_ref;
+        references[123] = small_ref;
+        // Sources 0 and 5 both carry one shared payload; the slice packs it once.
+        let shared = b"payload carried by two retired sources".to_vec();
+        let sources: Vec<Vec<(BlockId, Vec<u8>)>> = (0..8).map(|source| {
+            let mut payloads: Vec<_> = (0..16).map(|block| {
+                let bytes = format!("source-{source}-block-{block:02}").repeat(32).into_bytes();
+                (BlockId::for_payload(&bytes), bytes)
+            }).collect();
+            if source == 0 || source == 5 { payloads.push((BlockId::for_payload(&shared), shared.clone())); }
+            payloads
+        }).collect();
+        let unique: BTreeMap<_, _> = sources.iter().flatten().cloned().collect();
+        let group = carried_group(&sources);
+        assert_eq!(group.units.len(), 8);
+        let mut promotion = promotion(&blocks, references.clone());
         vfs.arm_fault(None).unwrap();
-        assert!(!promote_history_batch(&engine.block_store_shared(), &mut references,
-            &[(BlockId::for_payload(b"x"),0,1)], b"x", Uuid::new_v4()).unwrap());
-        assert!(vfs.trace().unwrap().is_empty());
-        assert!(references.iter().all(|entry| *entry == reference));
+        promote_history_group(&mut promotion, &group).unwrap();
+        let trace = vfs.trace().unwrap();
+        assert_eq!(trace.iter().filter(|op| **op == Operation::Rename).count(), 1,
+            "the whole slice seals exactly one segment");
+        assert_eq!(promotion.promoted_segment_ids.len(), 1);
+        let replaced: Vec<_> = (0..MAX_PAYLOAD_SEGMENTS)
+            .filter(|&slot| promotion.references[slot] != references[slot]).collect();
+        assert_eq!(replaced, vec![123], "only the smallest fitting segment is rewritten");
+        let merged_ref = promotion.references[123];
+        assert_eq!(merged_ref.block_count as usize, 1 + unique.len());
+        assert_eq!(merged_ref.payload_bytes,
+            small_ref.payload_bytes + unique.values().map(|bytes| bytes.len() as u64).sum::<u64>());
+        let merged = store.open_segment(merged_ref.segment_id).unwrap();
+        for (id, bytes) in &unique { assert_eq!(merged.get(*id).unwrap().as_ref(), Some(bytes)); }
+        assert_eq!(merged.get(small_id).unwrap(), Some(small_bytes.clone()));
+        assert_eq!(small.get(small_id).unwrap(), Some(small_bytes), "the replaced file keeps its readers");
+    }
+
+    /// Operator compaction streams several groups through one catalog: a later
+    /// group may replace the segment an earlier group sealed. Both IDs stay
+    /// tracked, so publication parks the superseded one.
+    #[test]
+    fn later_group_may_replace_a_segment_sealed_earlier_in_the_slice() {
+        let vfs = Arc::new(DeterministicVfs::new(None));
+        vfs.create_dir(Path::new("/data")).unwrap(); vfs.sync_directory(Path::new("/")).unwrap();
+        let engine = Engine::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+        let blocks = engine.block_store_shared();
+        let store = blocks.payload_segment_store().unwrap();
+        let old_bytes = b"only fitting catalog segment".to_vec();
+        let old_id = BlockId::for_payload(&old_bytes);
+        let old = store.create(Uuid::from_u128(1), vec![old_id], |_| Ok(old_bytes.clone())).unwrap();
+        let old_ref = PayloadSegmentReference::new(old.metadata(), old.first_block_id(), old.last_block_id()).unwrap();
+        let mut unavailable = old_ref;
+        unavailable.block_count = MAX_SEGMENT_BLOCKS as u32;
+        let mut references = vec![unavailable; MAX_PAYLOAD_SEGMENTS];
+        references[123] = old_ref;
+        let first = (BlockId::for_payload(b"first group"), b"first group".to_vec());
+        let second = (BlockId::for_payload(b"second group"), b"second group".to_vec());
+        let mut promotion = promotion(&blocks, references);
+        promote_history_group(&mut promotion, &carried_group(&[vec![first.clone()]])).unwrap();
+        promote_history_group(&mut promotion, &carried_group(&[vec![second.clone()]])).unwrap();
+        assert_eq!(promotion.promoted_segment_ids.len(), 2);
+        assert_eq!(promotion.references[123].segment_id, promotion.promoted_segment_ids[1]);
+        let merged = store.open_segment(promotion.promoted_segment_ids[1]).unwrap();
+        for (id, bytes) in [(old_id, old_bytes), first, second] {
+            assert_eq!(merged.get(id).unwrap(), Some(bytes));
+        }
+    }
+
+    #[test]
+    fn promotion_plan_rewrites_one_segment_while_any_segment_fits_the_slice() {
+        const MIB: u64 = 1024 * 1024;
+        let slice = [unit(10, 4 * MIB), unit(10, 4 * MIB), unit(10, 4 * MIB)];
+        // Headroom: one fresh segment holds the whole slice; format bounds
+        // alone split it.
+        assert_eq!(plan_history_promotion(&[catalog_entry(1, 1, 1)], &slice), Some((3, None)));
+        let wide = [unit(MAX_SEGMENT_BLOCKS - 5, 1), unit(10, 1), unit(1, 1)];
+        assert_eq!(plan_history_promotion(&[], &wide), Some((1, None)));
+        assert_eq!(plan_history_promotion(&[], &wide[1..]), Some((2, None)));
+        // Ceiling: the smallest segment that fits every unit takes them all.
+        // Slot 13 is smaller but lacks block room for the whole slice.
+        let mut catalog = vec![catalog_entry(9, 1, MAX_SEGMENT_PAYLOAD_BYTES); MAX_PAYLOAD_SEGMENTS];
+        catalog[11] = catalog_entry(11, 100, 200 * MIB);
+        catalog[12] = catalog_entry(12, 100, 100 * MIB);
+        catalog[13] = catalog_entry(13, MAX_SEGMENT_BLOCKS as u32 - 15, MIB);
+        assert_eq!(plan_history_promotion(&catalog, &slice), Some((3, Some(12))));
+        // No segment fits the slice: the smallest segment that fits the
+        // first unit takes the longest prefix it can hold, then the next.
+        catalog[12] = catalog_entry(12, 100, MAX_SEGMENT_PAYLOAD_BYTES - 9 * MIB);
+        catalog[11] = catalog_entry(11, 100, MAX_SEGMENT_PAYLOAD_BYTES - 5 * MIB);
+        assert_eq!(plan_history_promotion(&catalog, &slice), Some((1, Some(13))));
+        catalog[13] = catalog_entry(13, MAX_SEGMENT_BLOCKS as u32, MIB);
+        assert_eq!(plan_history_promotion(&catalog, &slice), Some((2, Some(12))));
+        catalog[12] = catalog_entry(12, 120, MAX_SEGMENT_PAYLOAD_BYTES - MIB);
+        assert_eq!(plan_history_promotion(&catalog, &slice[2..]), Some((1, Some(11))));
+        // Nothing can absorb even one unit.
+        catalog[11] = catalog_entry(11, 100, MAX_SEGMENT_PAYLOAD_BYTES - MIB);
+        assert_eq!(plan_history_promotion(&catalog, &slice[2..]), None);
     }
 }

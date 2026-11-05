@@ -130,7 +130,8 @@ def test_official_plain_configuration_errors_get_constant_safe_diagnosis(field):
         auth._parse(1, '', stderr)
     result = caught.value.envelope()
     assert result['error_code'] == 'SSO_AGENT_CONFIGURATION_MISSING'
-    assert result['login_required'] is False
+    assert 'login_required' not in result
+    assert result['auth_state'] == 'blocked'
     assert result['retryable'] is False
     assert result['recovery_action'] == 'repair_agent_configuration'
     assert field in result['error']

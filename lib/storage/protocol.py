@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import socket
@@ -96,6 +97,76 @@ def canonical_json(value: Any) -> bytes:
     return orjson.dumps(_materialize_json_mappings(value), option=orjson.OPT_SORT_KEYS)
 
 
+def _json_value_bytes(value: Any) -> bytes:
+    try:
+        # Builtin trees (the common case) need no materializing walk.
+        return orjson.dumps(value)
+    except (TypeError, RecursionError):
+        pass
+    try:
+        return orjson.dumps(_materialize_json_mappings(value))
+    except (TypeError, RecursionError, orjson.JSONEncodeError):
+        pass
+    # The storage.v2 encoder's own fallback for values orjson cannot
+    # represent exactly (integers beyond 64 bits, non-string keys).
+    try:
+        return json.dumps(value, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise StorageError(
+            'database_protocol_error', 'Storage frame is not serializable') from exc
+
+
+def encode_json_value(value: Any) -> bytes:
+    """Admit and encode one command value exactly as both clients send it.
+
+    These are the bytes a :class:`FrozenPayload` splices into the storage.v1
+    frame and the storage.v2 request, so a byte bound measured with ``len``
+    of them measures what the authority receives.
+    """
+    validate_finite_json_numbers(value)
+    return _json_value_bytes(value)
+
+
+class FrozenPayload(dict):
+    """A command payload whose container values were admitted and encoded once.
+
+    Every replay of one receipt must send the same bytes. Freezing encodes each
+    dict/list value here, so a retry splices that JSON verbatim instead of
+    copying, re-walking and re-encoding the caller's graph. The mapping view is
+    the caller's payload; storage clients send :meth:`wire_body`.
+
+    ``encoded`` adopts values the caller already encoded with
+    :func:`encode_json_value` (for example to measure them first); they are
+    neither walked nor encoded again.
+    """
+
+    __slots__ = ('encoded',)
+
+    def __init__(self, payload: Mapping[str, Any],
+                 encoded: Mapping[str, bytes] | None = None):
+        super().__init__(payload)
+        adopted = encoded or {}
+        validate_finite_json_numbers(
+            {key: value for key, value in self.items() if key not in adopted})
+        self.encoded = {
+            key: adopted[key] if key in adopted else _json_value_bytes(value)
+            for key, value in self.items()
+            if key in adopted or isinstance(value, (Mapping, list, tuple))}
+
+    def wire_body(self) -> dict[str, Any]:
+        body = dict(self)
+        for key, encoded in self.encoded.items():
+            body[key] = orjson.Fragment(encoded)
+        return body
+
+
+def wire_payload(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The mutable request body a client encodes for one attempt."""
+    if isinstance(payload, FrozenPayload):
+        return payload.wire_body()
+    return dict(payload or {})
+
+
 def validate_operation(operation: Any) -> str:
     value = str(operation or '')
     if not _OPERATION.fullmatch(value):
@@ -179,7 +250,8 @@ def send_frame(sock: socket.socket, message: Mapping[str, Any], *,
 
 
 __all__ = [
-    'MAX_FRAME_BYTES', 'PROTOCOL_VERSION', 'canonical_json', 'encode_frame',
-    'recv_frame', 'send_frame', 'validate_finite_json_numbers',
-    'validate_operation',
+    'FrozenPayload', 'MAX_FRAME_BYTES', 'PROTOCOL_VERSION', 'canonical_json',
+    'encode_frame', 'encode_json_value', 'recv_frame', 'send_frame',
+    'validate_finite_json_numbers',
+    'validate_operation', 'wire_payload',
 ]

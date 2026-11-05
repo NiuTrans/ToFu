@@ -29,9 +29,10 @@ def wait_context(monkeypatch):
     monkeypatch.setattr(_agents, 'simple_call',
                         lambda task, name, args, *a, **kw: kw['executor'](name, args))
 
-    def invoke():
+    def invoke(timeout_seconds=60):
         return json.loads(_agents._handle_swarm_tool(
-            task, {}, 'await_agents', 'tc', {'mode': 'all', 'timeout_seconds': 60},
+            task, {}, 'await_agents', 'tc',
+            {'mode': 'all', 'timeout_seconds': timeout_seconds},
             1, {}, {}, '', False))
 
     yield key, master, task, invoke
@@ -59,7 +60,6 @@ def test_handler_yields_without_consuming_input_or_results(wait_context, mode, d
         master._completion_event = ArrivalEvent()
     else:
         enqueue()
-        master._await_timeout_progress[('all', ('child', 'done'))] = frozenset({'done'})
 
     result = invoke()
     assert result['status'] == 'ok'
@@ -87,9 +87,8 @@ def test_handler_yields_without_consuming_input_or_results(wait_context, mode, d
 def test_unrelated_modes_do_not_yield_or_spin(wait_context, mode):
     key, master, task, invoke = wait_context
     agent_inbox.enqueue(key, 'unrelated', priority='next', mode=mode)
-    master._await_timeout_progress[('all', ('child', 'done'))] = frozenset({'done'})
-    result = invoke()
-    assert result['wait_suppressed'] and result['timed_out']
+    result = invoke(timeout_seconds=0.05)
+    assert result['timed_out'] and 'wait_suppressed' not in result
     assert 'yield_reason' not in result
     assert agent_inbox.has_pending(key, modes=[mode])
 
@@ -171,6 +170,6 @@ def test_headless_omits_inbox_policy(wait_context):
     key, master, task, invoke = wait_context
     task.pop('convId')
     agent_inbox.enqueue(key, 'ready', priority='next', mode='background-command')
-    master._await_timeout_progress[('all', ('child', 'done'))] = frozenset({'done'})
-    assert invoke()['wait_suppressed']
+    result = invoke(timeout_seconds=0.05)
+    assert result['timed_out'] and 'yield_reason' not in result
     assert 'yield_reason' not in master.await_agents(mode='all', timeout_seconds=0)

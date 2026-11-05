@@ -33,7 +33,6 @@ Skips cleanly without node/jsdom.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -46,12 +45,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 JS_DIR = runtime_sections_dir()
 _CONV = os.path.join(JS_DIR, 'ui', 'conversation_list.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -86,6 +79,7 @@ global.getActiveFolderId = () => null;
 global.setActiveFolderId = () => {};
 global.areFoldersLoaded = () => true;
 global.getFolderById = (id) => _FOLDERS_STATE.find(f => f.id === id) || null;
+global.folderDefaultProjectPaths = () => [];
 global.setConversationFolder = () => {};
 global.showToast = () => {};
 
@@ -199,8 +193,6 @@ _EXPECTED = (
 )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_new_project_sorts_to_rail_top():
     output = _run(_CONV)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -209,8 +201,6 @@ def test_new_project_sorts_to_rail_top():
         assert ('PASS ' + must) in output, output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_createdAt_floor_is_load_bearing():
     """Revert the sort key to member-activity-only → the new project drops to
     the bottom (new_folder_first FAILs) while every negative control — which a

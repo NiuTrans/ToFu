@@ -30,6 +30,8 @@ from lib.orchestration.run_status import (
     is_terminal_run_status,
 )
 from lib.swarm.persistence_contract import (
+    SWARM_CHECKPOINT_MARKER_RESULT_FIELDS,
+    SWARM_CHECKPOINT_MARKER_TEXT_CHARACTERS,
     SWARM_SESSION_STATUS_QUARANTINED_OWNERLESS,
     SWARM_SESSION_STATUS_RUNNING,
     SWARM_SESSION_STATUS_TERMINATED,
@@ -1005,6 +1007,8 @@ def _swarm_session_quarantine_ownerless(
 
 def _swarm_session_delete(session: Session, payload: Mapping[str, Any]) -> Any:
     swarm_key = _required_text(payload, "swarm_key", 512)
+    session.execute(
+        "DELETE FROM swarm_agent_checkpoint_markers WHERE swarm_key = ?", (swarm_key,))
     session.execute("DELETE FROM swarm_agents WHERE swarm_key = ?", (swarm_key,))
     count = session.execute(
         "DELETE FROM swarm_sessions WHERE swarm_key = ?", (swarm_key,)
@@ -1027,6 +1031,7 @@ def _swarm_agent_save(session: Session, payload: Mapping[str, Any]) -> Any:
     delivered = payload.get("delivered")
     if delivered is not None and not isinstance(delivered, bool):
         raise StorageError("database_protocol_error", "Invalid swarm delivered flag")
+    checkpoint_id = _optional_text(payload, "checkpoint_id", maximum=512, scope="swarm")
     # PostgreSQL TEXT rejects NUL bytes; a length-prefixed composite key is
     # unambiguous on both backends and safe for advisory-lock hashing.
     session.lock_key("swarm.agent", f"{len(swarm_key)}:{swarm_key}{agent_id}")
@@ -1041,37 +1046,161 @@ def _swarm_agent_save(session: Session, payload: Mapping[str, Any]) -> Any:
         rounds_used,
         int(bool(delivered)),
         now,
+        checkpoint_id,
     )
     if delivered is None:
         session.execute(
             "INSERT INTO swarm_agents("
             "swarm_key, agent_id, role, objective, status, messages_json, "
-            "result_json, rounds_used, delivered, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "result_json, rounds_used, delivered, updated_at, checkpoint_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(swarm_key, agent_id) DO UPDATE SET "
             "role = excluded.role, objective = excluded.objective, "
             "status = excluded.status, messages_json = excluded.messages_json, "
             "result_json = excluded.result_json, "
-            "rounds_used = excluded.rounds_used, updated_at = excluded.updated_at",
+            "rounds_used = excluded.rounds_used, updated_at = excluded.updated_at, "
+            "checkpoint_id = excluded.checkpoint_id",
             values,
         )
     else:
         session.execute(
             "INSERT INTO swarm_agents("
             "swarm_key, agent_id, role, objective, status, messages_json, "
-            "result_json, rounds_used, delivered, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "result_json, rounds_used, delivered, updated_at, checkpoint_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(swarm_key, agent_id) DO UPDATE SET "
             "role = excluded.role, objective = excluded.objective, "
             "status = excluded.status, messages_json = excluded.messages_json, "
             "result_json = excluded.result_json, rounds_used = excluded.rounds_used, "
-            "delivered = excluded.delivered, updated_at = excluded.updated_at",
+            "delivered = excluded.delivered, updated_at = excluded.updated_at, "
+            "checkpoint_id = excluded.checkpoint_id",
             values,
         )
-    return {"saved": True}
+    # A full checkpoint supersedes every earlier compact marker.
+    session.execute(
+        "DELETE FROM swarm_agent_checkpoint_markers WHERE swarm_key = ? AND agent_id = ?",
+        (swarm_key, agent_id),
+    )
+    # Echoing the id acknowledges it as the base of a later swarm.agent.append.
+    return {"saved": True, "checkpoint_id": checkpoint_id} if checkpoint_id else {"saved": True}
 
 
-def _swarm_agents_mark_delivered(session: Session, payload: Mapping[str, Any]) -> Any:
+def _swarm_agent_append(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Append new messages to the exact checkpoint this writer last wrote.
+
+    The base is that checkpoint's id and message count. A missing agent, any
+    other write since (a different checkpoint_id) or a different count changes
+    nothing and answers ``appended: false``; the writer then saves in full. On
+    success the row equals a full save of the extended transcript: result,
+    status, rounds and time are replaced and the compact marker retires.
+    """
+    swarm_key = _required_text(payload, "swarm_key", 512)
+    agent_id = _required_text(payload, "agent_id", 512)
+    base_checkpoint_id = _required_text(payload, "base_checkpoint_id", 512)
+    checkpoint_id = _required_text(payload, "checkpoint_id", 512)
+    base_message_count = _integer(payload, "base_message_count", minimum=0)
+    appended = payload.get("messages")
+    if not isinstance(appended, list):
+        raise StorageError("database_protocol_error", "Invalid swarm messages")
+    result = payload.get("result")
+    if not isinstance(result, Mapping):
+        raise StorageError("database_protocol_error", "Invalid swarm result")
+    result_json = _json_text(dict(result))
+    rounds_used = _integer(
+        payload, "rounds_used", default=0, minimum=0, maximum=1_000_000
+    )
+    now = _integer(payload, "now_ms", minimum=0)
+    status = _optional_text(payload, "status", default="pending", maximum=64, scope="swarm")
+    session.lock_key("swarm.agent", f"{len(swarm_key)}:{swarm_key}{agent_id}")
+    row = session.fetch_one(
+        "SELECT role, objective, messages_json, checkpoint_id FROM swarm_agents "
+        "WHERE swarm_key = ? AND agent_id = ?",
+        (swarm_key, agent_id),
+    )
+    if row is None or row["checkpoint_id"] != base_checkpoint_id:
+        return {"appended": False}
+    messages = _load(row["messages_json"])
+    if not isinstance(messages, list):
+        raise StorageError("database_integrity", "Durable swarm agent JSON is invalid")
+    if len(messages) != base_message_count:
+        return {"appended": False}
+    messages.extend(appended)
+    messages_json = _dump(messages).decode("utf-8")
+    # A full save of this transcript must fit one storage frame and every
+    # agent page must still carry it, so appends stop at the same page bound.
+    row_bytes = sum(len(text.encode("utf-8")) for text in (
+        agent_id, row["role"] or "", row["objective"] or "", messages_json, result_json))
+    if row_bytes + _SWARM_AGENT_FIELD_OVERHEAD_BYTES > _SWARM_AGENT_PAGE_BYTES:
+        raise StorageError("database_protocol_error", "Storage frame exceeds the size limit")
+    session.execute(
+        "UPDATE swarm_agents SET status = ?, messages_json = ?, result_json = ?, "
+        "rounds_used = ?, updated_at = ?, checkpoint_id = ? "
+        "WHERE swarm_key = ? AND agent_id = ?",
+        (status, messages_json, result_json, rounds_used, now, checkpoint_id,
+         swarm_key, agent_id),
+    )
+    session.execute(
+        "DELETE FROM swarm_agent_checkpoint_markers WHERE swarm_key = ? AND agent_id = ?",
+        (swarm_key, agent_id),
+    )
+    return {"appended": True}
+
+
+def _swarm_checkpoint_marker(value: Any) -> dict[str, Any]:
+    if (not isinstance(value, Mapping) or not value
+            or not set(value) <= set(SWARM_CHECKPOINT_MARKER_RESULT_FIELDS)):
+        raise StorageError("database_protocol_error", "Invalid swarm checkpoint marker")
+    for item in value.values():
+        if isinstance(item, str):
+            if len(item) > SWARM_CHECKPOINT_MARKER_TEXT_CHARACTERS:
+                raise StorageError(
+                    "database_protocol_error", "Invalid swarm checkpoint marker")
+        elif item is not None and not isinstance(item, (bool, int, float)):
+            raise StorageError("database_protocol_error", "Invalid swarm checkpoint marker")
+    return dict(value)
+
+
+def _swarm_agent_checkpoint_mark(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Overlay compact checkpoint fields on one agent's last full checkpoint.
+
+    Constant size: the marker row never reads or rewrites the messages/result
+    bodies. Reads apply it over the full row; the next ``swarm.agent.save``
+    retires it. Without a full checkpoint there is nothing to mark.
+    """
+    swarm_key = _required_text(payload, "swarm_key", 512)
+    agent_id = _required_text(payload, "agent_id", 512)
+    marker = _swarm_checkpoint_marker(payload.get("result"))
+    rounds_used = _integer(payload, "rounds_used", minimum=0, maximum=1_000_000)
+    now = _integer(payload, "now_ms", minimum=0)
+    session.lock_key("swarm.agent", f"{len(swarm_key)}:{swarm_key}{agent_id}")
+    if session.fetch_one(
+            "SELECT 1 AS present FROM swarm_agents WHERE swarm_key = ? AND agent_id = ?",
+            (swarm_key, agent_id)) is None:
+        return {"marked": False}
+    current = session.fetch_one(
+        "SELECT result_json FROM swarm_agent_checkpoint_markers "
+        "WHERE swarm_key = ? AND agent_id = ?",
+        (swarm_key, agent_id),
+    )
+    if current is not None:
+        previous = _load(current["result_json"])
+        if not isinstance(previous, dict):
+            raise StorageError(
+                "database_integrity", "Durable swarm checkpoint marker is invalid")
+        marker = {**previous, **marker}
+    session.execute(
+        "INSERT INTO swarm_agent_checkpoint_markers("
+        "swarm_key, agent_id, result_json, rounds_used, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(swarm_key, agent_id) DO UPDATE SET "
+        "result_json = excluded.result_json, rounds_used = excluded.rounds_used, "
+        "updated_at = excluded.updated_at",
+        (swarm_key, agent_id, _json_text(marker), rounds_used, now),
+    )
+    return {"marked": True}
+
+
+def _swarm_delivery_ids(payload: Mapping[str, Any]) -> tuple[str, list[str]]:
     swarm_key = _required_text(payload, "swarm_key", 512)
     agent_ids = payload.get("agent_ids")
     if (
@@ -1083,8 +1212,26 @@ def _swarm_agents_mark_delivered(session: Session, payload: Mapping[str, Any]) -
         )
     ):
         raise StorageError("database_protocol_error", "Invalid swarm agent_ids")
+    return swarm_key, list(dict.fromkeys(agent_ids))
+
+
+def _swarm_agents_acknowledge_results(session: Session, payload: Mapping[str, Any]) -> Any:
+    swarm_key, _ = _swarm_delivery_ids(payload)
+    task_id = _required_text(payload, "task_id", 4096)
+    # Share the replacement writer's lock, including PostgreSQL's read/ACK
+    # window. A process-local session check cannot fence another writer.
+    session.lock_key("swarm.session", swarm_key)
+    row = session.fetch_one("SELECT task_id FROM swarm_sessions WHERE swarm_key = ?",
+                            (swarm_key,))
+    if row is None or row['task_id'] != task_id:
+        return {"acknowledged": False, "changed": 0}
+    return {"acknowledged": True, **_swarm_agents_mark_delivered(session, payload)}
+
+
+def _swarm_agents_mark_delivered(session: Session, payload: Mapping[str, Any]) -> Any:
+    swarm_key, agent_ids = _swarm_delivery_ids(payload)
     changed = 0
-    for agent_id in dict.fromkeys(agent_ids):
+    for agent_id in agent_ids:
         changed += session.execute(
             "UPDATE swarm_agents SET delivered = 1 "
             "WHERE swarm_key = ? AND agent_id = ?",
@@ -1093,8 +1240,62 @@ def _swarm_agents_mark_delivered(session: Session, payload: Mapping[str, Any]) -
     return {"changed": changed}
 
 
+def _swarm_marked_state(agent: Mapping[str, Any]) -> tuple[dict[str, Any], int, int]:
+    """Compact marker overlay (result fields, rounds, updated_at) or none."""
+    if agent["marker_result_json"] is None:
+        return {}, int(agent["rounds_used"] or 0), int(agent["updated_at"] or 0)
+    marker = _load(agent["marker_result_json"])
+    if not isinstance(marker, dict):
+        raise StorageError("database_integrity", "Durable swarm checkpoint marker is invalid")
+    return (marker, int(agent["marker_rounds_used"] or 0),
+            int(agent["marker_updated_at"] or 0))
+
+
+def _swarm_agent_row(agent: Mapping[str, Any]) -> dict[str, Any]:
+    messages = _load(agent["messages_json"])
+    result = _load(agent["result_json"])
+    if not isinstance(messages, list) or not isinstance(result, dict):
+        raise StorageError(
+            "database_integrity", "Durable swarm agent JSON is invalid"
+        )
+    marker, rounds_used, updated_at = _swarm_marked_state(agent)
+    return {
+        "agent_id": agent["agent_id"],
+        "role": agent["role"] or "",
+        "objective": agent["objective"] or "",
+        "status": agent["status"] or "pending",
+        "messages": messages,
+        "result": {**result, **marker},
+        "rounds_used": rounds_used,
+        "delivered": bool(agent["delivered"]),
+        "updated_at": updated_at,
+    }
+
+
+_SWARM_MARKER_COLUMNS = (
+    "m.result_json AS marker_result_json, m.rounds_used AS marker_rounds_used, "
+    "m.updated_at AS marker_updated_at"
+)
+_SWARM_MARKER_JOIN = (
+    "LEFT JOIN swarm_agent_checkpoint_markers AS m "
+    "ON m.swarm_key = a.swarm_key AND m.agent_id = a.agent_id"
+)
+_SWARM_AGENT_SELECT = (
+    "SELECT a.agent_id AS agent_id, a.role AS role, a.objective AS objective, "
+    "a.status AS status, a.messages_json AS messages_json, "
+    "a.result_json AS result_json, a.rounds_used AS rounds_used, "
+    "a.delivered AS delivered, a.updated_at AS updated_at, "
+    f"{_SWARM_MARKER_COLUMNS} FROM swarm_agents AS a {_SWARM_MARKER_JOIN}"
+)
+
+
 def _swarm_session_get(session: Session, payload: Mapping[str, Any]) -> Any:
     swarm_key = _required_text(payload, "swarm_key", 512)
+    include_agents = payload.get("include_agents", True)
+    if not isinstance(include_agents, bool):
+        raise StorageError(
+            "database_protocol_error", "Invalid swarm include_agents flag"
+        )
     item = session.fetch_one(
         "SELECT swarm_key, conv_id, task_id, status, specs_json, config_json, "
         "created_at, updated_at FROM swarm_sessions WHERE swarm_key = ?",
@@ -1102,40 +1303,13 @@ def _swarm_session_get(session: Session, payload: Mapping[str, Any]) -> Any:
     )
     if item is None:
         return None
-    agents = session.fetch_all(
-        "SELECT agent_id, role, objective, status, messages_json, result_json, "
-        "rounds_used, delivered, updated_at FROM swarm_agents "
-        "WHERE swarm_key = ? ORDER BY agent_id",
-        (swarm_key,),
-    )
     specs = _load(item["specs_json"])
     config = _load(item["config_json"])
     if not isinstance(specs, list) or not isinstance(config, dict):
         raise StorageError(
             "database_integrity", "Durable swarm session JSON is invalid"
         )
-    decoded_agents = []
-    for agent in agents:
-        messages = _load(agent["messages_json"])
-        result = _load(agent["result_json"])
-        if not isinstance(messages, list) or not isinstance(result, dict):
-            raise StorageError(
-                "database_integrity", "Durable swarm agent JSON is invalid"
-            )
-        decoded_agents.append(
-            {
-                "agent_id": agent["agent_id"],
-                "role": agent["role"] or "",
-                "objective": agent["objective"] or "",
-                "status": agent["status"] or "pending",
-                "messages": messages,
-                "result": result,
-                "rounds_used": int(agent["rounds_used"] or 0),
-                "delivered": bool(agent["delivered"]),
-                "updated_at": int(agent["updated_at"] or 0),
-            }
-        )
-    return {
+    detail = {
         "swarm_key": item["swarm_key"],
         "conv_id": item["conv_id"] or "",
         "task_id": item["task_id"] or "",
@@ -1144,93 +1318,125 @@ def _swarm_session_get(session: Session, payload: Mapping[str, Any]) -> Any:
         "config": config,
         "created_at": int(item["created_at"] or 0),
         "updated_at": int(item["updated_at"] or 0),
-        "agents": decoded_agents,
+    }
+    if include_agents:
+        detail["agents"] = [
+            _swarm_agent_row(agent)
+            for agent in session.fetch_all(
+                f"{_SWARM_AGENT_SELECT} WHERE a.swarm_key = ? ORDER BY a.agent_id",
+                (swarm_key,),
+            )
+        ]
+    return detail
+
+
+def _swarm_agent_state_get(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Session header without specs/config plus one agent's compact state.
+
+    Exact-run message consumers fence on this every model round, so it never
+    reads checkpoint bodies: its cost is independent of retained history.
+    """
+    swarm_key = _required_text(payload, "swarm_key", 512)
+    agent_id = _required_text(payload, "agent_id", 512)
+    item = session.fetch_one(
+        "SELECT swarm_key, conv_id, task_id, status, created_at, updated_at "
+        "FROM swarm_sessions WHERE swarm_key = ?",
+        (swarm_key,),
+    )
+    if item is None:
+        return None
+    agent = session.fetch_one(
+        "SELECT a.agent_id AS agent_id, a.status AS status, a.rounds_used AS rounds_used, "
+        "a.delivered AS delivered, a.updated_at AS updated_at, "
+        f"{_SWARM_MARKER_COLUMNS} FROM swarm_agents AS a {_SWARM_MARKER_JOIN} "
+        "WHERE a.swarm_key = ? AND a.agent_id = ?",
+        (swarm_key, agent_id),
+    )
+    _, rounds_used, updated_at = (_swarm_marked_state(agent) if agent is not None
+                                  else ({}, 0, 0))
+    return {
+        "swarm_key": item["swarm_key"],
+        "conv_id": item["conv_id"] or "",
+        "task_id": item["task_id"] or "",
+        "status": item["status"] or "running",
+        "created_at": int(item["created_at"] or 0),
+        "updated_at": int(item["updated_at"] or 0),
+        "agent": None if agent is None else {
+            "agent_id": agent["agent_id"],
+            "status": agent["status"] or "pending",
+            "rounds_used": rounds_used,
+            "delivered": bool(agent["delivered"]),
+            "updated_at": updated_at,
+        },
+    }
+
+
+# The native swarm stream ceiling (contracts/tofudb_ir_v1.json swarm_sessions
+# maximumResponseBytes) less the page envelope. One checkpoint always fits.
+_SWARM_AGENT_PAGE_BYTES = MAX_FRAME_BYTES - 4096 - 4096
+_SWARM_AGENT_FIELD_OVERHEAD_BYTES = 256
+
+
+def _swarm_agents_page(session: Session, payload: Mapping[str, Any]) -> Any:
+    swarm_key = _required_text(payload, "swarm_key", 512)
+    after = _optional_text(payload, "after_agent_id", maximum=512, scope="swarm")
+    size = " + ".join(
+        utf8_length_expression(session.backend, column)
+        for column in ("agent_id", "role", "objective", "messages_json", "result_json")
+    )
+    remaining = session.fetch_all(
+        f"SELECT agent_id, {size} AS row_bytes FROM swarm_agents "
+        "WHERE swarm_key = ? AND agent_id > ? ORDER BY agent_id",
+        (swarm_key, after),
+    )
+    marker_size = utf8_length_expression(session.backend, "result_json")
+    marker_bytes = {
+        row["agent_id"]: int(row["marker_bytes"])
+        for row in session.fetch_all(
+            f"SELECT agent_id, {marker_size} AS marker_bytes "
+            "FROM swarm_agent_checkpoint_markers WHERE swarm_key = ? AND agent_id > ?",
+            (swarm_key, after),
+        )
+    }
+    count, page_bytes = 0, 0
+    for row in remaining:
+        row_bytes = (int(row["row_bytes"]) + marker_bytes.get(row["agent_id"], 0)
+                     + _SWARM_AGENT_FIELD_OVERHEAD_BYTES)
+        if count and page_bytes + row_bytes > _SWARM_AGENT_PAGE_BYTES:
+            break
+        count += 1
+        page_bytes += row_bytes
+    agents = [
+        _swarm_agent_row(agent)
+        for agent in session.fetch_all(
+            f"{_SWARM_AGENT_SELECT} WHERE a.swarm_key = ? AND a.agent_id > ? "
+            "ORDER BY a.agent_id LIMIT ?",
+            (swarm_key, after, count),
+        )
+    ] if count else []
+    return {
+        "agents": agents,
+        "next_after_agent_id": (
+            agents[-1]["agent_id"] if count < len(remaining) else None
+        ),
     }
 
 
 def _swarm_resumable_list(session: Session, _payload: Mapping[str, Any]) -> Any:
+    """Keys only: each session is read separately, so history never overflows."""
     normal_statuses = tuple(sorted(SWARM_SESSION_WRITABLE_STATUSES))
     nonterminal_statuses = tuple(sorted(_SWARM_NONTERMINAL))
-    candidate_parameters = (
-        *normal_statuses,
-        *nonterminal_statuses,
-        "completed",
-    )
-    sessions = session.fetch_all(
-        "SELECT s.swarm_key AS swarm_key, s.conv_id AS conv_id, "
-        "s.task_id AS task_id, s.status AS status, "
-        "s.specs_json AS specs_json, s.config_json AS config_json "
+    rows = session.fetch_all(
+        "SELECT s.swarm_key AS swarm_key, s.updated_at AS updated_at "
         "FROM swarm_sessions AS s WHERE s.status IN (?, ?) AND EXISTS ("
         "SELECT 1 FROM swarm_agents AS candidate "
         "WHERE candidate.swarm_key = s.swarm_key AND ("
         "candidate.status IN (?, ?, ?) OR "
         "(candidate.status = ? AND candidate.delivered = 0))) "
         "ORDER BY s.updated_at DESC, s.swarm_key",
-        candidate_parameters,
+        (*normal_statuses, *nonterminal_statuses, "completed"),
     )
-    if not sessions:
-        return []
-    agents = session.fetch_all(
-        "SELECT a.swarm_key AS swarm_key, a.agent_id AS agent_id, "
-        "a.role AS role, a.objective AS objective, a.status AS status, "
-        "a.messages_json AS messages_json, a.result_json AS result_json, "
-        "a.rounds_used AS rounds_used, a.delivered AS delivered "
-        "FROM swarm_agents AS a JOIN swarm_sessions AS s "
-        "ON s.swarm_key = a.swarm_key WHERE s.status IN (?, ?) AND EXISTS ("
-        "SELECT 1 FROM swarm_agents AS candidate "
-        "WHERE candidate.swarm_key = s.swarm_key AND ("
-        "candidate.status IN (?, ?, ?) OR "
-        "(candidate.status = ? AND candidate.delivered = 0))) "
-        "ORDER BY a.swarm_key, a.agent_id",
-        candidate_parameters,
-    )
-    by_session: dict[str, list[Mapping[str, Any]]] = {}
-    for agent in agents:
-        by_session.setdefault(str(agent["swarm_key"]), []).append(agent)
-    result = []
-    for item in sessions:
-        decoded_agents = []
-        resumable = False
-        for agent in by_session.get(str(item["swarm_key"]), []):
-            status = str(agent["status"] or "pending")
-            delivered = bool(agent["delivered"])
-            resumable = resumable or status in _SWARM_NONTERMINAL
-            resumable = resumable or (status == "completed" and not delivered)
-            messages = _load(agent["messages_json"])
-            agent_result = _load(agent["result_json"])
-            if not isinstance(messages, list) or not isinstance(agent_result, dict):
-                raise StorageError(
-                    "database_integrity", "Durable swarm agent JSON is invalid"
-                )
-            decoded_agents.append(
-                {
-                    "agent_id": agent["agent_id"],
-                    "role": agent["role"] or "",
-                    "objective": agent["objective"] or "",
-                    "status": status,
-                    "messages": messages,
-                    "result": agent_result,
-                    "rounds_used": int(agent["rounds_used"] or 0),
-                    "delivered": delivered,
-                }
-            )
-        if not resumable:
-            continue
-        specs = _load(item["specs_json"])
-        config = _load(item["config_json"])
-        if not isinstance(specs, list) or not isinstance(config, dict):
-            raise StorageError(
-                "database_integrity", "Durable swarm session JSON is invalid"
-            )
-        result.append(
-            {
-                "swarm_key": item["swarm_key"],
-                "conv_id": item["conv_id"] or "",
-                "task_id": item["task_id"] or "",
-                "status": item["status"] or "running",
-                "specs": specs,
-                "config": config,
-                "agents": decoded_agents,
-            }
-        )
-    return result
+    return [
+        {"swarm_key": row["swarm_key"], "updated_at": int(row["updated_at"] or 0)}
+        for row in rows
+    ]

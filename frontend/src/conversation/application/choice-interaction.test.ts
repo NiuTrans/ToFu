@@ -86,3 +86,63 @@ it.each(['running', 'stopped'])('preserves one-option declarations and explanati
   expect(question.descriptions).toEqual(['Retain supplied explanation']);
   expect(question.state).toBe('pending');
 });
+
+function asked(extra: Record<string, unknown> = {}): any {
+  // A settled Coordinator turn whose question was asked without waiting.
+  return { conversationId: 'owned', turnId: 'turn', status: 'completed', projectionRevision: 9,
+    settlement: { resumeOptions: [] },
+    projection: { toolRounds: [{ toolName: 'ask_human', guidanceId: 'hg_chat', status: 'done',
+      guidanceBlocking: false, guidanceType: 'choice', guidanceQuestion: 'Which nightly budget?',
+      guidanceOptions: ['Under 500', '500 to 1000'], ...extra }] } };
+}
+
+describe('non-blocking questions answer through the chat', () => {
+  it('stays answerable after settlement and sends a quoted chat reply instead of a command', async () => {
+    const createAttempt = vi.fn();
+    const replyInChat = vi.fn(async () => 'sent' as const);
+    const ports = createChoiceInteractionPorts({ conversationId: 'owned', turnId: 'turn',
+      readTurn: async () => asked(), createAttempt, commandId: () => 'cmd', replyInChat,
+      text: (key, fallback) => `${key}|${fallback}` });
+    const loaded = await ports.load('hg_chat', signal());
+    expect(loaded.state).toBe('pending');
+    expect(loaded.note).toContain('toolHumanGuidance.nonBlockingHint');
+    await expect(ports.submit('hg_chat', 'Over 9000', 'cmd', signal())).rejects.toThrow('undeclared');
+    const answered = await ports.submit('hg_chat', 'Under 500', 'cmd', signal());
+    expect(replyInChat).toHaveBeenCalledWith({ conversationId: 'owned', guidanceId: 'hg_chat',
+      quote: 'Which nightly budget?', responseText: 'Under 500' });
+    expect(createAttempt).not.toHaveBeenCalled();
+    expect(answered).toMatchObject({ state: 'answered', response: 'Under 500' });
+    expect(answered.note).toContain('toolHumanGuidance.repliedInChat');
+    expect((await ports.load('hg_chat', signal())).state).toBe('answered');
+  });
+
+  it('keeps a drafted reply pending with an explanatory note, never an unconfirmed answer', async () => {
+    const ports = createChoiceInteractionPorts({ conversationId: 'owned', turnId: 'turn',
+      readTurn: async () => asked(), createAttempt: vi.fn(), commandId: () => 'cmd',
+      replyInChat: async () => 'drafted' });
+    const drafted = await ports.submit('hg_chat', '500 to 1000', 'cmd', signal());
+    expect(drafted.state).toBe('pending');
+    expect(drafted.note).toContain('composer');
+    expect((await ports.load('hg_chat', signal())).state).toBe('pending');
+  });
+
+  it('numbers batch questions and answers so the chat reply reads on its own', async () => {
+    const replyInChat = vi.fn(async () => 'sent' as const);
+    const turn = asked({ guidanceType: 'batch', guidanceOptions: [], guidanceQuestion: 'Two questions',
+      guidanceBatchQuestions: [{ question: 'Budget?', response_type: 'choice', options: [{ label: 'Low' }, { label: 'High' }] },
+        { question: 'Anything else?', response_type: 'free_text' }] });
+    const ports = createChoiceInteractionPorts({ conversationId: 'owned', turnId: 'turn',
+      readTurn: async () => turn, createAttempt: vi.fn(), commandId: () => 'cmd', replyInChat });
+    await ports.submit('hg_chat', JSON.stringify([{ index: 1, answer: 'Parking' }, { index: 0, answer: 'Low' }]), 'cmd', signal());
+    expect(replyInChat).toHaveBeenCalledWith(expect.objectContaining({
+      quote: '1. Budget?\n\n2. Anything else?', responseText: '1. Low\n2. Parking' }));
+  });
+
+  it('refuses without a chat reply port rather than inventing a guidance command', async () => {
+    const createAttempt = vi.fn();
+    const ports = createChoiceInteractionPorts({ conversationId: 'owned', turnId: 'turn',
+      readTurn: async () => asked(), createAttempt, commandId: () => 'cmd' });
+    await expect(ports.submit('hg_chat', 'Under 500', 'cmd', signal())).rejects.toThrow('Chat reply unavailable');
+    expect(createAttempt).not.toHaveBeenCalled();
+  });
+});

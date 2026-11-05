@@ -89,8 +89,14 @@ class TestListConversationsScope:
         out = list_conversations(scope='project', project_path=self.proj_a,
                                  current_conv_id=self.ids['a1'], limit=50,
                                  user_id=1)
-        assert self.ids['a1'] not in out
-        assert self.ids['a2'] in out
+        listed = [item['id'] for item in out.conversation_search['items']]
+        assert self.ids['a1'] not in listed
+        assert self.ids['a2'] in listed
+        assert f"• [{self.ids['a1']}]" not in out
+        # The exclusion is stated, with the recall path for its own Turns.
+        assert (f"The current conversation [{self.ids['a1']}] is not listed"
+                in out)
+        assert f'get_conversation(conversation_id="{self.ids["a1"]}"' in out
 
     def test_auto_scope_falls_back_to_all_without_project(self):
         # No project_path → auto degrades to 'all'; the term still finds both.

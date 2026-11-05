@@ -15,11 +15,11 @@ use sha2::{Digest, Sha256};
 use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
-    MAX_MODEL_ROUTING_PRUNED_PER_COMMAND,
-    MODEL_ROUTING_AUTHORITY_METADATA_NAMESPACE, MODEL_ROUTING_AUTHORITY_NAMESPACE,
-    MODEL_ROUTING_BACKUP_NAMESPACE, MODEL_ROUTING_MIGRATION_RECEIPT_NAMESPACE,
-    MODEL_ROUTING_SECRET_COUNT_NAMESPACE, MODEL_ROUTING_SECRET_NAMESPACE,
-    MODEL_ROUTING_SECRET_REFERENCE_INDEX_NAMESPACE, MODEL_ROUTING_SECRET_UPDATED_INDEX_NAMESPACE,
+    MAX_MODEL_ROUTING_PRUNED_PER_COMMAND, MODEL_ROUTING_AUTHORITY_METADATA_NAMESPACE,
+    MODEL_ROUTING_AUTHORITY_NAMESPACE, MODEL_ROUTING_BACKUP_NAMESPACE,
+    MODEL_ROUTING_MIGRATION_RECEIPT_NAMESPACE, MODEL_ROUTING_SECRET_COUNT_NAMESPACE,
+    MODEL_ROUTING_SECRET_NAMESPACE, MODEL_ROUTING_SECRET_REFERENCE_INDEX_NAMESPACE,
+    MODEL_ROUTING_SECRET_UPDATED_INDEX_NAMESPACE,
 };
 use crate::versioned_document::{self, PutRequest};
 
@@ -244,6 +244,38 @@ fn read_authority(
             "model-routing authority metadata and document differ",
         )),
     }
+}
+
+fn current_secret_references(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    tenant_label: &str,
+) -> io::Result<BTreeSet<String>> {
+    let mut references = BTreeSet::new();
+    let Some((_, document)) = read_authority(database, transaction, tenant_label)? else {
+        return Ok(references);
+    };
+    let Some(credentials) = document.get("credentials") else {
+        return Ok(references);
+    };
+    let credentials = credentials
+        .as_array()
+        .ok_or_else(|| invalid_data("stored model-routing credentials are invalid"))?;
+    for credential in credentials {
+        let credential = credential
+            .as_object()
+            .ok_or_else(|| invalid_data("stored model-routing credential is invalid"))?;
+        let reference = match credential.get("secret_reference") {
+            None | Some(Value::Null) => continue,
+            Some(value) => value
+                .as_str()
+                .ok_or_else(|| invalid_data("stored model-routing secret reference is invalid"))?,
+        };
+        if !reference.trim().is_empty() {
+            references.insert(reference.trim().to_owned());
+        }
+    }
+    Ok(references)
 }
 
 pub(crate) struct CommitRequest {
@@ -756,7 +788,13 @@ pub(crate) fn secret_delete(
     tenant_label: &str,
     secret_reference: &str,
 ) -> io::Result<Vec<u8>> {
-    let current = read_secret(database, transaction, tenant_label, secret_reference)?;
+    let current = if current_secret_references(database, transaction, tenant_label)?
+        .contains(secret_reference)
+    {
+        None
+    } else {
+        read_secret(database, transaction, tenant_label, secret_reference)?
+    };
     if let Some(document) = &current {
         remove_secret(database, transaction, document)?;
         let count = read_count(database, transaction, tenant_label)?;
@@ -783,6 +821,7 @@ pub(crate) fn secret_prune(
     active_secret_references: &BTreeSet<String>,
     updated_before: f64,
 ) -> io::Result<Vec<u8>> {
+    let retained_references = current_secret_references(database, transaction, tenant_label)?;
     let (start, end) = secret_range(
         transaction,
         MODEL_ROUTING_SECRET_UPDATED_INDEX_NAMESPACE,
@@ -822,7 +861,9 @@ pub(crate) fn secret_prune(
             if document.updated_at >= updated_before {
                 break 'pages;
             }
-            if active_secret_references.contains(reference) {
+            if active_secret_references.contains(reference)
+                || retained_references.contains(reference)
+            {
                 continue;
             }
             remove_secret(database, transaction, &document)?;

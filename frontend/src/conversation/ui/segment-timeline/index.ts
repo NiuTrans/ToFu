@@ -15,8 +15,8 @@ export function renderToolSegmentTimeline(segments: readonly TimelineSegment[] |
     if (round?._programSynthetic) return '';
     if (round?.toolName === 'todo_write' && !round.toolCallId && ++noIdTodos > 1) return '';
   }
-  const { real, injections, superseded, hasInbox } = classifyTimelineRounds(allRounds, segments, ports.isSuperseded);
-  const batches = resolveTimelineBatches(segments, real, superseded, hasInbox, ports);
+  const { real, injections, superseded } = classifyTimelineRounds(allRounds, segments, ports.isSuperseded);
+  const batches = resolveTimelineBatches(segments, real, superseded, allRounds, ports);
   if (!batches.length || (!batches.some(batch => batch.rounds.length) && real.length)) return '';
   const session = ports.createSession(allRounds), emitted = new Set<number>();
   const renderGroups = (rounds: readonly TimelineRound[]) => session.renderGroups(rounds);
@@ -31,6 +31,6 @@ export function renderToolSegmentTimeline(segments: readonly TimelineSegment[] |
   }
   for (const [anchor, rows] of injections) { if (!emitted.has(anchor)) inner += renderInjections(rows); }
   if (!inner) return '';
-  const panel = ports.panel(real, allRounds, real.some(round => round.status === 'searching' || round._swarmActive));
+  const panel = ports.panel(real, allRounds, real.some(round => round.status === 'searching' || round.status === 'queued' || round._swarmActive));
   return `<div class="ptool-panel seg-timeline${panel.active ? ' ptool-panel-active' : ''}${panel.collapsed ? ' collapsed' : ''}"${!panel.active ? ' data-collapsible="true"' : ''} data-attention="${panel.attention}">${panel.html}<div class="ptool-panel-body" data-full-count="${real.length}">${inner}</div></div>`;
 }

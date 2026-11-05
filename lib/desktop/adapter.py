@@ -37,6 +37,7 @@ import uuid
 from urllib.parse import urlencode
 
 from lib.config_dir import config_path
+from lib.error_envelope import BadRequest
 from lib.identity import require_user_id
 from lib.json_store import read_json, update_json_atomic
 from lib.log import get_logger
@@ -488,7 +489,7 @@ def delete_adapter_account(agent_id: str, name: str, auth_index=None,
     match = next((a for a in accounts if a.get('name') == name and
                   (auth_index is None or a.get('auth_index') == auth_index)), None)
     if not match:
-        raise ValueError('unknown adapter account')
+        raise BadRequest('unknown adapter account', field='name')
     query_data = {'name': name}
     if auth_index is not None:
         query_data['auth_index'] = auth_index

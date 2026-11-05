@@ -138,10 +138,12 @@ def test_report_extraction_uses_exact_snapshot_transcript(monkeypatch):
         'created_at_lt': int(dt.datetime(2026, 8, 3).timestamp() * 1000),
         'limit': 10_000,
         'settings_keys': [],
+        'oversized_messages_since_ms': int(
+            dt.datetime(2026, 8, 2).timestamp() * 1000),
     }]
 
 
-def test_report_extraction_discards_partial_day_on_lazy_hydration_error(
+def test_report_extraction_raises_instead_of_partial_day_on_lazy_error(
         monkeypatch):
     def snapshots():
         yield _snapshot('partial', [
@@ -154,8 +156,9 @@ def test_report_extraction_discards_partial_day_on_lazy_hydration_error(
         lambda **_kwargs: (2, snapshots()),
     )
 
-    assert conversations._extract_convs_for_date(
-        '2026-08-02', owner_user_id=OWNER_USER_ID) == []
+    with pytest.raises(RuntimeError, match='later transcript batch failed'):
+        conversations._extract_convs_for_date(
+            '2026-08-02', owner_user_id=OWNER_USER_ID)
 
 
 def test_cost_scan_uses_usage_from_authority_snapshot(monkeypatch):

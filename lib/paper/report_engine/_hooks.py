@@ -1,17 +1,46 @@
 """Best-effort post-report passes and their durable metadata merge.
 
-The worker calls these hooks only after the canonical report is persisted.
-They own insight, terminology, and checkpoint enrichment; report lifecycle and
-event storage remain owned by ``report_runtime``.
+Entry: run_report_postpasses receives a committed report and explicit worker
+ports. The individual hooks retain their gates, model invocation, additive
+artifact persistence and usage projection. Report lifecycle and event storage
+remain owned by ``report_runtime``.
 """
 
 import uuid
 
 from lib.log import get_logger
+from lib.paper.report_metadata import merge_report_second_pass
 
 from ..report_runtime import _append_report_event
 
 logger = get_logger(__name__)
+
+
+def run_report_postpasses(task, phash, ui_lang, report_md, report_meta, *,
+                          messages, model, insight, termfill):
+    """Run ordered additive passes without changing an already-published verdict.
+
+    The worker retains terminal/request-local admission and its injection ports.
+    Resolve checkpoints only when its phase begins, as in the original worker.
+    Exception contains one pass; process-control exceptions still propagate.
+    """
+    stages = (
+        ('Insight', lambda: insight(
+            task, phash, ui_lang, report_md,
+            truncated_paper=messages[1]['content'] if len(messages) > 1 else '',
+            model=model)),
+        ('TermFill', lambda: termfill(
+            task, phash, ui_lang, report_md, report_meta, model=model)),
+        ('Checkpoints', lambda: _maybe_run_checkpoints(
+            task, phash, ui_lang, report_md, model=model)),
+    )
+    for label, invoke in stages:
+        try:
+            invoke()
+        except Exception as exc:
+            logger.warning(
+                '[Paper:%s] second-pass wrapper failed (non-fatal) hash=%s: %s',
+                label, phash, exc, exc_info=True)
 
 
 def _merge_second_pass(task, phash, name, payload, *, model=None):
@@ -24,7 +53,7 @@ def _merge_second_pass(task, phash, name, payload, *, model=None):
       1. updates ``task['report_meta']['secondPasses'][name]`` in place
          (usage + pass-specific verdict fields + computed cost);
       2. recomputes the meta's TOTAL cost (body + Σ passes) into
-         ``totalCostCny`` / ``totalCostUsd``;
+         ``totalCostCny`` / ``totalCostUsd`` from recorded stage costs;
       3. re-persists ONLY the meta column of the already-written
          paper_reports row (the body was persisted before the hooks ran —
          meta predates the passes, so it must be re-written);
@@ -50,31 +79,6 @@ def _merge_second_pass(task, phash, name, payload, *, model=None):
                 entry['costUsd'] = cost.get('costUsd')
         except Exception as e:
             logger.warning('[Paper:SecondPass] %s cost computation failed: %s', name, e)
-    def _apply(current):
-        passes = current.setdefault('secondPasses', {})
-        passes[name] = entry
-        # Total = body usage + Σ pass usages (token fields), re-costed once.
-        try:
-            keys = ('prompt_tokens', 'completion_tokens', 'cache_read_tokens',
-                    'cache_write_tokens', 'reasoning_tokens')
-            total = {k: int(current.get(_camel(k), 0) or 0) for k in keys}
-            for pass_meta in passes.values():
-                pass_usage = (pass_meta or {}).get('usage') or {}
-                for k in keys:
-                    total[k] += int(pass_usage.get(k, 0) or 0)
-            from lib.cost import compute_cost
-            total_cost = compute_cost(
-                total, model_id=model or current.get('model') or '',
-                provider_id=current.get('providerId') or None)
-            if total_cost:
-                current['totalCostCny'] = total_cost.get('costCny')
-                current['totalCostUsd'] = total_cost.get('costUsd')
-            current['totalUsage'] = total
-        except Exception as e:
-            logger.warning(
-                '[Paper:SecondPass] total-cost computation failed: %s', e)
-        return current
-
     # Merge against the lock-protected CURRENT database JSON. A deepen request
     # can start as soon as the done event is visible, while these hooks are
     # still running; writing the task's older in-memory dict would erase it.
@@ -91,7 +95,7 @@ def _merge_second_pass(task, phash, name, payload, *, model=None):
         if not isinstance(updated, dict):
             logger.warning('[Paper:SecondPass] report row missing during meta '
                            'merge — hash=%s pass=%s', phash, name)
-            meta = _apply(meta)
+            meta = merge_report_second_pass(meta, name, entry)
         else:
             meta = updated
         task['report_meta'] = meta
@@ -100,17 +104,11 @@ def _merge_second_pass(task, phash, name, payload, *, model=None):
     except Exception as e:
         logger.warning('[Paper:SecondPass] meta re-persist failed hash=%s pass=%s: %s',
                        phash, name, e)
-        meta = _apply(meta)
+        meta = merge_report_second_pass(meta, name, entry)
         task['report_meta'] = meta
 
     _append_report_event(task, {'type': 'report_meta', 'paperHash': phash,
                                 'meta': meta})
-
-
-def _camel(snake_key):
-    """prompt_tokens → promptTokens (the report meta's camelCase usage keys)."""
-    parts = snake_key.split('_')
-    return parts[0] + ''.join(p.title() for p in parts[1:])
 
 
 def _maybe_run_insight(task, phash, ui_lang, report_md, *, truncated_paper, model):

@@ -51,6 +51,7 @@ from lib.llm.llm_errors import (
     PermissionError_,
     PromptTooLongError,
     PROVIDER_RESPONSE_ERRORS,
+    REQUEST_REPAIR_ERRORS,
     RateLimitError,
     RequestTransportError,
     ResponseReadTimeoutError,
@@ -58,6 +59,7 @@ from lib.llm.llm_errors import (
     SubscriptionConnectionError,
     _RETRYABLE,
 )
+from lib.llm.request_repair import RequestRepairState, repair_rejected_request
 from lib.log import get_logger
 
 from lib.llm.diagnostic_timing import timed_call, timed_call_with_fields, timing_stage
@@ -122,7 +124,10 @@ def _iter_response_bytes(response):
 # Expiry causes that represent the CALLER's own per-attempt bound rather than
 # an upstream hiccup. They must not re-enter the same-slot retry loop: the
 # slot already had its full window.
-_CALLER_BOUND_EXPIRY_CAUSES = frozenset({'attempt_deadline', 'response_headers'})
+# ``stream_silence`` joins them: the silent-stream backstop already spent a
+# full deadline on this slot, so a same-slot retry would only double the hang.
+_CALLER_BOUND_EXPIRY_CAUSES = frozenset(
+    {'attempt_deadline', 'response_headers', 'stream_silence'})
 
 
 def stream_chat(body, *, on_thinking=None, on_content=None,
@@ -134,11 +139,12 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
                 on_stream_wait=None,
                 owner_user_id=None,
                 attempt_timeout=None,
-                first_byte_timeout=None) -> ProviderStreamResult:
+                first_byte_timeout=None, max_retries=None) -> ProviderStreamResult:
     """Streaming chat completion with callbacks.
 
     Automatically retries on transient connection errors up to
-    MAX_STREAM_RETRIES times.
+    MAX_STREAM_RETRIES times, or the caller's explicit ``max_retries``. A
+    dispatch-owned attempt can pass zero to keep retry ownership at dispatch.
 
     ``on_attempt_restart`` (optional): fired with ``reason=<str>`` whenever an
     in-flight attempt is being DISCARDED and the request is about to restart
@@ -186,7 +192,9 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
 
     last_err = None
     _limit_learned = None
-    for attempt in range(1 + MAX_STREAM_RETRIES):
+    _repair_state = RequestRepairState()
+    retries = MAX_STREAM_RETRIES if max_retries is None else max_retries
+    for attempt in range(1 + retries):
         try:
             stream_result = ensure_provider_stream_result(_stream_chat_once(
                 body, on_thinking=on_thinking, on_content=on_content,
@@ -209,10 +217,21 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
             # AbortedError: the user pressed Stop — never retry that.
             raise
         except ModelLimitError as e:
+            if attempt >= retries:
+                raise
             _limit_learned = apply_model_limit_retry(body, e, log_prefix)
             # The clamped retry restarts from scratch — anything streamed so
             # far belongs to a discarded attempt.
             _fire_attempt_restart('model-limit clamp retry')
+            continue
+        except REQUEST_REPAIR_ERRORS as e:
+            # Repairs are restrict-only and once per kind; an unrepairable or
+            # repeated rejection keeps its BadRequestError dispatch handling.
+            reason = repair_rejected_request(
+                body, e, _repair_state, log_prefix=log_prefix)
+            if not reason or attempt >= retries:
+                raise
+            _fire_attempt_restart(reason)
             continue
         except ResponseReadTimeoutError as e:
             if e.cause_type in _CALLER_BOUND_EXPIRY_CAUSES:
@@ -222,18 +241,20 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
                 # excludes the pair and rotates.
                 raise
             last_err = e
-            if attempt < MAX_STREAM_RETRIES:
+            if attempt < retries:
                 _fire_attempt_restart(
                     'transport retry: %s' % e.__class__.__name__)
-            wait = prepare_retryable_wait(attempt, e, abort_check, log_prefix)
+            wait = prepare_retryable_wait(attempt, e, abort_check, log_prefix,
+                **({'max_retries': retries} if max_retries is not None else {}))
             timed_call('transport_backoff', abortable_sleep, wait, abort_check)
         except _RETRYABLE as e:
             last_err = e
-            if attempt < MAX_STREAM_RETRIES:
+            if attempt < retries:
                 # Another attempt WILL run from scratch — the partial stream
                 # from this attempt is being abandoned.
                 _fire_attempt_restart('transport retry: %s' % e.__class__.__name__)
-            wait = prepare_retryable_wait(attempt, e, abort_check, log_prefix)
+            wait = prepare_retryable_wait(attempt, e, abort_check, log_prefix,
+                **({'max_retries': retries} if max_retries is not None else {}))
             timed_call('transport_backoff', abortable_sleep, wait, abort_check)
     raise last_err
 
@@ -272,6 +293,94 @@ def _stream_chat_once(body, **kwargs):
             return result
 
 
+def _stream_websocket_or_none(plan, *, log_prefix, **stream_options):
+    """Run the round on the Responses WebSocket; ``None`` means use SSE.
+
+    ``None`` is returned only when the socket failed before
+    ``response.create`` was sent, so the same sealed request can safely use
+    the proven SSE transport.
+    """
+    from lib.llm.responses_websocket import (
+        ResponsesWebSocketUnavailable,
+        stream_responses_websocket,
+    )
+    try:
+        result = stream_responses_websocket(
+            plan, log_prefix=log_prefix, **stream_options)
+    except ResponsesWebSocketUnavailable as exc:
+        (logger.debug if exc.expected else logger.warning)(
+            '%s [ResponsesWS] unavailable before send (%s); '
+            'falling back to SSE', log_prefix, exc)
+        return None
+    if plan.raw_archive_capture is not None:
+        plan.raw_archive_capture.append_response(
+            json.dumps(result.message, ensure_ascii=False).encode('utf-8'))
+        plan.raw_archive_capture.commit(
+            response_complete=True, status_code=200)
+    return result
+
+
+def _classify_stream_error_response(
+        resp, plan, canonical_body, *, watchdog, abort_check, oauth, log_prefix,
+        report_network_outcome, annotate_network_error):
+    if resp.status_code == 200:
+        return
+    # A complete application-level HTTP response proves the selected network
+    # route. Provider status classification is separate from route health.
+    report_network_outcome(True)
+    from lib.llm.provider_error_body import read_error_body, ERROR_BODY_TIMEOUT_S
+    import lib.llm._transport as transport
+    watchdog.arm_read_deadline(
+        ERROR_BODY_TIMEOUT_S, lambda: transport.interrupt_response_read(resp))
+    error_read_options = dict(
+        abort_check=abort_check,
+        expired_check=lambda: watchdog.read_deadline_expired)
+    # Keep desktop route failures distinct; both adapters consume only a
+    # bounded prefix rather than retaining/draining the entire body.
+    if hasattr(resp, 'read_all_text'):
+        from lib.desktop.egress import EgressUnavailable
+        try:
+            captured_error = read_error_body(resp, **error_read_options)
+        except EgressUnavailable as error:
+            raise EndpointUnreachableError(str(error), base_url=plan.url) from error
+    else:
+        chunks = (_iter_response_bytes(resp)
+                  if callable(getattr(resp, 'iter_content', None)) else None)
+        captured_error = read_error_body(resp, chunks=chunks, **error_read_options)
+    err_body = captured_error.text(resp)
+    if plan.raw_archive_capture is not None:
+        plan.raw_archive_capture.append_response(captured_error.data)
+        plan.raw_archive_capture.commit(
+            response_complete=captured_error.complete, status_code=resp.status_code)
+    for activate_fallback, error_text in (
+            (activate_native_tool_search_fallback,
+             'native Tool Search rejected; retrying locally'),
+            (activate_native_orchestration_fallback,
+             'native orchestration rejected; retrying locally')):
+        if activate_fallback(
+                resp.status_code, err_body, plan=plan,
+                canonical_body=canonical_body):
+            error = RetryableAPIError(
+                error_text, status_code=resp.status_code)
+            raise annotate_network_error(error, 'provider_response')
+    if activate_subscription_transient_retry(
+            resp.status_code, oauth=oauth,
+            canonical_body=canonical_body):
+        error = RetryableAPIError(
+            'subscription upstream transient 404; retrying',
+            status_code=resp.status_code)
+        raise annotate_network_error(error, 'provider_response')
+    try:
+        classify_status_error(
+            resp.status_code, err_body, body=plan.body,
+            log_prefix=log_prefix, raw_dumper=plan.raw_dumper,
+            credential_present=plan.credential_present,
+            route_limit_key=plan.route_output_limit_key)
+    except Exception as error:
+        annotate_network_error(error, 'provider_response')
+        raise
+
+
 def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                       on_tool_call_ready=None,
                       abort_check=None, log_prefix='', attempt=0,
@@ -283,19 +392,13 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
     """Single attempt at a streaming chat completion (sync transport)."""
     from lib.llm._transport import transport_owner_scope
     _owner_scope = transport_owner_scope(owner_user_id)
-    try:
+    from lib.llm.request import request_preparation
+    with request_preparation():
         plan = timed_call('request_build', prepare_request,
             body, attempt=attempt, log_prefix=log_prefix,
             api_key=api_key, base_url=base_url, extra_headers=extra_headers,
             api_protocol=api_protocol, oauth=oauth,
             owner_user_id=_owner_scope)
-    except (LocalRequestPreparationError, AbortedError):
-        raise
-    except Exception as error:
-        raise LocalRequestPreparationError(
-            f'local request preparation failed: {error}',
-            stage='wire_projection',
-        ) from error
 
     _network_route = {
         'routeId': 'unresolved',
@@ -345,30 +448,15 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                          log_prefix, annotate_error)
         return error
 
-    if plan.responses_transport == 'websocket':
-        from lib.llm.responses_websocket import (
-            ResponsesWebSocketUnavailable,
-            stream_responses_websocket,
-        )
-        try:
-            websocket_result = stream_responses_websocket(
-                plan, on_thinking=on_thinking, on_content=on_content,
-                on_tool_call_ready=on_tool_call_ready,
-                abort_check=abort_check, log_prefix=log_prefix,
-                on_first_byte_wait=on_first_byte_wait,
-                on_stream_wait=on_stream_wait)
-            if plan.raw_archive_capture is not None:
-                plan.raw_archive_capture.append_response(
-                    json.dumps(websocket_result.message,
-                               ensure_ascii=False).encode('utf-8'))
-                plan.raw_archive_capture.commit(
-                    response_complete=True, status_code=200)
+    # A desktop subscription adapter is reachable only through its HTTP relay.
+    if plan.responses_transport == 'websocket' and not adapter:
+        websocket_result = _stream_websocket_or_none(
+            plan, on_thinking=on_thinking, on_content=on_content,
+            on_tool_call_ready=on_tool_call_ready, abort_check=abort_check,
+            log_prefix=log_prefix, on_first_byte_wait=on_first_byte_wait,
+            on_stream_wait=on_stream_wait, owner_scope=_owner_scope)
+        if websocket_result is not None:
             return websocket_result
-        except ResponsesWebSocketUnavailable as exc:
-            # The socket failed before response.create was sent, so the same
-            # translated request can safely use the proven SSE transport.
-            logger.warning('%s [ResponsesWS] unavailable before send (%s); '
-                           'falling back to SSE', log_prefix, exc)
 
     # ``prepare_request`` already opened the RawSSEDumper fd (when enabled), so
     # a single outer try/finally must guard EVERY exit path — including the
@@ -378,13 +466,16 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
     resp = None
     raw_chunks = None
     # ── Idle watchdog ──
-    # Three jobs: beat while the upstream is silent (HUD + the reaper's
-    # liveness clocks), poll ``abort_check`` so a Stop pressed during a
-    # silent stretch actually lands, and cut a genuinely SILENT stream short
-    # after the rolling transport-idle window. Any bytes — including SSE
-    # comments/keep-alives — renew the window, matching native Codex. The
-    # in-loop abort check below only runs when a byte arrives, so without the
-    # poll a zero-byte hang would ignore Stop entirely. Constants are read
+    # Two phases. During the response-header wait it only beats (HUD + the
+    # reaper's liveness clocks) and polls ``abort_check`` so a Stop lands;
+    # the idle window is deliberately unarmed because there is no response
+    # handle to interrupt and no body activity to renew the clock. Arming it
+    # there latched an expiry that the body loop then applied to the first
+    # chunk of a healthy late answer (2026-10-23 zero-byte incident: a
+    # gateway that buffered headers past the window produced a discarded
+    # complete answer). ``_start_body_watchdog`` anchors the rolling window
+    # when headers arrive; any body bytes — including SSE comments and
+    # keep-alives — renew it, matching native Codex. Constants are read
     # through the module at call time so tests/deployments can retune.
     import lib.llm._transport as _tp
     _resp_holder = {}
@@ -396,8 +487,32 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
         progress=_progress,
         abort_check=abort_check,
         on_abort=lambda: _tp.interrupt_response_read(_resp_holder.get('resp')),
-        idle_timeout=_tp.stream_idle_timeout_seconds(),
+        idle_timeout=0,
         on_idle_timeout=lambda: _tp.interrupt_response_read(_resp_holder.get('resp')))
+    _body_watchdog_started = False
+
+    def _start_watchdog_before_send():
+        # Nothing has been sent yet: a host thread refusal is a neutral local
+        # failure that must not charge the slot or authorize a model switch.
+        try:
+            _watchdog.start()
+        except RuntimeError as error:
+            raise LocalRequestPreparationError(
+                f'stream-idle-watchdog thread could not start: {error}',
+                stage='thread_start') from error
+
+    def _start_body_watchdog():
+        # The response now exists: anchor the rolling idle clock at headers,
+        # then arm the window exactly once.
+        nonlocal _body_watchdog_started
+        if _body_watchdog_started:
+            return
+        _body_watchdog_started = True
+        _watchdog.notify_response_headers()
+        _watchdog.arm_stream_idle(_tp.stream_idle_timeout_seconds())
+        _watchdog.arm_silence_deadline(
+            _tp.silent_stream_deadline_seconds(),
+            lambda: _tp.interrupt_response_read(_resp_holder.get('resp')))
     _attempt_deadline_at = (
         time.monotonic() + float(attempt_timeout)
         if attempt_timeout and float(attempt_timeout) > 0 else None)
@@ -426,7 +541,7 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                 # resolves to direct.
                 _eg = None
             if adapter and _eg is not None:
-                _watchdog.start()
+                _start_watchdog_before_send()
                 # ── Subscription-adapter branch (E4): the provider IS a
                 # CLIProxyAPI sidecar on the user's desktop agent; its
                 # base_url is loopback-ON-THE-AGENT, which the server can
@@ -477,7 +592,7 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                 # Route admission precedes socket silence. Waiting locally
                 # must not exhaust the upstream idle clock or emit its HUD.
                 _progress.mark_transport_activity()
-                _watchdog.start()
+                _start_watchdog_before_send()
                 if _egress_route != 'direct':
                     _set_network_route({
                         'routeId': 'desktop:egress',
@@ -606,70 +721,18 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
             raise _annotate_network_error(error, stage) from e
 
         resp_trace = resp.headers.get('M-TraceId', '')
-        _watchdog.notify_response_headers()
+        _start_body_watchdog()
         if resp_trace and resp_trace != plan.trace_id:
             logger.debug('%s resp M-TraceId=%s', log_prefix, resp_trace)
+        if oauth == 'codex' and resp.status_code == 200:
+            from lib.oauth.codex_turn_state import observe_turn_state_headers
+            observe_turn_state_headers(plan.responses_state_key, resp.headers)
 
-        if resp.status_code != 200:
-            # A complete application-level HTTP response proves the selected
-            # network route. Provider status classification is separate from
-            # route health.
-            _report_network_outcome(True)
-            from lib.llm.provider_error_body import read_error_body, ERROR_BODY_TIMEOUT_S
-            _watchdog.arm_read_deadline(
-                ERROR_BODY_TIMEOUT_S, lambda: _tp.interrupt_response_read(resp))
-            error_read_options = dict(
-                abort_check=abort_check,
-                expired_check=lambda: _watchdog.read_deadline_expired)
-            # Keep desktop route failures distinct; both adapters consume only
-            # a bounded prefix rather than retaining/draining the entire body.
-            if hasattr(resp, 'read_all_text'):
-                from lib.desktop.egress import EgressUnavailable as _EU
-                try:
-                    captured_error = read_error_body(resp, **error_read_options)
-                except _EU as e:
-                    raise EndpointUnreachableError(str(e), base_url=plan.url) from e
-            else:
-                chunks = (_iter_response_bytes(resp)
-                          if callable(getattr(resp, 'iter_content', None)) else None)
-                captured_error = read_error_body(resp, chunks=chunks, **error_read_options)
-            err_body = captured_error.text(resp)
-            if plan.raw_archive_capture is not None:
-                plan.raw_archive_capture.append_response(captured_error.data)
-                plan.raw_archive_capture.commit(
-                    response_complete=captured_error.complete, status_code=resp.status_code)
-            if activate_native_tool_search_fallback(
-                    resp.status_code, err_body, plan=plan,
-                    canonical_body=body):
-                error = RetryableAPIError(
-                    'native Tool Search rejected; retrying locally',
-                    status_code=resp.status_code)
-                raise _annotate_network_error(
-                    error, 'provider_response')
-            if activate_native_orchestration_fallback(
-                    resp.status_code, err_body, plan=plan,
-                    canonical_body=body):
-                error = RetryableAPIError(
-                    'native orchestration rejected; retrying locally',
-                    status_code=resp.status_code)
-                raise _annotate_network_error(
-                    error, 'provider_response')
-            if activate_subscription_transient_retry(
-                    resp.status_code, oauth=oauth, canonical_body=body):
-                error = RetryableAPIError(
-                    'subscription upstream transient 404; retrying',
-                    status_code=resp.status_code)
-                raise _annotate_network_error(
-                    error, 'provider_response')
-            try:
-                classify_status_error(
-                    resp.status_code, err_body, body=plan.body,
-                    log_prefix=log_prefix, raw_dumper=plan.raw_dumper,
-                    credential_present=plan.credential_present,
-                    route_limit_key=plan.route_output_limit_key)
-            except Exception as error:
-                _annotate_network_error(error, 'provider_response')
-                raise
+        _classify_stream_error_response(
+            resp, plan, body, watchdog=_watchdog, abort_check=abort_check,
+            oauth=oauth, log_prefix=log_prefix,
+            report_network_outcome=_report_network_outcome,
+            annotate_network_error=_annotate_network_error)
 
         resp.encoding = 'utf-8'
 
@@ -712,7 +775,9 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                                      log_prefix, _dbg_write_e)
                 if plan.raw_archive_capture is not None:
                     plan.raw_archive_capture.append_response(raw_chunk)
-                if _watchdog.idle_timed_out or _watchdog.attempt_deadline_expired:
+                if (_watchdog.idle_timed_out
+                        or _watchdog.attempt_deadline_expired
+                        or _watchdog.silence_deadline_expired):
                     # The watchdog closed the socket after
                     # IDLE_STREAM_TIMEOUT_S of silence or at the caller's
                     # per-attempt deadline. Fall through to finalize() so the
@@ -739,7 +804,9 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                            'error_kind': type(_iter_e).__name__,
                            'stream_evidence': _interrupted_evidence,
                        }})
-            if _watchdog.idle_timed_out or _watchdog.attempt_deadline_expired:
+            if (_watchdog.idle_timed_out
+                    or _watchdog.attempt_deadline_expired
+                    or _watchdog.silence_deadline_expired):
                 # Closing the response from the watchdog thread usually
                 # surfaces as an I/O error here; treat it as a premature close
                 # (finalize will flag _missing_done) rather than re-raising.
@@ -776,7 +843,8 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                              log_prefix, _dbg_close_e)
         byte_stream.finalize(interrupted=(
             acc.aborted_by_client or _watchdog.aborted
-            or _watchdog.attempt_deadline_expired))
+            or _watchdog.attempt_deadline_expired
+            or _watchdog.silence_deadline_expired))
         if _watchdog.aborted:
             # A close() can surface as a CLEAN end of iteration on some
             # urllib3 versions — without this check an aborted attempt would
@@ -795,6 +863,16 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                 base_url=plan.url,
                 timeout_seconds=attempt_timeout,
                 cause_type='attempt_deadline')
+        if _watchdog.silence_deadline_expired and not _watchdog.idle_timed_out:
+            # Response headers arrived, then no byte for the whole silent-
+            # stream deadline. Never accept the partial body: surface a typed
+            # retryable read timeout so dispatch rotates slot/fallback.
+            _report_network_outcome(False, 'read_timeout')
+            logger.warning(
+                '%s Provider stream silent for %.0fs after headers trace=%s; '
+                'closed the response', log_prefix,
+                _tp.silent_stream_deadline_seconds(), plan.trace_id)
+            raise _tp.silent_stream_timeout_error(base_url=plan.url)
         if byte_stream.stopped and acc.saw_done and not acc.aborted_by_client:
             def _record_tail(raw_chunk):
                 _progress.mark_transport_bytes(len(raw_chunk))

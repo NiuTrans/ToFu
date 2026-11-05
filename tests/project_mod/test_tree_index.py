@@ -7,6 +7,9 @@ cross-DC mounts turn a full-tree walk into a >60s timeout). These tests pin:
   * find_files served from the index (format + glob parity),
   * grep_search served from the index (match parity, include glob, count_only,
     context lines, subdirectory scoping, hidden/ignore rules),
+  * one coverage policy across index, rg/fd and fallback walkers: hidden
+    entries are searched, ignore files prune discovery, and explicit paths
+    inside pruned trees are still searched,
   * write-hook freshness (note_write) and .gitignore invalidation,
   * honest fallback to the live walk when the index is absent/disabled.
 """
@@ -16,6 +19,7 @@ _AUDIT_SYNTHETIC_REPO_PATHS = {'docs/guide.md', 'scripts/keep.py'}
 import os
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -26,10 +30,9 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture()
-def proj(tmp_path, monkeypatch):
-    """A small project tree on local disk + index disk-state redirected to tmp."""
-    idx_store = tmp_path / '.idx-store'
-    idx_store.mkdir()
+def proj(tmp_path, tmp_path_factory, monkeypatch):
+    """A small project tree on local disk + index disk-state kept outside it."""
+    idx_store = tmp_path_factory.mktemp('idx-store')
     (tmp_path / 'src' / 'pkg').mkdir(parents=True)
     (tmp_path / 'docs').mkdir()
     (tmp_path / 'node_modules' / 'junk').mkdir(parents=True)
@@ -63,9 +66,9 @@ class TestBuildAndAcquire:
         paths = set(entry.paths)
         assert 'src/pkg/alpha.py' in paths
         assert 'docs/guide.md' in paths
-        # IGNORE_DIRS + hidden entries are excluded (rg/fd parity).
+        # Hidden entries are searchable; IGNORE_DIRS stay excluded.
+        assert '.hidden.py' in paths
         assert 'node_modules/junk/dep.js' not in paths
-        assert '.hidden.py' not in paths
         assert '.git/config' not in paths
 
     def test_disk_persistence_roundtrip(self, proj, monkeypatch):
@@ -89,6 +92,16 @@ class TestBuildAndAcquire:
         assert loaded is not None
         assert loaded.refresh_after_s == tree_index._stale_after_s()
         assert loaded.unchanged_refreshes == 0
+
+    def test_snapshot_from_previous_coverage_policy_is_rejected(self, proj):
+        # TFIX001 snapshots skipped hidden entries and ignored `.ignore`.
+        _build(proj)
+        path = tree_index._disk_path(proj)
+        with open(path, 'rb') as source:
+            blob = source.read()
+        with open(path, 'wb') as output:
+            output.write(b'TFIX001\n' + blob[len(tree_index._DISK_MAGIC):])
+        assert tree_index._load_disk(proj) is None
 
     def test_malformed_disk_count_cannot_install_missing_rows(self, proj):
         header = tree_index.struct.pack(
@@ -543,18 +556,20 @@ class TestFind:
         out = read_tools.tool_find_files(proj, '*.py')
         assert 'src/pkg/alpha.py' in out
         assert 'src/top.py' in out
+        assert '.hidden.py (' in out
         assert 'docs/guide.md' not in out
-        assert '3 found' in out
+        assert '4 found' in out
         # Size annotation parity with the fd/python walkers.
         assert 'src/pkg/alpha.py (' in out
 
     @pytest.mark.parametrize('indexed', [True, False])
     @pytest.mark.parametrize('pattern,expected', [
-        ('**/*', {'root.py', 'src/top.py', 'src/pkg/alpha.py', 'docs/guide.md'}),
-        ('**/*.py', {'root.py', 'src/top.py', 'src/pkg/alpha.py'}),
+        ('**/*', {'root.py', 'src/top.py', 'src/pkg/alpha.py', 'docs/guide.md',
+                  '.hidden.py'}),
+        ('**/*.py', {'root.py', 'src/top.py', 'src/pkg/alpha.py', '.hidden.py'}),
         ('**/**/root.py', {'root.py'}),
         ('**/' * 64 + 'root.py', {'root.py'}),
-        ('**/*.PY', {'root.py', 'src/top.py', 'src/pkg/alpha.py'}),
+        ('**/*.PY', {'root.py', 'src/top.py', 'src/pkg/alpha.py', '.hidden.py'}),
     ])
     def test_recursive_name_glob_keeps_root_files(self, proj, monkeypatch, indexed,
                                                  pattern, expected):
@@ -569,7 +584,7 @@ class TestFind:
         out = read_tools.tool_find_files(proj, pattern)
         for rel in expected:
             assert rel + ' (' in out
-        assert 'node_modules' not in out and '.hidden.py' not in out
+        assert 'node_modules' not in out and '.git/' not in out
         scoped = read_tools.tool_find_files(proj, pattern, rel_path='src/pkg', max_results=1)
         assert 'root.py (' not in scoped and 'docs/guide.md (' not in scoped
         if 'root.py' not in pattern:
@@ -622,8 +637,8 @@ class TestFind:
         out = read_tools.tool_find_files(proj, '*.py', max_results=1)
         assert '(1 found)' in out
         assert 'results capped at 1' in out
-        exact = read_tools.tool_find_files(proj, '*.py', max_results=3)
-        assert '(3 found)' in exact
+        exact = read_tools.tool_find_files(proj, '*.py', max_results=4)
+        assert '(4 found)' in exact
         assert 'results capped' not in exact
         assert 'No files matching' in read_tools.tool_find_files(proj, '*.rs')
 
@@ -730,12 +745,13 @@ class TestGrep:
             assert 'src/pkg/beta.py\n3:' in out
             assert 'src/top.py\n1:' in out
             assert 'docs/guide.md\n2:' in out
-            # Ignored/hidden trees stay out.
+            assert '.hidden.py\n1:' in out
+            # Ignored trees stay out.
             assert 'node_modules' not in out
-            assert '.hidden' not in out
+            assert '.git/' not in out
         _build(proj)  # now pin the explicit index path too
         via_index = read_tools.tool_grep(proj, 'needle')
-        assert '4 matches' in via_index
+        assert '5 matches' in via_index
         assert 'src/pkg/alpha.py\n2:' in via_index
 
     def test_include_glob(self, proj):
@@ -753,7 +769,7 @@ class TestGrep:
     def test_count_only(self, proj):
         _build(proj)
         out = read_tools.tool_grep(proj, 'needle', count_only=True)
-        assert '4 matches (count only)' in out
+        assert '5 matches (count only)' in out
 
     def test_context_lines(self, proj):
         _build(proj)
@@ -785,14 +801,15 @@ class TestGrep:
         out = read_tools.tool_grep(proj, 'NEEDLE-ONE')
         assert 'src/pkg/alpha.py\n2:' in out
         out = read_tools.tool_grep(proj, 'NEEDLE', count_only=True)
-        assert '4 matches (count only)' in out
+        assert '5 matches (count only)' in out
 
     def test_single_explicit_file_uses_live_semantics(self, proj):
         _build(proj)
-        # A hidden file is NOT in the index, but an explicit file operand must
-        # still be searched (rg single-file behavior).
-        out = read_tools.tool_grep(proj, 'needle-hidden', rel_path='.hidden.py')
-        assert 'needle-hidden' in out
+        # An ignored file is NOT in the index, but an explicit file operand
+        # must still be searched (rg single-file behavior).
+        out = read_tools.tool_grep(
+            proj, 'needle-ignored', rel_path='node_modules/junk/dep.js')
+        assert 'needle-ignored' in out
 
     def test_regex_pattern(self, proj):
         _build(proj)
@@ -805,6 +822,119 @@ class TestGrep:
         monkeypatch.setenv('TOFU_TREE_INDEX_DISABLE', '1')
         out = read_tools.tool_grep(proj, 'needle')
         assert 'src/pkg/alpha.py\n2:' in out
+
+
+@pytest.fixture()
+def covered(proj):
+    """Tracked dotfiles plus trees pruned by .gitignore, .ignore and IGNORE_DIRS."""
+    root = Path(proj)
+    (root / '.github' / 'workflows').mkdir(parents=True)
+    (root / '.github' / 'workflows' / 'ci.yml').write_text('run: needle-ci\n')
+    (root / '.gitignore').write_text('.scratch*\n')
+    worktree = root / '.scratch' / 'worktrees' / 'w1' / 'src'
+    worktree.mkdir(parents=True)
+    (worktree / 'copy.py').write_text('needle-worktree\n')
+    (root / '.ignore').write_text('gen/\nsrc/bundle.js\n')
+    (root / 'gen').mkdir()
+    (root / 'gen' / 'out.js').write_text('needle-generated\n')
+    (root / 'src' / 'bundle.js').write_text('needle-bundle\n')
+    return proj
+
+
+def _grep_hit(out, rel):
+    """rg/GNU group matches under a path line; the Python fallback prints rel:N:."""
+    return f'{rel}\n1:' in out or f'{rel}:1:' in out
+
+
+def _route_search(monkeypatch, proj, backend):
+    """Serve grep/find through exactly one backend."""
+    if backend == 'index':
+        _build(proj)
+        return
+    monkeypatch.setenv('TOFU_TREE_INDEX_DISABLE', '1')
+    if backend == 'rg' and not read_tools._HAS_RG:
+        pytest.skip('ripgrep is not installed')
+    if backend == 'fd' and not read_tools._FD_BIN:
+        pytest.skip('fd is not installed')
+    if backend in ('gnu', 'python'):
+        monkeypatch.setattr(read_tools, '_HAS_RG', False)
+    if backend == 'python':
+        monkeypatch.setattr(read_tools, '_run_gnu_grep', lambda *a, **kw: None)
+        monkeypatch.setattr(read_tools, '_FD_BIN', None)
+
+
+class TestSearchCoverage:
+    """Index, rg/fd and fallback walkers share one coverage policy: hidden
+    entries are searched, ignore files and IGNORE_DIRS prune default discovery,
+    and an explicit path inside a pruned tree is still searched."""
+
+    @pytest.mark.parametrize('backend', ['index', 'rg', 'gnu', 'python'])
+    def test_grep_default_scope(self, covered, monkeypatch, backend):
+        _route_search(monkeypatch, covered, backend)
+        out = read_tools.tool_grep(covered, 'needle')
+        assert _grep_hit(out, '.github/workflows/ci.yml')
+        assert _grep_hit(out, '.hidden.py')
+        for pruned in ('node_modules', '.git/', 'gen/out.js'):
+            assert pruned not in out
+        if backend != 'gnu':  # GNU grep can only prune named directories
+            assert '.scratch/' not in out and 'src/bundle.js' not in out
+
+    @pytest.mark.parametrize('backend', ['index', 'rg', 'gnu', 'python'])
+    @pytest.mark.parametrize('rel_path,expected', [
+        ('.scratch/worktrees/w1', '.scratch/worktrees/w1/src/copy.py'),
+        ('gen', 'gen/out.js'),
+        ('node_modules', 'node_modules/junk/dep.js'),
+    ])
+    def test_grep_explicit_path_inside_pruned_tree(
+            self, covered, monkeypatch, backend, rel_path, expected):
+        _route_search(monkeypatch, covered, backend)
+        out = read_tools.tool_grep(covered, 'needle', rel_path=rel_path)
+        assert _grep_hit(out, expected)
+
+    @pytest.mark.parametrize('backend', ['index', 'fd', 'python'])
+    def test_find_default_scope(self, covered, monkeypatch, backend):
+        _route_search(monkeypatch, covered, backend)
+        assert '.github/workflows/ci.yml (' in read_tools.tool_find_files(
+            covered, '*.yml')
+        python_files = read_tools.tool_find_files(covered, '*.py')
+        assert '.hidden.py (' in python_files and '.scratch/' not in python_files
+        scripts = read_tools.tool_find_files(covered, '*.js')
+        for pruned in ('node_modules', 'gen/out.js', 'src/bundle.js'):
+            assert pruned not in scripts
+
+    @pytest.mark.parametrize('backend', ['index', 'fd', 'python'])
+    @pytest.mark.parametrize('rel_path,pattern,expected', [
+        ('.scratch/worktrees/w1', '*.py', '.scratch/worktrees/w1/src/copy.py ('),
+        ('gen', '*.js', 'gen/out.js ('),
+        ('node_modules', '*.js', 'node_modules/junk/dep.js ('),
+    ])
+    def test_find_explicit_path_inside_pruned_tree(
+            self, covered, monkeypatch, backend, rel_path, pattern, expected):
+        _route_search(monkeypatch, covered, backend)
+        out = read_tools.tool_find_files(covered, pattern, rel_path=rel_path)
+        assert expected in out
+
+    @pytest.mark.parametrize('backend,rejected,accepted', [
+        # Rust regex (index, rg): `(` opens a group, `\(` is literal.
+        ('index', {'pattern': 'needle('}, {'pattern': r'needle\('}),
+        ('rg', {'pattern': 'needle('}, {'pattern': r'needle\('}),
+        ('rg', {'pattern': 'needle', 'include': '[ab'},
+         {'pattern': 'needle', 'include': '[ab]'}),
+        # The GNU grep fallback speaks basic regex: the reverse.
+        ('gnu', {'pattern': r'needle\('}, {'pattern': 'needle('}),
+    ])
+    def test_rejected_request_is_an_error_not_an_empty_result(
+            self, covered, monkeypatch, backend, rejected, accepted):
+        """Exit status 2 means the backend refused the request (invalid regex or
+        glob) and searched nothing; that must never read as "No matches"."""
+        _route_search(monkeypatch, covered, backend)
+        for count_only in (False, True):
+            out = read_tools.tool_grep(covered, count_only=count_only, **rejected)
+            assert out.startswith('Invalid pattern'), out
+            assert 'Nothing was searched' in out and 'matches' not in out
+        assert 'No matches found' in read_tools.tool_grep(covered, **accepted)
+        assert _grep_hit(read_tools.tool_grep(covered, r'needle-c[i]'),
+                         '.github/workflows/ci.yml')
 
 
 class TestFreshness:
@@ -858,7 +988,7 @@ class TestGitignoreCompile:
         (tmp_path / '.gitignore').write_text('gen/\n')
         _build(str(tmp_path))
         entry = tree_index.acquire(str(tmp_path))
-        assert set(entry.paths) == {'keep.py'}
+        assert set(entry.paths) == {'keep.py', '.gitignore'}
 
     def test_negation_keeps_file(self, tmp_path):
         (tmp_path / 'a.log').write_text('x')
@@ -893,16 +1023,32 @@ class TestGitignoreCompile:
         assert 'shots/keep.txt' in paths
         assert 'other.png' in paths
 
-    def test_hidden_whitelist_resurrected(self, tmp_path):
-        """rg parity: `!.env.example` resurrects a hidden file past the
-        hidden-filter; `.env` itself stays hidden."""
+    def test_hidden_entries_follow_ignore_rules(self, tmp_path):
+        """Hidden entries are indexed like any other; ignore rules (including
+        negations) decide, so a gitignored `.env` stays out."""
         (tmp_path / '.env.example').write_text('x')
         (tmp_path / '.env').write_text('secret')
+        (tmp_path / '.editorconfig').write_text('root = true')
         (tmp_path / '.gitignore').write_text('.env\n.env.*\n!.env.example\n')
         _build(str(tmp_path))
         paths = set(tree_index.acquire(str(tmp_path)).paths)
-        assert '.env.example' in paths
+        assert {'.env.example', '.editorconfig', '.gitignore'} <= paths
         assert '.env' not in paths
+
+    def test_dot_ignore_file_prunes_like_gitignore(self, tmp_path):
+        (tmp_path / 'gen').mkdir()
+        (tmp_path / 'gen' / 'out.js').write_text('x')
+        (tmp_path / 'sub').mkdir()
+        (tmp_path / 'sub' / '.ignore').write_text('*.min.css\n')
+        (tmp_path / 'sub' / 'a.min.css').write_text('x')
+        (tmp_path / 'sub' / 'a.css').write_text('x')
+        (tmp_path / 'bundle.js').write_text('x')
+        (tmp_path / 'kept.js').write_text('x')
+        (tmp_path / '.ignore').write_text('gen/\n/bundle.js\n')
+        _build(str(tmp_path))
+        paths = set(tree_index.acquire(str(tmp_path)).paths)
+        assert {'kept.js', 'sub/a.css', '.ignore', 'sub/.ignore'} <= paths
+        assert not paths & {'gen/out.js', 'bundle.js', 'sub/a.min.css'}
 
     def test_git_info_exclude_honored(self, tmp_path):
         (tmp_path / '.git' / 'info').mkdir(parents=True)
@@ -915,22 +1061,39 @@ class TestGitignoreCompile:
         assert 'kept.md' in paths
 
     def test_note_write_refuses_non_indexable_paths(self, proj):
-        """Writes into ignored/hidden trees must NOT become searchable via
-        the write hook (a rebuild would exclude them)."""
+        """Writes into ignored trees must NOT become searchable via the write
+        hook (a rebuild would exclude them); hidden files are indexable."""
         _build(proj)
         sneaky = os.path.join(proj, 'node_modules', 'junk', 'sneaky.js')
         with open(sneaky, 'w') as f:
             f.write('needle-sneaky\n')
+        git_internal = os.path.join(proj, '.git', 'sneaky.py')
+        with open(git_internal, 'w') as f:
+            f.write('needle-sneaky\n')
         hidden = os.path.join(proj, '.secret.py')
         with open(hidden, 'w') as f:
-            f.write('needle-secret\n')
-        tree_index.note_write(sneaky)
-        tree_index.note_write(hidden)
+            f.write('needle-dotfile\n')
+        build_script = os.path.join(proj, 'src', 'build')
+        with open(build_script, 'w') as f:
+            f.write('needle-script\n')
+        for written in (sneaky, git_internal, hidden, build_script):
+            tree_index.note_write(written)
         paths = set(tree_index.acquire(proj).paths)
         assert 'node_modules/junk/sneaky.js' not in paths
-        assert '.secret.py' not in paths
+        assert '.git/sneaky.py' not in paths
+        # A FILE named like an IGNORE_DIRS entry is not a pruned directory.
+        assert {'.secret.py', 'src/build'} <= paths
         out = read_tools.tool_grep(proj, 'needle-sneaky')
         assert 'No matches found' in out
+        assert '.secret.py\n1:' in read_tools.tool_grep(proj, 'needle-dotfile')
+
+    def test_ignore_rule_file_write_invalidates(self, proj):
+        _build(proj)
+        rules = os.path.join(proj, 'docs', '.ignore')
+        with open(rules, 'w') as f:
+            f.write('guide.md\n')
+        tree_index.note_write(rules)
+        assert tree_index._mem.get(proj) is None
 
 
 def test_failed_scan_is_never_installed_as_complete_index(proj, monkeypatch):
@@ -1084,3 +1247,75 @@ def test_large_text_sources_are_searchable_live_indexed_and_explicit(proj, monke
     assert 'large-source.txt' in live and 'full-large-source-needle' in live
     explicit=read_tools.tool_grep(proj, 'full-large-source-needle', rel_path='large-source.txt')
     assert 'full-large-source-needle' in explicit
+
+
+_GITIGNORE_PARITY_LINES = [
+    'node_modules', '*.pyc', 'build/', '/dist', 'docs/_build', 'logs*', '*~', '.env',
+    '!.env.example', '!keep/', 'cache?', 'a/**/b', '**/tmp', '[Tt]humbs.db', 'foo[]x]',
+    '[^]bar', '[!a]z', '\\#literal', 'deep/nested/', '*', 'x[', '# comment', '',
+]
+_GITIGNORE_PARITY_PATHS = [
+    '', 'a', 'node_modules', 'src/node_modules/pkg', 'a.pyc', 'pkg/b.pyc', 'x.pyc/inner', 'build',
+    'src/build', 'dist', 'dist/x', 'src/dist', 'docs/_build/html', 'logs', 'logs.txt',
+    'x/logsy', 'file~', '.env', '.env.example', 'keep', 'keep/a', 'cache1', 'cachefile', 'a/b',
+    'a/x/y/b', 'tmp', 'q/tmp', 'Thumbs.db', 'thumbs.db', 'foo]x', 'foox', '^bar', ']bar', '!z',
+    'bz', '\\#literal', '#literal', 'deep/nested', 'deep/nested/file', 'x[', 'a//b',
+    'name\nnode_modules', 'dist\n',
+]
+
+
+def test_gitignore_buckets_answer_exactly_like_their_combined_regex():
+    """The walk's fast matcher keeps the combined alternation's verdicts.
+
+    Each rule bucket was one ``|``-joined regex. The literal, suffix, prefix
+    and anchored-path fast paths must give the same ``search`` truthiness for
+    every path, including newline paths and bracket classes whose regex parse
+    differs from the glob translator (those buckets keep the combined regex).
+    """
+    import random
+    import re
+    import warnings
+
+    def combined_buckets(lines):
+        sources = ([], [], [], [])
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            negated = line.startswith('!')
+            if negated:
+                line = line[1:]
+            src, dir_only = tree_index._translate_gitignore_glob(line)
+            if src:
+                sources[(2 if negated else 0) + (1 if dir_only else 0)].append(src)
+        buckets = []
+        for srcs in sources:
+            try:
+                buckets.append(
+                    re.compile('|'.join(f'(?:{s})' for s in srcs)) if srcs else None)
+            except re.error:
+                buckets.append(None)
+        return buckets
+
+    rng = random.Random(20261023)
+    rule_sets = [[line] for line in _GITIGNORE_PARITY_LINES]
+    rule_sets.append(list(_GITIGNORE_PARITY_LINES))
+    rule_sets.extend(rng.sample(_GITIGNORE_PARITY_LINES, 6) for _ in range(60))
+    # ``[]a]`` opens a class that swallows ``node_modules`` up to the ``]`` of
+    # ``[ab]``: the combined regex never matches that literal, so neither may
+    # the bucket.
+    rule_sets.append(['[]a]', 'node_modules', '[ab]'])
+    compared = 0
+    with warnings.catch_warnings():
+        # Malformed classes make re emit FutureWarning; verdicts are the subject.
+        warnings.simplefilter('ignore')
+        for lines in rule_sets:
+            pairs = zip(tree_index._compile_gi_lines(lines), combined_buckets(lines))
+            for actual, expected in pairs:
+                assert (actual is None) == (expected is None), lines
+                if expected is None:
+                    continue
+                for rel in _GITIGNORE_PARITY_PATHS:
+                    assert bool(actual.search(rel)) == bool(expected.search(rel)), (lines, rel)
+                    compared += 1
+    assert compared > 1000

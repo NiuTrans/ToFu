@@ -10,6 +10,26 @@ const header = createToolHeaderPresentation({
 });
 const summaries = Array.from({ length: 6 }, (_, i) => ({ status: i === 3 ? 'fail' : 'ok', detail: 'reason' }));
 
+describe('tool effect outcome badges', () => {
+  it.each(['run_command', 'write_file', 'edit_file'])('keeps %s non-entry distinct from failure', toolName => {
+    const value = header.renderBadgeHtml({ toolName, status: 'error', executionEffect: {
+      operationId: 'a'.repeat(32), state: 'not_started', recovery: 'reconcile', scope: 'process',
+    } }, { badge: 'failed' });
+    expect(value).toContain('tool.notStarted');
+    expect(value).not.toContain('tool.failed');
+  });
+
+  it('does not claim a definite failure when the effect outcome is unknown', () => {
+    const value = header.renderBadgeHtml({ toolName: 'run_command', status: 'error', executionEffect: {
+      operationId: 'a'.repeat(32), state: 'unknown', recovery: 'reconcile', scope: 'process',
+    } }, {});
+    expect(value).toContain('tool.effectUnknown');
+    expect(value).toContain('ptool-badge-warn');
+    expect(value).toContain('data-tool-effect-outcome="unknown"');
+    expect(value).not.toContain('tool.failed');
+  });
+});
+
 describe('batch header operation counts', () => {
   it.each(['edit_file', 'apply_diffs', 'insert_contents'])('counts outcomes for %s, not distinct files or tokens', toolName => {
     const round = Object.freeze({ toolName, status: 'done', toolTokens: 1000 });

@@ -38,6 +38,7 @@ from lib.tasks_pkg.snapshot_delta import (  # noqa: E402
     SnapshotProjector,
     content_hash,
     prefix_hash,
+    rebuild_attempt_event_frames,
     rebuild_snapshots,
     shared_prefix_len,
 )
@@ -413,12 +414,139 @@ def test_projector_retains_only_content_free_message_fingerprints():
     payload['messages'][0]['content'] = 'private-prompt-' + 'x' * 20_000
     projector.project('fingerprint-memory', payload)
 
-    retained = projector._prev_message_fingerprints
-    fingerprints = next(iter(retained.values()))
-    assert len(fingerprints) == len(payload['messages'])
+    retained = projector._previous_scans
+    scan = next(iter(retained.values()))
+    assert len(scan.fingerprints) == len(payload['messages'])
     assert all(isinstance(value, bytes) and len(value) == 32
-               for value in fingerprints)
-    assert 'private-prompt' not in repr(retained)
+               for value in scan.fingerprints)
+    assert type(scan.hasher).__name__ == 'HASH'
+    assert 'private-prompt' not in repr((scan.fingerprints, scan.hasher))
+
+
+def _v2_oracle(payloads, task_id='t1'):
+    """The v2 delta rows, derived from the public prefix helpers alone."""
+    previous, known_tools, rows = {}, set(), []
+    for payload in payloads:
+        out = {key: value for key, value in payload.items()
+               if key not in ('messages', 'tools')}
+        out['snapshotDeltaVersion'] = 2
+        tools = payload.get('tools')
+        if isinstance(tools, list) and tools:
+            out['toolsHash'] = content_hash(tools)
+            out['toolsCount'] = len(tools)
+            if out['toolsHash'] not in known_tools:
+                known_tools.add(out['toolsHash'])
+                out['tools'] = tools
+        else:
+            out['toolsCount'] = 0
+        messages = payload['messages']
+        key = (task_id, payload.get('turn') or '')
+        shared = (shared_prefix_len(previous[key], messages)
+                  if key in previous else 0)
+        out['prefixLen'] = shared
+        out['prefixHash'] = prefix_hash(messages, shared)
+        out['messageCount'] = len(messages)
+        if messages[shared:]:
+            out['newMessages'] = messages[shared:]
+        previous[key] = list(messages)
+        rows.append(out)
+    return rows
+
+
+def _settled_like_the_producer(payloads):
+    """Settle each snapshot, reusing the previous snapshot's unchanged twins."""
+    from lib.conversation_sync.settled_rows import settle_items
+    previous, out = None, []
+    for payload in payloads:
+        messages = settle_items([dict(m) for m in payload['messages']], previous=previous)
+        out.append({**payload, 'messages': messages})
+        previous = messages
+    return out
+
+
+def _diverging_rounds():
+    """Growth, a duplicate, an in-place rewrite (compaction) and regrowth."""
+    rounds = _interleaved_request_state_rounds(6)
+    rewritten = dict(rounds[7])
+    rewritten['messages'] = [dict(m) for m in rewritten['messages']]
+    rewritten['messages'][3] = {'role': 'tool', 'tool_call_id': 'call_1',
+                                'content': '[compacted] 结果'}
+    regrown = dict(rounds[9])
+    regrown['messages'] = [*rewritten['messages'],
+                           *[dict(m) for m in rounds[9]['messages'][len(rewritten['messages']):]]]
+    return [*rounds[:6], dict(rounds[5]), rewritten, regrown, *rounds[10:]]
+
+
+@pytest.mark.parametrize('settled', [False, True])
+def test_projected_rows_equal_the_prefix_helper_oracle_byte_for_byte(settled):
+    payloads = _diverging_rounds()
+    if settled:
+        payloads = _settled_like_the_producer(payloads)
+    projector = SnapshotProjector()
+    rows = [projector.project('oracle', payload) for payload in payloads]
+    expected = _v2_oracle(payloads, 'oracle')
+    assert [_canon(row) for row in rows] == [_canon(row) for row in expected]
+    assert any(0 < row['prefixLen'] < row['messageCount'] - 2 for row in rows)
+    rebuilt = rebuild_snapshots([{'type': row['type'], 'payload': row} for row in rows])
+    for payload, restored in zip(payloads, rebuilt):
+        assert not restored.get('degraded')
+        assert _canon(restored['messages']) == _canon(payload['messages'])
+
+
+def test_settled_history_is_encoded_and_hashed_once(monkeypatch):
+    import lib.tasks_pkg.snapshot_delta as snapshot_delta
+
+    payloads = _settled_like_the_producer(_task_rounds(12))
+    canonicalized, hashed = [], []
+    original_canon = snapshot_delta._canon
+    original_update = snapshot_delta.update_holding_gil
+
+    def counted_canon(value):
+        canonicalized.append(value)
+        return original_canon(value)
+
+    def counted_update(hasher, data):
+        hashed.append(len(data))
+        return original_update(hasher, data)
+
+    monkeypatch.setattr(snapshot_delta, '_canon', counted_canon)
+    monkeypatch.setattr(snapshot_delta, 'update_holding_gil', counted_update)
+    projector = SnapshotProjector()
+    for index, payload in enumerate(payloads):
+        canonicalized.clear()
+        hashed.clear()
+        projector.project('settled-history', payload)
+        new = len(payload['messages']) - (len(payloads[index - 1]['messages']) if index else 0)
+        # Only messages new since the previous snapshot are encoded and hashed
+        # (the tools list keeps its own content hash).
+        assert sum(value is not payload['tools'] for value in canonicalized) == new
+        assert len(hashed) == new
+
+
+def test_an_equal_digest_of_another_object_is_rehashed(monkeypatch):
+    """Only the same settled objects reuse the hash state; a forged digest
+    collision still yields the current bytes' prefix hash, so rebuild
+    degrades instead of authorizing a different prefix."""
+    import lib.tasks_pkg.snapshot_delta as snapshot_delta
+
+    first, second = _settled_like_the_producer(_task_rounds(2))
+    forged = dict(second)
+    forged['messages'] = [*second['messages']]
+    forged['messages'][1] = {'role': 'user', 'content': 'a different prompt'}
+    real = snapshot_delta.sha256_holding_gil
+    impostor = _canon(forged['messages'][1]).encode()
+    original = _canon(first['messages'][1]).encode()
+    monkeypatch.setattr(snapshot_delta, 'sha256_holding_gil', lambda data: real(
+        original if data == impostor else data))
+    projector = SnapshotProjector()
+    projector.project('collision', first)
+    row = projector.project('collision', forged)
+    assert row['prefixLen'] == len(first['messages'])
+    assert row['prefixHash'] == prefix_hash(forged['messages'], row['prefixLen'])
+    rebuilt = rebuild_snapshots([
+        {'type': 'messages_snapshot', 'payload': projector_row}
+        for projector_row in (SnapshotProjector().project('collision', first), row)])
+    assert rebuilt[1]['degraded'] is True
 
 
 def test_neuter_tools_dedup_breaks_compression_not_roundtrip():
@@ -449,6 +577,39 @@ def test_neuter_tools_dedup_breaks_compression_not_roundtrip():
     # Post-restore: dedup works again.
     rows = _project_all(originals)
     assert len([r for r in rows if isinstance(r['payload'].get('tools'), list)]) == 1
+
+
+
+def test_attempt_event_frames_rehydrate_delta_rows_in_place():
+    originals = _task_rounds(4)
+    projected = [row['payload'] for row in _project_all(originals)]
+    events = [{'payload': {'event': row}} for row in projected]
+
+    rebuilt = rebuild_attempt_event_frames(events)
+
+    for position, original in enumerate(originals):
+        frame = rebuilt[position]['payload']['event']
+        assert not frame.get('degraded')
+        assert _canon(frame['messages']) == _canon(original['messages'])
+        assert _canon(frame['tools']) == _canon(original['tools'])
+        assert 'snapshotDeltaVersion' not in frame
+        assert 'prefixLen' not in frame
+
+
+def test_attempt_event_frame_without_baseline_stays_a_delta():
+    originals = _task_rounds(3)
+    projected = [row['payload'] for row in _project_all(originals)]
+    orphan = projected[-1]
+    assert orphan['prefixLen'] > 0
+
+    events = [{'payload': {'event': orphan}}]
+    rebuilt = rebuild_attempt_event_frames(events)
+
+    assert rebuilt[0]['payload']['event'] is orphan
+    assert rebuilt[0]['payload']['event']['prefixLen'] == orphan['prefixLen']
+
+
+
 
 
 if __name__ == '__main__':

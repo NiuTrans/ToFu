@@ -37,7 +37,8 @@ def test_agent_dock_execution_history_and_keyboard(frontend_visual_page, tmp_pat
       const dispose=[];window.retainedCompositionLifecycle={add:fn=>dispose.push(fn)};
       window.disposeDockFixture=()=>dispose.reverse().forEach(fn=>fn());
       window.Api={activity:{background:()=>Promise.resolve({swarms:[],backgroundCommands:[
-        {command_id:'build',conv_id:'fixture',status:'running',command:'npm run build:frontend',elapsed_s:12}]})}};
+        {command_id:'build',conv_id:'fixture',status:'running',elapsed_s:5340,
+         command:'cd /mnt/your-fs && npm run build:frontend 2>&1 | tail -40 && python3 -m pytest -q tests/visual'}]})}};
     }""", locale)
     for name in ['background-activity-presentation', 'agent-sidebar-dock', 'agent-sidebar-dock-projection',
                  'conversation/ui/conversation-surface', 'conversation/presentation/swarm-failure-presentation',
@@ -64,7 +65,7 @@ def test_agent_dock_execution_history_and_keyboard(frontend_visual_page, tmp_pat
         _toolCallsOmitted:7,_toolCalls:[{callId:'actual-read',toolName:'read_files',status:'done',argsBrief:'docs/RENDER_CONTRACT.md',
           preview:'Actual canonical execution result <script>not markup</script>',previewTruncated:true,previewFullChars:8000,elapsed:0.4}]};
       window.round={_swarm:true,_swarmActive:true,_swarmRunId:'run',_swarmKey:'session',roundNum:1,status:'running',
-        _swarmAgents:[agent,{id:'builder',role:'coder',status:'running'},{id:'finished',role:'reviewer',status:'done'},
+        _swarmAgents:[agent,{id:'builder',role:'coder',status:'running',objective:'Rebuild the frontend bundle, run the visual tier in three themes and two widths, then report every layout regression with its screenshot path and the exact selector involved\\nSecond line stays in the detail.'},{id:'finished',role:'reviewer',status:'done'},
           {id:'failed',role:'tester',status:'failed',error:'Tests need attention'}]};
       round._swarmSnapshot={swarm_id:'run',messageReceiptsAvailable:true,
         messageParticipants:[{id:'run',taskId:'run',label:'Coordinator'},{id:'reader',taskId:'reader-task',label:'Researcher'}],
@@ -86,12 +87,27 @@ def test_agent_dock_execution_history_and_keyboard(frontend_visual_page, tmp_pat
     assert frame.locator('main > .agent-dock').count() == 0
     assert frame.evaluate("document.getElementById('chatContainer').getBoundingClientRect().width===beforeWidth")
     assert frame.evaluate("getComputedStyle(document.getElementById('chatContainer')).marginInlineEnd===beforeMargin")
-    assert frame.locator('.agent-dock-name').first.is_visible()
-    assert frame.locator('.agent-dock-status').first.is_visible()
-    assert '42' in frame.locator('.agent-dock-status').first.inner_text()
+    rows = frame.locator('.agent-dock-active .agent-dock-agent')
+    reader = rows.first
+    assert reader.locator('.agent-dock-purpose').inner_text() == 'Review contracts and source code'
+    assert reader.locator('.agent-dock-status').inner_text() == locale['swarm.phase.running']
+    assert reader.locator('.agent-dock-name').inner_text() == 'reader'
+    assert reader.get_attribute('data-tone') == 'live'
+    # The collapsed row carries the round count beside the state; no count, no slot.
+    assert reader.locator('.agent-dock-rounds').inner_text() == locale['agentDock.rounds'].replace('{count}', '42').replace('{s}', 's')
+    assert not rows.nth(1).locator('.agent-dock-rounds').is_visible()
+    builder = rows.nth(1).locator('.agent-dock-purpose')
+    assert builder.evaluate('el=>el.scrollHeight>el.clientHeight+1'), 'a long purpose is clamped'
+    assert builder.evaluate('el=>el.getBoundingClientRect().height<=2*parseFloat(getComputedStyle(el).lineHeight)+1')
+    assert 'Second line' not in rows.nth(1).locator(':scope > summary').text_content()
+    failed = rows.nth(2)
+    assert failed.get_attribute('data-tone') == 'error'
+    assert failed.locator('.agent-dock-status').inner_text() == locale['swarm.phase.failed']
+    assert failed.locator('.agent-dock-purpose').inner_text() == 'failed'
+    assert not failed.locator('.agent-dock-name').is_visible()
     assert dock.evaluate("el=>getComputedStyle(el).position==='static' && getComputedStyle(el).boxShadow==='none'")
     if width == 1280:
-        assert dock.evaluate("el=>el.parentElement.matches('.turn-ctx')")
+        assert dock.evaluate("el=>el.parentElement.matches('.turn-ctx > .tctx-card')")
         rail = frame.locator('.user-msg > .turn-ctx')
         assert dock.bounding_box()['x'] >= rail.bounding_box()['x']
         assert dock.bounding_box()['x'] + dock.bounding_box()['width'] <= rail.bounding_box()['x'] + rail.bounding_box()['width'] + 1
@@ -152,7 +168,8 @@ def test_agent_dock_execution_history_and_keyboard(frontend_visual_page, tmp_pat
     assert detail.locator('.sw-tl-omitted').count() == 1
     assert detail.locator('.sw-tl-truncated').count() >= 1
     assert detail.locator('script').count() == 0
-    assert 'not a full transcript' in detail.inner_text() if language == 'en' else '不是完整会话记录' in detail.inner_text()
+    # The detail opens directly on the canonical execution card, without a disclaimer.
+    assert detail.evaluate("el => el.firstElementChild.matches('.sw-a-body')")
     frame.evaluate("window.originalAgent=document.querySelector('.agent-dock-agent'); surface.render(makeVm('Updated model'));runtimeScope.renderBackgroundAgents()")
     assert frame.evaluate("originalAgent===document.querySelector('.agent-dock-agent')")
     assert frame.locator('.agent-dock-agent').first.evaluate('el=>el.open')
@@ -160,8 +177,19 @@ def test_agent_dock_execution_history_and_keyboard(frontend_visual_page, tmp_pat
     assert not frame.locator('.agent-dock-agent').first.evaluate('el=>el.open')
     assert summary.evaluate('el=>document.activeElement===el')
     frame.locator('#bgActivityChip').click()
-    assert 'npm run build:frontend' in frame.locator('#bgActivityPopover').inner_text()
-    assert frame.locator('#bgActivityPopover .bg-act-agent').count() == 0
+    popover = frame.locator('#bgActivityPopover')
+    assert 'npm run build:frontend' in popover.inner_text()
+    assert popover.locator('.bg-act-agent').count() == 0
+    command = popover.locator('.bg-act-cmd-text')
+    one_line = command.bounding_box()['height']
+    assert command.evaluate('el=>el.scrollWidth>el.clientWidth'), 'collapsed row is one ellipsized line'
+    popover.locator('.bg-act-cmd-head').click()
+    assert popover.locator('.bg-act-cmd').evaluate('el=>el.open')
+    assert command.bounding_box()['height'] > 2 * one_line, 'expanded row wraps the whole command'
+    assert command.evaluate('el=>el.scrollWidth<=el.clientWidth+1')
+    assert popover.evaluate('el=>el.scrollWidth<=el.clientWidth+1')
+    assert popover.locator('.bg-act-elapsed').inner_text() == '1h 29m'
+    page.locator('#agent-dock-fixture').screenshot(path=str(tmp_path / f'command-expanded-{theme}-{language}-{width}.png'))
     frame.locator('#bgActivityChip').click()
     frame.locator('.agent-dock-history > summary').click()
     frame.wait_for_function("document.querySelectorAll('.agent-dock-history .agent-dock-agent').length===1")
@@ -218,19 +246,22 @@ def test_agent_dock_counts_executions_once_during_launch_reconciliation(frontend
     dock.wait_for(state='visible')
     assert dock.locator('.agent-dock-active .agent-dock-agent').count() == 3
     assert dock.locator('.agent-dock-counts').inner_text() == '3 running'
-    assert dock.locator('.agent-dock-name').all_text_contents() == ['80024c34', '7d68e2ea', 'd2c1632d']
+    assert dock.locator('.agent-dock-purpose').all_inner_texts() == ['80024c34', '7d68e2ea', 'd2c1632d']
+    assert dock.locator('.agent-dock-rounds').all_inner_texts() == ['18 rounds', '16 rounds', '9 rounds']
     first = dock.locator('.agent-dock-active .agent-dock-agent').first
     first.locator(':scope > summary').click()
     first.locator(':scope > summary').focus()
     frame.evaluate("window.originalAgent=document.querySelector('.agent-dock-active .agent-dock-agent')")
     frame.evaluate("""() => {
       rounds=[{toolName:'read_files'},savedFirst,savedLater];
-      live={...live,created_at:2,agents:live.agents.map(a=>({...a,round:a.round+1}))};
+      live={...live,created_at:2,agents:live.agents.map(a=>({...a,round:a.round+1,objective:'Live brief '+a.id}))};
       repaint();
     }""")
     assert dock.locator('.agent-dock-active .agent-dock-agent').count() == 3
     assert first.evaluate('el=>el===originalAgent && el.open && document.activeElement===el.querySelector("summary")')
-    assert '19' in first.locator('.agent-dock-status').inner_text()
+    # Live evidence still binds to the retained execution after its launch copies move.
+    assert first.locator('.agent-dock-purpose').inner_text() == 'Live brief 80024c34'
+    assert dock.locator('.agent-dock-rounds').all_inner_texts() == ['19 rounds', '17 rounds', '10 rounds']
     frame.evaluate("""() => {
       for(const launch of [savedFirst,savedLater]) launch._swarmSnapshot.agents=
         launch._swarmSnapshot.agents.map(a=>({...a,executionTaskId:'worker-'+a.id}));
@@ -301,7 +332,7 @@ def test_agent_dock_hydration_retains_focus_and_reconciles_conversation_button(f
     dock = frame.locator('.agent-dock')
     row = dock.locator('.agent-dock-active .agent-dock-agent')
     summary = row.locator(':scope > summary')
-    button = row.locator(':scope > button')
+    button = row.locator(':scope > .agent-dock-actions > button')
     assert row.count() == 1
     assert button.count() == 0
     summary.focus()
@@ -327,7 +358,7 @@ def test_agent_dock_hydration_retains_focus_and_reconciles_conversation_button(f
     button.click()
     assert frame.evaluate('opened') == [{'callback': 'first', 'id': 'child-one'}]
     frame.evaluate("""() => {
-      window.oldButton=originalRow.querySelector(':scope > button');
+      window.oldButton=originalRow.querySelector(':scope > .agent-dock-actions > button');
       agent={...agent,conversationId:'child-two'};
       openChild=id=>opened.push({callback:'latest',id});repaint();
     }""")
@@ -418,4 +449,136 @@ def test_agent_dock_hydration_retains_focus_and_reconciles_conversation_button(f
     assert history.get_attribute('data-status') == 'done'
     assert dock.locator('.agent-dock-agent').count() == 1
     frame.evaluate('lateDock.dispose()')
+    assert dock.count() == 0
+
+
+@pytest.mark.parametrize('width', [1280, 390])
+@pytest.mark.parametrize('language', ['en', 'zh'])
+def test_agent_dock_stops_a_running_agent_from_its_opened_row(frontend_visual_page, tmp_path, width, language):
+    """Stop sits beside the conversation control at rail width; the snapshot, not the
+    request, settles the row."""
+    page = frontend_visual_page
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.evaluate("""() => {
+      const frame=document.createElement('iframe');frame.id='agent-stop-fixture';
+      frame.style.cssText='position:fixed;inset:0;width:100%;height:100%;z-index:99999';document.body.append(frame);
+    }""")
+    frame = page.frames[-1]
+    frame.set_content('<!doctype html><html><body><div id="host" style="max-width:280px;margin:12px"></div></body></html>')
+    frame.add_style_tag(path=str(ROOT / 'static/styles.css'))
+    locale = json.loads((ROOT / f'frontend/src/i18n/locales/{language}.json').read_text())
+    frame.evaluate(r"""locale => {
+      window.t=(key,vars)=>(locale[key]||key).replace(/\{(\w+)\}/g,(match,name)=>vars?.[name]??match);
+    }""", locale)
+    for name in ['agent-sidebar-dock', 'agent-sidebar-dock-projection']:
+        frame.add_script_tag(path=native_module_path(f'.native/stop-{name}.js', ROOT / f'frontend/src/{name}.ts'))
+    frame.evaluate("""() => {
+      window.translate=(key,fallback,vars)=>t(key,vars);
+      window.stops=[];window.accept=null;window.liveStatus='running';
+      const round={_swarm:true,_swarmRunId:'run',_swarmKey:'fixture',taskId:'producer',attemptId:'attempt',
+        toolName:'spawn_agents',toolCallId:'launch',_swarmAgents:[{id:'reader',role:'researcher',status:'running',
+          objective:'Fix the embedded-data-islands page projection',conversationId:'child'}]};
+      window.dock=createAgentSidebarDock({host:document.getElementById('host'),translate});
+      window.repaint=()=>dock.update('fixture',agentDockProjection({
+        turns:[{turnId:'turn',projection:{toolRounds:[round]}}],
+        swarms:[{swarm_id:'run',swarm_key:'fixture',conv_id:'fixture',agents:[{id:'reader',status:liveStatus}]}],
+        recover:()=>[],renderPanel:()=>'<div></div>',
+        renderActivity:a=>Object.assign(document.createElement('div'),{textContent:a.id}),
+        openConversation:()=>{},
+        stopAgent:(run,agent)=>new Promise(resolve=>{stops.push([run,agent]);accept=resolve;}),
+        translate,
+      }));
+      repaint();
+    }""")
+    dock = frame.locator('.agent-dock')
+    row = dock.locator('.agent-dock-active .agent-dock-agent')
+    row.locator(':scope > summary').click()
+    actions = row.locator(':scope > .agent-dock-actions > button')
+    assert actions.all_inner_texts() == [locale['agentDock.openConversation'], locale['agentDock.stop']]
+    stop = actions.nth(1)
+    assert dock.evaluate('el=>el.scrollWidth<=el.clientWidth+1')
+    box, bounds = stop.bounding_box(), dock.bounding_box()
+    assert box['x'] + box['width'] <= bounds['x'] + bounds['width'] + 1
+    page.locator('#agent-stop-fixture').screenshot(path=str(tmp_path / f'agent-stop-{language}-{width}.png'))
+    stop.click()
+    assert frame.evaluate('stops') == [['run', 'reader']]
+    assert stop.is_disabled() and stop.inner_text() == locale['agentDock.stopping']
+    frame.evaluate("accept(true);liveStatus='cancelled';repaint()")
+    assert actions.all_inner_texts() == [locale['agentDock.openConversation']]
+    assert row.evaluate('el=>el.open')
+    frame.evaluate('dock.dispose()')
+    assert dock.count() == 0
+
+
+def test_agent_dock_follows_the_latest_round_input_rail(frontend_visual_page):
+    """A swarm settlement continues the round as a virtual user. Its rail, not the
+    human rail above it in history, hosts the agents and stays hit-testable where it
+    overhangs the later reply."""
+    page = frontend_visual_page
+    page.set_viewport_size({'width': 1280, 'height': 900})
+    page.evaluate("""() => {
+      const frame=document.createElement('iframe');frame.id='agent-dock-fixture';
+      frame.style.cssText='position:fixed;inset:0;width:100%;height:100%;z-index:99999';document.body.append(frame);
+    }""")
+    frame = page.frames[-1]
+    frame.set_content('''<!doctype html><html><body><main class="main" style="height:100vh;width:100%;display:block">
+      <div id="chatContainer" class="chat-container" style="height:100vh;width:100%"><div id="chatInner" class="chat-inner"></div></div>
+      <div id="convStatusStrip" style="position:fixed;bottom:16px;left:16px"><div id="turnNav"></div></div>
+      </main></body></html>''')
+    frame.add_style_tag(path=str(ROOT / 'static/styles.css'))
+    frame.evaluate("""() => {
+      window.t=key=>key;
+      window.escapeHtml=s=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+      window.runtimeScope={};window._TOOL_DISPLAY={};window.errorEnvelopeMessage=String;
+      window.activeConvId='fixture';window.getConvById=id=>({id,title:'Round input fixture'});window.loadConversation=()=>{};
+      const dispose=[];window.retainedCompositionLifecycle={add:fn=>dispose.push(fn)};
+      window.disposeDockFixture=()=>dispose.reverse().forEach(fn=>fn());
+      window.Api={activity:{background:()=>Promise.resolve({swarms:[],backgroundCommands:[]})}};
+    }""")
+    for name in ['background-activity-presentation', 'agent-sidebar-dock', 'agent-sidebar-dock-projection',
+                 'conversation/ui/conversation-surface', 'conversation/presentation/swarm-failure-presentation',
+                 'conversation/presentation/agent-message-receipts', 'conversation/presentation/swarm-messages-projection']:
+        frame.add_script_tag(path=native_module_path(f'.native/dock-{name.replace("/", "-")}.js', ROOT / f'frontend/src/{name}.ts'))
+    frame.add_script_tag(content=runtime_section('ui/streaming_swarm_panel.js'))
+    frame.evaluate("""() => {
+      const turn=(id,ordinal,actor,blocks)=>({turnId:id,laneId:'main',parentTurnId:null,ordinal,actor,
+        role:actor==='assistant'?'assistant':'user',kind:actor==='assistant'?'reply':'input',status:'completed',
+        attemptId:null,projectionRevision:1,subtreeRevisionKey:id,commandPending:null,finish:null,branches:[],actions:[],
+        metadata:{translation:{pending:false}},source:{},blocks});
+      const context=model=>[{kind:'context',blockId:'context',identitySource:'contract',source:{model},value:{snapshot:{model}}}];
+      const answer=[{kind:'text',blockId:'answer',identitySource:'contract',source:{},markdown:'Spawning the next batch. ',deliverable:true,terminal:true,resumable:false}];
+      window.turns=[turn('input',1,'human',context('Human round')),turn('reply',2,'assistant',answer),
+        turn('settled',3,'virtual_user',context('Autopilot round')),turn('settled-reply',4,'assistant',answer)];
+      window.surface=createConversationSurface(document.getElementById('chatInner'),{
+        renderTurnContextRail(node,block){node.innerHTML='<div class="tctx-head"><span class="tctx-model">'+escapeHtml(block?.value.snapshot.model||'')+'</span></div>';node.hidden=!block;},
+        renderBlock(node,block){node.className='conversation-block conversation-block--'+block.kind;node.innerHTML=block.kind==='context'?'':'<p>'+block.markdown.repeat(60)+'</p>';}
+      });
+      surface.render({conversationId:'fixture',conversationRevision:1,transport:'live',orphanLanes:[],queue:[],
+        mainLane:{laneId:'main',parentTurnId:null,title:'Conversation',kind:'main',turns}});
+      const round={_swarm:true,_swarmActive:true,_swarmRunId:'run',_swarmKey:'session',roundNum:1,status:'running',
+        _swarmAgents:[{id:'team',role:'coder',status:'running'},{id:'paper',role:'coder',status:'running'},{id:'poster',role:'coder',status:'running'}]};
+      runtimeScope.ConversationSwarmPresentation={candidates:()=>[{turnId:'settled-reply',projection:{toolRounds:[round]}}]};
+      runtimeScope.ConversationTurnRead={latest:(id,predicate,lane)=>(
+        id==='fixture'&&lane==='main'?[...turns].reverse().find(predicate):undefined)};
+    }""")
+    frame.add_script_tag(content=runtime_section('background-activity.js', scope_prelude=False))
+    frame.evaluate('runtimeScope.updateBackgroundActivity()')
+    dock = frame.locator('.agent-dock')
+    dock.wait_for(state='visible')
+    assert dock.evaluate("el=>el.parentElement.matches('.turn-ctx > .tctx-card')")
+    assert dock.evaluate("el=>el.closest('.conversation-turn').dataset.turnId") == 'settled'
+    assert frame.locator('.agent-dock-active .agent-dock-agent').count() == 3
+    row = frame.locator('.agent-dock-active .agent-dock-agent > summary').last
+    row.scroll_into_view_if_needed()
+    host_bottom = frame.evaluate("""document.querySelector('.conversation-turn[data-turn-id="settled"]')
+      .getBoundingClientRect().bottom""")
+    assert row.bounding_box()['y'] > host_bottom, 'fixture must place the row over the later reply'
+    hit = row.evaluate("""el=>{const r=el.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;
+      const top=document.elementFromPoint(x,y);
+      return {ok:el.contains(top),x,y,viewport:innerHeight,top:top&&(top.className||top.tagName),
+        turn:top?.closest?.('[data-turn-id]')?.dataset.turnId??null};}""")
+    assert hit['ok'], hit
+    row.click()
+    assert frame.locator('.agent-dock-active .agent-dock-agent').last.evaluate('el=>el.open')
+    frame.evaluate('disposeDockFixture();surface.dispose()')
     assert dock.count() == 0

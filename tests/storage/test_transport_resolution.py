@@ -15,6 +15,17 @@ def supervisor(tmp_path):
     return StorageSupervisor(project_root=tmp_path)
 
 
+def _admitted_engine(supervisor, monkeypatch, tmp_path, *, library):
+    """Admit a synthetic engine so policy specs never verify the host's artifact."""
+    engine = tmp_path / 'engine'
+    engine.mkdir()
+    (engine / 'tofu-db').write_bytes(b'')
+    if library:
+        (engine / 'libtofu_db.so').write_bytes(b'')
+    monkeypatch.setattr(supervisor, '_resolve_native_daemon_binary',
+                        lambda: str(engine / 'tofu-db'))
+
+
 def test_transport_defaults_to_auto(supervisor, monkeypatch):
     monkeypatch.delenv('TOFUDB_TRANSPORT', raising=False)
     assert supervisor._configured_transport() == 'auto'
@@ -34,10 +45,19 @@ def test_explicit_transports_pass_through(supervisor, monkeypatch):
         assert supervisor._resolve_transport() == explicit
 
 
-def test_auto_resolves_embedded_on_a_local_volume(supervisor, monkeypatch):
+def test_auto_resolves_embedded_on_a_local_volume(supervisor, monkeypatch, tmp_path):
     monkeypatch.delenv('TOFUDB_TRANSPORT', raising=False)
     monkeypatch.setattr(volume_class, 'volume_class', lambda _path: 'local')
+    _admitted_engine(supervisor, monkeypatch, tmp_path, library=True)
     assert supervisor._resolve_transport() == 'embedded'
+
+
+def test_auto_resolves_daemon_when_the_engine_has_no_embedded_library(
+        supervisor, monkeypatch, tmp_path):
+    monkeypatch.delenv('TOFUDB_TRANSPORT', raising=False)
+    monkeypatch.setattr(volume_class, 'volume_class', lambda _path: 'local')
+    _admitted_engine(supervisor, monkeypatch, tmp_path, library=False)
+    assert supervisor._resolve_transport() == 'daemon'
 
 
 def test_auto_resolves_daemon_on_a_network_volume(supervisor, monkeypatch):
@@ -47,12 +67,13 @@ def test_auto_resolves_daemon_on_a_network_volume(supervisor, monkeypatch):
 
 
 def test_auto_resolves_embedded_when_the_volume_is_unobservable(
-        supervisor, monkeypatch):
+        supervisor, monkeypatch, tmp_path):
     # Unknown mirrors the engine's always-safe Unknown→Strict tiering:
     # strict-only embedded stays correct everywhere; the risk is latency
     # on an unobserved network mount, never durability.
     monkeypatch.delenv('TOFUDB_TRANSPORT', raising=False)
     monkeypatch.setattr(volume_class, 'volume_class', lambda _path: 'unknown')
+    _admitted_engine(supervisor, monkeypatch, tmp_path, library=True)
     assert supervisor._resolve_transport() == 'embedded'
 
 

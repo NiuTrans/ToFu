@@ -31,12 +31,14 @@ def _patch_route_slot(monkeypatch, *, disposed=None):
 
     handle = SimpleNamespace(slot=SimpleNamespace())
     monkeypatch.setattr(
-        adapter, 'mint_ephemeral_slot', lambda **_kwargs: handle)
+        adapter, 'prepare_ephemeral_slot', lambda **_kwargs: handle)
+    monkeypatch.setattr(adapter, 'publish_ephemeral_slots', lambda handles: None)
     monkeypatch.setattr(
         adapter,
-        'dispose_ephemeral_slot',
-        lambda value: (
-            disposed.append(value) if disposed is not None else None) or True,
+        'dispose_ephemeral_slots',
+        lambda values: [
+            (disposed.append(value) if disposed is not None else None) or True
+            for value in values],
     )
     return handle
 
@@ -215,19 +217,32 @@ def test_forty_native_agents_deliver_tools_without_starving_async_io(monkeypatch
 
 
 @pytest.mark.unit
-def test_runtime_default_capacity_uses_shared_hardware_budget(monkeypatch):
+@pytest.mark.parametrize('workers', ['1', '60'])
+def test_runtime_default_run_concurrency_is_unlimited(monkeypatch, workers):
     import runtime_guards
     from tofu_agent import AgentRuntime
     monkeypatch.delenv('TOFU_AGENT_MAX_INFLIGHT', raising=False)
-    monkeypatch.setenv('TOFU_AGENT_WORKERS', '60')
+    monkeypatch.setenv('TOFU_AGENT_WORKERS', workers)
     monkeypatch.setattr(runtime_guards, 'probe_system_resources',
-                        lambda *_args, **_kwargs: pytest.fail('explicit budget must not probe'))
+                        lambda *_args, **_kwargs: pytest.fail('run admission must not probe'))
     with AgentRuntime.local(model_routing=_access()) as runtime:
-        assert runtime.capacity == 60
+        assert runtime.capacity == 0
+        assert all(runtime._gate.try_acquire() for _ in range(10_000))
+        assert runtime.in_flight == 10_000
 
 
 @pytest.mark.unit
-def test_retained_runs_bound_scales_with_launch_probe_and_keeps_override(monkeypatch):
+def test_explicit_max_inflight_remains_the_only_run_limit(monkeypatch):
+    from tofu_agent import AgentRuntime
+    monkeypatch.setenv('TOFU_AGENT_WORKERS', '1')
+    with AgentRuntime.local(model_routing=_access(), max_inflight=3) as runtime:
+        assert runtime.capacity == 3
+        assert [runtime._gate.try_acquire() for _ in range(4)] == [
+            True, True, True, False]
+
+
+@pytest.mark.unit
+def test_retained_runs_bound_is_constant_and_keeps_override(monkeypatch):
     from lib.identity import PrincipalContext
     from tofu_agent import AgentRuntime
 
@@ -237,19 +252,13 @@ def test_retained_runs_bound_scales_with_launch_probe_and_keeps_override(monkeyp
                 subject_id='test:retained', owner_user_id=73),
             model_routing=_access(), **kwargs)
 
-    monkeypatch.setenv('TOFU_AGENT_WORKERS', '2')
-    runtime = make()
-    try:
-        assert runtime._max_retained_runs == 128
-    finally:
-        runtime.close(abort=False)
-
-    monkeypatch.setenv('TOFU_AGENT_WORKERS', '128')
-    runtime = make()
-    try:
-        assert runtime._max_retained_runs == 4096
-    finally:
-        runtime.close(abort=False)
+    for workers in ('2', '128'):
+        monkeypatch.setenv('TOFU_AGENT_WORKERS', workers)
+        runtime = make()
+        try:
+            assert runtime._max_retained_runs == 1024
+        finally:
+            runtime.close(abort=False)
 
     runtime = make(max_retained_runs=33)
     try:
@@ -428,6 +437,46 @@ def test_runtime_submits_explicit_principal_as_transient(
     assert captured['config']['schedulerEnabled'] is False
     assert captured['kwargs']['principal'].subject_id == 'local:developer'
     assert runtime.in_flight == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('options,confined', [
+    ({}, True),
+    ({'remote_principal': True}, True),
+    ({'remote_principal': False}, False),
+])
+def test_runtime_declares_whether_its_callers_are_workspace_confined(
+    monkeypatch, options, confined,
+):
+    from lib.agent_core.admission import fire_terminal_callbacks
+    import lib.tasks_pkg.manager as task_manager
+    import lib.tasks_pkg.spawn as task_spawn
+    from lib.project_mod.abs_path_guard import task_is_remote
+    from tofu_agent import AgentRuntime
+
+    _patch_route_slot(monkeypatch)
+    created = []
+
+    def fake_create(conversation_id, messages, config, **kwargs):
+        task = {'id': f'task-confinement-{len(created)}',
+                '_userId': kwargs['principal'].owner_user_id,
+                'status': 'queued', 'events': [], 'toolRounds': []}
+        created.append(task)
+        return task
+
+    def fake_spawn(task, *, executor=None):
+        task.update(status='done', content='ready', finishReason='stop',
+                    usage={'total_tokens': 1})
+        fire_terminal_callbacks(task['id'])
+
+    monkeypatch.setattr(task_manager, 'create_task', fake_create)
+    monkeypatch.setattr(task_spawn, 'spawn_task', fake_spawn)
+    runtime = AgentRuntime.local(model_routing=_access(), **options)
+    try:
+        assert runtime.run([{'role': 'user', 'content': 'hello'}]).ok
+    finally:
+        runtime.close()
+    assert task_is_remote(created[0]) is confined
 
 
 @pytest.mark.unit

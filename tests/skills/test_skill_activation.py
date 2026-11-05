@@ -118,20 +118,32 @@ def test_generic_words_cannot_route_into_unrelated_catalog(isolated, query):
         'pptx-skill', 'general-video', 'hyperframes-design'}
 
 
+_DESIGN_SYSTEM_DESCRIPTION = (
+    'Build NEW pages, features, or standalone project UIs '
+    '(翻译项目/企业项目/新页面/新项目 UI, translation tools, enterprise apps, '
+    'dashboards) on the Tofu design system — every control from '
+    'frontend/src/ui factories and every value from design tokens; never '
+    'hand-rolled CSS, one-off buttons, or raw hex/px spacing.')
+
+
 @pytest.mark.parametrize('query', [
     '帮我开发一个翻译项目,要有 agent 能力和高水平的页面设计',
     '新建一个企业项目的管理页面 UI',
     'build a new project page with the tofu design system',
 ])
 def test_new_project_ui_routes_to_design_system_skill(isolated, query):
-    """One-sentence project requests must land on the design-system skill,
-    not on a blank stylesheet (docs/DESIGN_SYSTEM.md#agent-driven)."""
+    """One-sentence project requests must land on the installed design-system
+    skill, not on a blank stylesheet (docs/DESIGN_SYSTEM.md#agent-driven)."""
     from pathlib import Path
 
     from lib.skills.discovery import search_skill_catalog
-    repo_root = Path(__file__).resolve().parents[2]
-    matches = search_skill_catalog(
-        query, project_path=str(repo_root), owner_user_id=7)
+    from lib.skills.paths import owner_global_skills_dir
+    package = Path(owner_global_skills_dir(7)) / 'tofu-design-system'
+    package.mkdir(parents=True)
+    (package / 'SKILL.md').write_text(_skill_text(
+        'tofu-design-system', 'Build every control from frontend/src/ui factories.',
+        description=_DESIGN_SYSTEM_DESCRIPTION), encoding='utf-8')
+    matches = search_skill_catalog(query, owner_user_id=7)
     assert any(m.get('skill_id') == 'tofu-design-system' for m in matches), (
         f'query {query!r} did not route to tofu-design-system; '
         f'top matches: {[(m.get("skill_id"), m.get("score")) for m in matches[:5]]}')

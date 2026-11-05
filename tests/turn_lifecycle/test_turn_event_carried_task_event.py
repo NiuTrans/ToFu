@@ -18,6 +18,7 @@ unchanged.
 from __future__ import annotations
 
 from lib.api_v4 import attach_v4_envelope, copy_blueprint_to_v4
+from lib.agent_core.events import interaction_types
 
 import asyncio
 from pathlib import Path
@@ -178,6 +179,23 @@ def test_conflicting_carried_row_rolls_back_the_whole_frame(turn_service, storag
         'skew-conv', created['turn']['turnId'], user_id=1)
     assert turn['projectionRevision'] == revision_before
     assert turn['projection'].get('content') != 'NEW bytes'
+
+
+@pytest.mark.parametrize('event_type', sorted(interaction_types()))
+def test_registered_response_requiring_event_records_as_an_interaction_request(
+        turn_service, storage, event_type):
+    conv_id = f'interaction-{event_type}'
+    _, task = _running_task(turn_service, storage, conv_id, f'{conv_id}-task')
+    after = storage.client.query('turn.sync.snapshot', {
+        'conversation_id': conv_id, 'user_id': 1})['syncSequence']
+    request = {'type': event_type, 'roundNum': 1, 'toolCallId': 'call-1', 'seq': 0}
+    assert turn_service.record_task_event(task, request)
+    changes = storage.client.query('turn.sync.changes', {
+        'conversation_id': conv_id, 'user_id': 1, 'after': after})['events']
+    [event] = [change['payload']['event'] for change in changes
+               if change['type'] == 'attempt.event']
+    assert event['type'] == 'interaction_request'
+    assert event['payload']['request'] == request
 
 
 def test_stale_attempt_refuses_carrier_and_caller_appends_standalone(
@@ -380,6 +398,119 @@ def test_terminal_turn_freezes_trace_and_owner_scoped_browser_receipts(
         turn_service.record_turn_perception(
             'trace-durable-conv', turn_id, attempt_id=attempt_id,
             observation=observation, user_id=2)
+
+
+class _FailingTraceReads:
+    """Storage client proxy whose Turn Trace event projection read fails."""
+
+    def __init__(self, client, state):
+        self._client = client
+        self._state = state
+
+    def query(self, operation, payload, *args, **kwargs):
+        from lib.tasks_pkg.turn_trace import _TRACE_PAYLOAD_TYPES
+        if (self._state['failing'] and operation == 'event.list'
+                and payload.get('payload_types') == sorted(_TRACE_PAYLOAD_TYPES)):
+            # Production 2026-10-27: the authority answered the bare code.
+            raise StorageError('database_protocol_error', 'database_protocol_error')
+        return self._client.query(operation, payload, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+def test_settlement_event_read_failure_is_never_frozen_as_a_complete_trace(
+        turn_service, storage, monkeypatch):
+    """A failed trace read at settlement freezes an explicit partial marker; the
+    endpoint re-folds the retained event log instead of serving the marker as
+    the permanent authority, and never reports a read failure as expired."""
+    import lib.storage
+    from quart import Quart, g
+    from lib.api_keys import local_admin_context
+    from lib.conversation_sync.validation import decode
+    from lib.tasks_pkg.turn_trace import (
+        observe_task_trace_event,
+        read_persisted_task_trace,
+    )
+    import routes.api_v1.tasks as tasks_mod
+
+    state = {'failing': False}
+    real_client = lib.storage.get_storage_client
+    monkeypatch.setattr(
+        lib.storage, 'get_storage_client',
+        lambda *args, **kwargs: _FailingTraceReads(
+            real_client(*args, **kwargs), state))
+
+    created, task = _running_task(
+        turn_service, storage, 'trace-fail-conv', 'trace-fail-task')
+    turn_id = created['turn']['turnId']
+    for sequence, event in enumerate([
+        {'type': 'round_start', 'roundNum': 1},
+        {'type': 'phase', 'phase': 'waiting_model'},
+        {'type': 'round_end', 'roundNum': 1, 'reason': 'final'},
+    ]):
+        assert turn_service.record_task_event(
+            task, event,
+            task_event=_task_event('trace-fail-task', sequence, event),
+        ) == 'carried'
+    _, live_task = _running_task(
+        turn_service, storage, 'trace-fail-live-conv', 'trace-fail-live-task')
+    phase = {'type': 'phase', 'phase': 'waiting_model'}
+    observe_task_trace_event(live_task, phase)
+    assert turn_service.record_task_event(
+        live_task, phase,
+        task_event=_task_event('trace-fail-live-task', 0, phase)) == 'carried'
+
+    state['failing'] = True
+    terminal = {'type': 'done', 'finishReason': 'stop'}
+    assert turn_service.record_task_event(
+        task, terminal,
+        task_event=_task_event('trace-fail-task', 3, terminal)) == 'carried'
+    turn = turn_service.get_turn('trace-fail-conv', turn_id, user_id=1)
+    assert turn['status'] == 'completed'
+    decode('TurnProjection', turn['projection'])
+    for frozen in (turn['projection']['timingTrace'],
+                   read_persisted_task_trace('trace-fail-task', user_id=1)):
+        assert (frozen['coverage'], frozen['coverageReason']) == (
+            'partial', 'event-read-failed')
+        assert (frozen['status'], frozen['running']) == ('done', False)
+        assert not {'summary', 'spans', 'gaps'} & set(frozen)
+
+    app = Quart(__name__)
+    app.config['TESTING'] = True
+
+    @app.before_request
+    async def _grant_trace_owner():
+        context = local_admin_context()
+        context.owner_user_id = 1
+        g.auth_ctx = context
+        g.rate_decision = None
+
+    monkeypatch.setattr(tasks_mod, '_registries', lambda: {})
+    app.register_blueprint(attach_v4_envelope(copy_blueprint_to_v4(
+        tasks_mod.api_v1_tasks_bp, name='api_v1_tasks_bp_v4')))
+
+    def read_trace(task_id):
+        async def _get():
+            response = await app.test_client().get(f'/api/v4/tasks/{task_id}/trace')
+            return response.status_code, await v1_get_json(response)
+        return asyncio.run(_get())
+
+    # Still unreadable: the settled marker is honest evidence, never "expired".
+    status_code, body = read_trace('trace-fail-task')
+    assert status_code == 200
+    assert body['eventsAvailable'] is True
+    assert (body['source'], body['coverageReason']) == ('turn-snapshot', 'event-read-failed')
+    # A running task has no settled evidence to fall back on: retryable 503.
+    assert read_trace('trace-fail-live-task')[0] == 503
+
+    # Once the log is readable, the endpoint rebuilds the real fold.
+    state['failing'] = False
+    status_code, body = read_trace('trace-fail-task')
+    assert status_code == 200
+    assert (body['source'], body['coverage'], body['status']) == ('event-log', 'full', 'done')
+    assert [span['kind'] for span in body['spans']].count('round') == 1
+    assert body['summary']['totalMs'] == body['totalMs']
 
 
 def test_manager_carrier_delta_projects_snapshots_but_live_frame_stays_full(
@@ -757,3 +888,166 @@ def test_accepted_child_frame_uses_real_parent_attempt_fence(
         assert owner.close(5)
         task['_executionSession'].settle(ExecutionPhase.CANCELLED)
         chat_task_runtime.discard(task_id)
+
+
+def test_oversized_debug_baseline_rides_only_the_carried_task_event(
+        turn_service, storage, caplog):
+    """A full request-snapshot baseline larger than the native attempt-event
+    document bound must not make its frame unwritable (the run-killing
+    delivery failure): the carried task-event row keeps the complete request
+    evidence and the attempt event records the update without its copy."""
+    import json
+    import logging
+
+    from lib.tasks_pkg import manager
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    from lib.tasks_pkg.snapshot_delta import forget_projector_task
+    from lib.turn_lifecycle import _ATTEMPT_EVENT_DOCUMENT_MAX_BYTES
+
+    task_id = 'oversized-debug-task'
+    conv_id = 'oversized-debug-conv'
+    chat_task_runtime.discard(task_id)
+    created, attempt_task = _running_task(
+        turn_service, storage, conv_id, task_id)
+    task = chat_task_runtime.create(user_id=1, task_id=task_id)
+    task.update(attempt_task)
+    task.update({
+        'convId': conv_id,
+        '_turnId': created['turn']['turnId'],
+        'status': 'running',
+    })
+    messages = [{'role': 'system', 'content': 'system'}] + [
+        {'role': 'user' if index % 2 else 'assistant',
+         'content': f'{index:04d}' + 'x' * 100_000}
+        for index in range(_ATTEMPT_EVENT_DOCUMENT_MAX_BYTES // 100_000 + 2)
+    ]
+    snapshot = {
+        'type': 'messages_snapshot', 'kind': 'request', 'roundNum': 1,
+        'model': 'test-model', 'label': 'request 1', 'messages': messages,
+    }
+    assert len(json.dumps(snapshot)) > _ATTEMPT_EVENT_DOCUMENT_MAX_BYTES
+    try:
+        with caplog.at_level(logging.WARNING, logger='lib.turn_lifecycle'):
+            manager.append_event(task, snapshot)
+
+        rows = storage.client.query('turn.events.list', {
+            'attempt_id': task['_attemptId'], 'user_id': 1, 'limit': 100,
+        })
+        updates = [
+            row['payload'] for row in rows
+            if isinstance(row.get('payload'), dict)
+            and row['payload'].get('updateKind') == 'messages_snapshot'
+        ]
+        assert len(updates) == 1
+        assert 'event' not in updates[0]
+        stored = storage.client.query('event.list', {
+            'task_id': task_id, 'after_sequence': -1, 'limit': 100,
+        })
+        frames = [row['event'] for row in stored
+                  if row['event'].get('type') == 'messages_snapshot']
+        assert len(frames) == 1
+        assert frames[0]['messageCount'] == len(messages)
+        assert frames[0]['newMessages'] == messages
+        omitted = [
+            record.getMessage() for record in caplog.records
+            if 'messages_snapshot evidence shed' in record.getMessage()
+        ]
+        assert len(omitted) == 1
+        assert 'carried task event keeps the complete frame' in omitted[0]
+        assert not task.get('aborted')
+    finally:
+        chat_task_runtime.discard(task_id)
+        forget_projector_task(task_id)
+
+
+def test_large_debug_snapshot_attempt_event_is_delta_and_read_rehydrates(
+        turn_service, storage):
+    """A large live frame must not be written twice (event log + attempt).
+
+    The attempt event keeps the same shared-prefix delta the event log stores,
+    and ``read_events`` restores the complete wire frame for its consumers.
+    """
+    from lib.tasks_pkg import manager
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    from lib.tasks_pkg.snapshot_delta import forget_projector_task
+
+    task_id = 'large-debug-task'
+    conv_id = 'large-debug-conv'
+    chat_task_runtime.discard(task_id)
+    created, attempt_task = _running_task(
+        turn_service, storage, conv_id, task_id)
+    task = chat_task_runtime.create(user_id=1, task_id=task_id)
+    task.update(attempt_task)
+    task.update({
+        'convId': conv_id,
+        '_turnId': created['turn']['turnId'],
+        'status': 'running',
+    })
+    tools = [{
+        'type': 'function',
+        'function': {'name': 'read_file', 'description': 'x' * 200,
+                     'parameters': {'type': 'object'}},
+    }]
+    first_messages = [
+        {'role': 'system', 'content': 'system'},
+        {'role': 'user', 'content': 'u' * 100_000},
+    ]
+    second_messages = [
+        *first_messages,
+        {'role': 'assistant', 'content': 'calling'},
+        {'role': 'tool', 'content': 'r' * 1000, 'tool_call_id': 'call-1'},
+    ]
+    first = {
+        'type': 'messages_snapshot', 'kind': 'request', 'roundNum': 1,
+        'model': 'test-model', 'label': 'request 1',
+        'messages': first_messages, 'tools': tools,
+    }
+    second = {
+        'type': 'messages_snapshot', 'kind': 'request', 'roundNum': 2,
+        'model': 'test-model', 'label': 'request 2',
+        'messages': second_messages, 'tools': tools,
+    }
+    try:
+        manager.append_event(task, first)
+        manager.append_event(task, second)
+
+        attempt_id = task['_attemptId']
+        raw = storage.client.query('turn.events.list', {
+            'attempt_id': attempt_id, 'user_id': 1, 'limit': 100,
+        })
+        frames = [
+            row['payload']['event'] for row in raw
+            if isinstance(row.get('payload'), dict)
+            and isinstance(row['payload'].get('event'), dict)
+            and row['payload']['event'].get('type') == 'messages_snapshot'
+        ]
+        assert len(frames) == 2
+        # The baseline stays self-contained for a live debug panel.
+        assert frames[0]['messages'] == first_messages
+        assert frames[0]['tools'] == tools
+        # The growing frame is stored once as a prefix delta, not the full
+        # 100 KB wire form.
+        assert 'messages' not in frames[1]
+        assert frames[1]['snapshotDeltaVersion'] == 2
+        assert frames[1]['prefixLen'] == len(first_messages)
+        assert frames[1]['newMessages'] == second_messages[len(first_messages):]
+        assert 'tools' not in frames[1]
+        import json
+        assert (len(json.dumps(frames[1])) * 10
+                < len(json.dumps(second)))
+
+        # The attempt-event API still returns complete frames.
+        replayed = turn_service.read_events(attempt_id, user_id=1)
+        replayed_frames = [
+            row['payload']['event'] for row in replayed
+            if isinstance(row.get('payload'), dict)
+            and isinstance(row['payload'].get('event'), dict)
+            and row['payload']['event'].get('type') == 'messages_snapshot'
+        ]
+        assert replayed_frames[1]['messages'] == second_messages
+        assert replayed_frames[1]['tools'] == tools
+        assert 'snapshotDeltaVersion' not in replayed_frames[1]
+        assert 'prefixLen' not in replayed_frames[1]
+    finally:
+        chat_task_runtime.discard(task_id)
+        forget_projector_task(task_id)

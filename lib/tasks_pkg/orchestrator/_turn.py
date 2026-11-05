@@ -70,7 +70,8 @@ def drain_peer_messages_into(task: dict[str, Any],
             return 0
         append_injection(
             messages, 'inbox_delivery', '\n\n'.join(it['value'] for it in _peer_items),
-            task=task, round_num=round_label, contains_human_steer=False)
+            task=task, round_num=round_label, contains_human_steer=False,
+            display_owner='peer-lane')
         task.setdefault('_peer_inject_pending', []).extend(_peer_items)
         logger.info('[Task %s] driver-loop injected %d peer message(s) at '
                     'iteration %s', task.get('id', '?')[:8], len(_peer_items),

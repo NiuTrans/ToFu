@@ -15,6 +15,9 @@ use crate::protocol::MAX_OPERATION_BYTES;
 const ENTRY_MAGIC: &[u8; 8] = b"TDBRCP01";
 const ENTRY_VERSION: u32 = 1;
 const ENTRY_FIXED_BYTES: usize = 8 + 4 + 2 + 1 + 1 + 32 + 8 + 4;
+/// Largest receipt entry a command can add to its entity writes (inline response).
+pub(crate) const MAX_RECEIPT_ENTRY_BYTES: usize =
+    ENTRY_FIXED_BYTES + MAX_OPERATION_BYTES + MAX_INLINE_RECEIPT_BYTES;
 const RESPONSE_INLINE: u8 = 1;
 const RESPONSE_BLOB: u8 = 2;
 const BLOB_REFERENCE_BYTES: usize = 32 + 32 + 8;

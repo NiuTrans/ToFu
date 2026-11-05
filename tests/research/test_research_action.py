@@ -374,9 +374,11 @@ def test_stale_action_refuses_before_task_birth(monkeypatch, action_name):
     monkeypatch.setattr(action_runtime._production, 'new_task_id', forbidden)
     monkeypatch.setattr(action_runtime, 'create_action_task', forbidden)
     monkeypatch.setattr(action_runtime._research_action_runtime, 'spawn', forbidden)
-    with pytest.raises(ValueError, match='research_workspace_stale'):
+    from lib.turn_lifecycle import LifecycleConflict
+    with pytest.raises(LifecycleConflict) as stale:
         action.start_research_action('Owned question', action=action_name,
             expected_revision=3, lang='zh', confirm_external_writes=True, user_id=7)
+    assert stale.value.code == 'research_workspace_stale'
     assert reads == [('Owned question', 'zh', 7)]
 
 

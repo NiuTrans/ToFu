@@ -1,9 +1,11 @@
 """routes/api_v1/swarm.py — Swarm UI surface.
 
-Three routes the in-app debug panel + future external clients use:
+Routes the in-app debug panel, the background-agent dock and external clients use:
 
   GET  /api/v1/swarm/status/<task_id>   — current swarm state for a task
   POST /api/v1/swarm/abort/<task_id>    — request abort of all sub-agents
+  POST /api/v1/swarm/runs/<swarm_id>/agents/<agent_id>/stop
+                                        — stop one running agent of a live run
   GET  /api/v1/swarm/config             — registry: roles, max-concurrent
 
 Status/abort are also mirrored at ``/api/v1/agents/swarm/{status,abort}/<id>``
@@ -16,7 +18,9 @@ from __future__ import annotations
 
 from quart import Blueprint
 
-from lib.api_response import api_internal_error, api_not_found, api_ok
+from lib.api_response import (
+    api_conflict, api_internal_error, api_not_found, api_ok, safe_route,
+)
 from lib.log import get_logger
 from lib.openapi import api_meta
 
@@ -94,6 +98,37 @@ def swarm_abort(task_id):
     if not result.get('success'):
         return api_not_found('Swarm not found')
     return api_ok({'message': 'Swarm abort requested'})
+
+
+@api_v1_swarm_bp.route('/api/v1/swarm/runs/<swarm_id>/agents/<agent_id>/stop',
+                       methods=['POST'])
+@require_scope('agents:swarm')
+@api_meta(
+    summary='Stop one running sub-agent of a live swarm run',
+    description=(
+        'Sends the stop signal of the model-facing ``kill`` tool: the agent '
+        'settles ``cancelled`` while its siblings and coordinator continue. '
+        '``swarm_id`` is the run identity from ``GET /api/v4/activity/background`` '
+        '(``swarms[].swarm_id``), not the reusable session key. 404 '
+        '``swarm_agent_not_found`` when the caller owns no live run with that '
+        'agent; 409 ``swarm_agent_not_running`` when the agent has no live '
+        'invocation to signal (pending, settled, or starting/finishing an attempt).'
+    ),
+    tags=['agents'], scope='agents:swarm',
+)
+@safe_route
+def swarm_agent_stop(swarm_id, agent_id):
+    from lib.swarm.integration import stop_swarm_agent
+
+    result = stop_swarm_agent(swarm_id, agent_id, user_id=int(request_user_id()))
+    if result['outcome'] == 'not_found':
+        return api_not_found('No live swarm agent with this run and agent ID',
+                             error_code='swarm_agent_not_found')
+    if result['outcome'] == 'not_running':
+        return api_conflict(
+            f"Agent {agent_id!r} has no live invocation to stop (status: {result['status']})",
+            error_code='swarm_agent_not_running')
+    return api_ok({'stopped': True, 'swarmId': swarm_id, 'agentId': agent_id})
 
 
 @api_v1_swarm_bp.route('/api/v1/swarm/config', methods=['GET'])

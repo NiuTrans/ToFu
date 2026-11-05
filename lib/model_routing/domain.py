@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import copy
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any
 from urllib.parse import urlparse
 
 from lib.model_catalog._creator_identity import (
@@ -22,6 +23,7 @@ from lib.model_catalog._creator_identity import (
 from lib.model_info import release_date as _release_date
 from lib.pricing import pricing_for_model as _pricing_for_model
 from lib.provider.provider_headers import is_credential_header, sanitise_extra_headers
+from lib.utils import fast_deepcopy
 
 
 CONTRACT_VERSION = "tofu.model-routing/v2"
@@ -35,6 +37,8 @@ _FORBIDDEN_LEGACY_FIELDS = frozenset({"aliases", "request_ids", "routes"})
 _FORBIDDEN_SECRET_FIELDS = frozenset({
     "api_key", "api_keys", "secret", "ciphertext", "password", "token",
 })
+_FORBIDDEN_FIELDS = _FORBIDDEN_LEGACY_FIELDS | _FORBIDDEN_SECRET_FIELDS
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f]")
 
 
 class ModelRoutingError(ValueError):
@@ -92,7 +96,7 @@ def _identifier(value: Any, field: str) -> str:
     if not isinstance(value, str):
         raise ModelRoutingError(f"{field} must be a string", field=field)
     result = value.strip()
-    if not result or len(result) > 256 or any(ord(ch) < 32 for ch in result):
+    if not result or len(result) > 256 or _CONTROL_CHARACTER.search(result):
         raise ModelRoutingError(
             f"{field} must be 1..256 printable characters", field=field)
     return result
@@ -120,7 +124,7 @@ def _rows(document: Mapping[str, Any], name: str) -> list[dict[str, Any]]:
         if not isinstance(item, Mapping):
             raise ModelRoutingError(
                 f"{name}[{index}] must be an object", field=f"{name}[{index}]")
-        rows.append(copy.deepcopy(dict(item)))
+        rows.append(fast_deepcopy(dict(item)))
     return rows
 
 
@@ -153,7 +157,26 @@ def _string_set(value: Any, field: str, *, maximum: int | None = None) -> list[s
     return sorted(result)
 
 
+def _contains_forbidden_field(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if key in _FORBIDDEN_FIELDS or _contains_forbidden_field(child):
+                return True
+    elif isinstance(value, list):
+        for child in value:
+            if _contains_forbidden_field(child):
+                return True
+    return False
+
+
 def _scan_for_forbidden_fields(value: Any, path: str = "document") -> None:
+    # Clean aggregates are the norm; build the field path only for a failure.
+    if not _contains_forbidden_field(value):
+        return
+    _raise_first_forbidden_field(value, path)
+
+
+def _raise_first_forbidden_field(value: Any, path: str) -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
             if key in _FORBIDDEN_LEGACY_FIELDS:
@@ -168,10 +191,10 @@ def _scan_for_forbidden_fields(value: Any, path: str = "document") -> None:
                     kind="secret_material_forbidden",
                     field=f"{path}.{key}",
                 )
-            _scan_for_forbidden_fields(child, f"{path}.{key}")
+            _raise_first_forbidden_field(child, f"{path}.{key}")
     elif isinstance(value, list):
         for index, child in enumerate(value):
-            _scan_for_forbidden_fields(child, f"{path}[{index}]")
+            _raise_first_forbidden_field(child, f"{path}[{index}]")
 
 
 def empty_document(*, revision: int = 0) -> dict[str, Any]:
@@ -389,6 +412,8 @@ def normalize_document(
             if not isinstance(connection["thinking_format"], str) or not _is_valid_thinking_format(connection["thinking_format"]):
                 raise ModelRoutingError("invalid thinking_format", field="connections.thinking_format")
 
+    from .model_defaults import apply_model_defaults, current_model_defaults
+    model_defaults = current_model_defaults()
     model_by_ref: dict[ModelRef, dict[str, Any]] = {}
     for index, model in enumerate(models):
         ref = ModelRef.from_value(model, field=f"models[{index}]")
@@ -427,8 +452,7 @@ def normalize_document(
         if not isinstance(issues, list) or len(issues) > 64 or any(
                 not isinstance(issue, str) or len(issue) > 256 for issue in issues):
             raise ModelRoutingError('invalid registration_issues', field=f'models[{index}].registration_issues')
-        from .model_defaults import apply_model_defaults
-        apply_model_defaults(model)
+        apply_model_defaults(model, profiles=model_defaults)
         model_by_ref[ref] = model
 
     alias_map = _merge_trained_model_alias_rows(model_by_ref)
@@ -452,7 +476,7 @@ def normalize_document(
         if row['display_name'] == ref.model_id:
             row['display_name'] = bare
 
-        apply_model_defaults(row)
+        apply_model_defaults(row, profiles=model_defaults)
         model_by_ref[canonical] = row
         for source, target in list(alias_map.items()):
             if target == ref:

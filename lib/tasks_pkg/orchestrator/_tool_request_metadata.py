@@ -15,6 +15,10 @@ def attach_tool_request_metadata(task, body, messages, tool_list, *, model, roun
     # Resolve outside the best-effort metadata block so lookup failure cannot
     # accidentally retain a provider-native execution route.
     _coordinator = coordinator_scope(task)
+    from lib.tasks_pkg.delegate_mode import delegate_mode_active
+    # A delegating root runs no programs and always keeps its local Swarm lane:
+    # provider-native subagents would inherit the narrowed root surface.
+    _delegate = not _coordinator and delegate_mode_active(task)
     _tools_this_round = tool_list
     task['_ptc_local'] = None
     task['_toolOrchestration'] = None
@@ -47,22 +51,29 @@ def attach_tool_request_metadata(task, body, messages, tool_list, *, model, roun
         from lib.tasks_pkg.tool_orchestration_policy import (
             resolve_tool_orchestration)
         from lib.tools.programmatic import ACTIVE_PROGRAMMATIC_MODES
+        _requested_programmatic = (
+            'off' if _coordinator or _delegate
+            else _experiment_flags['tools']['programmaticCalling'])
+        _requested_multi_agent = (
+            'disabled' if _coordinator
+            else 'full' if _delegate and _orchestration_flags['multiAgent'] == 'auto'
+            else _orchestration_flags['multiAgent'])
         _latched_optimization = (task.get('_toolOrchestrationPromptLatch')
                                 or (task.get('config') or {}).get('_modelReplayToolLatch'))
         if (isinstance(_latched_optimization, dict) and not _coordinator
                 and _latched_optimization.get('programmaticRequestedMode')
-                == _experiment_flags['tools']['programmaticCalling']):
+                == _requested_programmatic
+                and (not _delegate or _latched_optimization.get('multiAgent')
+                     == _requested_multi_agent)):
             _optimization = copy.deepcopy(_latched_optimization)
             _optimization['round'] = int(round_num)
             task['_toolOrchestrationPromptLatch'] = copy.deepcopy(_latched_optimization)
         else:
             _optimization = resolve_tool_orchestration(
-                requested_programmatic=(
-                    'off' if _coordinator else _experiment_flags['tools']['programmaticCalling']),
+                requested_programmatic=_requested_programmatic,
                 requested_programmatic_exposure=(
                     _experiment_flags['tools']['programmaticExposure']),
-                requested_multi_agent=('disabled' if _coordinator
-                                       else _orchestration_flags['multiAgent']),
+                requested_multi_agent=_requested_multi_agent,
                 messages=messages, tools=_tools_this_round, round_num=round_num,
                 model=model,
                 policy_version=_orchestration_flags['policy'])
@@ -109,6 +120,8 @@ def attach_tool_request_metadata(task, body, messages, tool_list, *, model, roun
              'eligible': body['_programmatic_eligible_tools']}
             if _programmatic_active else None)
         body['_multi_agent_mode'] = _optimization['multiAgent']
+        if _delegate:
+            body['_force_local_multi_agent'] = True
         body['_multi_agent_stage'] = _optimization['multiAgentStage']
         body['_multi_agent_max_concurrent_agents'] = (
             _orchestration_flags['maxConcurrentAgents'])
@@ -132,8 +145,12 @@ def attach_tool_request_metadata(task, body, messages, tool_list, *, model, roun
             # Keep the exact history row as a shallow request sidecar. The
             # final provider boundary annotates it with the independently
             # resolved native/local backends; it is never serialized upstream.
-            _decision_row = dict(_task_orchestration)
-            _decision_history.append(_decision_row)
+            _decision_row = next((
+                row for row in reversed(_decision_history)
+                if isinstance(row, dict) and row.get('round') == int(round_num)), None)
+            if _decision_row is None:
+                _decision_row = dict(_task_orchestration)
+                _decision_history.append(_decision_row)
             body['_tool_orchestration_decision_sink'] = _decision_row
             # Keep task-state telemetry bounded on unusually long runs.
             del _decision_history[:-64]

@@ -43,16 +43,17 @@ from lib.llm.llm_errors import (
     AbortedError,
     ContentFilterError,
     EndpointUnreachableError,
-    LocalRequestPreparationError,
     ModelLimitError,
     PermissionError_,
     PromptTooLongError,
     PROVIDER_RESPONSE_ERRORS,
+    REQUEST_REPAIR_ERRORS,
     RateLimitError,
     RetryableAPIError,
     SubscriptionConnectionError,
     _RETRYABLE,
 )
+from lib.llm.request_repair import RequestRepairState, repair_rejected_request
 from lib.log import get_logger
 from lib.proxy import report_outcome as _proxy_report_outcome
 from lib.proxy import resolve_async_route as _resolve_async_route
@@ -250,6 +251,7 @@ async def async_stream_chat(body, *, on_thinking=None, on_content=None,
     """
     last_err = None
     _limit_learned = None
+    _repair_state = RequestRepairState()
 
     def _restart(reason: str) -> None:
         if on_attempt_restart is None:
@@ -284,10 +286,24 @@ async def async_stream_chat(body, *, on_thinking=None, on_content=None,
             raise
         except ModelLimitError as e:
             logger.debug('async stream chat: ModelLimitError (%s)', e)
+            if attempt >= MAX_STREAM_RETRIES:
+                raise
             _limit_learned = apply_model_limit_retry(body, e, log_prefix)
             _restart('model output limit learned — retrying')
             continue
+        except REQUEST_REPAIR_ERRORS as e:
+            reason = repair_rejected_request(
+                body, e, _repair_state, log_prefix=log_prefix)
+            if not reason or attempt >= MAX_STREAM_RETRIES:
+                raise
+            _restart(reason)
+            continue
         except _RETRYABLE as e:
+            from lib.llm._transport import SILENT_STREAM_DEADLINE_CAUSE
+            if getattr(e, 'cause_type', '') == SILENT_STREAM_DEADLINE_CAUSE:
+                # The slot already spent a full silent-stream deadline; let
+                # dispatch exclude the pair and rotate (sync parity).
+                raise
             last_err = e
             wait = prepare_retryable_wait(attempt, e, abort_check, log_prefix)
             _restart('retryable transport failure — retrying')
@@ -341,20 +357,14 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
     # under desktop-egress routing that refresh waits an agent RTT (design
     # §6.2 A2). Running it on the event loop would freeze every concurrent
     # request — move it to a worker thread.
-    try:
+    from lib.llm.request import request_preparation
+    with request_preparation():
         plan = await asyncio.to_thread(
             prepare_request,
             body, attempt=attempt, log_prefix=log_prefix,
             api_key=api_key, base_url=base_url, extra_headers=extra_headers,
             api_protocol=api_protocol, oauth=oauth,
             owner_user_id=_owner_scope)
-    except (LocalRequestPreparationError, AbortedError):
-        raise
-    except Exception as error:
-        raise LocalRequestPreparationError(
-            f'local request preparation failed: {error}',
-            stage='wire_projection',
-        ) from error
     # Read the operator value at attempt time so tests and long-lived servers
     # can retune it without creating a second async timeout definition.
     import lib.llm._transport as _tp
@@ -463,6 +473,11 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
             _progress.mark_response_headers()
             if resp_trace and resp_trace != plan.trace_id:
                 logger.debug('%s resp M-TraceId=%s', log_prefix, resp_trace)
+            if oauth == 'codex' and resp.status_code == 200:
+                from lib.oauth.codex_turn_state import (
+                    observe_turn_state_headers)
+                observe_turn_state_headers(
+                    plan.responses_state_key, resp.headers)
 
             if resp.status_code != 200:
                 _report_network_outcome(True)
@@ -527,18 +542,17 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
             _fb = {
                 'aborted': False,
                 'idle_timed_out': False,
+                'silence_expired': False,
                 'done': False,
             }
 
             async def _idle_watchdog():
                 _interval = _tp.IDLE_HEARTBEAT_S
                 _idle_timeout = _tp.stream_idle_timeout_seconds()
+                _silence_deadline = _tp.silent_stream_deadline_seconds()
                 _beats = _interval > 0 and (
                     on_first_byte_wait is not None
                     or on_stream_wait is not None)
-                if (not _beats and abort_check is None
-                        and _idle_timeout <= 0):
-                    return
                 _last_beat = time.monotonic()
                 while not _fb['done']:
                     if abort_check is not None:
@@ -557,6 +571,14 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
                     _idle = _progress.transport_idle_seconds(_now)
                     if _idle_timeout > 0 and _idle >= _idle_timeout:
                         _fb['idle_timed_out'] = True
+                        try:
+                            await resp.aclose()
+                        except Exception as _ck:
+                            logger.debug('%s watchdog aclose raised: %s',
+                                         log_prefix, _ck)
+                        return
+                    if _idle >= _silence_deadline:
+                        _fb['silence_expired'] = True
                         try:
                             await resp.aclose()
                         except Exception as _ck:
@@ -595,6 +617,9 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
                             _wait = _remaining
                         else:
                             _wait = min(_wait, _remaining)
+                    _silence_left = max(0.01, _silence_deadline - _idle)
+                    _wait = (min(_wait, _silence_left) if _wait > 0
+                             else _silence_left)
                     try:
                         await asyncio.sleep(max(_wait, 0.01))
                     except asyncio.CancelledError:
@@ -607,7 +632,7 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
                 async for raw_chunk in raw_chunks:
                     if plan.raw_archive_capture is not None:
                         plan.raw_archive_capture.append_response(raw_chunk)
-                    if _fb['idle_timed_out']:
+                    if _fb['idle_timed_out'] or _fb['silence_expired']:
                         break
                     _progress.mark_transport_bytes(len(raw_chunk))
                     if abort_check and abort_check():
@@ -623,7 +648,7 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
                     # Caller control flow wins even when watchdog expiry or
                     # response.close raced with the task's cancellation.
                     raise
-                if _fb['idle_timed_out']:
+                if _fb['idle_timed_out'] or _fb['silence_expired']:
                     # The watchdog closed the response after
                     # IDLE_STREAM_TIMEOUT_S of silence; fall through to
                     # finalize() so the premature-close diagnostics fire.
@@ -646,7 +671,9 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
                 # A cancelled child is expected; cancelling this caller while
                 # joining it must still propagate, not become a clean finish.
                 await asyncio.gather(_wd_task, return_exceptions=True)
-            byte_stream.finalize(interrupted=acc.aborted_by_client or _fb['aborted'])
+            byte_stream.finalize(interrupted=(
+                acc.aborted_by_client or _fb['aborted']
+                or _fb['silence_expired']))
             if _fb['aborted']:
                 # A close() can surface as a CLEAN end of iteration — without
                 # this check an aborted attempt would finalize as a silent
@@ -654,6 +681,15 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
                 raise AbortedError(
                     'User aborted while waiting on %s' % plan.url,
                     url=plan.url)
+            if _fb['silence_expired'] and not _fb['idle_timed_out']:
+                # Same contract as the sync transport: silence past the
+                # always-on backstop is a typed retryable read timeout.
+                _report_network_outcome(False, 'read_timeout')
+                logger.warning(
+                    '%s Provider stream silent for %.0fs after headers '
+                    'trace=%s; closed the response', log_prefix,
+                    _tp.silent_stream_deadline_seconds(), plan.trace_id)
+                raise _tp.silent_stream_timeout_error(base_url=plan.url)
             if byte_stream.stopped and acc.saw_done and not acc.aborted_by_client:
                 def _record_tail(raw_chunk):
                     _progress.mark_transport_bytes(len(raw_chunk))

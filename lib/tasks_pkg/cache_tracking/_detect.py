@@ -1,9 +1,9 @@
-"""Two-phase cache-break detection.
+"""Coordinate cache diagnosis under one invocation-scoped state lock.
 
-Owns the break-classification thresholds and the single-source
-``EDITABLE_TAIL_COUNT`` immutable-prefix bound, the pure classifiers
-(``_classify_break`` / ``_resolve_break_cause``), and the round-driving
-``detect_cache_break`` which mutates the shared ``CacheState`` singleton.
+Entry point: detect_cache_break compares source and provider evidence, applies
+_policy, advances the baseline/checkpoints through _advance, and emits exactly
+one round record. _wire owns provider comparisons; _report owns confirmed-break
+diagnostics. Existing policy imports remain explicit re-exports for callers.
 """
 
 from __future__ import annotations
@@ -16,13 +16,7 @@ from typing import Any
 
 from lib.cost import normalize_usage, observed_cache_read
 from lib.log import get_logger
-from lib.tasks_pkg.wire_fingerprint import (
-    diff_canonical, markers_regressed, markers_ttl_flipped,
-    mid_anchor_out_of_window,
-)
 from lib.tasks_pkg.cache_tracking._state import (
-    COLD_ROUND_TOKEN_FLOOR,
-    COLD_STREAK_GUARD_OPEN,
     CacheState,
     _cache_lock,
     _cache_states,
@@ -42,45 +36,36 @@ from lib.tasks_pkg.cache_tracking._hashing import (
 )
 from lib.tasks_pkg.cache_tracking._roi import _emit_l2_roi
 
+from lib.tasks_pkg.cache_tracking._policy import (
+    _MIN_CACHE_MISS_TOKENS as _MIN_CACHE_MISS_TOKENS,
+    EDITABLE_TAIL_COUNT as EDITABLE_TAIL_COUNT,
+    _MIN_NO_REUSE_TOKENS as _MIN_NO_REUSE_TOKENS,
+    BUCKET_NAMESPACE as BUCKET_NAMESPACE,
+    BUCKET_TURN_BOUNDARY as BUCKET_TURN_BOUNDARY,
+    BUCKET_TTL_FLIP as BUCKET_TTL_FLIP,
+    BUCKET_TTL_EXPIRY as BUCKET_TTL_EXPIRY,
+    _TTL_EXPIRY_CAUSE as _TTL_EXPIRY_CAUSE,
+    BUCKET_BREAKPOINT_LOST as BUCKET_BREAKPOINT_LOST,
+    BUCKET_MID_WINDOW as BUCKET_MID_WINDOW,
+    BUCKET_WRITE_UNSETTLED as BUCKET_WRITE_UNSETTLED,
+    BUCKET_UPSTREAM as BUCKET_UPSTREAM,
+    BUCKET_BODY_CHANGE as BUCKET_BODY_CHANGE,
+    BUCKET_NO_BREAK as BUCKET_NO_BREAK,
+    BUCKET_INDETERMINATE as BUCKET_INDETERMINATE,
+    BUCKET_OTHER as BUCKET_OTHER,
+    _classify_break as _classify_break,
+    _resolve_break_cause as _resolve_break_cause,
+    classify_verdict as classify_verdict,
+)
+from lib.tasks_pkg.cache_tracking._wire import (
+    _wire_evidence_from_usage, _detect_namespace_switch,
+    compare_wire_evidence,
+)
+from lib.tasks_pkg.cache_tracking import _health
+from lib.tasks_pkg.cache_tracking._advance import advance_cache_observation
+from lib.tasks_pkg.cache_tracking._report import BreakReport, report_confirmed_break
+
 logger = get_logger(__name__)
-
-
-# Minimum absolute token drop required to trigger a cache break warning.
-# Small drops (e.g., a few thousand tokens) can happen due to normal
-# variation and aren't worth alerting on.
-_MIN_CACHE_MISS_TOKENS = 2000
-
-# ── Single-source editable-tail bound ──
-# The number of trailing messages a backend writer (turn-end tail rewrite,
-# reconcile) may mutate WITHOUT busting the cache. Equivalently: the cache
-# prefix treated as immutable is messages[0 : len - EDITABLE_TAIL_COUNT].
-# ``get_cache_prefix_count`` (what the cache assumes stable) and the
-# reconcile prefix guard (what a writer is allowed to touch) BOTH read this
-# ONE number, so "immutable prefix" and "mutable suffix" can never silently
-# diverge. The value is 2 because the Anthropic tail breakpoint + the moving
-# str↔block wrap keep the last user+assistant pair in flux each round.
-EDITABLE_TAIL_COUNT = 2
-
-# Minimum fresh cache_write (with zero cache_read) required to flag a
-# "cache written but never read back" miss. Set well above the tiny-prompt
-# alternating-WRITE/HIT noise floor (system+tools < 4096 tokens) so we only
-# alert when re-writing the prefix actually cost real money. The motivating
-# case: 2 rounds, both ~279k cache_write, zero cache_read.
-_MIN_NO_REUSE_TOKENS = 20000
-
-
-@dataclass(frozen=True)
-class _WireEvidence:
-    """Provider-bound evidence captured after final request translation."""
-
-    fingerprint: Any = None
-    static_prefix: str = ''
-    system: Any = None
-    markers: Any = None
-    message_bytes: Any = None
-    field_bytes: Any = None
-    region: Any = None
-    routing: Any = None
 
 
 @dataclass(frozen=True)
@@ -257,20 +242,6 @@ def _prefix_field_content_text(value) -> str | None:
         return ''.join(chunks)
     return str(value)
 
-def _wire_evidence_from_usage(usage: dict | None) -> _WireEvidence:
-    if not usage:
-        return _WireEvidence()
-    return _WireEvidence(
-        fingerprint=usage.get('_wire_fp'),
-        static_prefix=usage.get('_wire_static') or '',
-        system=usage.get('_wire_system'),
-        markers=usage.get('_wire_markers'),
-        message_bytes=usage.get('_wire_bytes'),
-        field_bytes=usage.get('_wire_field_bytes'),
-        region=usage.get('_wire_region'),
-        routing=usage.get('_wire_routing'),
-    )
-
 
 def _validated_wire_region_hash(region: Any, field: str) -> str:
     """Return one trusted 16-hex true-byte region digest, or empty."""
@@ -284,292 +255,13 @@ def _validated_wire_region_hash(region: Any, field: str) -> str:
     return value
 
 
-def _detect_namespace_switch(
-    *,
-    current_routing: Any,
-    previous_state: CacheState,
-    was_compaction: bool,
-    conv_id: str,
-) -> tuple[list[str], bool]:
-    """Compare the provider cache namespace after body-byte comparison."""
-    if (current_routing is None or previous_state.wire_routing is None
-            or previous_state.call_count <= 0 or was_compaction):
-        return [], False
-
-    from lib.tasks_pkg.wire_fingerprint import diff_routing
-    namespace_switch = diff_routing(
-        previous_state.wire_routing, current_routing)
-    namespace_verified_same = not namespace_switch
-    if namespace_switch:
-        logger.warning(
-            '[CacheTrack] conv=%s call=%d ⚠ CACHE NAMESPACE SWITCH: the '
-            'request routing changed between turns — a byte-identical prefix '
-            'now lands on a DIFFERENT gateway cache namespace (client-caused '
-            'cold miss, NOT server-side). changed=[%s] prev=%s cur=%s',
-            conv_id[:8], previous_state.call_count + 1,
-            ', '.join(namespace_switch), previous_state.wire_routing,
-            current_routing,
-        )
-    return namespace_switch, namespace_verified_same
-
-
-def _classify_break(
-    *, call_count: int, was_compaction: bool,
-    prev_cache_read: int, cache_read: int,
-    prev_cache_write: int, cache_write: int,
-    prev_prefix_tokens: int,
-) -> tuple[bool, bool, bool]:
-    """Phase-2 break classification (pure arithmetic on API cache tokens).
-
-    Returns ``(api_break, no_reuse, partial_no_reuse)`` — the three
-    mutually-narrowing break predicates.  Extracted verbatim from
-    ``detect_cache_break``'s Phase 2 so the (subtle, much-commented)
-    thresholds live in one testable place; the caller still owns the lock,
-    the state mutation, and the cause/logging/return shaping.
-
-      * api_break       — cache_read DROPPED >5% from a prior high read, with
-                          the absolute drop over the miss threshold.
-      * no_reuse        — a large fresh write with ZERO read despite an
-                          established prefix last round.
-      * partial_no_reuse— a large write repeated round-over-round while the
-                          read stayed pinned (body re-billed uncached).
-    """
-    api_break = (
-        call_count > 0
-        and prev_cache_read > _MIN_CACHE_MISS_TOKENS
-        and cache_read < prev_cache_read * 0.95
-        and (prev_cache_read - cache_read) >= _MIN_CACHE_MISS_TOKENS
-        and not was_compaction
-    )
-
-    no_reuse = (
-        call_count > 0
-        and cache_read == 0
-        and cache_write >= _MIN_NO_REUSE_TOKENS
-        and prev_prefix_tokens >= _MIN_NO_REUSE_TOKENS
-        and not was_compaction
-    )
-
-    partial_no_reuse = (
-        call_count > 0
-        and not was_compaction
-        and not api_break
-        and not no_reuse
-        and cache_write >= _MIN_NO_REUSE_TOKENS
-        and prev_cache_write >= _MIN_NO_REUSE_TOKENS
-        and cache_read <= prev_cache_read * 1.05
-    )
-
-    return bool(api_break), bool(no_reuse), bool(partial_no_reuse)
-
-
-def _resolve_break_cause(
-    *, client_changes: dict, prefix_mutation_break: bool,
-    elapsed: float, cache_read: int, prefix_mutated: bool,
-    prefix_culprits: list | None = None,
-    wire_proven_identical: bool = False,
-    namespace_switch: list | None = None,
-    namespace_verified_same: bool = False,
-) -> str:
-    """Build the single most-specific human cause string for a confirmed break.
-
-    Precedence: explicit client changes → prefix-byte mutation (with the EXACT
-    changed ``key.field`` list when known) → TTL expiry → upstream eviction.
-
-    The eviction verdict is GATED on evidence, not reached by elimination.
-    ``wire_proven_identical`` is True only when the authoritative
-    post-translation wire fingerprint (see ``wire_fingerprint.py``) showed the
-    actual sent bytes were byte-for-byte identical to the previous round.
-    CRUCIALLY, byte-identity proves only that the miss is NOT a client-side
-    prefix change THIS ROUND — it says nothing about the cause. A byte-identical
-    prefix that is not read back was not reused upstream; that is an ordinary
-    upstream cache miss (a per-request gateway miss or a TTL boundary). The
-    gateway forwards requests and does not evict, and there is no per-key cache
-    capacity limit, so this is NOT shared-pool contention. So the verdict names
-    an "upstream cache miss" WITHOUT asserting a single confident cause. NOTE the systemic picture: most cache
-    misses in this system are CLIENT-side (already-cached bytes re-serialized
-    differently across turns) — those take the ``<bytes>`` / ``prefix_mutation``
-    branches above and are named there. This byte-identical branch is the
-    comparatively RARE residual, so it must not over-claim.
-
-    ⚠ The eviction verdict is DOUBLE-gated. ``wire_proven_identical`` requires
-    BOTH the lossy canonical fingerprint AND the TRUE per-message serialized
-    bytes (``wire_byte_prefix``) to match. The canonical fingerprint alone is
-    NOT enough: it drops ``cache_control``, collapses ``str`` ↔ block, and
-    skips ``reasoning_details`` — so a round can rebuild ``reasoning_details``,
-    merge same-role turns, or switch protocol while canonical says "identical".
-    When the raw bytes diverged, the caller has already appended a ``<bytes>``
-    culprit (so this function takes the byte-divergence branch above), meaning
-    we NEVER reach the eviction branch claiming "byte-identical" when the bytes
-    were not. When no wire fingerprint was captured (non-Claude / capture
-    failure) we fall back to the honestly-hedged "likely server/TTL OR silent
-    byte change" wording — the elimination guess, explicitly marked unproven.
-    """
-    _culprits = ', '.join(prefix_culprits) if prefix_culprits else ''
-    if client_changes:
-        return ', '.join(f'{k}={v}' for k, v in client_changes.items())
-    # ── Stable-block cache-TTL flipped between turns (the _task_id-drop bug) ──
-    # The system/tools cache_control ttl value changed (e.g. "1h" ↔ absent)
-    # while content bytes were identical. That value is part of the gateway
-    # cache key, so the flip creates a DISTINCT entry → full prefix miss. It is
-    # a CLIENT-side bug (a body rebuild dropped ``_task_id`` and fell back to the
-    # live global CACHE_EXTENDED_TTL instead of the per-task latch), NOT a server
-    # miss — name it precisely so it is never laundered into "server-side PROVEN".
-    if prefix_culprits and '<ttl-flip>' in prefix_culprits:
-        return ('cache TTL marker flipped between turns (the stable system/tools '
-                'cache_control ttl changed, e.g. "1h" ↔ default — a body rebuild '
-                'lost the per-task TTL latch and read the live global) — the '
-                'whole prefix was re-billed under a new cache key')
-    # ── Breakpoint LOST in translation (the tool_result/assistant-tail bug) ──
-    # A cache_control marker the client placed vanished before the wire (or the
-    # system/tools marker count changed) while the CONTENT bytes were identical.
-    # This is a CLIENT-side bug (a dropped breakpoint), not a server miss — name
-    # it precisely so it is never laundered into "server-side PROVEN".
-    if prefix_culprits and '<breakpoint-lost>' in prefix_culprits:
-        return ('cache breakpoint lost between turns (a cache_control marker '
-                'the client placed did not survive to the wire — e.g. dropped '
-                'in the tool_result translation) — the body past the last '
-                'surviving marker was re-billed uncached')
-    # ── Mid-anchor slipped past the ~20-block cache lookback window ──
-    # The mid-history stepping-stone drifted FARTHER than Anthropic's ~20-block
-    # lookback behind the rolling tail, so the tail could not extend the prior
-    # cache entry and the whole prefix past the mid was re-written — on a
-    # byte-identical body. This is a CLIENT-side breakpoint-LAYOUT miss (the
-    # add_cache_breakpoints trail/step params), NOT a server miss — name it so
-    # it is never laundered into "upstream cache miss".
-    if prefix_culprits and '<mid-out-of-window>' in prefix_culprits:
-        return ('mid-history cache anchor drifted past Anthropic\'s ~20-block '
-                'cache lookback window behind the rolling tail — the tail could '
-                'not extend the prior cache entry, so the whole prefix past the '
-                'mid anchor was re-billed uncached even though the body bytes '
-                'were identical. A client-side breakpoint-layout miss (the '
-                'stepping-stone trail/step params), NOT a server-side or '
-                'gateway fault.')
-    # ── Provider-bound hoisted structure changed (canonical AND raw proof) ──
-    # ``<hoisted>.tools`` / ``<hoisted>.system`` comes from the canonical
-    # system_fingerprint and therefore proves the structure/content changed;
-    # a co-occurring ``<bytes>tools`` / ``<bytes>system`` proves the exact
-    # serialized cache-key bytes changed too.  Handle this BEFORE the
-    # canonical-invisible byte branch below.  Calling this a lossy-fingerprint
-    # match (the old generic wording) is factually wrong and hid a dynamic
-    # execute_tools description mutation behind a server-side-looking verdict.
-    _hoisted = [str(c) for c in (prefix_culprits or [])
-                if str(c).startswith('<hoisted>.')]
-    if _hoisted:
-        _named = ', '.join(str(c) for c in prefix_culprits)
-        return (
-            'provider-bound system/tools structure changed between turns — '
-            'the client changed cache-key bytes in the hoisted prefix, so the '
-            'cached prefix was re-billed uncached'
-            f' [changed: {_named}]')
-    # ── TRUE-byte divergence with an IDENTICAL lossy-canonical fingerprint ──
-    # canonical_messages matched (same tokenized content) yet the RAW serialized
-    # bytes of a prefix message changed. The lossy canonicaliser is blind to
-    # this class: reasoning_details rebuilt by build_body, consecutive same-role
-    # turns merged, JSON field order changed, or an OpenAI↔Anthropic envelope /
-    # endpoint switch. Any of these changes the exact bytes the gateway keys its
-    # cache on → a full/partial miss. This is NOT proof of a client HISTORY
-    # edit (the envelope-switch case is routing, not content), so name the
-    # honest SET of causes rather than asserting a specific one — and never let
-    # it be called "byte-identical eviction", because the bytes were NOT
-    # identical.
-    if prefix_culprits and any(str(c).startswith('<bytes>') or
-                               str(c).startswith('byte-len')
-                               for c in prefix_culprits):
-        _named = ', '.join(c for c in prefix_culprits
-                           if str(c).startswith('<bytes>'))
-        _suffix = f' [changed: {_named}]' if _named else ''
-        # If the HOISTED system/tools region is among the byte-diverged parts,
-        # name it as the prime suspect — on the Anthropic path that region is
-        # where the per-turn context (charter / board / peer-status /
-        # relevant_memories) is injected fresh, and it rides on a LOSSY system
-        # fingerprint, so it is the most likely place a real context-mechanism
-        # corruption hides.
-        _region_hit = any(c in ('<bytes>system', '<bytes>tools')
-                          for c in prefix_culprits)
-        if _region_hit:
-            return ('hoisted system/tools bytes changed between turns while the '
-                    'lossy system fingerprint matched — a canonical-invisible '
-                    'change in the per-turn-injected system prefix (block '
-                    'reorder, wrapping flip, re-serialization, or tool-param '
-                    'key reorder) altered the exact bytes the gateway caches '
-                    f'on → the cached prefix was re-billed uncached{_suffix}')
-        return ('wire bytes changed between turns while the lossy content '
-                'fingerprint matched — a canonical-invisible change '
-                '(reasoning_details rebuild, consecutive same-role merge, JSON '
-                'field reorder, or an OpenAI↔Anthropic envelope/endpoint '
-                'switch) altered the exact bytes the gateway caches on → the '
-                f'affected prefix was re-billed uncached{_suffix}')
-    if prefix_mutation_break:
-        _base = ('cached prefix bytes changed between turns '
-                 '(non-idempotent history edit) — the whole body '
-                 'was re-billed uncached')
-        return f'{_base} [changed: {_culprits}]' if _culprits else _base
-    # ── Cache-NAMESPACE switch (byte-identical body, routing flipped) ──
-    # The request BODY was byte-identical to last round, but the cache-namespace
-    # routing changed — the upstream key, the anthropic-beta header (e.g.
-    # extended-cache-ttl presence), or the endpoint. Anthropic caches per
-    # (key + beta + endpoint), so the same prefix bytes hit a COLD namespace →
-    # a guaranteed miss. This is a CLIENT-side cause (dispatch rebind on
-    # cooldown/429, or a per-task TTL-latch flip), NOT a server/gateway fault —
-    # name the exact attribute(s) that flipped so it is never laundered upstream.
-    if namespace_switch:
-        _ns_names = {'<ns>key': 'upstream API key', '<ns>beta': 'anthropic-beta '
-                     'header (e.g. extended-cache-ttl)', '<ns>endpoint': 'endpoint'}
-        _flipped = ', '.join(_ns_names.get(c, c) for c in namespace_switch)
-        return ('same prefix bytes routed to a different cache namespace — the '
-                f'{_flipped} changed between turns (a client-side dispatch '
-                'rebind on cooldown/429, or a per-task TTL-latch flip), so the '
-                'byte-identical prefix landed on a COLD gateway cache and was '
-                're-billed uncached. NOT a server-side miss.')
-    if elapsed > 300:
-        return 'Possible TTL expiry (>5min gap); server cause not established'
-    # ── Upstream cache miss — byte-identical, so NOT a client byte change THIS
-    #    round ──
-    # The wire fingerprint confirmed our sent bytes were IDENTICAL to last
-    # round, so THIS round's miss is not a client-side prefix mutation. But
-    # byte-identity does not tell us the cause: an identical prefix that comes
-    # back with a dropped cache_read simply was not reused upstream. That is an
-    # ordinary upstream cache miss (a per-request gateway miss or a TTL
-    # boundary) — the gateway forwards and does not evict, and there is no
-    # per-key cache capacity limit, so it is NOT shared-pool contention. We do
-    # NOT assert it is or is not a server fault. IMPORTANT systemic note: the DOMINANT cache-miss cause
-    # in this system is CLIENT-side (already-cached bytes re-serialized
-    # differently across turns), and those are caught+named on the <bytes> /
-    # prefix_mutation branches ABOVE — a stable client (byte-identical prefixes
-    # every round) has been observed to drive misses to ~zero. This
-    # byte-identical branch is therefore the comparatively RARE residual; word
-    # it as a possibility, not a confident verdict, and never over-claim a
-    # single mechanism.
-    if wire_proven_identical:
-        _ns_evidence = (' Captured routing hashes were identical '
-                        '(key + anthropic-beta + endpoint).'
-                        if namespace_verified_same else '')
-        return ('Provider reported less prefix reuse (an upstream cache miss); '
-                'captured wire-prefix hashes were identical. This is evidence '
-                'about observed request fields, not proof of server causality, '
-                'TTL expiry, or unobserved upstream transformations.' + _ns_evidence)
-    # ── Wire fingerprint UNAVAILABLE → legacy elimination guess (unproven) ──
-    if cache_read > _MIN_CACHE_MISS_TOKENS:
-        return ('Cache read decreased with partial prefix reuse; local '
-                'fingerprints cannot establish the upstream cause.')
-    if not prefix_mutated:
-        return ('Prefix not reused; matching local fingerprints alone '
-                'cannot establish a server cause or TTL expiry.')
-    # Prefix bytes DID change but the write was below the surfacing floor.
-    # We still know exactly which field moved — name it instead of guessing.
-    if _culprits:
-        return ('prefix bytes changed between turns '
-                f'[changed: {_culprits}] — likely cause of the miss')
-    return ('Prefix not reused; insufficient provider-bound evidence to '
-            'attribute a cause.')
-
-
 def _emit_round_record(conv_id, call_num, verdict, *, ns_switch, ttl_flip,
                        breakpoint_lost, body_identical, namespace_verified,
                        cache_read, cache_write, elapsed, culprits=None,
                        model='', wire_available=False, wire_changed=False,
-                       read_collapsed=False):
+                       read_collapsed=False, lane='', tool_count=None,
+                       wire_tool_count=None, wire_tool_name_bytes=None,
+                       cold_group='', affinity=''):
     """Emit ONE machine-readable per-round cache-verdict record (ALWAYS, every
     round — not only on a break).
 
@@ -620,6 +312,33 @@ def _emit_round_record(conv_id, call_num, verdict, *, ns_switch, ttl_flip,
         #   back rather than dropping the row.
         if model:
             rec['model'] = str(model)
+        # 'conversation' (root agent), 'isolated' (child/transient invocation)
+        # or 'unscoped'. One route can serve both lanes very differently, so
+        # cache health is only comparable within a lane.
+        if lane:
+            rec['lane'] = lane
+        # Tool definitions on the request. A gateway may serve one route from
+        # caches that behave differently by request shape, so read share is
+        # also compared across tool-surface sizes.
+        if tool_count is not None:
+            rec['tools'] = int(tool_count)
+        # The provider-visible surface actually sent, after Tool Search,
+        # budgets and protocol translation; ``tools`` above is the task's
+        # logical catalog. On the Sankuai Claude route reuse followed the
+        # joined sent names, not the catalog (docs/LLM_COST_OPTIMIZATION.md,
+        # "Gateway tool-name budget").
+        if wire_tool_count is not None:
+            rec['wire_tools'] = int(wire_tool_count)
+        if wire_tool_name_bytes is not None:
+            rec['wire_tool_name_bytes'] = int(wire_tool_name_bytes)
+        if cold_group:
+            rec['cold_group'] = str(cold_group)
+        # Wire slots that carried the lineage's cache-affinity key
+        # (lib/llm/cache_affinity.py), e.g. 'Mt-Session-Id'. Reports split
+        # read-back by carrier: a lineage that still reads an OLDER round's
+        # entry while carrying a key shows that the hop ignored the key.
+        if affinity:
+            rec['affinity'] = str(affinity)
         # The RAW wire-culprit tokens (e.g. '<ttl-flip>', '<mid-out-of-window>',
         # 'assistant.content', '<hoisted>.system') that drove _wire_prefix_changed
         # this round. Emitted so a post-fix live A/B can see the ACTUAL driver of
@@ -630,138 +349,9 @@ def _emit_round_record(conv_id, call_num, verdict, *, ns_switch, ttl_flip,
             rec['culprits'] = [str(c) for c in list(culprits)[:8]]
         import json as _json
         logger.info('[CacheRoundRecord] %s', _json.dumps(rec, sort_keys=True))
+        _health.read_share_monitor.observe(rec)
     except Exception as _rre:
         logger.debug('[CacheTrack] round-record emit failed: %s', _rre)
-
-
-# ── Verdict bucket taxonomy (SINGLE SOURCE — replay + live records share it) ──
-BUCKET_NAMESPACE = 'cache_namespace_switch'
-BUCKET_TURN_BOUNDARY = 'turn_boundary_rebill'
-BUCKET_TTL_FLIP = 'ttl_flip'
-# TTL EXPIRY is NOT waste and NOT a client change. ``_resolve_break_cause``
-#   emits 'TTL expiry (>5min gap, prompt unchanged)' for any >300s gap, but
-#   classify_verdict used to match only 'ttl marker flipped' / 'new cache key',
-#   so every idle-expiry rebuild fell through to body_change ("the client
-#   changed the bytes" — the exact mislabel this detector family exists to
-#   prevent) or to the `other` catch-all. Measured on real traffic: 73 rounds /
-#   1,516 CNY of ORDINARY cache rebuilds were being counted as recoverable
-#   waste, which distorted where the money looked like it was going (removing
-#   them moves the upstream-gateway share of avoidable spend 86.1% → 91.2%).
-#   A cache entry that expired on its own schedule HAD to be re-created; the
-#   honest bucket is what lets a cost view subtract it instead of chasing it.
-BUCKET_TTL_EXPIRY = 'ttl_expiry'
-# The EXACT wording _resolve_break_cause emits for a genuine >5min idle expiry,
-# lowercased for matching. Deliberately the full phrase: the no-fingerprint
-# fallback cause also contains the words "TTL expiry", but as one item in a
-# hedge ("likely server-side miss or TTL expiry (UNPROVEN ...)"). Matching the
-# bare substring mis-claimed those rounds as confirmed expiries and dropped
-# genuine waste out of the recoverable total.
-_TTL_EXPIRY_CAUSE = 'ttl expiry (>5min gap'
-BUCKET_BREAKPOINT_LOST = 'breakpoint_lost'
-BUCKET_MID_WINDOW = 'cache_mid_out_of_window'
-BUCKET_WRITE_UNSETTLED = 'cache_write_unsettled'
-BUCKET_UPSTREAM = 'upstream_identical'
-BUCKET_BODY_CHANGE = 'body_change'
-BUCKET_NO_BREAK = 'no_break'
-# INDETERMINATE — the detector reached NO conclusion, which is NOT the same
-#   as concluding the cache was fine. `no_break` used to mean both, so a round
-#   that paid to rebuild a large prefix and read back nothing was filed
-#   alongside genuine cache hits.
-#
-#   Measured mechanism: all three break predicates in _classify_break carry
-#   `and not was_compaction`, so a COMPACTED round with a huge zero-read write
-#   is structurally exempt from every gate and falls through. The exemption is
-#   correct for the detector's RETURN value — a compaction legitimately
-#   rebuilds its prefix and must not be blamed on the gateway — but wrong for
-#   the LEDGER, where the tokens were really paid for.
-#
-#   NOT the mechanism (checked and disproved): a zero-read predecessor starving
-#   the gates. `prev_prefix_tokens` is prev_read + prev_write, so a miss
-#   predecessor with a large write still clears no_reuse's threshold — verified
-#   directly against _classify_break, which returns no_reuse=True on exactly
-#   that shape.
-#
-#   Deliberately NOT fixed by loosening a detection threshold: those gates stop
-#   a genuinely cold or legitimately-rebuilt prefix being reported as a miss.
-#   The defect is in how an unconcluded round is NAMED, so the fix is at the
-#   landing site.
-BUCKET_INDETERMINATE = 'indeterminate'
-BUCKET_OTHER = 'other'
-
-
-def classify_verdict(verdict: dict | None) -> str:
-    """Map ONE ``detect_cache_break`` result dict to a bucket name.
-
-    THE SINGLE SOURCE OF TRUTH for cache-miss bucketing — imported by BOTH the
-    live per-round record emitter (below) AND the offline replay harness
-    (``replay.py`` re-exports this exact function), so offline counts and live
-    counts can never drift (the recurring bug class this whole effort fights).
-
-    Keys off the RETURN KEY first (most authoritative), then the cause wording
-    for the byte-identical sub-classes that share the ``server_side`` key.
-    """
-    if not verdict:
-        return BUCKET_NO_BREAK
-    if BUCKET_INDETERMINATE in verdict:
-        return BUCKET_INDETERMINATE
-    if BUCKET_NAMESPACE in verdict:
-        return BUCKET_NAMESPACE
-    if BUCKET_WRITE_UNSETTLED in verdict:
-        return BUCKET_WRITE_UNSETTLED
-    if BUCKET_MID_WINDOW in verdict:
-        return BUCKET_MID_WINDOW
-    if BUCKET_TURN_BOUNDARY in verdict:
-        return BUCKET_TURN_BOUNDARY
-    _cause = ' '.join(str(v) for v in verdict.values()).lower()
-    if any(k in verdict for k in ('prefix_mutation', 'system_prompt', 'tools',
-                                  'model', 'no_cache_reuse')):
-        if 'ttl marker flipped' in _cause or 'new cache key' in _cause:
-            return BUCKET_TTL_FLIP
-        # A >5min idle gap expired the entry on its own schedule — an ordinary
-        # rebuild, not a client body change. Checked BEFORE the generic
-        # body_change fallthrough below, which would otherwise accuse our own
-        # client of mutating a prefix the wire fingerprint proved identical.
-        #
-        # Anchored on the FULL genuine wording, not the bare substring 'ttl
-        #   expiry'. The no-fingerprint fallback cause reads "likely
-        #   server-side miss OR TTL expiry (UNPROVEN ...)" — a HEDGE listing
-        #   TTL as one possibility, not a finding. Matching the bare substring
-        #   claimed those unproven rounds as confirmed TTL and so REMOVED real
-        #   waste from the recoverable total, which is the more dangerous
-        #   direction: it makes the gateway problem look smaller than it is.
-        if _TTL_EXPIRY_CAUSE in _cause:
-            return BUCKET_TTL_EXPIRY
-        if 'lookback window' in _cause:
-            return BUCKET_MID_WINDOW
-        if 'breakpoint lost' in _cause:
-            return BUCKET_BREAKPOINT_LOST
-        # ``no_cache_reuse`` is returned ONLY when client_changes was empty
-        # (see the no_reuse / partial_no_reuse branches in detect_cache_break),
-        # so a byte-identical one — whose cause names the whole/partial prefix
-        # "an upstream cache miss" — is NOT a client body change. It must bucket
-        # as upstream_identical, never body_change (which reads as a client
-        # miss). Verified against real traffic: 8 rounds carrying this verdict
-        # were all byte-identical by DB reconstruction.
-        if 'upstream cache miss' in _cause:
-            return BUCKET_UPSTREAM
-        return BUCKET_BODY_CHANGE
-    if 'ttl marker flipped' in _cause or 'new cache key' in _cause:
-        return BUCKET_TTL_FLIP
-    # Same reasoning as the client-keys branch above: an idle-expiry rebuild is
-    # its own honest verdict, not the `other` catch-all. Anchored on the full
-    # genuine wording so the UNPROVEN "server-side miss or TTL expiry" hedge is
-    # NOT claimed as a confirmed expiry.
-    if _TTL_EXPIRY_CAUSE in _cause:
-        return BUCKET_TTL_EXPIRY
-    if 'lookback window' in _cause:
-        return BUCKET_MID_WINDOW
-    if 'breakpoint lost' in _cause:
-        return BUCKET_BREAKPOINT_LOST
-    if 'upstream cache miss' in _cause:
-        return BUCKET_UPSTREAM
-    return BUCKET_OTHER
-
-
 
 
 def _emit_pending_l2_roi(prev, conv_id, cache_write, cache_read, usage, *,
@@ -821,13 +411,36 @@ def _cache_observation_elapsed(prev, now, scope, key, user_id, conv_id):
     return elapsed
 
 
+def _round_groups(scope, tools, model, call_count, wire_evidence) -> dict:
+    """Record fields naming this round's request groups, keyed as the finisher's.
+
+    ``cold_group`` is read before the round is observed, so a round is judged
+    against the split its predecessors established.
+    """
+    lane = ('unscoped' if scope is None
+            else 'conversation' if scope.lane == 'conversation'
+            else 'isolated')
+    tool_count = len(tools) if isinstance(tools, (list, tuple)) else None
+    cold_group = _health.read_share_monitor.cold_group({
+        'call': call_count, 'model': model, 'lane': lane, 'tools': tool_count,
+        'wire_tool_name_bytes': wire_evidence.tool_name_bytes})
+    routing = wire_evidence.routing if isinstance(wire_evidence.routing, dict) else {}
+    return {'lane': lane, 'tool_count': tool_count,
+            'wire_tool_count': wire_evidence.tool_count,
+            'wire_tool_name_bytes': wire_evidence.tool_name_bytes,
+            'cold_group': cold_group,
+            'affinity': str(routing.get('affinity') or '').split('@', 1)[0]}
+
+
 def _cache_verdict_finisher(
     conv_id, prev, _ns_switch, _ttl_flip,
     _breakpoint_lost, _wire_proven_identical, _ns_verified_same, cache_read,
     cache_write, elapsed, _wire_culprits, model,
     _wire_available, _wire_prefix_changed, _read_collapsed, client_changes,
     prefix_mutation_break, _prefix_culprits, _wire_tools_verified, _wire_system_verified,
-    turn_boundary_break, _cross_turn_prev_read, prev_cache_read,
+    turn_boundary_break, _cross_turn_prev_read, prev_cache_read, lane='',
+    tool_count=None, wire_tool_count=None, wire_tool_name_bytes=None,
+    cold_group='', affinity='',
 ):
     """Freeze this round's evidence for consistent telemetry and returned verdicts."""
     def _finish(v, record_as=None):
@@ -850,7 +463,10 @@ def _cache_verdict_finisher(
             elapsed=elapsed, culprits=_wire_culprits, model=model,
             wire_available=_wire_available,
             wire_changed=_wire_prefix_changed,
-            read_collapsed=_read_collapsed)
+            read_collapsed=_read_collapsed, lane=lane, tool_count=tool_count,
+            wire_tool_count=wire_tool_count,
+            wire_tool_name_bytes=wire_tool_name_bytes, cold_group=cold_group,
+            affinity=affinity)
         if v:
             # Keep legacy keys and the primary ledger bucket, but never
             # discard independent evidence merely because another reason
@@ -905,6 +521,43 @@ def _cache_verdict_finisher(
     return _finish
 
 
+def _report_indeterminate_round(conv_id, prev, *, cache_write, elapsed,
+                                was_compaction, advertised_rewrite,
+                                expected_rewrite_index) -> dict:
+    """Log a zero-read substantial write that no break gate explained and
+    return its ``indeterminate`` ledger record."""
+    if advertised_rewrite:
+        logger.info(
+            '[CacheTrack] conv=%s call=%d zero-read write after an '
+            'advertised compaction rewrite: cache_write=%d '
+            '(gap=%.1fs, advertised api-form index %d) — counted as '
+            'indeterminate.',
+            conv_id[:8], prev.call_count, cache_write, elapsed,
+            expected_rewrite_index)
+    else:
+        logger.warning(
+            '[CacheTrack] conv=%s call=%d INDETERMINATE: cache_write=%d '
+            'read=0 (gap=%.1fs, compaction=%s) but no break gate fired '
+            '— the spend is real but the cause is unresolved. Counted '
+            'as indeterminate, NOT as no_break: a zero-read rebuild '
+            'must not be filed alongside genuine cache hits.',
+            conv_id[:8], prev.call_count, cache_write, elapsed,
+            was_compaction)
+    return {
+        'indeterminate': (
+            'zero read-back on a substantial write, but no break gate '
+            'could fire'
+            + (' because this round followed a compaction, which is '
+               'structurally exempt from every break predicate'
+               if was_compaction else '')
+            + (' because an advertised bounded compaction rewrite '
+               'covered the first prefix change'
+               if advertised_rewrite else '')
+            + '. The spend is real and counted here; the CAUSE is '
+            'unresolved — this round is NOT evidence of a healthy '
+            'cache.')}
+
+
 def detect_cache_break(
     conv_id: str,
     messages: list,
@@ -928,14 +581,9 @@ def detect_cache_break(
     Returns a dict describing what changed, or None if no break detected.
     Logs warnings on significant cache breaks for cost diagnostics.
 
-    Key change from previous implementation:
-      - Does NOT hash message content (avoids false positives from
-        micro-compact mutations)
-      - Only tracks system prompt, tools, model, and message count
-      - Uses API-reported cache tokens as the source of truth
-      - Accounts for compaction events (expected token drops)
-      - Bounded intended_rewrite_index covers an api-form first change
-        at/after that index without raising compaction_pending
+    Provider-bound fingerprints override source-level fallbacks. Compaction
+    and advertised bounded rewrites keep their existing exclusions; comparison
+    always precedes baseline mutation and guarded checkpoint publication.
     """
     if not conv_id:
         return None
@@ -977,11 +625,7 @@ def detect_cache_break(
 
         client_evidence = _detect_client_changes(
             prev, messages, tools, model, _wire_evidence, conv_id=conv_id)
-        sys_hash = client_evidence.system_hash
         msg_count = client_evidence.message_count
-        tools_hash = client_evidence.tools_hash
-        per_tool_hashes = client_evidence.per_tool_hashes
-        prefix_field_hashes = client_evidence.prefix_field_hashes
         client_changes = client_evidence.client_changes
         _prefix_mutated = client_evidence.prefix_mutated
         _prefix_culprits = client_evidence.prefix_culprits
@@ -1024,6 +668,14 @@ def detect_cache_break(
                     conv_id[:8], prev_cache_read, cache_read)
         if _expected_rewrite_index >= 0:
             prev.expected_rewrite_index = -1
+        # Api-form index space (prefix-field hashes), NOT wire_fp positions.
+        # Anthropic hoists system, merges same-role turns, and wraps tool
+        # results, so a wire first_changed_index is not comparable to
+        # notify_compaction(intended_rewrite_index=...).
+        _expected_covers = (
+            _expected_rewrite_index >= 0
+            and _api_first_changed >= _expected_rewrite_index
+        )
         # ── Phase-C: complete a pending L2 ROI record ──
         # An L2 force-summary event stashed its 'saved' half via
         # record_l2_compaction. THIS round is the one whose prompt was rebuilt
@@ -1047,248 +699,23 @@ def detect_cache_break(
         #   * identical → no observed local prefix change, NOT proof of a
         #                 server cause or of unobserved upstream transformations.
         #   * differ → identifies a concrete provider-bound field change.
-        _cur_wire_fp = _wire_evidence.fingerprint
-        _wire_static = _wire_evidence.static_prefix
-        _cur_wire_system = _wire_evidence.system
-        _cur_wire_markers = _wire_evidence.markers
-        _cur_wire_bytes = _wire_evidence.message_bytes
-        _cur_wire_field_bytes = _wire_evidence.field_bytes
-        _cur_wire_region = _wire_evidence.region
+        wire_comparison = compare_wire_evidence(
+            prev, _wire_evidence, conv_id=conv_id,
+            was_compaction=_was_compaction, expected_covers=_expected_covers,
+            expected_rewrite_index=_expected_rewrite_index,
+            api_first_changed=_api_first_changed, client_changes=client_changes,
+            message_count=msg_count, cache_read=cache_read,
+        )
+        _wire_available = _wire_evidence.fingerprint is not None
         _cur_wire_routing = _wire_evidence.routing
-        _wire_available = _cur_wire_fp is not None
-        _wire_prefix_changed = False
-        _wire_culprits: list = []
-        # Position of the first byte-diverged prefix message, and whether it
-        # falls INSIDE the prior round's cached-prefix boundary. Hoisted here
-        # (default: no position known) so the break classifier below can use
-        # it to tell a genuine already-cached-message rewrite (a real
-        # whole-prefix break) from a benign change confined to the fresh /
-        # editable tail (read still hits ~fully). Set in the wire block.
-        _first_changed_idx = -1
-        _mutation_inside_prior_prefix = False
-        _wire_comparable = (_wire_available and prev.call_count > 0
-                            and prev.wire_fp is not None and not _was_compaction)
-        _wire_bytes_comparable = (_cur_wire_bytes is not None
-                                  and prev.wire_bytes is not None)
-        if _wire_comparable:
-            # Compare only the region that existed last round (its full length);
-            # this round appends new tail messages we don't diff against.
-            _shared = len(prev.wire_fp)
-            _wire_culprits = diff_canonical(
-                prev.wire_fp[:_shared], (_cur_wire_fp or [])[:_shared])
-            # ── System/tools diff (the hoisted-prefix blind spot) ──
-            # On the Anthropic path system+tools live OUTSIDE body['messages'],
-            # so the diff above never sees them. A per-turn system change
-            # (cross-conv digest / charter / board) would otherwise leave
-            # _wire_culprits empty → a false "server-side PROVEN" verdict on a
-            # genuinely client-caused miss. Fold the system fingerprint diff in
-            # so a system-block mutation is NAMED and blocks that false verdict.
-            if _cur_wire_system is not None and prev.wire_system is not None:
-                for _fld in ('system', 'tools'):
-                    if prev.wire_system.get(_fld) != _cur_wire_system.get(_fld):
-                        _wire_culprits.append(f'<hoisted>.{_fld}')
-            # ── Marker-layout regression (the breakpoint-lost blind spot) ──
-            # canonical_messages STRIPS cache_control, so a miss caused purely
-            # by a breakpoint being LOST between rounds (byte-identical content,
-            # e.g. the tail marker dropped in the anthropic tool_result
-            # translation) leaves _wire_culprits empty → false "server-side
-            # PROVEN". markers_regressed fires ONLY on a marker COUNT DROP /
-            # system-tools marker change (NOT on the rolling tail's normal
-            # forward move), so folding it in names the dropped breakpoint and
-            # blocks the false verdict without crying wolf every round.
-            # A breakpoint being LOST (count/sys/tools drop) and a breakpoint's
-            # ttl VALUE flipping (5m↔1h, count unchanged) are DISTINCT client
-            # causes on a byte-identical body — check them INDEPENDENTLY. The
-            # old code read the ttl only INSIDE the markers_regressed branch
-            # and off a 'stable_ttls' key marker_signature never emitted, so a
-            # pure ttl flip (the _task_id-drop latch bypass) was doubly invisible
-            # on the live path and laundered into "byte-identical → server-side".
-            if markers_regressed(prev.wire_markers, _cur_wire_markers):
-                _wire_culprits.append('<breakpoint-lost>')
-            if markers_ttl_flipped(prev.wire_markers, _cur_wire_markers):
-                _wire_culprits.append('<ttl-flip>')
-            # ── Mid-anchor slipped past the ~20-block lookback (the sawtooth
-            #    whole-prefix rewrite) ──
-            # The mid-history stepping-stone trails the rolling tail so the tail
-            # can extend the prior cache entry, but if the trail/step params let
-            # it slip FARTHER than Anthropic's ~20-block lookback the tail can
-            # no longer reach it and the whole prefix past the mid is re-written
-            # — on a BYTE-IDENTICAL body, which would otherwise launder into the
-            # "upstream cache miss" verdict. Only meaningful when the read
-            # actually collapsed this round (a same-layout warm round reads back
-            # fine); gate it on _read_collapsed so a within-window round with a
-            # benign write is not falsely named. This is the LAST body-invisible
-            # CLIENT cause, mirroring <ttl-flip> / <breakpoint-lost>.
-            #
-            # NOTE: the ``<mid-out-of-window>`` layout token is appended LATER
-            # (just before ``_wire_prefix_changed`` is computed), AFTER every
-            # content-culprit detector (canonical diff, <bytes>, <hoisted>
-            # region) has run — so a genuine prefix mutation ALWAYS blocks the
-            # byte-identity gate and the layout token can never hijack the
-            # verdict of a real body change. See the gated append below.
-            # ── TRUE-byte divergence (the lossy-canonical blind spot) ──
-            # canonical_messages is deliberately lossy: it drops cache_control,
-            # collapses str↔block, canonicalises tool-arg key order, and DOES
-            # NOT hash reasoning_details. So "canonical identical" does NOT
-            # prove the SERIALIZED bytes were identical. If canonical + system +
-            # markers all say "unchanged" but the raw per-message bytes DID
-            # diverge (reasoning_details rebuild, consecutive same-role merge,
-            # field reorder, or an envelope/endpoint switch), the round is NOT
-            # eligible for the "bytes were byte-identical" eviction verdict.
-            # Fold a <bytes> culprit in so the verdict names the byte divergence
-            # instead of laundering a real content/serialization change into an
-            # upstream eviction. Only meaningful when canonical found NOTHING
-            # (if canonical already named a culprit, that's the more specific
-            # cause and we don't pile on).
-            if (not _wire_culprits and _cur_wire_bytes is not None
-                    and prev.wire_bytes is not None):
-                from lib.tasks_pkg.wire_fingerprint import diff_byte_prefix
-                _byte_shared = len(prev.wire_bytes)
-                _byte_culprits = diff_byte_prefix(
-                    prev.wire_bytes[:_byte_shared],
-                    (_cur_wire_bytes or [])[:_byte_shared])
-                if _byte_culprits:
-                    _wire_culprits.extend(_byte_culprits)
-                    # FIELD-GRANULAR attribution: name the EXACT top-level
-                    # field that flipped (reasoning_details / tool_calls /
-                    # content / __order__) instead of only the message, so the
-                    # dominant canonical-invisible miss is logged as a PROVEN
-                    # field, not a guessed category. Best-effort: falls back to
-                    # the message-level culprits if the field capture is absent
-                    # (non-Claude / pre-restart state / capture failure).
-                    _field_culprits: list = []
-                    if (_cur_wire_field_bytes is not None
-                            and prev.wire_field_bytes is not None):
-                        try:
-                            from lib.tasks_pkg.wire_fingerprint import (
-                                diff_byte_field_prefix)
-                            _ff_shared = len(prev.wire_field_bytes)
-                            _field_culprits = diff_byte_field_prefix(
-                                prev.wire_field_bytes[:_ff_shared],
-                                (_cur_wire_field_bytes or [])[:_ff_shared])
-                        except Exception as _ffe:
-                            logger.debug('[CacheTrack] field-byte diff failed: '
-                                         '%s', _ffe)
-                    logger.warning(
-                        '[CacheTrack] conv=%s call=%d ⚠ WIRE BYTES DIVERGED '
-                        'while canonical fingerprint matched — a '
-                        'canonical-invisible change (reasoning_details rebuild '
-                        '/ same-role merge / field reorder / protocol switch) '
-                        'altered the real sent bytes. changed=[%s] field=[%s]',
-                        conv_id[:8], prev.call_count + 1,
-                        ', '.join(_byte_culprits[:8]) or '?',
-                        ', '.join(_field_culprits[:8]) or '?')
-            # ── TRUE-byte divergence in the HOISTED system/tools region ──
-            # system_fingerprint (wire_system) is itself LOSSY (_text_of over
-            # system blocks + sort_keys over tool params), so a system BLOCK
-            # REORDER / wrapping flip / per-turn re-serialization / tool-param
-            # KEY REORDER — the highest-probability suspect on the Anthropic
-            # path, where charter/board/peer/relevant_memories are injected
-            # fresh each turn — leaves the <hoisted> diff empty and would be
-            # laundered into "eviction". wire_byte_region hashes the REAL bytes
-            # of that region so the divergence is named and the eviction verdict
-            # is refused. Checked even if messages already flagged, so a system
-            # byte flip is always surfaced.
-            if (_cur_wire_region is not None and prev.wire_region is not None):
-                from lib.tasks_pkg.wire_fingerprint import diff_byte_region
-                _region_culprits = diff_byte_region(
-                    prev.wire_region, _cur_wire_region)
-                if _region_culprits:
-                    _wire_culprits.extend(_region_culprits)
-                    _canonical_region_changed = any(
-                        str(c).startswith('<hoisted>.')
-                        for c in _wire_culprits)
-                    if _canonical_region_changed:
-                        logger.warning(
-                            '[CacheTrack] conv=%s call=%d ⚠ HOISTED REGION '
-                            'CHANGED in both canonical and raw fingerprints — '
-                            'the provider-bound system/tools cache-key bytes '
-                            'changed. changed=[%s]',
-                            conv_id[:8], prev.call_count + 1,
-                            ', '.join(_wire_culprits[:8]) or '?')
-                    else:
-                        logger.warning(
-                            '[CacheTrack] conv=%s call=%d ⚠ HOISTED REGION BYTES '
-                            'DIVERGED while the lossy system fingerprint matched '
-                            '— a canonical-invisible change (system block reorder '
-                            '/ wrapping flip / per-turn re-serialization / '
-                            'tool-param key reorder) altered the real cached-prefix '
-                            'bytes. changed=[%s]',
-                            conv_id[:8], prev.call_count + 1,
-                            ', '.join(_region_culprits) or '?')
-            # ── Mid-anchor slipped past the ~20-block lookback (LAYOUT-ONLY,
-            #    byte-identity-gated) ──
-            # Appended HERE, AFTER every content-culprit detector (canonical
-            # diff + <bytes> + <hoisted> region), and ONLY when NONE of them
-            # fired (``not _wire_culprits``): this is a LAYOUT-ONLY cause that
-            # only explains a miss when the prefix BYTES were identical (the mid
-            # marker moved but no content changed). Otherwise the miss is a
-            # genuine PREFIX MUTATION and the layout token would merely CO-OCCUR
-            # (the read collapse is a shared symptom) while its verdict branch
-            # preempts ``prefix_mutation`` / ``body_change`` — MASKING the real,
-            # actionable culprit. Live evidence: 128/128 real floor-collapses
-            # previously labelled cache_mid_out_of_window had
-            # body_identical=False, i.e. the body DID change and the layout
-            # token was hijacking the verdict. Gated on _read_collapsed so a
-            # within-window round with a benign write is not falsely named.
-            if (not _wire_culprits
-                    and not _was_compaction
-                    and mid_anchor_out_of_window(_cur_wire_markers)
-                    and prev_cache_read > _MIN_CACHE_MISS_TOKENS
-                    and cache_read < prev_cache_read * 0.95
-                    and (prev_cache_read - cache_read) >= _MIN_CACHE_MISS_TOKENS):
-                _wire_culprits.append('<mid-out-of-window>')
-            _wire_prefix_changed = bool(_wire_culprits)
-
-            if _wire_prefix_changed:
-                # ── Position evidence (the "which part & was it already
-                #    cached" ground truth) ──
-                # Report the FIRST changed message index and whether it falls
-                # inside the PRIOR round's cached-prefix boundary
-                # (prev.message_count - EDITABLE_TAIL_COUNT). A changed index
-                # BELOW that boundary means an ALREADY-CACHED message was
-                # rewritten in place this round (the monotonic-growth break);
-                # a changed index only in the editable tail / fresh region is a
-                # different, benign class. This is what distinguishes an
-                # EDITABLE_TAIL leak, a lost-state (thread-key) full-prefix
-                # rewrite, and a cold-compaction-of-cached-message from each
-                # other in the live log, without a rerun.
-                try:
-                    from lib.tasks_pkg.wire_fingerprint import (
-                        first_changed_byte_index, first_changed_index)
-                    _fci = first_changed_index(prev.wire_fp[:_shared],
-                                               (_cur_wire_fp or [])[:_shared])
-                    # The canonical index is BLIND to a <bytes>-only culprit
-                    # (canonical says "identical", raw bytes differ), returning
-                    # -1 → a meaningless inside_prior_cached_prefix=False for
-                    # exactly the class where position matters most. Fall back
-                    # to the true-byte index so a byte-only divergence gets an
-                    # honest position.
-                    if _fci < 0 and prev.wire_bytes is not None \
-                            and _cur_wire_bytes is not None:
-                        _byte_shared = len(prev.wire_bytes)
-                        _fci = first_changed_byte_index(
-                            prev.wire_bytes[:_byte_shared],
-                            (_cur_wire_bytes or [])[:_byte_shared])
-                except Exception as _fe:
-                    logger.debug('[CacheTrack] first_changed_index failed: %s', _fe)
-                    _fci = -2
-                _prior_prefix_boundary = max(0, prev.message_count
-                                             - EDITABLE_TAIL_COUNT)
-                _inside_prior_prefix = (0 <= _fci < _prior_prefix_boundary)
-                # Publish to the break classifier (see prefix_mutation_break).
-                _first_changed_idx = _fci
-                _mutation_inside_prior_prefix = _inside_prior_prefix
-                logger.warning(
-                    '[CacheTrack] conv=%s call=%d ⚠ WIRE PREFIX CHANGED: the '
-                    'ACTUAL sent bytes differ from last round — client-caused '
-                    'miss. changed=[%s] first_changed_idx=%d '
-                    'prior_prefix_boundary=%d prev_msg_count=%d cur_msg_count=%d '
-                    'inside_prior_cached_prefix=%s',
-                    conv_id[:8], prev.call_count + 1,
-                    ', '.join(_wire_culprits[:8]) or '?',
-                    _fci, _prior_prefix_boundary, prev.message_count, msg_count,
-                    _inside_prior_prefix)
+        _cur_wire_region = _wire_evidence.region
+        _wire_comparable = wire_comparison.comparable
+        _wire_bytes_comparable = wire_comparison.bytes_comparable
+        _wire_prefix_changed = wire_comparison.prefix_changed
+        _wire_culprits = wire_comparison.culprits
+        _first_changed_idx = wire_comparison.first_changed_index
+        _mutation_inside_prior_prefix = wire_comparison.mutation_inside_prior_prefix
+        _advertised_rewrite = wire_comparison.advertised_rewrite
 
         # ── Cache-NAMESPACE routing diff (the last body-invisible client var) ──
         # Anthropic prompt caching is namespaced by (upstream key + anthropic-beta
@@ -1321,14 +748,6 @@ def detect_cache_break(
             prev_cache_read=prev_cache_read, cache_read=cache_read,
             prev_cache_write=prev_cache_write, cache_write=cache_write,
             prev_prefix_tokens=_prev_prefix_tokens,
-        )
-        # Api-form index space (prefix-field hashes), NOT wire_fp positions.
-        # Anthropic hoists system, merges same-role turns, and wraps tool
-        # results, so a wire first_changed_index is not comparable to
-        # notify_compaction(intended_rewrite_index=...).
-        _expected_covers = (
-            _expected_rewrite_index >= 0
-            and _api_first_changed >= _expected_rewrite_index
         )
         _remaining_prefix_floor_miss = (
             _expected_covers
@@ -1376,119 +795,14 @@ def detect_cache_break(
             != _validated_wire_region_hash(prev.wire_region, 'system'))
         # ── Update state (AFTER elapsed computation) ──
 
-        if _scope is not None and _observed_read is not None:
-            _scope.rounds_seen += 1
-        prev.system_hash = sys_hash
-        prev.tools_hash = tools_hash
-        prev.per_tool_hashes = per_tool_hashes
-        prev.prefix_field_count = max(0, msg_count - EDITABLE_TAIL_COUNT)
-        prev.prefix_field_hashes = prefix_field_hashes
-        if _wire_available:
-            prev.wire_fp = _cur_wire_fp
-            prev.wire_static = _wire_static
-            prev.wire_system = _cur_wire_system
-            prev.wire_markers = _cur_wire_markers
-            prev.wire_bytes = _cur_wire_bytes
-            prev.wire_field_bytes = _cur_wire_field_bytes
-            prev.wire_region = _cur_wire_region
-        # Routing is captured independently of the body fingerprints — store it
-        # whenever present so a namespace flip is caught even on a round where
-        # the body wire_fp handling differs (non-Claude / partial capture).
-        if _cur_wire_routing is not None:
-            prev.wire_routing = _cur_wire_routing
-        prev.model = model
-        prev.message_count = msg_count
-        if _observed_read is not None:
-            prev.last_cache_read_tokens = _observed_read
-        prev.last_cache_write_tokens = cache_write
-        prev.last_update_time = now
-        prev.call_count += 1
-        # ── Cold-streak bookkeeping (reporting only since 2026-09-15) ──
-        # A round counts as verifiably COLD only when neither direction moved
-        # tokens; any read-back or fresh write means a server-side entry
-        # exists and the just-sent prefix must stay frozen for next round.
-        # Skipped on usage-less rounds (a failed call carries no cache signal
-        # and must not open the guard). get_cache_prefix_count's _boundary
-        # reads this streak — see COLD_STREAK_GUARD_OPEN in _state.py.
-        if usage:
-            if (cache_read > COLD_ROUND_TOKEN_FLOOR
-                    or cache_write > COLD_ROUND_TOKEN_FLOOR):
-                prev.cold_streak = 0
-            elif prev.cold_streak < COLD_STREAK_GUARD_OPEN:
-                prev.cold_streak += 1
-        # ── Advance the DURABLE prefix boundary (survives restart / replica
-        #    switch). When THIS round confirms real cache activity (read or
-        #    write > 1000 — the same floor the cold-streak bookkeeping uses),
-        #    the prefix [0, msg_count - EDITABLE_TAIL_COUNT) is a cached
-        #    conversation fact. Persist it as a monotonic high-water mark so a
-        #    future turn on a fresh thread/process/replica restores the guard
-        #    floor instead of collapsing to 0 and rewriting the still-cached
-        #    prefix. Best-effort, monotonic, DB-write only on genuine growth.
-        if durable and (cache_read > 1000 or cache_write > 1000):
-            _durable_boundary = max(0, msg_count - EDITABLE_TAIL_COUNT)
-            if _durable_boundary > 0:
-                _boundary_staged = False
-                if cache_prefix_hwm_sink is not None:
-                    try:
-                        cache_prefix_hwm_sink(_durable_boundary)
-                        _boundary_staged = True
-                    except Exception as _pe:
-                        logger.debug(
-                            '[CacheTrack] cache-prefix sink failed conv=%s: %s',
-                            conv_id[:8], _pe,
-                        )
-                if not _boundary_staged and _scope is None:
-                    try:
-                        from lib.tasks_pkg.cache_tracking._persist import (
-                            advance_persisted_boundary)
-                        advance_persisted_boundary(
-                            conv_id, _durable_boundary, user_id=user_id)
-                    except Exception as _pe:
-                        logger.debug('[CacheTrack] advance_persisted_boundary '
-                                     'failed conv=%s: %s', conv_id[:8], _pe)
-        # ── Persist the DURABLE round-1 read baseline (survives restart /
-        #    stale-eviction / replica switch). This round's cache_read becomes
-        #    the NEXT turn's cross-turn baseline; when that next turn starts on a
-        #    cold process (no live sibling), get_prev_turn_cache_read falls back
-        #    to this persisted value so a collapsed round-1 buckets honestly as
-        #    turn_boundary_rebill instead of being laundered into no_break.
-        #    Zero/floor reads are observations too; omission is not a zero.
-        #    Scoped tasks only stage into the guarded task-result checkpoint.
-        if durable and _observed_read is not None:
-            _last_read_staged = False
-            if last_turn_cache_read_sink is not None:
-                try:
-                    last_turn_cache_read_sink(_observed_read)
-                    _last_read_staged = True
-                except Exception as _pe:
-                    logger.debug(
-                        '[CacheTrack] last-read sink failed conv=%s: %s',
-                        conv_id[:8], _pe,
-                    )
-            if not _last_read_staged and _scope is None:
-                try:
-                    from lib.tasks_pkg.cache_tracking._persist import (
-                        write_last_turn_cache_read)
-                    write_last_turn_cache_read(
-                        conv_id, _observed_read, user_id=user_id)
-                except Exception as _pe:
-                    logger.debug('[CacheTrack] write_last_turn_cache_read '
-                                 'failed conv=%s: %s', conv_id[:8], _pe)
-        if not prev.first_call_time:
-            prev.first_call_time = now
-        # Accumulate session-level stats
-        prev.total_cache_read += cache_read
-        prev.total_cache_write += cache_write
-        # total_input_tokens is the denominator of [CacheSession]'s
-        #   overall_hit%. It must be the TOTAL prompt the provider processed,
-        #   which is convention-dependent: on the OpenAI-compat wire
-        #   prompt_tokens ALREADY INCLUDES the cached tokens, so the previous
-        #   `prompt_tokens + cache_write + cache_read` counted them twice and
-        #   halved the session hit rate. split_input_tokens is the same helper
-        #   the cost engine uses (lib/cost.py), so session telemetry, per-round
-        #   telemetry and billing all read the prompt size identically.
-        from lib.cost import split_input_tokens as _split_input_tokens
-        prev.total_input_tokens += _split_input_tokens(usage)[1]
+        advance_cache_observation(
+            prev, client_evidence, _wire_evidence, scope=_scope,
+            observed_read=_observed_read, conv_id=conv_id, user_id=user_id,
+            model=model, usage=usage, now=now, cache_read=cache_read,
+            cache_write=cache_write, durable=durable,
+            cache_prefix_hwm_sink=cache_prefix_hwm_sink,
+            last_turn_cache_read_sink=last_turn_cache_read_sink,
+        )
 
         # When the authoritative wire fingerprint is available it REPLACES
         #   the client-side reconstruction as the prefix-mutation signal — it
@@ -1554,6 +868,7 @@ def detect_cache_break(
         # below can call it too.
         _ttl_flip = '<ttl-flip>' in (_wire_culprits or [])
         _breakpoint_lost = '<breakpoint-lost>' in (_wire_culprits or [])
+        _groups = _round_groups(_scope, tools, model, prev.call_count, _wire_evidence)
 
         _finish = _cache_verdict_finisher(
             conv_id, prev, _ns_switch, _ttl_flip,
@@ -1562,6 +877,7 @@ def detect_cache_break(
             _wire_available, _wire_prefix_changed, _read_collapsed, client_changes,
             prefix_mutation_break, _prefix_culprits, _wire_tools_verified, _wire_system_verified,
             turn_boundary_break, _cross_turn_prev_read, prev_cache_read,
+            **_groups,
         )
 
         # ── Report ──
@@ -1572,242 +888,32 @@ def detect_cache_break(
         # we paid to rebuild (part of) the cache instead of reading it back.
         if (api_break or no_reuse or partial_no_reuse or prefix_mutation_break
                 or turn_boundary_break):
-            # ── Round-1 boundary re-bill (round-1 only; no other break can
-            #    co-fire since they all require call_count > 0). Named as its
-            #    OWN bucket — NOT laundered into server_side — so the previous
-            #    turn's warm prefix that fell out across the boundary is an
-            #    honest, counted client-visible miss, not "first-cache warm-up".
-            if turn_boundary_break:
-                _boundary_cause = (
-                    'new-turn round-1 boundary re-bill: the previous turn left '
-                    f'a warm ~{_cross_turn_prev_read}-token cached prefix, but '
-                    f'this turn read back only {cache_read} (collapsed toward '
-                    'the static floor) — the cached prefix was not reused '
-                    'across the turn boundary and was re-billed uncached. '
-                    'Provider usage establishes the read drop, not its cause.')
-                logger.warning(
-                    '[CacheTrack] conv=%s call=%d ⚠ TURN-BOUNDARY RE-BILL: '
-                    'cache_write=%d cache_read=%d (prev-turn read=%d, gap=%.1fs) '
-                    '— new-turn round-1 read collapsed; prefix not reused across '
-                    'the turn boundary.',
-                    conv_id[:8], prev.call_count, cache_write, cache_read,
-                    _cross_turn_prev_read, elapsed)
-                # Attach STRUCTURED fields alongside the free-form cause so the
-                # frontend can render a localized, parameterized sentence
-                # (t('finishInfo.cb.turnBoundaryRebill', {prev, read, gap}))
-                # instead of substring-translating English prose with dynamic
-                # numbers (which can never match a static phrase table). The
-                # string cause is RETAINED for back-compat with any persisted
-                # row / consumer that renders the value verbatim; no backend
-                # consumer reads the string value (replay/aggregate key off the
-                # dict KEY via classify_verdict), so the extra keys are inert
-                # there.
-                return _finish({
-                    'turn_boundary_rebill': _boundary_cause,
-                    'prev_read': int(_cross_turn_prev_read),
-                    'read': int(cache_read),
-                    'gap_s': round(float(elapsed or 0), 1),
-                })
-
-            # Build the most specific cause we can (pure; see _resolve_break_cause).
-            #
-            # NOTE: "cache contention" between different conversations is NOT a
-            # real phenomenon. A/B tested 2026-04-10: per-round cache_read is
-            # identical between solo and interleaved modes (±0.0%). Anthropic
-            # cache is keyed on exact prefix bytes — different conversations
-            # have different keys and CANNOT evict each other.
-            cause_str = _resolve_break_cause(
+            report = BreakReport(
+                call_count=prev.call_count,
+                conv_id=conv_id,
+                cache_read=cache_read,
+                cache_write=cache_write,
+                previous_read=prev_cache_read,
+                previous_write=prev_cache_write,
+                elapsed=elapsed, ttl_window_s=wire_comparison.ttl_window_s,
+                usage=usage,
                 client_changes=client_changes,
                 prefix_mutation_break=prefix_mutation_break,
-                elapsed=elapsed, cache_read=cache_read,
+                turn_boundary_break=turn_boundary_break,
+                previous_turn_read=_cross_turn_prev_read,
                 prefix_mutated=_prefix_mutated,
                 prefix_culprits=_prefix_culprits,
                 wire_proven_identical=_wire_proven_identical,
                 namespace_switch=_ns_switch,
                 namespace_verified_same=_ns_verified_same,
+                wire_culprits=_wire_culprits,
+                no_reuse=no_reuse,
+                api_break=api_break,
+                partial_no_reuse=partial_no_reuse,
+                previous_prefix_tokens=_prev_prefix_tokens,
+                cold_group=_groups['cold_group'],
             )
-
-            # CACHE WRITE-VISIBILITY RACE (Anthropic SDK #1451) — a
-            #   byte-identical, same-routing round whose read collapsed AND
-            #   which arrived within the cold-write settle window since THIS
-            #   conv's prior COLD write. A freshly-written cache entry is not
-            #   readable for ~15–20s (reproduced live: a cold prefix re-sent
-            #   every 4s missed at t=3s/t=10s, HIT at t≈16s), so a fast tool
-            #   loop that fires the next round ~8s later misses and re-writes
-            #   the whole prefix — NOT a server/gateway fault and NOT a client
-            #   byte change. Named FIRST (it is the most specific timing cause)
-            #   when the prior-round cold-write gap marker is present and inside
-            #   the window; the cache_settle gate is the fix that prevents it.
-            # The cold-write gap: prefer an explicit usage marker (test / future
-            # plumbing), else DERIVE it from internal state — the prior round
-            # was a COLD WRITE when its write dominated its read, and ``elapsed``
-            # is precisely the gap since that round ended. This keeps the
-            # detector self-contained (no dispatch plumbing) while staying
-            # overridable.
-            _cold_gap = None
-            if usage is not None:
-                _cold_gap = usage.get('_prev_cold_write_gap_s')
-            if _cold_gap is None:
-                _prev_was_cold = (prev_cache_write >= _MIN_CACHE_MISS_TOKENS
-                                  and prev_cache_read < prev_cache_write)
-                if _prev_was_cold and elapsed > 0:
-                    _cold_gap = elapsed
-            _within_settle_window = False
-            if _cold_gap is not None:
-                try:
-                    from lib.llm_dispatch.cache_settle import settle_cold_window_ms
-                    _within_settle_window = (
-                        float(_cold_gap) < (settle_cold_window_ms() / 1000.0))
-                except Exception as _cse:
-                    logger.debug('[CacheTrack] cold-window lookup failed: %s', _cse)
-            if (_within_settle_window and _wire_proven_identical
-                    and not _ns_switch and not client_changes
-                    and not prefix_mutation_break):
-                _unsettled_cause = (
-                    'prefix not read back though the wire bytes were '
-                    'byte-identical and the routing was identical — but this '
-                    f'round arrived only {float(_cold_gap):.1f}s after the '
-                    'previous round COLD-WROTE this prefix, inside the '
-                    '~15–20s Anthropic cache write-visibility window (SDK '
-                    '#1451): the just-written entry was not yet visible '
-                    'upstream, so the prefix was re-billed uncached. A '
-                    'CLIENT-side timing race (fast tool loop firing before the '
-                    'write settled), NOT a server/gateway miss — the '
-                    'cache-settle gate is meant to hold the next send until '
-                    'the write is visible.')
-                logger.warning(
-                    '[CacheTrack] conv=%s call=%d ⚠ CACHE WRITE UNSETTLED: '
-                    'cache_write=%d cache_read=%d (prev read=%d, cold-write gap='
-                    '%.1fs, gap=%.1fs) — prior cold write not yet visible.',
-                    conv_id[:8], prev.call_count, cache_write, cache_read,
-                    prev_cache_read, float(_cold_gap), elapsed)
-                # Structured sibling fields for the parameterized frontend
-                # rendering (see the turn_boundary_rebill note above): the
-                # string cause stays for back-compat, the numbers let the zh/en
-                # UI interpolate instead of substring-matching dynamic digits.
-                return _finish({
-                    'cache_write_unsettled': _unsettled_cause,
-                    'prev_read': int(prev_cache_read),
-                    'read': int(cache_read),
-                    'gap_s': round(float(elapsed or 0), 1),
-                    'cold_gap_s': round(float(_cold_gap), 1),
-                })
-
-            # CACHE-NAMESPACE SWITCH — a body-identical round whose ROUTING
-            #   flipped (upstream key / anthropic-beta / endpoint) is a
-            #   CLIENT-caused cold miss: the same prefix bytes were routed to a
-            #   different gateway cache namespace. It MUST NOT fall through to
-            #   the server_side branch (the exact mislabel the owner flagged —
-            #   "byte-identical → blame the gateway"). It wins over the generic
-            #   byte-identical verdict but still defers to a named body change
-            #   (client_changes / prefix_mutation_break), which is a distinct,
-            #   more-specific client culprit. Surfaced under its own key so the
-            #   cost popover names the actionable routing switch.
-            if (_ns_switch and _wire_proven_identical
-                    and not client_changes and not prefix_mutation_break):
-                logger.warning(
-                    '[CacheTrack] conv=%s call=%d ⚠ CACHE NAMESPACE SWITCH BREAK: '
-                    'cache_write=%d cache_read=%d (prev read=%d, gap=%.1fs) — '
-                    'byte-identical prefix routed to a different cache namespace. '
-                    'Cause: %s',
-                    conv_id[:8], prev.call_count, cache_write, cache_read,
-                    prev_cache_read, elapsed, cause_str)
-                return _finish({'cache_namespace_switch': cause_str})
-
-            # MID-ANCHOR OUT-OF-WINDOW — a byte-identical round whose mid
-            #   stepping-stone drifted past the ~20-block lookback so the tail
-            #   could not extend it → the whole prefix past the mid was
-            #   re-written. It is a CLIENT-side breakpoint-LAYOUT miss and MUST
-            #   NOT fall through to server_side/upstream (the "blame the
-            #   gateway" mislabel this fix targets). It wins over the generic
-            #   byte-identical / prefix_mutation verdicts (it is the SPECIFIC
-            #   named layout cause) but still defers to a concrete body change
-            #   (client_changes) which is a distinct, differently-named client
-            #   culprit. Surfaced under its own key so the record buckets it as
-            #   cache_mid_out_of_window, never upstream_identical.
-            if ('<mid-out-of-window>' in (_wire_culprits or [])
-                    and not client_changes):
-                logger.warning(
-                    '[CacheTrack] conv=%s call=%d ⚠ MID-ANCHOR OUT OF WINDOW: '
-                    'cache_write=%d cache_read=%d (prev read=%d, gap=%.1fs) — '
-                    'mid stepping-stone drifted past the ~20-block lookback; '
-                    'tail could not extend the prior entry → whole prefix past '
-                    'the mid re-billed on a byte-identical body. Cause: %s',
-                    conv_id[:8], prev.call_count, cache_write, cache_read,
-                    prev_cache_read, elapsed, cause_str)
-                return _finish({'cache_mid_out_of_window': cause_str})
-
-            # Prefix mutation is the most ACTIONABLE and most CERTAIN cause —
-            #   it means our own code rewrote bytes inside the cached prefix,
-            #   which GUARANTEES a miss regardless of any concurrent read drop.
-            #   So it must win over `api_break` too: a round that both mutated
-            #   the prefix AND shows a cache_read drop was previously falling
-            #   through to the generic `server_side` "breakpoint advancement"
-            #   label, hiding the real, fixable culprit (that exact mislabel is
-            #   what the cost popover showed on memory-CRUD turns — the system
-            #   prefix changed yet it read "服务端缓存失效（缓存断点前移…）").
-            #   We still defer ONLY to `client_changes` (system/tools/model),
-            #   which is a concrete, differently-named cause the popover labels
-            #   on its own. Surfaced under the existing `prefix_mutation` key.
-            if prefix_mutation_break and not client_changes:
-                logger.warning(
-                    '[CacheTrack] conv=%s call=%d ⚠ PREFIX MUTATION BREAK: '
-                    'cache_write=%d cache_read=%d (prev read=%d, gap=%.1fs) — '
-                    'cached prefix bytes changed between turns. Cause: %s',
-                    conv_id[:8], prev.call_count, cache_write, cache_read,
-                    prev_cache_read, elapsed, cause_str,
-                )
-                return _finish({'prefix_mutation': cause_str})
-
-            if no_reuse and not api_break:
-                # The expensive, previously-undetected pattern: wrote a fresh
-                # large prefix and read nothing back. WARN so each occurrence
-                # is greppable in error.log for debugging.
-                logger.warning(
-                    '[CacheTrack] conv=%s call=%d ⚠ NO CACHE REUSE: '
-                    'cache_write=%d cache_read=0 (prev prefix=%d tokens, '
-                    'gap=%.1fs). Cause: %s',
-                    conv_id[:8], prev.call_count, cache_write,
-                    _prev_prefix_tokens, elapsed, cause_str,
-                )
-                if client_changes:
-                    return _finish(client_changes)
-                return _finish({'no_cache_reuse': cause_str})
-
-            if partial_no_reuse and not api_break and not no_reuse:
-                # Big write repeated while cache_read stayed pinned at the
-                # static prefix — the conversation body is being re-billed
-                # uncached every round. WARN so each occurrence is greppable.
-                logger.warning(
-                    '[CacheTrack] conv=%s call=%d ⚠ PREFIX RE-WRITTEN: '
-                    'cache_write=%d cache_read=%d (prev write=%d read=%d, '
-                    'gap=%.1fs) — read pinned, body re-billed uncached. '
-                    'Cause: %s',
-                    conv_id[:8], prev.call_count, cache_write, cache_read,
-                    prev_cache_write, prev_cache_read, elapsed, cause_str,
-                )
-                if client_changes:
-                    return _finish(client_changes)
-                return _finish({'no_cache_reuse': cause_str})
-
-            # api_break path: cache_read dropped from a prior high value.
-            if client_changes:
-                logger.info(
-                    '[CacheBreak] conv=%s call=%d CONFIRMED cache break: %s. '
-                    'cache_read: %d → %d tokens (gap=%.1fs)',
-                    conv_id[:8], prev.call_count, cause_str,
-                    prev_cache_read, cache_read, elapsed,
-                )
-                return _finish(client_changes)
-            logger.info(
-                '[CacheTrack] conv=%s call=%d cache_read dropped: %d → %d '
-                '(gap=%.1fs, %s)',
-                conv_id[:8], prev.call_count,
-                prev_cache_read, cache_read, elapsed, cause_str,
-            )
-            return _finish({'server_side': (
-                'Provider-reported cache read decreased; server causality is '
-                'not established. ' + cause_str)})
+            return _finish(report_confirmed_break(report))
         # ── No confirmed break: still emit the per-round record so the ledger
         #    has EVERY round, not only misses. ──
         if client_changes:
@@ -1853,24 +959,11 @@ def detect_cache_break(
             and cache_write >= _MIN_NO_REUSE_TOKENS
         )
         if _gates_starved:
-            logger.warning(
-                '[CacheTrack] conv=%s call=%d INDETERMINATE: cache_write=%d '
-                'read=0 (gap=%.1fs, compaction=%s) but no break gate fired — '
-                'the spend is real but the cause is unresolved. Counted as '
-                'indeterminate, NOT as no_break: a zero-read rebuild must not '
-                'be filed alongside genuine cache hits.',
-                conv_id[:8], prev.call_count, cache_write, elapsed,
-                _was_compaction)
-            return _finish(None, record_as={
-                'indeterminate': (
-                    'zero read-back on a substantial write, but no break gate '
-                    'could fire'
-                    + (' because this round followed a compaction, which is '
-                       'structurally exempt from every break predicate'
-                       if _was_compaction else '')
-                    + '. The spend is real and counted here; the CAUSE is '
-                    'unresolved — this round is NOT evidence of a healthy '
-                    'cache.')})
+            return _finish(None, record_as=_report_indeterminate_round(
+                conv_id, prev, cache_write=cache_write, elapsed=elapsed,
+                was_compaction=_was_compaction,
+                advertised_rewrite=_advertised_rewrite,
+                expected_rewrite_index=_expected_rewrite_index))
         _finish(None)
 
     return None

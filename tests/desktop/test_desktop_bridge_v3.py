@@ -17,7 +17,7 @@ pytestmark = pytest.mark.unit
 @pytest.fixture
 def state():
     clock = [0.0]
-    runtime = RuntimeState(threading.Event(), budget=ExecutionBudget(2, 4, 8, 4096, 8, 4096),
+    runtime = RuntimeState(threading.Event(), budget=ExecutionBudget(8, 4096, 8, 4096),
                            clock=lambda: clock[0])
     runtime.observe_server_time(1000)
     return runtime, clock
@@ -130,22 +130,26 @@ def test_legacy_ids_remain_pinned(state):
     assert 'legacy' in runtime.seen
 
 
-def test_capacity_scales_up_down_and_override_errors(monkeypatch):
+def test_cpu_never_sizes_the_budget_and_memory_only_sizes_output_spill(monkeypatch):
     import runtime_guards
-    monkeypatch.delenv('TOFU_DESKTOP_EXECUTION_WORKERS', raising=False)
-    monkeypatch.setattr(runtime_guards, 'probe_system_resources', lambda: SimpleNamespace(
-        effective_cpu_count=64, effective_memory_capacity_mb=65536,
-        effective_memory_available_mb=32768))
+    monkeypatch.setenv('TOFU_DESKTOP_EXECUTION_WORKERS', '0')
+
+    def host(cpus, available_mb):
+        return lambda: SimpleNamespace(
+            effective_cpu_count=cpus, effective_memory_capacity_mb=65536,
+            effective_memory_available_mb=available_mb)
+
+    monkeypatch.setattr(runtime_guards, 'probe_system_resources', host(64, 32768))
     large = execution_budget()
-    assert large.workers == 32
+    assert not hasattr(large, 'workers') and not hasattr(large, 'replay_ids')
     assert large.result_items == 512 and large.stream_items == 256
     assert large.result_bytes > 16 * 1024 * 1024
-    monkeypatch.setattr(runtime_guards, 'probe_system_resources', lambda: SimpleNamespace(
-        effective_cpu_count=64, effective_memory_capacity_mb=65536,
-        effective_memory_available_mb=512))
-    assert execution_budget().workers == 1
-    monkeypatch.setenv('TOFU_DESKTOP_EXECUTION_WORKERS', '0')
-    assert execution_budget().workers == 1  # Retired worker overrides cannot reject work.
+    monkeypatch.setattr(runtime_guards, 'probe_system_resources', host(1, 32768))
+    assert execution_budget() == large
+    monkeypatch.setattr(runtime_guards, 'probe_system_resources', host(64, 512))
+    small = execution_budget()
+    assert small.result_bytes < large.result_bytes
+    assert small.result_items == large.result_items
 
 
 def enqueue(queue, cid, kind='desktop_system_info', target='device-a'):

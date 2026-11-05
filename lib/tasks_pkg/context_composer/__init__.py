@@ -16,7 +16,9 @@ from lib.tasks_pkg.context_composer._models import (
     ContextPlanV2,
 )
 from lib.tasks_pkg.context_composer._providers import collect_context_blocks
-from lib.tasks_pkg.context_composer._render import render_context, verified_block_hash
+from lib.tasks_pkg.context_composer._render import (
+    block_content_hash, render_context, verified_block_hash, verified_block_hashes,
+)
 from lib.tasks_pkg.context_composer._snapshot_compaction import compact_context_snapshots
 from lib.tasks_pkg.context_composer.injections import (
     append_injection, can_append_injection, record_injection_diagnostic,
@@ -130,14 +132,25 @@ def _child_disabled_blocks(request: ComposeRequest) -> frozenset[str]:
         from lib.tasks_pkg.invocation import is_child_invocation
         if not is_child_invocation(task):
             return frozenset()
-    except Exception:
+    except Exception as error:
+        logger.debug('child invocation probe failed: %s', error)
         return frozenset()
     return _CHILD_DISABLED_PROVIDERS
 
 
 def _with_context_policy(request: ComposeRequest) -> ComposeRequest:
-    """All entrypoints inherit task-owned ablations without changing the input."""
+    """All entrypoints inherit task-owned ablations without changing the input.
+
+    A third-party task (``lib.tasks_pkg.execution_profile``) acquires as a
+    request with no project, tools or memory, whatever its config says; the
+    renderer then keeps only the profile's blocks.
+    """
     from dataclasses import replace
+    from lib.tasks_pkg.execution_profile import THIRD_PARTY_CONTEXT_BLOCKS, is_third_party_text
+    if is_third_party_text(request.task):
+        return replace(request, project_path='', project_enabled=False, memory_enabled=False,
+                       has_real_tools=False, tool_names=frozenset(), granted_permissions=frozenset(),
+                       disabled_blocks=frozenset(INJECTION_REGISTRY) - THIRD_PARTY_CONTEXT_BLOCKS)
     disabled = (request.disabled_blocks
                 | disabled_context_blocks((request.task or {}).get('config'))
                 | _child_disabled_blocks(request))
@@ -306,4 +319,5 @@ __all__ = [
     'append_injection', 'can_append_injection', 'record_injection_diagnostic',
     'record_manifest_rows',
     'collect_context_blocks', 'derive_task_state_snapshot', 'render_context',
+    'block_content_hash', 'verified_block_hash', 'verified_block_hashes',
 ]

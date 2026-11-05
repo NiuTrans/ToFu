@@ -50,12 +50,13 @@ def test_wire_projection_reads_injected_admitted_history_on_fresh_or_restored_ro
         def inject(task,messages,**kwargs):
             events.append('inject');messages.append({'role':'user','content':'injected context'})
             assert kwargs['round_tools']==raw_tools
+        projected_tools=[{'type':'function','function':{'name':'search_tools'}}]
         def admit(task,messages,tools,**kwargs):
-            events.append('admit');assert messages[-1]['content']=='injected context';assert tools==raw_tools
+            events.append('admit');assert messages[-1]['content']=='injected context';assert tools==projected_tools
         def project(route,template,catalog,messages,number):
             events.append('wire');assert number==round_number;assert messages[-1]['content']=='injected context'
             assert template['max_tokens']==64 and route['owner_user_id']==7
-            return []
+            return projected_tools
         with ThreadPoolExecutor(max_workers=1) as executor:
             policy=NativeContextPolicy(principal=principal(),task=owner,executor=executor)
             policy.bind_wire_projection(project,raw_tools)
@@ -63,9 +64,9 @@ def test_wire_projection_reads_injected_admitted_history_on_fresh_or_restored_ro
             request=RoundRequest(principal(),owner['id'],'request',round_number,1,[{'role':'user','content':'before'}])
             with patch('lib.tasks_pkg.orchestrator._root_agent_loop.prepare_round_context',side_effect=inject),patch('lib.tasks_pkg.orchestrator._root_agent_loop.admit_round_context',side_effect=admit):
                 result=await policy.prepare(request)
-            assert isinstance(result,RoundPreparation) and result.wire_tools==[]
-            assert result.messages[-1]['content']=='injected context' and events==['inject','admit','wire']
-            assert policy.completion_binding()==('fixture',[])
+            assert isinstance(result,RoundPreparation) and result.wire_tools==projected_tools
+            assert result.messages[-1]['content']=='injected context' and events==['inject','wire','admit']
+            assert policy.completion_binding()==('fixture',projected_tools)
             policy.close()
     asyncio.run(run())
 
@@ -185,22 +186,41 @@ def test_cancellation_signals_and_joins_worker_before_return():
         asyncio.run(run(executor))
 
 
+class _SteppedClockLoop(asyncio.SelectorEventLoop):
+    """An event loop whose clock passes a deadline only when the test steps it."""
+
+    def __init__(self):
+        super().__init__()
+        self.stepped = 0.0
+
+    def time(self):
+        return super().time() + self.stepped
+
+
 def test_running_preparation_timeout_signals_and_joins_before_return():
+    # The deadline expires on the loop clock, never against wall time: a cold
+    # first preparation spends far longer than any short real deadline before
+    # it reaches admission.
     async def run(executor):
         owner_task=task(); account=Accounting(); entered=threading.Event(); release=threading.Event()
         policy=NativeContextPolicy(principal=principal(),task=owner_task,executor=executor,round_policy=account)
         policy.bind_route(metadata(),{'max_tokens':1024},{})
         def slow(*args,**kwargs):
             entered.set();assert owner_task['abort_event'].wait(5);assert release.wait(5)
-        request=RoundRequest(principal(),owner_task['id'],'request',0,1,[{'role':'user','content':'question'}],time.monotonic_ns()+50_000_000)
+        request=RoundRequest(principal(),owner_task['id'],'request',0,1,[{'role':'user','content':'question'}],time.monotonic_ns()+3_600_000_000_000)
         with patch('lib.tasks_pkg.compaction._prompt_admission.enforce_dispatch_prompt_limit',slow):
             pending=asyncio.create_task(policy.prepare(request))
+            while not entered.is_set():await asyncio.sleep(0.001)
+            assert not owner_task['abort_event'].is_set()
+            asyncio.get_running_loop().stepped += 7200
             while not owner_task['abort_event'].is_set():await asyncio.sleep(0.001)
-            assert entered.is_set() and not pending.done()
+            assert not pending.done()
             release.set()
             with pytest.raises(TimeoutError):await pending
         assert not account.events
-    with ThreadPoolExecutor(max_workers=1) as executor:asyncio.run(run(executor))
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with asyncio.Runner(loop_factory=_SteppedClockLoop) as runner:
+            runner.run(run(executor))
 
 
 def test_queued_preparation_timeout_does_not_wait_for_unrelated_worker():

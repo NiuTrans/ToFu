@@ -122,11 +122,13 @@ def test_scope_preserves_primary_failure_and_releases_host_reference():
 def test_reuse_configuration_is_lazy_thread_safe_and_closed_owner_refuses():
     import concurrent.futures
     release=image();host=NativeHost(release)
+    for invalid in (0,-1,True,3.0,{'root_maximum':3}):
+        with pytest.raises(NativeConfigurationError):host.enable_worker_reuse(invalid)
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        list(executor.map(lambda _:host.enable_worker_reuse({'root_maximum':3}),range(20)))
+        list(executor.map(lambda _:host.enable_worker_reuse(3),range(20)))
     assert host._worker_pool.idle_workers==3 and not host._worker_pool.workers
     asyncio.run(host.close())
-    with pytest.raises(NativeConfigurationError):host.enable_worker_reuse({'root_maximum':3})
+    with pytest.raises(NativeConfigurationError):host.enable_worker_reuse(3)
 
 
 def test_queued_preparation_is_withdrawn_on_shutdown_before_archive_io():

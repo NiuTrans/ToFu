@@ -7,6 +7,7 @@ import logging
 from quart import has_request_context, request
 
 from lib.api_response import (
+    api_bad_request,
     api_conflict,
     api_error,
     api_service_unavailable,
@@ -47,7 +48,7 @@ def storage_failure_response(exc: StorageError, *, operation: str):
     if status == 503:
         retry_after_s = max(1, (retry_after_ms + 999) // 1000)
         envelope = make_envelope(
-            "server_busy",
+            "storage_unavailable",
             detail=(
                 "数据库暂时无法完成请求，请稍后重试。 / "
                 "Storage temporarily unavailable; retry shortly.\n"
@@ -77,6 +78,19 @@ def storage_failure_response(exc: StorageError, *, operation: str):
             retryAfter=retry_after_s,
             **extras,
         )
+    if status == 400:
+        # The storage taxonomy's typed rejection of the request: answer it like
+        # every other client fault, without an internal envelope or traceback.
+        log_event(
+            logger, logging.WARNING, 'conversation.storage_rejected',
+            "Conversation storage rejected the request op=%s code=%s operation_id=%s",
+            operation, exc.code, exc.operation_id,
+            storage_operation=operation, storage_code=exc.code,
+            storage_operation_id=exc.operation_id, retryable=bool(exc.retryable),
+            diagnostic=exc.message,
+            **_conversation_log_fields(),
+        )
+        return api_bad_request(exc.message, **extras)
     if status in {404, 409}:
         return api_error(exc.message, status=status, **extras)
     if status == 413:

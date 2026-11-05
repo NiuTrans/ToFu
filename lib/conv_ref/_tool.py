@@ -80,7 +80,8 @@ def execute_conv_ref_tool(fn_name, fn_args, current_conv_id=None,
     Args:
         fn_name: 'list_conversations' or 'get_conversation'
         fn_args: dict of arguments
-        current_conv_id: the ID of the current conversation (to prevent self-reference)
+        current_conv_id: the ID of the current conversation. Listings exclude
+            it (and say so); ``get_conversation`` reads its durable transcript.
         project_path: the current task's project path, used to scope
             ``list_conversations`` to sibling conversations of the same project.
         user_id: the owning principal whose conversations are readable. The
@@ -118,6 +119,15 @@ def execute_conv_ref_tool(fn_name, fn_args, current_conv_id=None,
             )
             if err:
                 return err
+            turn_id = fn_args.get('turn_id')
+            if turn_id is not None:
+                if not isinstance(turn_id, str) or not 1 <= len(turn_id.strip()) <= 128:
+                    return ('Error: turn_id must be a Turn ID string (1-128 characters), '
+                            'as named by list_conversations matches.')
+                if before is not None:
+                    return ('Error: pass either turn_id (the page around that Turn) '
+                            'or before (an older page), not both.')
+                turn_id = turn_id.strip()
             return get_conversation(
                 conversation_id=conv_id,
                 include_tool_details=include_details,
@@ -126,6 +136,7 @@ def execute_conv_ref_tool(fn_name, fn_args, current_conv_id=None,
                 user_id=user_id,
                 limit=limit,
                 before=before,
+                turn_id=turn_id,
             )
 
         else:

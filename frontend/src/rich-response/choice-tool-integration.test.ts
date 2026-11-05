@@ -19,9 +19,13 @@ describe('native ask_human tool boundary', () => {
     renderToolBlock(host, block, turn, ports); await flush();
     expect(bind).toHaveBeenCalledWith('owned', 'turn');
     expect(host.dataset.rendererMode).toBe('native-choice');
+    const summary = host.querySelector('.conversation-tool-summary');
+    expect(summary).not.toBeNull();
     const input = host.querySelector<HTMLInputElement>('input')!; input.focus();
+    expect(document.activeElement).toBe(input);
     renderToolBlock(host, block, turn, ports); await flush();
     expect(host.querySelector('input')).toBe(input); expect(document.activeElement).toBe(input);
+    expect(host.querySelector('.conversation-tool-summary')).toBe(summary);
     expect(choices.load).toHaveBeenCalledTimes(1);
     state = 'answered'; block.round.guidanceResponse = 'Server'; block.round.status = 'completed';
     renderToolBlock(host, block, turn, ports); await flush();

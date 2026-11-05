@@ -16,9 +16,6 @@ __all__ = [
     'OPTIMIZER_ENABLED',
     'SCHEDULER_ALLOW_CODE_EXEC',
     'ARTIFACTS_ENABLED',
-    'FETCH_TOP_N', 'FETCH_TIMEOUT',
-    'FETCH_MAX_CHARS_SEARCH', 'FETCH_MAX_CHARS_DIRECT',
-    'FETCH_MAX_CHARS_PDF', 'FETCH_MAX_BYTES',
     'SKIP_DOMAINS', 'MODEL_PRICING',
     'QWEN_PRICING_CNY', 'DEFAULT_USD_CNY_RATE',
     'PROVIDER_PRICING', 'lookup_pricing',
@@ -84,7 +81,9 @@ def _cfg(env_key, saved_key, default, *, empty_env_is_unset=False):
 # requests and Settings-managed providers route through owner-scoped v2.
 # Preferred: LLM_API_KEYS=key1,key2,key3  (comma-separated, any number)
 # Legacy single-var: LLM_API_KEY still works (for 1 key only)
-_DEFAULT_KEYS = []  # No hardcoded or persisted-provider fallback.
+_DEFAULT_KEYS = [
+    # Add your API keys here, or set LLM_API_KEYS env var
+]  # No hardcoded or persisted-provider fallback.
 
 def _parse_api_keys():
     """Build legacy direct-call keys strictly from explicit environment."""
@@ -191,8 +190,8 @@ def _resolve_feature_flag(env_key, json_key, default):
 
 PPTX_TRANSLATE_ENABLED = _resolve_feature_flag('PPTX_TRANSLATE_ENABLED', 'pptx_translate_enabled', False)
 DEBUG_MODE = _resolve_feature_flag('DEBUG_MODE', 'debug_mode', False)
-# Cache Extended TTL: 1h TTL for stable prefix (system+tools), 5m for tail
-CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', True)
+# Opt-in 1h TTL for system+tools (tail stays 5m); default off: docs/LLM_COST_OPTIMIZATION.md
+CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', False)
 # Daily Optimizer: nightly LLM-driven improvement loop. ON by default —
 # users can disable it in Settings if they don't want autonomous changes
 # (e.g. auto-applied block_search_domain).
@@ -233,51 +232,23 @@ def _load_plugin_flags():
 
 _load_plugin_flags()
 
-# ── Fetch / search settings ──
-# Priority: ENV VAR > server_config.json search section > hardcoded default
-from lib.search.search_profiles import resolve_search_profile as _resolve_search_profile
-
-_search_cfg_raw = _SAVED_CONFIG.get('search', {})
-_search_cfg = _resolve_search_profile(
-    _search_cfg_raw if isinstance(_search_cfg_raw, dict) else {})
-SEARCH_PROFILE = _search_cfg['profile']
-SEARCH_OVERRIDES = dict(_search_cfg.get('overrides') or {})
-SEARCH_DEEPEN_ENABLED = bool(_search_cfg.get('deepen_enabled', False))
-
-def _fetch_cfg(env_key, saved_key, default):
-    """Resolve a fetch/search integer setting.  0 is a valid value (e.g. PDF no-limit)."""
-    env = os.environ.get(env_key)
-    if env is not None and env != '':
-        return int(env)
-    saved = _search_cfg.get(saved_key)
-    if saved is not None:
-        return int(saved)
-    return default
-
-FETCH_TOP_N            = _fetch_cfg('FETCH_TOP_N', 'fetch_top_n', 6)
-FETCH_TIMEOUT          = _fetch_cfg('FETCH_TIMEOUT', 'fetch_timeout', 15)
-FETCH_MAX_CHARS_SEARCH = _fetch_cfg('FETCH_MAX_CHARS_SEARCH', 'max_chars_search', 60000)
-FETCH_MAX_CHARS_DIRECT = _fetch_cfg('FETCH_MAX_CHARS_DIRECT', 'max_chars_direct', 200000)
-FETCH_MAX_CHARS_PDF    = _fetch_cfg('FETCH_MAX_CHARS_PDF', 'max_chars_pdf', 0)
-FETCH_MAX_BYTES        = _fetch_cfg('FETCH_MAX_BYTES', 'max_bytes', 20*1024*1024)
-
-SKIP_DOMAINS = {
+# ── Search fetch blocklist ──
+# Search and fetch limits are tofu-search's own defaults (SearchConfig); the
+# only saved search behaviour is the set of hosts the fetcher never visits.
+_DEFAULT_SKIP_DOMAINS = frozenset({
     'youtube.com','youtu.be','twitter.com','x.com',
     'facebook.com','instagram.com','tiktok.com',
     'linkedin.com','discord.com',
-}
-# Apply saved skip_domains on top of defaults
-if isinstance(_search_cfg.get('skip_domains'), list):
-    SKIP_DOMAINS = set(_search_cfg['skip_domains'])
+})
 
-# Resolved LLM-content-filter toggle (env > saved config > default ON).
-# tofu-search's pipeline reads this via lib/search_bridge.sync_search_config();
-# the optional bridge is installed at the first real search/fetch use.
-LLM_CONTENT_FILTER_ENABLED = (
-    os.environ.get('FETCH_LLM_FILTER', '1') == '1'
-    if os.environ.get('FETCH_LLM_FILTER') is not None
-    else bool(_search_cfg.get('llm_content_filter', True))
-)
+
+def _saved_skip_domains(saved_config):
+    search = saved_config.get('search')
+    domains = search.get('skip_domains') if isinstance(search, dict) else None
+    return set(domains) if isinstance(domains, list) else set(_DEFAULT_SKIP_DOMAINS)
+
+
+SKIP_DOMAINS = _saved_skip_domains(_SAVED_CONFIG)
 
 # ── Model pricing compatibility ──
 # Keep the historical ``from lib import MODEL_PRICING`` surface without making
@@ -319,7 +290,7 @@ def reload_config():
     This makes Settings UI changes take effect immediately for:
       - Model names (LLM_MODEL, QWEN_MODEL, GEMINI_MODEL, etc.)
       - Explicit environment API keys/base URL for direct-library callers
-      - Fetch settings (FETCH_TOP_N, FETCH_TIMEOUT, FETCH_MAX_CHARS_*, etc.)
+      - The search fetch blocklist (SKIP_DOMAINS)
       - Feature flags (TRADING_ENABLED)
 
     The dispatcher (lib/llm_dispatch) is reset separately by the caller.
@@ -347,35 +318,7 @@ def reload_config():
     _mod.CLAUDE_SONNET_MODEL = os.environ.get('CLAUDE_SONNET_MODEL', '')
     _mod.IMAGE_GEN_MODEL = _cfg('IMAGE_GEN_MODEL', 'IMAGE_GEN_MODEL', '')
 
-    # Fetch settings — same priority chain as module init: ENV > saved > default
-    _search_raw = _SAVED_CONFIG.get('search', {})
-    _search = _resolve_search_profile(
-        _search_raw if isinstance(_search_raw, dict) else {})
-    _mod.SEARCH_PROFILE = _search['profile']
-    _mod.SEARCH_OVERRIDES = dict(_search.get('overrides') or {})
-    _mod.SEARCH_DEEPEN_ENABLED = bool(_search.get('deepen_enabled', False))
-    def _rcfg(env_key, saved_key, default):
-        env = os.environ.get(env_key)
-        if env is not None and env != '':
-            return int(env)
-        saved_val = _search.get(saved_key)
-        if saved_val is not None:
-            return int(saved_val)
-        return default
-    _mod.FETCH_TOP_N = _rcfg('FETCH_TOP_N', 'fetch_top_n', 6)
-    _mod.FETCH_TIMEOUT = _rcfg('FETCH_TIMEOUT', 'fetch_timeout', 15)
-    _mod.FETCH_MAX_CHARS_SEARCH = _rcfg('FETCH_MAX_CHARS_SEARCH', 'max_chars_search', 60000)
-    _mod.FETCH_MAX_CHARS_DIRECT = _rcfg('FETCH_MAX_CHARS_DIRECT', 'max_chars_direct', 200000)
-    _mod.FETCH_MAX_CHARS_PDF = _rcfg('FETCH_MAX_CHARS_PDF', 'max_chars_pdf', 0)
-    _mod.FETCH_MAX_BYTES = _rcfg('FETCH_MAX_BYTES', 'max_bytes', 20*1024*1024)
-    if 'skip_domains' in _search and isinstance(_search['skip_domains'], list):
-        _mod.SKIP_DOMAINS = set(_search['skip_domains'])
-    # Re-resolve the content-filter toggle (env > saved > default ON).
-    _mod.LLM_CONTENT_FILTER_ENABLED = (
-        os.environ.get('FETCH_LLM_FILTER', '1') == '1'
-        if os.environ.get('FETCH_LLM_FILTER') is not None
-        else bool(_search.get('llm_content_filter', True))
-    )
+    _mod.SKIP_DOMAINS = _saved_skip_domains(_SAVED_CONFIG)
     # Push refreshed settings only when tofu-search is already resident. A
     # model/provider-only update must not cold-import the optional search graph;
     # first later activation reads these newest module values.
@@ -389,7 +332,7 @@ def reload_config():
     # Feature flags
     _mod.PPTX_TRANSLATE_ENABLED = _resolve_feature_flag('PPTX_TRANSLATE_ENABLED', 'pptx_translate_enabled', False)
     _mod.DEBUG_MODE = _resolve_feature_flag('DEBUG_MODE', 'debug_mode', False)
-    _mod.CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', True)
+    _mod.CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', False)
     _mod.OPTIMIZER_ENABLED = _resolve_feature_flag('OPTIMIZER_ENABLED', 'optimizer_enabled', True)
     _mod.SCHEDULER_ALLOW_CODE_EXEC = _resolve_feature_flag(
         'SCHEDULER_ALLOW_CODE_EXEC', 'scheduler_allow_code_exec', True)
@@ -416,9 +359,7 @@ def reload_config():
 
     import logging as _logging
     _logging.getLogger(__name__).info(
-        '[Config] Hot-reloaded: model=%s, base_url=%.60s, keys=%d, '
-        'fetch_top_n=%d, timeout=%d, max_chars_search=%d, max_chars_direct=%d',
+        '[Config] Hot-reloaded: model=%s, base_url=%.60s, keys=%d, skip_domains=%d',
         _mod.LLM_MODEL, _mod.LLM_BASE_URL, len(_mod.LLM_API_KEYS),
-        _mod.FETCH_TOP_N, _mod.FETCH_TIMEOUT,
-        _mod.FETCH_MAX_CHARS_SEARCH, _mod.FETCH_MAX_CHARS_DIRECT,
+        len(_mod.SKIP_DOMAINS),
     )

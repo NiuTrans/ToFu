@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """tests/search/test_search_settings.py — lib/search/search_settings.py + update_search_settings tool.
 
-Pins the single-source-of-truth contract shared by the Settings UI status
-projection and the agent tool:
+Pins the contract of the one saved search behaviour, the fetch blocklist:
 
-  * apply_updates validates / clamps / persists / hot-reloads / audit-logs.
-  * max_download_mb is the MB alias of max_bytes (humans think in MB).
   * block_domain/unblock_domain edit skip_domains with the SAME normaliser
-    the optimizer's block_search_domain action uses.
+    the optimizer's block_search_domain action uses, then persist, hot-reload
+    and audit-log.
   * A no-change call is a PURE READ (no file write, no reload, no audit).
-  * An env var that shadows a saved knob is reported in ``notes`` — the
-    caller must never believe a change landed when it did not.
-  * status_payload carries the live backend facts the Settings strip shows.
+  * Search limits are fixed tofu-search defaults: retired tuning keys are
+    rejected with a reason and nothing is written.
 
 The config file is redirected to tmp_path; reload_config and audit_log are
 stubbed on the module namespace. No network, no live LLM. Deterministic.
@@ -26,7 +23,6 @@ import pytest
 
 import lib as _lib
 import lib.search.search_settings as ss
-from lib.tools.gateway import tool_schema_tokens
 from lib.tools.search import build_update_search_settings_tool
 
 pytestmark = pytest.mark.unit
@@ -48,10 +44,6 @@ def _saved(path) -> dict:
     return json.loads(path.read_text()) if path.exists() else {}
 
 
-# ═══════════════════════════════════════════════════════════
-#  1. Pure read — zero changes writes NOTHING
-# ═══════════════════════════════════════════════════════════
-
 class TestPureRead:
     def test_no_changes_writes_nothing(self, cfg_file):
         res = ss.apply_updates({})
@@ -61,176 +53,50 @@ class TestPureRead:
         cfg_file['reload'].assert_not_called()
         cfg_file['audit'].assert_not_called()
 
-    def test_effective_reflects_lib_attrs(self, cfg_file, monkeypatch):
-        monkeypatch.setattr(_lib, 'FETCH_TOP_N', 9, raising=False)
-        monkeypatch.setattr(_lib, 'SKIP_DOMAINS', {'a.com'}, raising=False)
-        res = ss.apply_updates({})
-        assert res['effective']['fetch_top_n'] == 9
-        assert res['effective']['skip_domains'] == ['a.com']
+    def test_effective_reflects_live_blocklist(self, cfg_file, monkeypatch):
+        monkeypatch.setattr(_lib, 'SKIP_DOMAINS', {'b.com', 'a.com'}, raising=False)
+        assert ss.apply_updates({})['effective'] == {'skip_domains': ['a.com', 'b.com']}
 
 
 class TestToolSchema:
-    def test_model_contract_keeps_safety_profiles_tradeoffs_and_result_honesty(self):
-        tool = build_update_search_settings_tool()
-        schema = tool['function']
+    def test_model_contract_is_the_server_wide_blocklist(self):
+        schema = build_update_search_settings_tool()['function']
         desc = schema['description'].lower()
-        props = schema['parameters']['properties']
-
-        for phrase in (
-                'server-wide', 'pure read', 'always inspect',
-                'persist across restarts', 'hot-reload immediately',
-                'affect every conversation', 'user asks', 'repeated results',
-                'integers clamp', 'fast=3 pages/30k',
-                'balanced=6/60k', 'deep=10/100k', 'link deepening',
-                'legacy concrete knobs', 'coverage, latency, and tokens',
-                'max_download_mb is mb, not bytes',
-                'slower selective llm gate', 'faster/cheaper lexical',
-                'normalized fetch blocklist', 'rejected values with reasons',
-                'env overrides shadowing', 'new effective state',
-                'explain the outcome'):
+        for phrase in ('server-wide', 'pure read', 'persist', 'hot-reload',
+                       'every conversation', 'user asks', 'fixed defaults',
+                       'explain the outcome'):
             assert phrase in desc, phrase
+        assert set(schema['parameters']['properties']) == {'block_domain', 'unblock_domain'}
 
-        assert props['profile']['enum'] == ['fast', 'balanced', 'deep']
-        assert set(props['overrides']['properties']) == {
-            'fetch_top_n', 'llm_content_filter',
-            'deepen_enabled',
-        }
-        assert set(props) == {
-            'profile', 'overrides', 'fetch_top_n', 'fetch_timeout',
-            'max_download_mb', 'llm_content_filter', 'block_domain',
-            'unblock_domain',
-        }
-
-    def test_model_contract_stays_within_resident_token_budget(self):
-        tokens = tool_schema_tokens([build_update_search_settings_tool()])
-        assert tokens <= 550, (
-            f'update_search_settings schema costs {tokens} tokens; compact '
-            'repeated global-safety, profile, and knob prose')
-
-    def test_profile_and_overrides_are_rendered_as_global_writes(self):
+    def test_blocklist_change_is_rendered_as_a_global_write(self):
         from lib.tasks_pkg.tool_dispatch._approval import (
             _approval_meta_update_search_settings,
         )
 
         meta = {}
-        _approval_meta_update_search_settings(meta, {
-            'profile': 'deep',
-            'overrides': {'fetch_top_n': 9},
-        })
+        _approval_meta_update_search_settings(meta, {'block_domain': 'spam.example'})
 
-        assert meta['path'] == 'Setting: profile, Setting: overrides'
+        assert meta['path'] == 'Setting: block_domain'
         rendered = json.dumps(meta, ensure_ascii=False)
-        assert 'Setting: profile' in rendered and 'deep' in rendered
-        assert 'Setting: overrides' in rendered and 'fetch_top_n' in rendered
-        assert 'SERVER-WIDE' in rendered
+        assert 'spam.example' in rendered and 'SERVER-WIDE' in rendered
         assert 'read-only' not in rendered
 
 
-# ═══════════════════════════════════════════════════════════
-#  2. Write path — validate / clamp / persist / reload / audit
-# ═══════════════════════════════════════════════════════════
-
-class TestWritePath:
-    def test_apply_persists_and_reloads(self, cfg_file):
-        res = ss.apply_updates({'fetch_top_n': 8, 'llm_content_filter': False})
-        assert res['ok'] is True
-        saved = _saved(cfg_file['path'])
-        assert saved['search']['fetch_top_n'] == 8
-        assert saved['search']['llm_content_filter'] is False
-        cfg_file['reload'].assert_called_once()
-        cfg_file['audit'].assert_called_once()
-        assert cfg_file['audit'].call_args[0][0] == 'search_settings_update'
-
-    def test_ints_are_clamped_not_stored_out_of_range(self, cfg_file):
-        res = ss.apply_updates({'fetch_top_n': 99, 'fetch_timeout': 1,
-                                'max_chars_search': 10**9})
-        assert res['applied']['fetch_top_n'] == 20
-        assert res['applied']['fetch_timeout'] == 5
-        assert res['applied']['max_chars_search'] == 500_000
-        saved = _saved(cfg_file['path'])['search']
-        assert saved['fetch_top_n'] == 20 and saved['fetch_timeout'] == 5
-
-    def test_digit_string_coerced(self, cfg_file):
-        res = ss.apply_updates({'fetch_timeout': '30'})
-        assert res['applied']['fetch_timeout'] == 30
-        assert res['errors'] == {}
-
-    def test_bool_rejects_non_bool(self, cfg_file):
-        res = ss.apply_updates({'llm_content_filter': 'yes'})
-        assert res['ok'] is False
-        assert 'llm_content_filter' in res['errors']
-        assert not cfg_file['path'].exists()
-        cfg_file['reload'].assert_not_called()
-
-    def test_bool_is_not_accepted_as_int(self, cfg_file):
-        res = ss.apply_updates({'fetch_top_n': True})
-        assert 'fetch_top_n' in res['errors']
-
-    def test_unknown_key_rejected_and_nothing_written(self, cfg_file):
-        res = ss.apply_updates({'rm_rf': 1})
-        assert res['ok'] is False
-        assert 'rm_rf' in res['errors']
-        assert not cfg_file['path'].exists()
-        cfg_file['reload'].assert_not_called()
-
-    def test_partial_valid_invalid_applies_valid_reports_error(self, cfg_file):
-        res = ss.apply_updates({'fetch_top_n': 7, 'nope': 1})
-        assert res['applied']['fetch_top_n'] == 7
-        assert 'nope' in res['errors']
-        assert _saved(cfg_file['path'])['search']['fetch_top_n'] == 7
-
-    def test_merge_does_not_clobber_other_sections(self, cfg_file):
-        cfg_file['path'].write_text(json.dumps({
-            'providers': [{'id': 'p1'}],
-            'search': {'fetch_timeout': 33},
-        }))
-        ss.apply_updates({'fetch_top_n': 4})
-        saved = _saved(cfg_file['path'])
-        assert saved['providers'] == [{'id': 'p1'}]
-        assert saved['search']['fetch_timeout'] == 33
-        assert saved['search']['fetch_top_n'] == 4
-
-    def test_selecting_profile_clears_legacy_profile_knobs(self, cfg_file):
-        cfg_file['path'].write_text(json.dumps({
-            'search': {'fetch_top_n': 9, 'max_chars_search': 70000,
-                       'fetch_timeout': 33},
-        }))
-        res = ss.apply_updates({'profile': 'fast'})
-        saved = _saved(cfg_file['path'])['search']
-        assert res['applied']['profile'] == 'fast'
-        assert saved['profile'] == 'fast' and saved['overrides'] == {}
-        assert 'fetch_top_n' not in saved and 'max_chars_search' not in saved
-        assert saved['fetch_timeout'] == 33
-
-
-# ═══════════════════════════════════════════════════════════
-#  3. Aliases — MB download size + domain block/unblock
-# ═══════════════════════════════════════════════════════════
-
-class TestAliases:
-    def test_max_download_mb_becomes_bytes(self, cfg_file):
-        res = ss.apply_updates({'max_download_mb': 20})
-        assert res['applied']['max_bytes'] == 20 * 1024 * 1024
-        assert _saved(cfg_file['path'])['search']['max_bytes'] == 20971520
-
-    def test_max_download_mb_rejects_junk(self, cfg_file):
-        res = ss.apply_updates({'max_download_mb': -5})
-        assert 'max_download_mb' in res['errors']
-        assert not cfg_file['path'].exists()
-
-    def test_block_domain_normalises_and_dedupes(self, cfg_file):
+class TestBlocklistWrites:
+    def test_block_domain_normalises_persists_reloads_and_dedupes(self, cfg_file):
         res = ss.apply_updates({'block_domain': 'https://www.Spam.com:8080/x'})
+        assert res['ok'] is True
         assert res['applied']['block_domain'] == ['spam.com']
-        saved = _saved(cfg_file['path'])['search']['skip_domains']
-        assert 'spam.com' in saved
-        # again — stays deduped
+        assert 'spam.com' in _saved(cfg_file['path'])['search']['skip_domains']
+        cfg_file['reload'].assert_called_once()
+        assert cfg_file['audit'].call_args[0][0] == 'search_settings_update'
         ss.apply_updates({'block_domain': 'spam.com'})
-        saved2 = _saved(cfg_file['path'])['search']['skip_domains']
-        assert saved2.count('spam.com') == 1
+        assert _saved(cfg_file['path'])['search']['skip_domains'].count('spam.com') == 1
 
     def test_block_domain_invalid_rejected(self, cfg_file):
         res = ss.apply_updates({'block_domain': 'not-a-domain'})
-        assert 'block_domain' in res['errors']
+        assert res['ok'] is False and 'block_domain' in res['errors']
+        assert not cfg_file['path'].exists()
 
     def test_unblock_removes(self, cfg_file, monkeypatch):
         monkeypatch.setattr(_lib, 'SKIP_DOMAINS', {'keep.com', 'drop.com'},
@@ -251,89 +117,76 @@ class TestAliases:
         saved = set(_saved(cfg_file['path'])['search']['skip_domains'])
         assert saved == {'builtin1.com', 'builtin2.com', 'new.com'}
 
-
-# ═══════════════════════════════════════════════════════════
-#  4. Env-shadow honesty — saved but overridden is REPORTED
-# ═══════════════════════════════════════════════════════════
-
-class TestEnvOverride:
-    def test_env_set_produces_note(self, cfg_file, monkeypatch):
-        monkeypatch.setenv('FETCH_TOP_N', '3')
-        res = ss.apply_updates({'fetch_top_n': 8})
-        assert res['applied']['fetch_top_n'] == 8          # still persisted
-        assert any('FETCH_TOP_N' in n for n in res['notes'])
-
-    def test_env_unset_no_note(self, cfg_file, monkeypatch):
-        monkeypatch.delenv('FETCH_TOP_N', raising=False)
-        res = ss.apply_updates({'fetch_top_n': 8})
-        assert res['notes'] == []
+    def test_merge_does_not_clobber_other_sections(self, cfg_file):
+        cfg_file['path'].write_text(json.dumps({
+            'providers': [{'id': 'p1'}],
+            'search': {'gateway': {'enabled': False}},
+        }))
+        ss.apply_updates({'block_domain': 'spam.com'})
+        saved = _saved(cfg_file['path'])
+        assert saved['providers'] == [{'id': 'p1'}]
+        assert saved['search']['gateway'] == {'enabled': False}
 
 
-# ═══════════════════════════════════════════════════════════
-#  5. status_payload + normalise_domain + the tool handler
-# ═══════════════════════════════════════════════════════════
+@pytest.mark.parametrize('key', ['fetch_top_n', 'profile', 'llm_content_filter',
+                                 'max_download_mb', 'fetch_timeout', 'rm_rf'])
+def test_retired_or_unknown_keys_are_rejected_without_any_write(cfg_file, key):
+    res = ss.apply_updates({key: 7})
+    assert res['ok'] is False
+    assert 'fixed defaults' in res['errors'][key]
+    assert not cfg_file['path'].exists()
+    cfg_file['reload'].assert_not_called()
+    cfg_file['audit'].assert_not_called()
 
-class TestStatusAndSharedBits:
-    def test_status_payload_shape(self):
-        st = ss.status_payload(owner_user_id=1)
-        assert st['ok'] is True
-        for key in ('tofu_search_version', 'searxng_instances', 'filter_mode',
-                    'filter_model', 'search_deadline_secs',
-                    'fetch_url_deadline_secs', 'extension_connected'):
-            assert key in st, key
-        assert isinstance(st['searxng_instances'], int)
 
-    def test_normalise_domain_shared_with_optimizer(self):
-        from lib.optimizer.actions import block_search_domain as b
-        for raw in ('https://www.Spammy.Example:8080/path', '  HTTP://Foo.com  ', ''):
-            assert b._normalise_domain(raw) == ss.normalise_domain(raw)
+def test_valid_block_still_applies_beside_a_rejected_key(cfg_file):
+    res = ss.apply_updates({'block_domain': 'spam.com', 'fetch_top_n': 9})
+    assert res['applied']['block_domain'] == ['spam.com']
+    assert 'fetch_top_n' in res['errors']
+    saved = _saved(cfg_file['path'])['search']
+    assert 'spam.com' in saved['skip_domains'] and 'fetch_top_n' not in saved
 
+
+def test_normalise_domain_shared_with_optimizer():
+    from lib.optimizer.actions import block_search_domain as b
+    for raw in ('https://www.Spammy.Example:8080/path', '  HTTP://Foo.com  ', ''):
+        assert b._normalise_domain(raw) == ss.normalise_domain(raw)
+
+
+class TestToolHandler:
     def test_handler_roundtrip(self, cfg_file, monkeypatch):
         """The tool handler is a thin translator: args in → applied text out."""
         import lib.tasks_pkg.handlers.search._settings as h
-        monkeypatch.setattr(h, '_finalize_tool_round', lambda *a, **k: None)
-        task, round_entry = {}, {'query': 'update_search_settings'}
-        _id, content, ok = h._handle_update_search_settings(
-            task, None, 'update_search_settings', 'tc1',
-            {'fetch_top_n': 5, 'max_download_mb': 10}, 1, round_entry,
+        presented = []
+        monkeypatch.setattr(h, '_finalize_tool_round', lambda *a, **k: presented.extend(a[3]))
+        _id, content, is_search = h._handle_update_search_settings(
+            {}, None, 'update_search_settings', 'tc1',
+            {'block_domain': 'spam.example'}, 1, {'query': 'update_search_settings'},
             {}, None, False)
-        assert ok is True
-        assert 'fetch_top_n=5' in content
-        assert 'max_download_mb=10' in content
-        saved = _saved(cfg_file['path'])['search']
-        assert saved['fetch_top_n'] == 5 and saved['max_bytes'] == 10 * 1024 * 1024
+        # The third element declares web evidence, never the update's success.
+        assert is_search is False and presented[0]['settingsOk'] is True
+        assert 'block_domain=spam.example' in content
+        assert 'spam.example' in _saved(cfg_file['path'])['search']['skip_domains']
 
     def test_handler_read_mode(self, cfg_file, monkeypatch):
         import lib.tasks_pkg.handlers.search._settings as h
-        monkeypatch.setattr(h, '_finalize_tool_round', lambda *a, **k: None)
-        _id, content, ok = h._handle_update_search_settings(
+        presented = []
+        monkeypatch.setattr(h, '_finalize_tool_round', lambda *a, **k: presented.extend(a[3]))
+        monkeypatch.setattr(_lib, 'SKIP_DOMAINS', {'a.com'}, raising=False)
+        _id, content, is_search = h._handle_update_search_settings(
             {}, None, 'update_search_settings', 'tc1', {}, 1,
             {'query': 'update_search_settings'}, {}, None, False)
-        assert ok is True
-        assert 'no changes requested' in content
+        assert is_search is False and presented[0]['settingsOk'] is True
+        assert 'no changes requested' in content and 'a.com' in content
         assert not cfg_file['path'].exists()
 
-
-@pytest.mark.parametrize('key', ['max_chars_search', 'max_chars_direct', 'max_chars_pdf'])
-@pytest.mark.parametrize('nested', [False, True])
-def test_handler_rejects_retired_budget_without_any_mutation(cfg_file, monkeypatch, key, nested):
-    import lib.tasks_pkg.handlers.search._settings as h
-    monkeypatch.setattr(h, '_finalize_tool_round', lambda *a, **k: None)
-    apply = mock.Mock(side_effect=AssertionError('must reject before applying settings'))
-    monkeypatch.setattr(ss, 'apply_updates', apply)
-    args = {'fetch_top_n': 7, 'profile': 'deep'}
-    if nested:
-        args['overrides'] = {'fetch_top_n': 9, key: 1000}
-    else:
-        args[key] = 1000
-    _, content, ok = h._handle_update_search_settings(
-        {}, None, 'update_search_settings', 'tc1', args, 1,
-        {'query': 'update_search_settings'}, {}, None, False)
-    assert ok is False
-    assert 'Rejected:' in content
-    assert ('overrides.' + key if nested else key) in content
-    assert 'no settings were changed' in content
-    apply.assert_not_called()
-    cfg_file['reload'].assert_not_called()
-    cfg_file['audit'].assert_not_called()
-    assert not cfg_file['path'].exists()
+    def test_handler_reports_rejection_without_mutation(self, cfg_file, monkeypatch):
+        import lib.tasks_pkg.handlers.search._settings as h
+        presented = []
+        monkeypatch.setattr(h, '_finalize_tool_round', lambda *a, **k: presented.extend(a[3]))
+        _id, content, _ = h._handle_update_search_settings(
+            {}, None, 'update_search_settings', 'tc1', {'max_chars_search': 1000}, 1,
+            {'query': 'update_search_settings'}, {}, None, False)
+        assert presented[0]['settingsOk'] is False
+        assert 'Rejected:' in content and 'max_chars_search' in content
+        assert not cfg_file['path'].exists()

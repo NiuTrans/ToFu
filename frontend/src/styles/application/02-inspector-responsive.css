@@ -15,3 +15,9 @@ body.ri-open .input-actions{flex-wrap:wrap}
   .ri-drawer .debug-panel{padding:var(--space-2) calc(var(--space-1) * 2.5) var(--space-4)}
   .ri-main-empty{margin:calc(var(--space-1) * 7) auto}
 }
+/* Shared controls keep their target size. Narrow drawers give reply context
+ * a separate reading line, including half-width drawers on wider windows. */
+@container inspector (max-width:40em){
+  .ri-feed-turn{flex-wrap:wrap}
+  .ri-feed-turn-preview{flex-basis:100%;order:1}
+}

@@ -140,8 +140,6 @@ def outbox_memory_budget():
 
 @dataclass(frozen=True)
 class ExecutionBudget:
-    workers: int
-    replay_ids: int
     result_items: int
     result_bytes: int
     stream_items: int
@@ -149,30 +147,14 @@ class ExecutionBudget:
 
 
 def execution_budget():
-    """One cached launch probe; headroom constrains automatic resident budgets."""
-    cpu, memory_mb = 1, limit('memory_mb_per_worker')
-    try:
-        from runtime_guards import probe_system_resources
-        snapshot = probe_system_resources()
-        cpu = max(1, int(snapshot.effective_cpu_count))
-        memory_mb = max(1, int(min(snapshot.effective_memory_capacity_mb or memory_mb,
-                                  snapshot.effective_memory_available_mb or memory_mb)))
-    except Exception as exc:
-        logger.debug('resource probe failed, lean worker fallback: %s', type(exc).__name__)
-    workers = min(cpu, max(1, memory_mb // limit('memory_mb_per_worker')))
+    """Resident output budgets only; CPU and memory never size execution."""
     resident_bytes = outbox_memory_budget()
     return ExecutionBudget(
-        workers=workers,
-        replay_ids=max(limit('legacy_execution_ids'), workers * limit('execution_ids_per_worker')),
         result_items=limit('result_items_floor'),
         result_bytes=resident_bytes * 7 // 8,
         stream_items=limit('stream_items_floor'),
         stream_bytes=resident_bytes // 8,
     )
-
-
-def execution_capacity():
-    return execution_budget().workers
 
 
 class RuntimeState:

@@ -13,56 +13,6 @@ from __future__ import annotations
 from typing import Any
 
 
-PARTIAL_STREAM_PREFILL_MARKER = '_partialStreamPrefill'
-_CONTINUATION_CONTENT_UNSET = object()
-
-
-def append_assistant_message_with_partial_prefill(
-    messages: list[dict[str, Any]],
-    message: dict[str, Any],
-    *,
-    continuation_content: object = _CONTINUATION_CONTENT_UNSET,
-) -> dict[str, Any]:
-    """Append one assistant row or atomically consume its retry prefill.
-
-    A lossless partial-stream retry temporarily leaves a marked assistant
-    prefill at the tail of ``messages``. Once the continuation succeeds, that
-    prefill and the returned assistant message are one logical provider turn.
-    Replace them with one row and concatenate content byte-for-byte—never let
-    the generic same-role sanitizer inject its normal ``\n\n`` separator.
-
-    ``continuation_content`` lets structured tool-call assembly retain the raw
-    returned text even though its canonical builder normally strips incidental
-    inter-round whitespace.
-    """
-    trailing = messages[-1] if messages else None
-    if (isinstance(trailing, dict)
-            and trailing.get('role') == 'assistant'
-            and trailing.get(PARTIAL_STREAM_PREFILL_MARKER)
-            and not trailing.get('tool_calls')):
-        prefix = trailing.get('content')
-        prefix = prefix if isinstance(prefix, str) else str(prefix or '')
-        if continuation_content is _CONTINUATION_CONTENT_UNSET:
-            continuation = message.get('content')
-        else:
-            continuation = continuation_content
-        continuation = (
-            continuation if isinstance(continuation, str)
-            else str(continuation or '')
-        )
-        merged = dict(message)
-        merged.pop(PARTIAL_STREAM_PREFILL_MARKER, None)
-        combined = prefix + continuation
-        if combined:
-            merged['content'] = combined
-        else:
-            merged.pop('content', None)
-        messages[-1] = merged
-        return merged
-    messages.append(message)
-    return message
-
-
 def build_assistant_prose_message(
     assistant_message: dict[str, Any] | None,
     *,
@@ -101,13 +51,11 @@ def append_assistant_prose_message(
     """Build and append one prose assistant row, returning the row appended."""
     message = build_assistant_prose_message(assistant_message, task=task)
     if message is not None:
-        return append_assistant_message_with_partial_prefill(messages, message)
+        messages.append(message)
     return message
 
 
 __all__ = [
-    'PARTIAL_STREAM_PREFILL_MARKER',
-    'append_assistant_message_with_partial_prefill',
     'append_assistant_prose_message',
     'build_assistant_prose_message',
 ]

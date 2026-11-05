@@ -224,6 +224,38 @@ def test_exec_env_overlay_enabled_only(isolated):
     assert overlay.get('SOYOUNG_API_KEY') == 'sy-off-0123456789'
 
 
+def test_exec_env_overlay_reads_the_vault_store_once(isolated, monkeypatch):
+    """The overlay runs before every run_command subprocess. Re-reading the
+    vault JSON per enabled skill (and per bound entry) put seconds of FUSE
+    reads under the vault lock ahead of each command; one store read must
+    serve the whole overlay, whatever the skill count."""
+    proj = _proj(isolated)
+    root = os.path.join(proj, '.tofu', 'skills')
+    for index in range(5):
+        _write_pkg(root, f'pkg{index}', metadata_yaml=_REQUIRES_ENV_YAML)
+    from lib.skills.env import exec_env_overlay, set_skill_env
+    set_skill_env('pkg0', 'SOYOUNG_API_KEY', 'sy-first-0123456789')
+    set_skill_env('pkg3', 'OTHER_TOKEN', 'other-0123456789')
+    import lib.credentials_vault as vault
+    reads = []
+    original = vault._read_store
+    monkeypatch.setattr(vault, '_read_store',
+                        lambda **kw: reads.append(1) or original(**kw))
+
+    from lib.skills.registry import list_skills
+    list_skills(proj)
+    reads.clear()
+    list_skills(proj)
+    listing_reads = len(reads)  # eligibility probes belong to the listing
+    reads.clear()
+
+    overlay = exec_env_overlay(project_path=proj)
+
+    assert overlay.get('SOYOUNG_API_KEY') == 'sy-first-0123456789'
+    assert overlay.get('OTHER_TOKEN') == 'other-0123456789'
+    assert len(reads) == listing_reads + 1
+
+
 def test_run_command_child_env_carries_the_overlay(isolated):
     """The run_command subprocess env seam (_get_cmd_env) must merge the
     overlay — this is what makes `os.environ['KEY']` inside a skill's

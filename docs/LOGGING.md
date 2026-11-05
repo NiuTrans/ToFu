@@ -81,14 +81,74 @@ See `system_audit_rotation_preflight_admission_20261009.json`.
 
 `measure_task_startup` retains the existing closed-cardinality histogram and
 adds paired `[TaskStartupTiming]` JSON records when its caller supplies explicit
-identity. Conversation dispatch records cleanup, context construction,
-registration, preparation, binding and submission; the physical worker records
-worker entry and its nested workspace binding. Each start/complete contains only
+identity. The turn command records `input_build`, `turn_persist`,
+`executor_start` (claim, accepted-config re-read and the nested dispatch stages)
+and `acknowledgement`. Conversation dispatch records cleanup, context
+construction, registration, preparation, binding and submission. Inside
+`registration`, a task with a model reference records `registration_route`
+(owner authority read and candidate planning) and `registration_mint`
+(credential resolution, slot preparation and the single route-group
+publication), and a durable task records `registration_checkpoint` (the
+durable-at-birth row); they inherit the enclosing identity and are inclusive,
+so never add them to `registration`. The physical
+worker records worker entry, its nested workspace binding and `input_translation`
+(the join of a deferred send translation). Before the first round the root
+invocation records `startup_config` (prelude, provider binding, model config),
+`startup_resume`, `startup_project`, `startup_tools`, `startup_memory`,
+`startup_context` (context injection) and `startup_history`; a stage skipped by an
+abort gate emits nothing. Inside `startup_memory` the prefetch records
+`memory_list` (the time startup spent obtaining the eligible metadata listing,
+including any wait for a shared scan), `memory_rank` (BM25 shortlist and
+confidence gate) and `memory_hydrate` (bounded bodies of the selected IDs;
+absent when nothing was selected). An accepted attempt starts that listing at
+acceptance (`lib/tasks_pkg/memory_listing.py`), so its `memory_list` measures
+only the wait for it. The `memory_list` completion carries `listing`
+(`early` for that listing, `inline` for one run inside the stage) and
+`listingMs`, the listing's own duration: `listingMs` minus `durationMs` is the
+share earlier startup hid, and an inline listing hides nothing. A
+nested stage inherits the enclosing stage's identity, so the three sub-stages
+are paired with the same task without passing identifiers into the memory
+package. Each start/complete contains only
 bounded conversation/Turn/Attempt/task/owner identifiers, a fixed stage, wall-clock
-`observedAtMs`, and completion outcome/monotonic `durationMs`. Identity never
-becomes metric labels. No config, prompt, file list, error text, polling loop or
-new durable store is introduced. Existing model/tool/compaction execution clocks
+`observedAtMs`, completion outcome/monotonic `durationMs` and the closed
+completion details above (`_TASK_STARTUP_DETAILS` in `lib/observability.py`).
+Identity never becomes metric labels. No config, prompt, file list, error text,
+polling loop or new durable store is introduced. Existing model/tool/compaction execution clocks
 and browser perception receipts cover the subsequent boundaries.
+
+Workspace isolation records `workspace_snapshot` and each `workspace_snapshot_observation`, `workspace_input_ref`, `workspace_metadata`, `workspace_checkout` and `workspace_registration`. Repository/destination admission has separate `*_lock_wait` and `*_lock_hold` stages; wait starts before lockfile filesystem I/O, and hold starts only after admission. Nested stages inherit only the outer caller's explicitly bounded identity through a reset-on-exit context, never config or paths. Startup histograms retain finite buckets through 600 seconds; longer observations remain in the count/sum and infinity bucket. **Problem:** the former inclusive binding/materialization timers exposed latency but could not attribute it to contention, snapshot CPU/I/O or checkout. **Decision:** reuse the paired anchors and closed stage registry rather than another watchdog, lock-owner database or polling thread. Missing completions still do not prove a hang, and these new records certify production coverage only after code reload. Tool `workspace_admission` remains an inclusive total, not pure lock wait; `undo_journal_lock_wait` measures journal admission while `post_commit_wait` and `post_commit_callback` distinguish ordered presentation delay after release.
+
+Workspace tools distinguish registry-lock acquisition (`workspace_registry_wait`), lockfile filesystem setup (`workspace_lock_io`), local condition sleeping (`workspace_local_wait`) and blocked cross-process flock backoff (`workspace_flock_wait`). The sleep timers are measured backoff, not blocker identity or the total kernel-call duration. Lockfile filesystem work runs outside registry ownership; an active-opening counter under the same registry lock fences fork until each FD is registered or closed. Fork waits on the registry condition (releasing it while waiting), then retains the lock across fork. Cancellation cannot interrupt a filesystem syscall, but unrelated edits can now acquire/release their leases while it is blocked. No namespace migration, new thread, queue or durable lock-owner registry is introduced. Exactly 16 current owner-defined tool phases fit the existing 16-name bound; unknown additional phases may still be omitted rather than grow state. Slow-tool records are completion-only and over-budget-only, not an all-call latency population. Specs: `tests/observability/test_task_startup_metrics.py` and the real-Git startup evidence case in `test_integration_delivery.py`.
+
+A record carries only identity that exists when it is written. A stage's start
+keeps the identity known at entry; identity the stage creates joins its
+completion and the stages opened after it (`measure_task_startup` yields
+`bind_identity`). `input_build` and the `turn_persist` start precede the Turn and
+carry conversation/owner identity only; the `turn_persist` completion carries the
+persisted Turn and Attempt, as do `executor_start`, `acknowledgement` and the
+dispatch stages. A join anchors a command window on that completion: the earlier
+records share its request `rid` and thread, and `observedAtMs - durationMs` is the
+persist start. A failed persist names no Turn (a lane-busy conflict's live Turn
+belongs to another command). Blank identifiers are omitted, never written as a
+placeholder. Attempts started by `create_attempt`, `execute_plan`, queued
+activation or recovery emit no command-window records; their first anchor is the
+dispatch `cleanup`.
+
+Problem: command-window records carried only conversation and owner identity,
+so a join attached them to Turns by timing. Over the retained 2026-10-31/11-01
+logs the audit's timing join left 9 of 66 settled attempts unattached: 6 Turn
+commands submitted as `inputTurn` by background commands, Swarm drivers or
+schedules (no `input_build`; 4 had no request `rid`), 2 attempts started outside
+Turn creation, and one pseudo-attempt `"unknown"` merging child invocations whose
+blank Turn/Attempt fields had been bounded to that placeholder. Decision: a stage
+admits identity created inside it, `turn_persist` binds the Turn/Attempt it
+persisted, and blank values stay absent, so those 6 command windows join by
+Attempt identity. Alternatives rejected: allocating the Turn ID before persistence
+invents identity the authority has not committed (an idempotent replay returns
+the existing Turn); logging the client `commandId` adds a non-Turn identifier and
+still needs a second join; a separate post-persist record duplicates the boundary
+the completion already marks; a tighter timing window cannot separate concurrent
+commands.
 
 Problem: create-to-run timing conflated dispatch preparation, worker scheduling
 and workspace isolation, leaving a bare waiting placeholder during filesystem
@@ -99,8 +159,163 @@ Alternatives rejected: a synthetic heartbeat cannot prove progress, a longer
 timeout hides the gap, and logging task dictionaries copies private content.
 Nested durations are inclusive, not additive. Missing completion does not alone
 prove a hang (log retention/loss still applies); existing `queue_wait` means
-create-to-run, not pure executor residence. Specs:
-`tests/tasks_pkg/test_startup_timing_anchors.py` and `test_spawn_serving_loop.py`.
+create-to-run, not pure executor residence. Problem: on 2026-10-27, 87% of
+unattributed task time preceded the first round, split between the unanchored
+command window and worker preparation (5–22 s of memory/context work per task).
+Decision: extend this one family to both windows instead of adding a second
+startup log. The Turn Trace names the same windows from the startup prompts as
+`startup` stage spans (`docs/contracts/TURN_TRACE_CONTRACT.md`, 编排窗口与锚点身份),
+so a settled task explains them without these log lines. Specs:
+`tests/tasks_pkg/test_startup_timing_anchors.py`,
+`test_spawn_serving_loop.py` and
+`tests/conversation/test_deferred_input_translation.py`.
+
+## Per-task Turn timing summary
+
+Terminal trace settlement (`lib.tasks_pkg.turn_trace.finalize_trace_projection`)
+logs exactly one INFO `[TurnTraceSummary]` record per task (one physical line):
+
+```text
+[TurnTraceSummary] task=<full task id> conv=<conversation id> status=done totalMs=191521 llmMs=110377 toolMs=21631 waitMs=36194 admissionWaitMs=33000 retryWaitMs=0 compactionMs=0 approvalWaitMs=0 unattributedMs=0 ttftMs=71258 rounds=6 spawnWaitMs=3194 flowStepMs=0 orchestrationMs=23319 startupMs=17200 roundPrepMs=3600 roundSettleMs=2400 finalizeMs=119 coverage=full
+```
+
+Every number comes from the fold that is frozen into the attempt's Turn Trace
+(`docs/contracts/TURN_TRACE_CONTRACT.md`): the buckets and the `waitMs` split
+(`admissionWaitMs + retryWaitMs + spawnWaitMs == waitMs`, and `startupMs +
+roundPrepMs + roundSettleMs + finalizeMs == orchestrationMs`, that fold's own
+disjoint priority attribution) are read from its persisted `summary`, so the line cannot
+disagree with the Request Inspector or the API audit. The durable summary keeps
+the split even when the bounded spans list dropped evidence, so API mode of
+`debug/turn_trace_audit.py` is exact after these lines rotate away. A rebuilt terminal projection (CAS rebase, retained-receipt
+retry) does not log again. The record is INFO — below the WARNING+ duplicate
+coalescer — and carries the full task id, so distinct tasks are never merged;
+per-module INFO flood insurance (`LogBudgetFilter`) still applies. Keys are
+`key=value` tokens; parsers must ignore unknown keys. Aggregate retained lines
+without API access with `python3 debug/turn_trace_audit.py --logs logs/`; re-fold
+exported event logs with the checkout's fold (startup stages and remaining gaps by
+phase) with `--events FILE ...`.
+
+A settlement whose event read failed has no fold to report. Its record carries
+only the coverage marker and no number an aggregator could sum, so `--logs`
+skips it instead of counting the whole run as unattributed:
+
+```text
+[TurnTraceSummary] task=<full task id> conv=<conversation id> status=done coverage=partial coverageReason=event-read-failed
+```
+
+If a rebuild of the same terminal projection then reads successfully, that
+rebuild logs the normal record once. The read failure itself is the WARNING
+`[TurnTrace] Sidecar event read failed task=<full task id> code=... message='...'
+retryable=...`, rendered by `describe_storage_failure` and bounded to 400
+characters, because a bare storage code is not a diagnosis.
+Specs: `tests/turn_lifecycle/test_turn_trace.py` (summary line, coalescing).
+
+## Round preparation timing
+
+Problem: ROUND_START -> logical MODEL_REQUEST_START reached p99 27 s (max
+140 s) with no log line; the pre-request durability barrier waited silently on
+slow storage writes. Decision: observability only; durability, barrier,
+ordering and retry semantics are unchanged, and no task event or phase is
+emitted (it would queue behind the durable FIFO being measured).
+
+- INFO `[RoundPrepTiming] {json}` (`lib/tasks_pkg/round_prep_timing.py`): at
+  most one per root round, logged by the logical request start when the window
+  is >= 1 s; faster rounds and rounds whose request never starts log nothing.
+  Keys: `task_id` (full), `conversation_id`, `turn_id`, `attempt_id`,
+  `user_id` when known; `roundNum` (1-based, = MODEL_REQUEST_START.roundNum;
+  ROUND_START.roundNum is this minus one), `requestTag`, `spanId`,
+  `observedAtMs`, `totalMs`, `stepsMs` (always `round_open`, `hygiene`,
+  `compaction`, `inputs`, `admission`, `build_body`, `accumulator`, `barrier`,
+  `dispatch`, `receipts`, `request`, `other`; self time, so nested steps never
+  double count and the values sum to `totalMs`), `inputsMs` (per-input
+  breakdown when inputs ran, including `remember`), `build_bodyMs.snapshot`
+  (Request Inspector snapshot construction and hand-off; a managed root lane
+  and a child invocation's evidence lane only enqueue it),
+  `barrierMs` (`sink`: the domain checkpoint write-ahead, e.g. the Swarm agent
+  checkpoint; `events`: present only when a failed FIFO head forced a repair
+  wait), `barrierPendingEvents` (accepted task events still undurable when the
+  request was dispatched; for a child, its Inspector snapshots) and
+  `barrierAwaitedEvents` (how many the pre-request checkpoint waited for: 0
+  unless it repaired a failed head).
+  `round_open` is the ROUND_START append plus the round phase; `accumulator`
+  the streaming tool accumulator; `dispatch` the fallback/credential wrappers
+  between the barrier and the receipt check; `request` the stream entry through
+  the MODEL_REQUEST_START and waiting-phase appends (the logical request start
+  names this tail). `other` is only time no boundary named (a path that
+  bypasses one). The native context policy and swarm sinks carry no record.
+- WARNING `[EventBarrier] slow task=<full id> conv=<id> checkpoint=<phase>
+  checkpointRound=<n> elapsedMs=<ms> pendingEvents=<n>` (event
+  `event_barrier_slow`): once per awaited `checkpoint_invocation` barrier
+  (`tools_in_flight`, `ready`, `terminal_delivery`; `model_in_flight`, and a
+  child invocation's `ready`, only while repairing a failed head) still waiting
+  after 1 s (`checkpointRound` is the
+  0-based round index); the barrier keeps waiting. Only then is it followed by
+  INFO `[EventBarrier] released ... elapsedMs=<total> awaitedEvents=<n|->
+  persistCalls=<n|-> persistMs=<ms|-> queuedMs=<ms|-> outcome=<ok|ExceptionClass>`.
+  The three cost fields cover the batches the barrier awaited (`-` without
+  a lane): `persistCalls` counts their storage persist calls, transient
+  retries included (merged progress frames share one call, and so does a run
+  of queued events persisted together); `persistMs` sums
+  each batch's first storage dispatch to its acknowledgement, retries and
+  backoff included (storage latency); `queuedMs` sums each batch's wait at
+  its FIFO head for a delivery pump, from acceptance or the previous batch's
+  settlement or repair (local queuing: pump scheduling, lock and GIL waits).
+  The remainder of `elapsedMs` is publication callbacks, barrier wake-up and
+  any head already in flight before the barrier began. A refused barrier
+  reports the cost it observed.
+- WARNING `storage.v2 slow <query|command> <operation> succeeded
+  elapsedMs=<ms> attempts=<n> task=<id|-> conv=<id|->` (event
+  `storage_rpc_slow`, `lib/storage/v2_client.py`): a successful call >= 2 s,
+  at most once per kind+operation per 30 s (`RetryLogThrottle`); identity
+  comes from the ambient log context. `tofu_storage_rpc_seconds` keeps exact
+  counts.
+- `[Timing] TTFT=<s> (context-ready→first-token), request=<s>
+  (stream-entry→first-token, after build_body+barrier)`: the request clock
+  starts after body building, the barrier and receipt checks. This line, the
+  `[Timing:<tid>] prep=` line and `[Timing:<tid>] queue_wait=` (from the
+  create-time `_t_created_monotonic`) subtract monotonic readings only; a
+  wall-clock step cannot produce a negative or inflated duration.
+
+Alternatives rejected: a user-visible storage-wait phase cannot be seen while
+the FIFO it rides is stalled; a barrier timeout would change durability.
+
+Problem: agents waited 10-69 s per round at `[EventBarrier]` on a busy task,
+and `elapsedMs` could not say whether storage calls or local queuing (pump
+churn, lock and GIL convoys) spent that time. Decision: every queued batch
+keeps a small timing record (persist calls, dispatch-to-acknowledgement time,
+head-of-FIFO wait) that the coordinator sums for the batches a barrier awaited
+([task event delivery](TASK_EVENT_DELIVERY.md#pump-scheduling-and-coordinator-lock-scope));
+the barrier holds only those records, never the batches' callbacks or inputs.
+Alternatives rejected: summing acceptance-to-dispatch per batch counts the
+wait behind earlier batches' storage calls as queuing, growing with backlog
+depth; one log line per persist attempt floods the log; an aggregate metric
+loses the attribution to one task's barrier.
+
+Problem: once the pre-request checkpoint stopped awaiting request diagnostics
+([task event delivery](TASK_EVENT_DELIVERY.md#pre-request-checkpoint-never-awaits-diagnostics)),
+one `barrier` number could no longer separate a domain write-ahead from event
+durability, and `barrierPendingEvents` stopped meaning "events awaited".
+Decision: `barrier` keeps the whole checkpoint wall time (near zero for root
+tasks without a sink); `barrierMs.sink`/`barrierMs.events` name what remains,
+the pending and awaited counts are separate facts, and the snapshot hand-off
+is named inside `build_body`. Alternatives rejected: dropping the
+`barrier` key breaks existing parsers; reporting only the event wait would
+hide the Swarm/Evolution write-ahead that still precedes every paid call.
+
+Problem: on 2026-10-27, `other` was 13% of root round preparation (p50
+193 ms, max 2.3 s) — unwrapped calls had no name. Decision: a
+`round_prep_lap(task, name)` boundary after each unwrapped call names the
+not-yet-charged time since the previous boundary (a no-op inside an open step),
+and `finish_round_prep(tail=...)` names the final stretch, so instrumentation
+adds one line instead of re-indenting the measured code. On the LLM replay
+suite (18 rounds) `other` fell from 52.1% to 0.0%; the ROUND_START and
+MODEL_REQUEST_START event appends (`round_open`, `request`) were each about a
+quarter of preparation. Alternative rejected: wrapping each call in
+`round_prep_step` re-indents code that other latency work edits and names
+nothing more. Each lap costs one monotonic read and a sum over at most a dozen
+steps.
+Specs: `tests/tasks_pkg/test_round_prep_timing.py`,
+`tests/storage/test_storage_v2_client.py` (slow RPC warning).
 
 ## Repeated tool-call evidence
 
@@ -130,6 +345,99 @@ Use this metadata to fetch a bounded archive chunk through Request Inspector
 when raw-frame verification is needed. Terminal fatal paths also run the normal
 tool-round sweep before DONE/persistence, so unadopted announcements stop showing
 as running; retries and external/flow-owned lifecycle retain their owners.
+
+## Raw archive persistence stays off the provider path
+
+Problem: transports finished a Request Inspector capture on the provider
+call's thread, and the async relay finished it on the event loop, before the
+model result returned. Compression, hashing and `raw_archive.put` (whose
+storage client replays refusals with backoff, then replayed again by the
+archive writer) therefore sat on every round's critical path. Measured
+2026-10-23 after a restart: 3,251 refused archive commits against 2,443
+provider rounds; a refused commit held its provider call p50 47 s, p90 290 s
+(27,349 s in total), and a capacity refusal cannot succeed on replay.
+Decision: `RawArchiveCapture.commit` is a non-blocking handoff to one
+background writer in `lib/raw_archive.py` that persists captures in
+submission order. One writer, because the authority serializes commits;
+parallel writers would contend with the event and turn writes sharing it.
+Pending captures are bounded by resident bytes (request document plus the
+response spool's in-memory part, 64 MiB); an empty queue always admits one
+capture, and beyond the bound a capture is dropped and counted. A capacity
+refusal (`database_resource_exhausted`) is never replayed by the writer and
+pauses capture process-wide for 30 s, doubling per refused probe up to
+15 min; exactly one commit probes when a window ends, and success resumes
+capture. Exit drains for at most 5 s. Dropped, skipped and resumed counts are
+logged once per episode, so missing evidence stays visible; an archive
+reference still proves only a capture attempt. Alternatives rejected:
+retrying in place keeps the stall on the user's path; a per-call thread or
+the demand executor would fan out against an authority that is already
+refusing; silently disabling capture hides missing evidence. Specs:
+`tests/storage/test_raw_archive.py`.
+
+## Swarm sub-agent rounds are not raw-archived
+
+Problem: child invocations (swarm agents) run the same round loop, but their
+task carries no Turn/Attempt identity, so `RawArchiveCapture.create` declines
+and the Request Inspector's composite id (`<parent>#agent:<child>`) lists no
+`rawArchives`; their wire evidence exists only as reconstructed round evidence.
+Decision (2026-10-28): keep it that way for now. Swarm lanes completed 4,777
+model rounds against 1,279 root rounds in the retained 2026-10-27/28 logs, so
+archiving them would multiply writes through the single serialized archive
+writer about 4.7x and, under the oldest-first reclamation below, retire the
+parent conversation's own archives within its 1,792-archive ceiling. Revisit
+with a measured budget and an explicit capture scope. Alternatives rejected:
+reusing the parent's Turn/Attempt with the composite id for every child round
+(the volume above, unmeasured retention impact); a per-run opt-in flag (a
+second capture policy without an owner decision). A failure-only capture for
+child rounds is the smallest follow-up.
+
+## Raw archives are reclaimed oldest-first
+
+Problem: raw archives left the native authority only through conversation
+deletion and superseded-Attempt cleanup. Every put counted against the
+65,536-archive owner ceiling, including the body-less `quota_exhausted`
+placeholder written once the tenant byte budget is full, and at the ceiling
+every put was refused (`database_resource_exhausted`). In production the
+4 GiB budget (`TOFU_RAW_ARCHIVE_BUDGET_MIB=4096`) was full by 2026-10-20, so
+every later archive was a placeholder, and the owner ceiling refused from
+2026-10-22 11:57 (engine counter `raw_archive_owner_capacity=25425`,
+conversation ceiling 0). With the writer pause above, the Request Inspector
+recorded nothing.
+
+Decision: raw archives are reconstructible diagnostic evidence, not durable
+user state. Before a live `raw_archive.put` would meet the conversation
+ceiling (1,792), it retires that conversation's oldest archives. Before it
+would meet the owner ceiling, or scrub a body that fits the budget once older
+bodies go, it retires the owner's oldest archives in
+`(created_at_ms, archive_id)` order from the owner age index
+`raw_archives_by_owner_created`. Reclamation, the new archive and every
+counter commit in the put's transaction, at most 64 archives per put; what is
+still exceeded keeps the previous refusal or scrub, and the next put continues.
+Bodies scrubbed regardless (free-space floor, 16 MiB per-Attempt budget,
+parts above the budget) never reclaim for bytes; replays and offline restores
+never reclaim. Archives written before the age index existed are indexed from
+the conversation removal index by a persistent owner cursor, 512 rows per live
+put (128 puts cover 65,536), before that put reclaims. An owner whose first
+archive arrives with this index needs no backfill. Reading a reclaimed archive
+through `GET /api/v4/tasks/{taskId}/raw-archives/{archiveId}/{part}` returns an
+empty chunk with `state: "expired"`; retained chunks carry
+`state: "retained"`. The SQL sidecar keeps its scrub-only budget; it has no
+count ceiling, so it never refuses. The byte budget is tenant-wide while an
+owner reclaims only its own archives (TODO(enterprise): per-owner budgets).
+
+Measured with `raw_archive::tests::lifecycle::measure_reclaiming_put_cost`
+(debug build, in-memory deterministic VFS, loaded 4-CPU host): 9.5 ms per put
+below the bounds, 13.7 ms per put that reclaims one archive, both one WAL write
+per commit; the first backfill put (512 rows) took 45 ms and 2 writes.
+
+Alternatives rejected: raising the ceilings moves the cliff and lets the store
+grow without a lifecycle; a TTL or maintenance-driven prune operation adds an
+operation, a schedule and a second policy, and still refuses between passes;
+ordering owner reclamation by the existing conversation index would retire
+evidence in conversation-ID order rather than by age; refusing until the
+backfill completes would never complete it, because a refused put rolls back
+its backfill. Specs: `raw_archive::tests::lifecycle`,
+`raw_archive::migration::tests`, `tests/storage/test_raw_archive.py`.
 
 ## 搜索诊断与统计
 
@@ -262,15 +570,33 @@ drainers never share one pipe.
 The drainer mirrors lines into the app pipeline through
 `lib.log.get_logger('tofu.storage.engine')`. Engine operational lines are
 exactly one JSON object
-`{"source":"tofu-db","level":...,"target":...,"message":...}` so the mirror
-routes without parsing free text: `error`/`critical` levels cross at
+`{"source":"tofu-db","timestamp":...,"level":...,"target":...,"message":...}`
+so the mirror routes without parsing free text: `error`/`critical` levels cross at
 matching severity, and the `integrity_fence` target crosses at any level
 (fence refusals are first-class evidence); other levels stay at DEBUG.
+`timestamp` is the engine's wall-clock emit instant in RFC 3339 UTC with
+milliseconds and a `+00:00` offset, the incident index form (for example
+`2026-11-01T09:27:30.172+00:00`). A duration record (`authority_hold`, a
+lifecycle `state=done`) is emitted when its interval ends, `elapsed_ms` after it
+began; an `authority_hold` message also splits that time into exclusive phases
+and stages ([format and phases](RESOURCE_CONTROL.md#demand-driven-root-acceptance-and-workers)). Mirrored records repeat it as `at=` (`at=-` from an engine without the
+field) because their own record time is when the drainer read the line.
 Human-oriented opt-in dumps (`TOFU_DB_FSYNC_STATS` and the `*_stats:`/
 `listener_metrics:` lines) mirror at DEBUG, and non-JSON lines forward
 as-is at INFO. CLI contract output stays on stdout as key=value/JSON.
 Engine observation (health/metrics) goes through the authenticated control
 operations, not log scraping.
+
+Problem: raw engine lines reached `server-console.log` without a time, and the
+mirror persists only error/fence records, so an `authority_hold` could not be
+aligned with the client-side `storage.v2 slow` warnings in `error.log`.
+Decision: the engine stamps every record when it emits it. Alternatives
+rejected: stamping in the Python drainer dates the read rather than the emit (the
+drainer lags under GIL pressure), breaks the verbatim raw forward and cannot cover
+the embedded transport, which has no drainer; local time with an offset needs
+per-platform calendar calls while `app.log` local times carry no offset anyway;
+epoch milliseconds are unreadable in a console; a calendar crate would be a new
+engine dependency for one formatter.
 
 Storage supervision emits its full lifecycle through
 `tofu.storage.supervisor` and `tofu.storage.runtime` — child spawn (pid,
@@ -406,12 +732,13 @@ to the external manager's heartbeat/liveness policy, but this watcher does
 not promise an in-stall Python dump for them.
 
 The manager retains an identity-checked zombie's OS exit evidence in
-`lastWorkerProcessExit` before clearing its generation. This observation is
-read-only, does not reap the child or identify a signal sender, and remains
-unknown if the PID disappeared, was reused or the host lacks Linux `/proc`.
+`lastWorkerProcessExit` when it retires a generation, planned or failed. The
+observation itself is read-only and identifies no signal sender; only after
+the record is saved does the manager reap that exact child (see
+[infra runtime](modules/infra_runtime.md)). It remains unknown if the PID
+disappeared, was reused or the host lacks Linux `/proc`.
 A stale probe error cannot replace a known fatal signal; planned restart,
-memory recycle, health-wedge and shared-cgroup OOM accounting retain their
-existing authority.
+health-wedge and shared-cgroup OOM accounting retain their existing authority.
 
 Inspect an explicit saved core offline:
 
@@ -543,14 +870,82 @@ Verification: `tests/tools/test_tool_execution_timing.py` covers the real
 executor boundary, shared trace budget, redaction, failure, nested scopes,
 phase bounds and unavailable sinks.
 
+## Workspace lease wait evidence
+
+Model tool calls take no workspace lease since 2026-10-28
+(`docs/runbooks/GIT_WORKSPACE_GUARD.md`, "Tool calls take no workspace
+leases"), so the `[CommandAdmission] fence` line and command claim replay are
+gone. The `[WorkspaceLease] wait` line remains for Tofu's own operations
+(delivery, integration snapshots, checkpoints, dependency setup) and names
+both sides of a stalled acquisition:
+
+```text
+[WorkspaceLease] wait 12s mode=write root=tree:/…/tofu waiter(pid=… thread=…
+  thread_name=tofu-integration tool=- task=- conv=- claims=file:/…/a.py,…
+  cmd="…") [holder: pid=…, thread=…, held_seconds=12.0, mode=file-write,
+  thread_name=…, claims=tree:/…/worktrees/x]
+```
+
+(one line in the log). `claims=` lists at most four `scope:path` labels
+(`+N more` beyond). `mode=` is the blocker's mode on the contested key:
+`file-write` on an ancestor `tree:` key means the holder's claim lies beneath
+it. A blocker that is an earlier queued request the waiter may not overtake
+reports `queued_seconds=` and `mode=queued-<mode>` instead of
+`held_seconds=`. `cmd=` is the caller's purpose summary, collapsed to one line
+of at most 160 characters. The `workspace_admission_wait` event carries the
+same facts. The decision record is "Both sides named" in
+`docs/runbooks/GIT_WORKSPACE_GUARD.md`.
+
+`run_command: $ <cmd> (timeout=…, cwd=…)` logs one line per execution: the
+redundant leading `cd <cwd> && ` is elided (the line records cwd), newlines are
+escaped, and text beyond 600 characters ends in `…[+N chars]`. Verification:
+`tests/project_mod/test_run_command_log_line.py` and
+`tests/project_mod/test_workspace_admission_wait_both_sides.py`.
+
 
 ## Metric work on storage RPCs
 
-Problem: per-RPC metric recording recreated default histogram containers and normalized every character before truncating bounded labels. Decision: normalize only the length-preserving label prefix, replace ASCII C0 characters using one compiled regular expression, and allocate histogram state only on its first locked observation. Whitespace/fallback rules, Unicode and DEL behavior, label cardinality, first bucket definitions, inclusive counts, sums and fail-open RPC recording remain unchanged. Alternatives considered: disabling or sampling metrics would lose exact observations; label caching would introduce another resident bound and lifecycle; active waiting improved latency but increased CPU and concurrent-read costs.
+Metric test resets clear both admitted label values and their normalization
+memo. Resetting only the admission set leaves previously folded labels stuck
+on `other` in later tests; retaining that memo across a reset was rejected
+because it makes label admission depend on test order.
 
-Measured against frozen native source 5c69659aa11c0f56437decde0c4b40fa10626079f6a7e8193300934ed99622fd: four single-caller runs each checked 610,000 exact reads including the separately profiled sample. Default SDK caller CPU decreases about 12% and mean latency 9–11%; default constructor pool capacity is four, with one caller. The direct-runtime point corpus omits the application client, so its latency must not be described as full SDK latency. Eight original 1000-conversation harness legs preserve exact stream/replay/content and integrity. Stream P99 improves in both transports but remains above one second. One reverse embedded completion P99 regresses about 4.3%; no universal no-regression or SQLite superiority claim follows.
+Problem: every observation updated every matching cumulative bucket, while
+exposition repeatedly sorted and rescanned complete series for each metric
+name and re-escaped the same labels for every bucket.
+Decision: the process-local store retains one disjoint count per distinct
+non-NaN boundary and uses binary search to increment at most one count.
+Scraping derives inclusive counts from a consistent locked snapshot, groups
+sorted series once, and escapes each histogram's labels once. The first bucket
+definition, its original order and duplicate boundaries remain authoritative;
+negative/NaN observations retain their existing zero clamp, NaN boundaries
+never match, and infinite observations remain counted. Counter names retain
+precedence over gauges of the same name. No sample, label, public metric or
+observation is dropped.
 
-There are no added workers, queues, per-request caches or persistent records. The compiled pattern object measures 160 Python bytes, excluding interpreter regexp-cache bookkeeping and RSS; histogram state has its original structure. Both native/client RSS in embedded observations overlap and must not be summed. Full results and limitations: `tofudb_metrics_hotpath_admission_20261008.json`.
+Alternatives considered: sampling or disabling metrics loses exact evidence;
+adding a scrape cache introduces freshness policy; assuming sorted unique
+inputs changes the existing store contract. Input conversion still occurs on
+every observation, preserving failure behavior for invalid bucket iterables.
+Existing prefix-only label normalization and cardinality limits are unchanged.
+
+A seven-pair alternating component benchmark against `7d0f5ff8a` checked
+byte-identical exposition and exact snapshots on each pair. For 100,000 calls
+to `record_storage_rpc`, median wall time fell from 0.556 s to 0.471 s (15%).
+Ten scrapes with 8 series per name and 1/16/64 names per metric kind fell from
+2.22/47.7/354 ms to 1.17/17.2/70.1 ms. An unchanged-source control varied by
+approximately 2% or less. This measures metric work in one Python process,
+not storage RPC latency, application startup or overall request throughput.
+An eight-writer fixture with 16,000 observations and 100 concurrent snapshots
+preserved exact counts: median wall/CPU time changed from 257/331 ms to
+194/253 ms. First observation of a new series pays boundary indexing once:
+a separate nine-pair measurement changed from 5.33 to 6.34 microseconds.
+For the 16-name fixture (128 histograms), traced retained Python allocations
+changed from 155,880 to 156,200 bytes; the peak including a detached snapshot
+changed from 215,024 to 218,120 bytes. These are Python allocations, not RSS;
+no worker, queue, persistent record or tuning parameter was introduced.
+Verify `tests/observability/test_metric_store.py`,
+`tests/storage/test_storage_rpc_metrics.py` and the metrics route suite.
 
 Explicit provider-payload capture
 ---------------------------------
@@ -597,9 +992,10 @@ introduced. These are diagnostic facts, never task/Turn settlement authority.
 
 | Phase / field | Actual observation |
 |---|---|
-| `turn_command_total`, `input_translation`, `language_detection` | command application, send translation gate/work, and language cascade |
+| `turn_command_total` | command application; an accepted turn's input translation is not part of it |
+| `input_translation`, `language_detection` | send translation gate/work: the attempt-start job of an accepted turn (`send` operation; the worker logs `[Task …] joined deferred input translation after Ns` when it had to wait) or a synchronous steer |
 | `lane_queue`, `lane_worker` | submission → worker entry, and worker entry → return |
-| `route_resolution`, `route_selection`, `dispatcher_wait` | dispatcher preparation, slot selection, and actual backpressure sleep |
+| `route_resolution`, `route_selection`, `dispatcher_wait` | dispatcher preparation, slot selection, and actual backpressure sleep; every pick on any thread (agent rounds included) also records `tofu_llm_route_selection_seconds{scope=pinned\|shared,outcome=selected\|none}`, dispatcher-lock wait included; chat dispatch reports its summed pick time as described below |
 | `cache_lookup`, `identity_check`, `machine_translation`, `cache_store` | explicit fast paths and cache writes |
 | `engine_attempt`, `engine_backoff`, `quality_validation`, `postprocess` | outer translation attempt, actual backoff, guards/status publication, dedup |
 | `status_delivery` | status callback publication; nested in validation when appropriate |
@@ -615,6 +1011,8 @@ introduced. These are diagnostic facts, never task/Turn settlement authority.
 | `stream_headers_wait` | direct/relay stream-header wait, with physical trace and transport label |
 | `storage_commit`, `storage_attempt`, `storage_backoff` | translated Turn overlay CAS lifecycle, storage attempts and actual retry sleeps |
 | `turn_persist`, `executor_start`, `acknowledgement_read` | accepted send command persistence, executor start and final receipt reads |
+
+**Chat dispatch pick latency (decision 2026-11-02).** Problem: outside an admitted translation scope `timed_call('route_selection', …)` records nothing, so agent and swarm rounds had no log-visible pick latency, while the per-logger `LogBudgetFilter` (300 INFO/DEBUG lines per minute) dropped `lib.llm.diagnostic_timing` lines in 33 one-minute windows of the 2026-11-02 live profile. Decision: no per-pick log line is added. Every pick on every thread records `tofu_llm_route_selection_seconds{scope,outcome}`, which no log budget can drop. Each chat dispatch (sync stream, async stream, non-stream) also sums the wall time of its picks, empty picks and retried picks included, into the internal dispatch evidence `usage['_dispatch']['route_selection_ms']` beside `queue_wait_ms`, so the round's provider evidence carries it, and the existing per-round INFO line `stream_llm_response complete: … route_selection_ms=<ms>` prints it (`-` when a transport reports no dispatch evidence) without adding a line. Translation keeps its `[Translation:timing]` phases; when the budget drops them, the metric still holds every pick. Alternatives considered: binding a `DiagnosticTiming` scope to every chat dispatch emits start and complete records for every phase of every round into the same budgeted logger; a per-pick INFO line from the dispatcher adds load to a budgeted logger and is dropped first under the contention it should explain; WARNING records bypass the budget but misfile routine timing as incidents. Specs: `test_chat_dispatch_pick_emits_the_latency_record` and `test_round_completion_line_reports_the_dispatch_pick_time` in `tests/llm_dispatch/test_slot_pool_scopes.py`.
 
 Spans are **inclusive**, not additive: `parent_span_id` names nesting, and worker
 execution overlaps the synchronous caller wait. Sum neither `provider_call` and

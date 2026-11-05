@@ -99,6 +99,7 @@ def test_proven_credential_failure_disables_and_retains_reason(stats, failure):
     assert row['last_error'] == str(failure)
     assert ks.get_all_stats()['keys'][PAIR]['last_error'] == str(failure)
     assert ks.is_key_enabled(PROVIDER, KEY, model='another-model') is False
+    assert ks.flush_key_stats() is True
     assert json.loads(path.read_text())['stats'][PAIR]['credential_failures'] == ks.MIN_ATTEMPTS
 
 

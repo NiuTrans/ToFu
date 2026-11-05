@@ -13,7 +13,15 @@ import copy
 import json
 import os
 
-from lib.tools.result_envelope import sparse_result_items
+from lib.conversation_sync.settled_rows import (
+    SettledDict,
+    SettledList,
+    memo_get,
+    memo_put,
+    settle,
+    settle_unless_same,
+)
+from lib.tools.result_envelope import sparse_result_items, tool_result_observation
 
 
 # Backend-only stream diagnostics.  Keep the legacy spellings documented, but
@@ -42,6 +50,18 @@ def sanitize_usage_for_persist(usage):
     }
 
 
+def _sanitized_api_round(round_item):
+    if (isinstance(round_item, dict)
+            and isinstance(round_item.get('usage'), dict)):
+        clean_usage = sanitize_usage_for_persist(round_item['usage'])
+        if clean_usage is not round_item['usage']:
+            return {**round_item, 'usage': clean_usage}
+    return round_item
+
+
+_SANITIZED_API_ROUND_KEY = ('persist-sanitized-api-round',)
+
+
 def sanitize_api_rounds_for_persist(api_rounds):
     """Remove wire diagnostics while retaining public round/cost/token data."""
     if not isinstance(api_rounds, list):
@@ -49,13 +69,15 @@ def sanitize_api_rounds_for_persist(api_rounds):
     out = []
     changed = False
     for round_item in api_rounds:
-        if (isinstance(round_item, dict)
-                and isinstance(round_item.get('usage'), dict)):
-            clean_usage = sanitize_usage_for_persist(round_item['usage'])
-            if clean_usage is not round_item['usage']:
-                round_item = {**round_item, 'usage': clean_usage}
-                changed = True
-        out.append(round_item)
+        if type(round_item) is SettledDict:
+            clean = memo_get(round_item, _SANITIZED_API_ROUND_KEY)
+            if clean is None:
+                clean = memo_put(round_item, _SANITIZED_API_ROUND_KEY, settle_unless_same(
+                    round_item, _sanitized_api_round(round_item)))
+        else:
+            clean = _sanitized_api_round(round_item)
+        changed = changed or clean is not round_item
+        out.append(clean)
     return out if changed else api_rounds
 
 
@@ -123,6 +145,24 @@ def trim_tool_round_for_persist(round_item):
     return round_item
 
 
+_TRIMMED_TOOL_ROUND_KEY = ('persist-trimmed-tool-round',)
+
+
+def trim_tool_round_copy(round_item):
+    """``trim_tool_round_for_persist(dict(row))``, once per settled row."""
+    if type(round_item) is SettledDict:
+        trimmed = memo_get(round_item, _TRIMMED_TOOL_ROUND_KEY)
+        if trimmed is None:
+            candidate = dict(round_item)
+            result = trim_tool_round_for_persist(candidate)
+            trimmed = memo_put(round_item, _TRIMMED_TOOL_ROUND_KEY, (
+                round_item if result is candidate else settle(result)))
+        return trimmed
+    if isinstance(round_item, dict):
+        return trim_tool_round_for_persist(dict(round_item))
+    return round_item
+
+
 # A durable turn frame must stay below the sidecar wire cap (64 MiB). The
 # toolRounds lane dominates long tool-heavy turns; once its string payload
 # crosses this budget the oldest settled rounds are compacted so full folds
@@ -133,15 +173,33 @@ _TOOL_ROUNDS_KEEP_TAIL_INTACT = 24
 _ELIDED_PAYLOAD_MIN_CHARS = 4096
 
 
+_PAYLOAD_CHARS_KEY = ('persist-payload-chars',)
+
+
 def _string_payload_chars(value):
     """Cheap serialized-size proxy: JSON overhead stays proportional."""
     if isinstance(value, str):
         return len(value)
+    kind = type(value)
+    if kind is SettledDict or kind is SettledList:
+        chars = memo_get(value, _PAYLOAD_CHARS_KEY)
+        if chars is None:
+            chars = memo_put(value, _PAYLOAD_CHARS_KEY, _container_payload_chars(value))
+        return chars
+    return _container_payload_chars(value)
+
+
+def _container_payload_chars(value):
     if isinstance(value, dict):
         return sum(_string_payload_chars(item) for item in value.values())
     if isinstance(value, (list, tuple)):
         return sum(_string_payload_chars(item) for item in value)
     return 0
+
+
+def tool_round_payload_chars(round_item):
+    """One row's share of the toolRounds frame budget (memoized per settled row)."""
+    return _string_payload_chars(round_item)
 
 
 def _elided_payload_stub(original_chars):
@@ -200,7 +258,7 @@ def _swarm_stub_snapshot_from_handle(round_item):
     try:
         handle = json.loads(raw)
     except ValueError:
-        return None
+        handle = tool_result_observation(raw, round_item.get('toolResultEvidence'))
     items = sparse_result_items(handle)
     if items:
         handle = next(
@@ -235,6 +293,7 @@ def compact_tool_rounds_for_frame_budget(
     *,
     budget_bytes=None,
     keep_tail=_TOOL_ROUNDS_KEEP_TAIL_INTACT,
+    payload_chars=None,
 ):
     """Elide the oldest settled rounds' heavy payloads when the toolRounds
     lane crosses the durable frame budget.
@@ -245,13 +304,16 @@ def compact_tool_rounds_for_frame_budget(
     ``results[]`` string values) become honest stubs. The newest ``keep_tail``
     rounds and any in-flight round stay intact. Copy-on-change: the input and
     every untouched round keep their identity, and the function is
-    allocation-free while the lane already fits.
+    allocation-free while the lane already fits. ``payload_chars`` is the
+    caller's exact ``sum(map(tool_round_payload_chars, rounds))`` when it
+    already holds that total.
     """
     if not isinstance(rounds, list) or not rounds:
         return rounds
     budget = (TOOL_ROUNDS_FRAME_BUDGET_BYTES
               if budget_bytes is None else budget_bytes)
-    total = sum(_string_payload_chars(item) for item in rounds)
+    total = (sum(_string_payload_chars(item) for item in rounds)
+             if payload_chars is None else payload_chars)
     if total <= budget:
         return rounds
     compacted = list(rounds)
@@ -264,19 +326,40 @@ def compact_tool_rounds_for_frame_budget(
             continue
         if item.get('status') in ('running', 'pending'):
             continue
-        clone = copy.deepcopy(item)
-        stub_snapshot = _swarm_stub_snapshot_from_handle(item)
-        reclaimed = _elide_string_field(clone, 'toolContent')
-        reclaimed += _elide_results_payloads(clone)
+        if type(item) is SettledDict:
+            elision = memo_get(item, _FRAME_ELISION_KEY)
+            if elision is None:
+                clone, reclaimed, stub_chars = _frame_elision(item)
+                elision = memo_put(item, _FRAME_ELISION_KEY, (
+                    None if clone is None else settle(clone), reclaimed, stub_chars))
+            clone, reclaimed, stub_chars = elision
+        else:
+            clone, reclaimed, stub_chars = _frame_elision(item)
         if reclaimed <= 0:
             continue
-        if stub_snapshot is not None:
-            clone['_swarmSnapshot'] = stub_snapshot
-            total += _string_payload_chars(stub_snapshot)
-        clone['_persistCompacted'] = True
+        total += stub_chars
         compacted[position] = clone
         total -= reclaimed
     return compacted
+
+
+_FRAME_ELISION_KEY = ('persist-frame-elision',)
+
+
+def _frame_elision(item):
+    """Return one round's elided clone, reclaimed chars and stub chars."""
+    clone = copy.deepcopy(item)
+    stub_snapshot = _swarm_stub_snapshot_from_handle(item)
+    reclaimed = _elide_string_field(clone, 'toolContent')
+    reclaimed += _elide_results_payloads(clone)
+    if reclaimed <= 0:
+        return None, reclaimed, 0
+    stub_chars = 0
+    if stub_snapshot is not None:
+        clone['_swarmSnapshot'] = stub_snapshot
+        stub_chars = _string_payload_chars(stub_snapshot)
+    clone['_persistCompacted'] = True
+    return clone, reclaimed, stub_chars
 
 def project_message_for_window(message):
     """Return the compact, UI-complete first-paint projection of a message.
@@ -343,6 +426,8 @@ __all__ = [
     'project_usage_container_for_storage',
     'project_event_usage_for_storage',
     'project_task_result_metadata_for_storage',
+    'tool_round_payload_chars',
     'trim_tool_round_for_persist',
+    'trim_tool_round_copy',
     'project_message_for_window',
 ]

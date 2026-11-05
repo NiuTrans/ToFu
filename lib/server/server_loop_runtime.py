@@ -10,7 +10,7 @@ from typing import Any, Coroutine
 
 from lib.agent_core.worker_executor import RecoverableAgentExecutor
 from lib.observability import InstrumentedThreadPoolExecutor
-from runtime_guards import deployment_resource_default, task_concurrency_hard_ceiling
+from runtime_guards import deployment_resource_default
 
 
 def _evolution_run_sweep() -> None:
@@ -33,27 +33,19 @@ def _worker_count(
     environ: Mapping[str, str],
     logger: logging.Logger,
 ) -> int:
-    """Resolve a bounded pool size without letting malformed env block boot."""
-    try:
-        default_ceiling = deployment_resource_default(key, environ)
-    except KeyError:
-        # Keep the helper useful for independently named bounded executors;
-        # only the two production-owned pools have profile-specific budgets.
-        default_ceiling = 16
+    """Resolve an idle-reuse target without letting malformed env block boot.
+
+    The demand executors start every accepted job; this number only decides
+    how many idle threads stay warm, so it is never clamped.
+    """
     try:
         configured = int(environ.get(key, '') or '0')
     except (ValueError, TypeError, OverflowError) as exc:
-        logger.debug('[Server] bad %s, auto-sizing: %s', key, exc)
+        logger.debug('[Server] bad %s, using the deployment default: %s', key, exc)
         configured = 0
-    if configured <= 0:
-        minimum = max(1, default_ceiling // 2)
-        return min(default_ceiling, max(minimum, os.cpu_count() or 4))
-    ceiling = task_concurrency_hard_ceiling(environ) if key == 'TOFU_AGENT_WORKERS' else 512
-    if configured > ceiling:
-        logger.warning('[Server] %s=%d exceeds the pool bound; clamping to %d',
-                       key, configured, ceiling)
-        return ceiling
-    return configured
+    if configured > 0:
+        return configured
+    return deployment_resource_default(key, environ)
 
 
 def _cleanup_interval(

@@ -38,3 +38,8 @@ Preserve request deadlines, detached inputs, late-result exclusion and local
 lease cancellation; only executor-owned close joins physical workers. Verify
 `tests/context/test_context_provider_executor_lifecycle.py` with real startup
 faults, 32 blocked reads, healthy sibling work and close beyond one second.
+A required read cannot degrade, so its deadline only makes the wait visible:
+`turn_requirements.py` keeps its in-flight read through
+`persistence_wait.wait_for_persistence` (`docs/contracts/ARTIFACT_REVIEW.md`);
+never turn storage slowness into a fatal admission error. Verify
+`tests/artifacts/test_turn_requirements_context.py`.

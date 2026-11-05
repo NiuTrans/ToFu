@@ -56,10 +56,6 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn resource_exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
-
 fn python_falsy(value: &Value) -> bool {
     match value {
         Value::Null => true,
@@ -480,7 +476,7 @@ pub(crate) fn register(
     let canonical = serde_json::to_vec(&manifest)
         .map_err(|_| invalid_data("plugin manifest cannot be encoded"))?;
     if canonical.len() > MAX_PLUGIN_MANIFEST_BYTES {
-        return Err(resource_exhausted("plugin manifest exceeds its bound"));
+        return Err(crate::resource_exhaustion::domain_bound("plugin manifest exceeds its bound"));
     }
     let namespace = manifest["namespace"]
         .as_str()

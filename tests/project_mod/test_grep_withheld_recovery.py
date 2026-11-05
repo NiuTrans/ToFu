@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import sys
 
 import pytest
 
@@ -46,26 +47,28 @@ def _write_lines(path, count, *, prefix='needle line'):
 
 
 def _match_line_classifier(line: bytes) -> bool:
-    return bool(re.match(rb'^(?:.+?:)?\d+:', line))
+    return bool(re.match(rb'^(?:[^\x00]*\x00)?\d+:', line))
 
 
-def _backend(tmp_path, name, body):
-    script = tmp_path / name
-    script.write_text(body)
-    script.chmod(0o755)
-    return str(script)
+def _emit_argv(tmp_path, payload: bytes, *, then: str = ''):
+    """Fake backend argv writing *payload* verbatim (NUL bytes included)."""
+    script = tmp_path / 'emit.py'
+    script.write_text(
+        'import sys\n'
+        f'sys.stdout.buffer.write({payload!r})\n'
+        'sys.stdout.flush()\n' + then)
+    return (sys.executable, str(script))
 
 
 def test_engine_counts_remainder_per_file(tmp_path, monkeypatch):
     monkeypatch.setattr(grep_engine, '_REMAINDER_DRAIN_S', 0.4)
-    backend = _backend(
-        tmp_path, 'emit.sh',
-        '#!/bin/sh\nprintf "a.py:1:x\\na.py:2:x\\nb.py:1:x\\nb.py:2:x\\nb.py:3:x\\n"\n')
+    argv = _emit_argv(tmp_path, (
+        b'a.py\x001:x\na.py\x002:x\nb.py\x001:x\nb.py\x002:x\nb.py\x003:x\n'))
     result = run_search(SearchRequest(
-        cwd=str(tmp_path), gnu_argv=(backend,), preferred_backend='gnu',
+        cwd=str(tmp_path), gnu_argv=argv, preferred_backend='gnu',
         max_results=2, timeout=5, match_line=_match_line_classifier))
     assert result.limit_reached and not result.timed_out
-    assert result.stdout == b'a.py:1:x\na.py:2:x\n'
+    assert result.stdout == b'a.py\x001:x\na.py\x002:x\n'
     assert result.remainder_total == 3
     assert result.remainder_files == (('b.py', 3, 1, 3),)
     # The backend exited on its own: the remainder is provably complete.
@@ -74,11 +77,9 @@ def test_engine_counts_remainder_per_file(tmp_path, monkeypatch):
 
 def test_engine_exact_cap_proves_completeness(tmp_path, monkeypatch):
     monkeypatch.setattr(grep_engine, '_REMAINDER_DRAIN_S', 0.4)
-    backend = _backend(
-        tmp_path, 'emit.sh',
-        '#!/bin/sh\nprintf "a.py:1:x\\na.py:2:x\\n"\n')
+    argv = _emit_argv(tmp_path, b'a.py\x001:x\na.py\x002:x\n')
     result = run_search(SearchRequest(
-        cwd=str(tmp_path), gnu_argv=(backend,), preferred_backend='gnu',
+        cwd=str(tmp_path), gnu_argv=argv, preferred_backend='gnu',
         max_results=2, timeout=5, match_line=_match_line_classifier))
     assert result.limit_reached
     assert result.remainder_total == 0 and result.remainder_complete
@@ -87,13 +88,13 @@ def test_engine_exact_cap_proves_completeness(tmp_path, monkeypatch):
 def test_engine_remainder_ceiling_marks_capped(tmp_path, monkeypatch):
     monkeypatch.setattr(grep_engine, '_REMAINDER_MATCH_CEILING', 5)
     monkeypatch.setattr(grep_engine, '_REMAINDER_DRAIN_S', 5.0)
-    lines = ''.join(f'a.py:{i}:x\\n' for i in range(1, 60))
+    lines = b''.join(b'a.py\x00%d:x\n' % i for i in range(1, 60))
     marker = tmp_path / 'finished'
-    backend = _backend(
-        tmp_path, 'emit.sh',
-        f'#!/bin/sh\nprintf "{lines}"\nsleep 5\ntouch "$1"\n')
+    argv = _emit_argv(tmp_path, lines, then=(
+        'import pathlib, time\ntime.sleep(5)\n'
+        'pathlib.Path(sys.argv[1]).touch()\n'))
     result = run_search(SearchRequest(
-        cwd=str(tmp_path), gnu_argv=(backend, str(marker)),
+        cwd=str(tmp_path), gnu_argv=(*argv, str(marker)),
         preferred_backend='gnu', max_results=2, timeout=10,
         match_line=_match_line_classifier))
     assert result.remainder_capped
@@ -103,26 +104,37 @@ def test_engine_remainder_ceiling_marks_capped(tmp_path, monkeypatch):
 
 
 def test_engine_from_line_filters_matches_context_and_separators(tmp_path):
-    body = (
-        '#!/bin/sh\nprintf "a.py:1:m\\na.py-2-c\\n--\\na.py:3:m\\n'
-        'a.py-4-c\\na.py:5:m\\n"\n')
-    backend = _backend(tmp_path, 'emit.sh', body)
+    argv = _emit_argv(tmp_path, (
+        b'a.py\x001:m\na.py\x002-c\n--\na.py\x003:m\n'
+        b'a.py\x004-c\na.py\x005:m\n'))
     result = run_search(SearchRequest(
-        cwd=str(tmp_path), gnu_argv=(backend,), preferred_backend='gnu',
+        cwd=str(tmp_path), gnu_argv=argv, preferred_backend='gnu',
         max_results=10, from_line=3, timeout=5,
         match_line=_match_line_classifier))
-    assert result.stdout == b'a.py:3:m\na.py-4-c\na.py:5:m\n'
+    assert result.stdout == b'a.py\x003:m\na.py\x004-c\na.py\x005:m\n'
     assert not result.limit_reached
 
 
-def test_engine_no_floor_no_counting_without_cap(tmp_path):
-    backend = _backend(
-        tmp_path, 'emit.sh', '#!/bin/sh\nprintf "a.py:1:x\\na.py:2:x\\n"\n')
+def test_engine_floor_reads_bare_record_line_numbers(tmp_path):
+    # Single-file records carry no path; their timestamps hold ``:NN:`` and
+    # ``-NN-`` runs that must never be mistaken for the line number.
+    payload = (b'29-2026-10-24 15:29:55 ctx\n'
+               b'30:2026-10-24 15:09:55 match\n'
+               b'31-2026-10-24 15:10:00 ctx\n')
     result = run_search(SearchRequest(
-        cwd=str(tmp_path), gnu_argv=(backend,), preferred_backend='gnu',
+        cwd=str(tmp_path), gnu_argv=_emit_argv(tmp_path, payload),
+        preferred_backend='gnu', from_line=30, timeout=5,
+        match_line=_match_line_classifier))
+    assert result.stdout == payload.split(b'\n', 1)[1]
+
+
+def test_engine_no_floor_no_counting_without_cap(tmp_path):
+    argv = _emit_argv(tmp_path, b'a.py\x001:x\na.py\x002:x\n')
+    result = run_search(SearchRequest(
+        cwd=str(tmp_path), gnu_argv=argv, preferred_backend='gnu',
         timeout=5, match_line=_match_line_classifier))
     assert not result.limit_reached and result.remainder_total == 0
-    assert result.stdout == b'a.py:1:x\na.py:2:x\n'
+    assert result.stdout == b'a.py\x001:x\na.py\x002:x\n'
 
 
 # ── Public tool: truncation evidence + from_line paging (live path) ────
@@ -246,6 +258,104 @@ def test_no_match_beyond_floor_hint(tmp_path, live_only):
     assert 'line 99 or later' in out
 
 
+# ── Record framing: timestamps and dated names never shift the split ───
+
+
+def _log_line(i, word='needle'):
+    # Minutes differ from line numbers, so splitting at the content's
+    # ``HH:MM:`` would report a wrong line.
+    return f'2026-10-24 15:{(i * 7 + 3) % 60:02d}:55 [INFO] {word} {i}\n'
+
+
+@needs_backend
+def test_single_file_paging_round_trip_on_timestamped_lines(tmp_path, live_only):
+    base = str(tmp_path)
+    (tmp_path / 'app.log').write_text(
+        ''.join(_log_line(i) for i in range(1, 26)))
+    page1 = tool_grep(base, 'needle', 'app.log', max_results=10)
+    assert '[page with from_line=11]' in page1
+    page2 = tool_grep(base, 'needle', 'app.log', max_results=10, from_line=11)
+    assert '[page with from_line=21]' in page2
+    page3 = tool_grep(base, 'needle', 'app.log', max_results=10, from_line=21)
+    shown = []
+    for page in (page1, page2, page3):
+        shown += [int(n) for n in re.findall(r'^(\d+):2026-10-24 ', page, re.M)]
+    assert shown == list(range(1, 26))
+    assert not grep_result_was_truncated(page3)
+
+
+@needs_backend
+def test_single_file_context_on_timestamped_lines_counts_matches_only(
+        tmp_path, live_only):
+    base = str(tmp_path)
+    (tmp_path / 'app.log').write_text(''.join(
+        _log_line(i, 'needle' if i == 30 else 'filler') for i in range(1, 34)))
+    out = tool_grep(base, 'needle', 'app.log', context_lines=1)
+    assert '\u2014 1 matches:' in out
+    assert out.split('\n\n', 1)[1].splitlines() == [
+        f'29-{_log_line(29, "filler").rstrip()}',
+        f'30:{_log_line(30).rstrip()}',
+        f'31-{_log_line(31, "filler").rstrip()}',
+    ]
+
+
+def _grouped_records(out):
+    """``{header: [record, ...]}`` from a grouped multi-file result body."""
+    groups: dict[str, list[str]] = {}
+    current = None
+    for line in out.split('\n\n', 1)[1].splitlines():
+        if line == '--':
+            continue
+        if re.match(r'\d+[:-]', line):
+            groups[current].append(line)
+        else:
+            current = line
+            groups.setdefault(current, [])
+    return groups
+
+
+@needs_backend
+@pytest.mark.parametrize('search_path', ['live', 'index'])
+def test_multifile_dated_names_and_timestamps_keep_exact_records(
+        tmp_path, monkeypatch, search_path):
+    project = tmp_path / 'proj'
+    project.mkdir()
+    base = str(project)
+    dated = 'app.log.2026-10-24.00001'
+    (project / dated).write_text(''.join(
+        _log_line(i, 'needle' if i in (12, 30) else 'filler')
+        for i in range(1, 34)))
+    (project / 'b-1-2.py').write_text('x = 1\nneedle = "12:34:56"\n')
+    if search_path == 'live':
+        monkeypatch.setattr(
+            read_tools.tree_index, 'acquire', lambda *_a, **_kw: None)
+    else:
+        idx_store = tmp_path / 'idx'
+        idx_store.mkdir()
+        monkeypatch.setattr(tree_index, '_index_dir', lambda: str(idx_store))
+        monkeypatch.setattr(tree_index, '_mem', {})
+        monkeypatch.setattr(tree_index, '_building', set())
+        tree_index._build_sync(base)
+
+    out = tool_grep(base, 'needle', '.', context_lines=1)
+    assert '\u2014 3 matches:' in out
+    assert '\0' not in out
+    assert _grouped_records(out) == {
+        dated: [f'{n}{":" if n in (12, 30) else "-"}'
+                f'{_log_line(n, "needle" if n in (12, 30) else "filler").rstrip()}'
+                for n in (11, 12, 13, 29, 30, 31)],
+        'b-1-2.py': ['1-x = 1', '2:needle = "12:34:56"'],
+    }
+
+    capped = tool_grep(base, 'needle', '.', max_results=1)
+    summary = capped.splitlines()[-2]
+    entries = re.findall(r'(\S+) \((\d+), lines? ([\d\u2013]+)\)', summary)
+    assert sum(int(count) for _path, count, _lines in entries) == 2
+    assert {path for path, _count, _lines in entries} <= {dated, 'b-1-2.py'}
+    for _path, _count, lines in entries:
+        assert {int(n) for n in lines.split('\u2013')} <= {2, 12, 30}
+
+
 # ── Index path: skipped chunks get an exact bounded count pass ─────────
 
 
@@ -345,17 +455,25 @@ def test_unstarted_index_chunk_failure_preserves_incomplete_evidence(monkeypatch
     from types import SimpleNamespace
 
     original = threading.Thread.start
-    starts = 0
+    submit_chunk = read_tools._submit_index_chunk
+    unstartable = threading.Event()
     called = []
     lock = threading.Lock()
     barrier = threading.Barrier(3, timeout=10)
 
+    # The executor retries one failed carrier start, so chunk 1 stays
+    # unstarted only when every start attempted for its submission fails.
+    def submit(pool, function, index, chunk):
+        if index == 1:
+            unstartable.set()
+        try:
+            return submit_chunk(pool, function, index, chunk)
+        finally:
+            unstartable.clear()
+
     def start(thread):
-        nonlocal starts
-        if thread.name.startswith('project-read'):
-            starts += 1
-            if starts == 2:
-                raise RuntimeError('unstarted search chunk')
+        if thread.name.startswith('project-read') and unstartable.is_set():
+            raise RuntimeError('unstarted search chunk')
         return original(thread)
 
     def search(index, chunk):
@@ -364,6 +482,7 @@ def test_unstarted_index_chunk_failure_preserves_incomplete_evidence(monkeypatch
         barrier.wait()
         return index, chunk, False, False, 0, SimpleNamespace(limit_reached=False)
 
+    monkeypatch.setattr(read_tools, '_submit_index_chunk', submit)
     monkeypatch.setattr(threading.Thread, 'start', start)
     results = [None] * 4
     actual = read_tools._run_pool(search, [b'a', b'b', b'c', b'd'],

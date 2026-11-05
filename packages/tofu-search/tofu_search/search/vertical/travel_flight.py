@@ -15,10 +15,15 @@ search deadline.
 
 import re
 from datetime import date
+from importlib import import_module
 
 from tofu_search.config import get_config
-from tofu_search.search.vertical import _mcp, travel_flyai, travel_slots
 from tofu_search.search.vertical.base import logger
+
+# Leaf imports, not via the package: see base.py.
+_mcp = import_module('tofu_search.search.vertical._mcp')
+travel_flyai = import_module('tofu_search.search.vertical.travel_flyai')
+travel_slots = import_module('tofu_search.search.vertical.travel_slots')
 
 TYPE = 'flight'
 DOMAIN = 'travel'

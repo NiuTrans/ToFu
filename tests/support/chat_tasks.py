@@ -20,8 +20,11 @@ from lib.tasks_pkg.manager.runtime import chat_task_runtime
 class ChatTaskTestRegistry(MutableMapping[str, dict]):
     """Mutable test-fixture view over the public chat runtime operations."""
 
+    def __init__(self, runtime=chat_task_runtime):
+        self._runtime = runtime
+
     def __getitem__(self, task_id: str) -> dict:
-        task = chat_task_runtime.get(task_id)
+        task = self._runtime.get(task_id)
         if task is None:
             raise KeyError(task_id)
         return task
@@ -40,40 +43,40 @@ class ChatTaskTestRegistry(MutableMapping[str, dict]):
         ).to_payload()
         requested_status = str(task.get('status') or 'running')
         task['status'] = 'running'
-        chat_task_runtime.discard(task_id)
-        if not chat_task_runtime.adopt(task):
+        self._runtime.discard(task_id)
+        if not self._runtime.adopt(task):
             raise ValueError(f'chat task fixture could not be adopted: {task_id}')
         task['status'] = requested_status
 
     def __delitem__(self, task_id: str) -> None:
-        if chat_task_runtime.discard(task_id) is None:
+        if self._runtime.discard(task_id) is None:
             raise KeyError(task_id)
 
     def __iter__(self) -> Iterator[str]:
-        return iter(chat_task_runtime.task_ids())
+        return iter(self._runtime.task_ids())
 
     def __len__(self) -> int:
-        return chat_task_runtime.task_count()
+        return self._runtime.task_count()
 
     def get(self, task_id: str, default=None):
-        task = chat_task_runtime.get(task_id)
+        task = self._runtime.get(task_id)
         return default if task is None else task
 
     def pop(self, task_id: str, default=None):
-        task = chat_task_runtime.discard(task_id)
+        task = self._runtime.discard(task_id)
         return default if task is None else task
 
     def clear(self) -> None:
-        for task_id in chat_task_runtime.task_ids():
-            chat_task_runtime.discard(task_id)
+        for task_id in self._runtime.task_ids():
+            self._runtime.discard(task_id)
 
     def values(self):
-        return chat_task_runtime.snapshot()
+        return self._runtime.snapshot()
 
     def items(self):
         return [
             (str(task.get('id') or ''), task)
-            for task in chat_task_runtime.snapshot()
+            for task in self._runtime.snapshot()
         ]
 
 
@@ -85,4 +88,21 @@ chat_task_registry = ChatTaskTestRegistry()
 chat_task_fixture_guard = threading.RLock()
 
 
-__all__ = ['chat_task_fixture_guard', 'chat_task_registry']
+def isolated_reaper_registry(monkeypatch) -> ChatTaskTestRegistry:
+    """Point the stuck-task reaper at a registry holding only this test's tasks.
+
+    ``reap_stuck_running_tasks`` sweeps the whole process registry, which in a
+    shared worker also holds tasks that earlier tests left running; a reaped
+    count or verdict must not include them. Insert the test's own task dicts
+    into the returned view; they may also stay in ``chat_task_registry`` for
+    reads, because both registries hold the same dict.
+    """
+    from lib.agent_core.task_runtime import TaskRuntime
+    from lib.tasks_pkg.manager import _maintenance
+
+    runtime = TaskRuntime('chat', ttl=3600, push_channel=None)
+    monkeypatch.setattr(_maintenance, 'chat_task_runtime', runtime, raising=True)
+    return ChatTaskTestRegistry(runtime)
+
+
+__all__ = ['chat_task_fixture_guard', 'chat_task_registry', 'isolated_reaper_registry']

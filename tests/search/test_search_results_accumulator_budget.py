@@ -62,7 +62,7 @@ def test_fallback_join_bounds_an_unbounded_input_list():
     assert 'RESULT79' in joined
 
 
-def test_sources_footer_join_stays_within_budget():
+def test_custom_separator_join_stays_within_budget():
     huge = [_big_result(i) for i in range(80)]
     joined = bounded_search_results_text(huge, separator='\n')
     assert _utf8_bytes(joined) <= SEARCH_RESULTS_ACCUM_BYTES

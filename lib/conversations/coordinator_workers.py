@@ -2,18 +2,63 @@
 
 Authority is the current accepted human Coordinator request, frozen tool policy
 and ProjectDispatchRepository grant. This module has no executor, task state,
-transcript store or polling model loop. It observes existing task notifications.
+transcript store or polling model loop. It observes existing task notifications,
+and a wait yields to input already waiting for the Coordinator's next round
+(``lib.agent_inbox`` lanes and the ``project_messages`` mailbox).
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from copy import deepcopy
 
-from lib.project_dispatch.repository import CONTRACT, ProjectDispatchRepository, _validate_schema
-from lib.project_dispatch.delegation import source_for_task, policy_for_task, check_allowance, issued_worker_policy
+from lib.project_dispatch.admission import require_isolated_worker_root
+from lib.project_dispatch.repository import ProjectDispatchRepository, _validate_schema
+from lib.project_dispatch.delegation import source_for_task, policy_for_task, validate_delegation_policy, issued_worker_policy
 from lib.project_dispatch.service import ProjectDispatchService
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
+_TERMINAL = frozenset({'completed', 'failed', 'interrupted', 'truncated', 'superseded', 'cancelled'})
+# Receipts that end a delivery wait: the Coordinator acts on or reports the reason.
+_HELD_DELIVERY = frozenset({'blocked', 'failed', 'preserved'})
+# A terminal notification can precede the attempt's durable status, so a wait
+# rechecks promptly for a bounded window after one. The slow recheck covers
+# process-local notification loss and queued task admission.
+_PROMPT_RECHECK_SECONDS = 0.5
+_PROMPT_RECHECK_WINDOW_SECONDS = 10.0
+_DURABLE_RECHECK_SECONDS = 5.0
+# Inbox lanes delivered at the Coordinator's next round boundary that end a wait,
+# as they end poll's blocking waits: a steer (human, forwarded or channel input)
+# and another background completion of this conversation.
+_PENDING_INPUT_MODES = ['user-steer', 'background-command']
+
+
+def _input_waiting(task) -> bool:
+    from lib.tasks_pkg.conversation_delivery import completion_conversation_id
+    conversation_id = completion_conversation_id(task)
+    if not conversation_id:
+        return False
+    from lib.agent_inbox import has_pending
+    return has_pending(conversation_id, modes=_PENDING_INPUT_MODES)
+
+
+def _incoming_project_messages(task):
+    """IDs of incoming project messages still awaiting input, or None without a mailbox."""
+    from lib.conversations.project_messages import ProjectMessageError, execute
+    from lib.storage.errors import StorageError
+    try:
+        page = execute('get_project_messages', {'direction': 'incoming'}, task)
+    except ProjectMessageError:
+        return None
+    except StorageError:
+        logger.warning('Coordinator wait could not read its project mailbox task=%s', task.get('id'), exc_info=True)
+        return None
+    # A new submission is always on the newest page.
+    return {message['id'] for message in page['messages'] if message['state'] == 'submitted'}
 
 
 def get_workers(task, scope, arguments, *, repository=None):
@@ -53,7 +98,7 @@ def get_workers(task, scope, arguments, *, repository=None):
         source = source_policy(repository, task)
         budget_id = source['id'] if source is not None else None
     if budget_id:
-        result['request_allowance'] = request_view(repository, value, budget_id)
+        result['request_usage'] = request_view(repository, value, budget_id)
     return result
 
 
@@ -68,7 +113,7 @@ def delegate(task, scope, arguments, *, repository=None, service=None, create=No
     current, _ = repository._load(repository._selection(sources=[origin['attemptId']],
         budgets=[budget_id] if budget_id else []))
     ensure_open(current, origin['attemptId'])
-    issued = issued_worker_policy(repository, task); defaults = CONTRACT['delegationDefaults']
+    issued = issued_worker_policy(repository, task)
     key = hashlib.sha256(json.dumps([origin['attemptId'], arguments['idempotency_key']],
                                    separators=(',', ':')).encode()).hexdigest()
     command = 'coordinator-delegate:' + key
@@ -78,33 +123,23 @@ def delegate(task, scope, arguments, *, repository=None, service=None, create=No
     request = {'projectPath': repository.project, 'coordinatorId': scope['conversation_id'],
         'recipientId': original['request']['recipientId'] if original else 'pending-worker',
         'authorizationSource': source, 'brief': arguments['brief'], 'model': issued.model,
-        'budget': {'maxTokens': arguments.get('max_tokens', defaults['workerTokens']),
-                   'maxModelRequests': arguments.get('max_model_requests', defaults['workerModelRequests']),
-                   'deadline': policy['deadline']},
-        'profile': {'mode': 'project', 'tools': list(issued.tools), 'readPaths': ['.'], 'writePaths': ['.'],
-                    'maxToolCalls': arguments.get('max_tool_calls', defaults['workerToolCalls'])},
+        'budget': {},
+        'profile': {'mode': 'project', 'tools': list(issued.tools), 'readPaths': ['.'], 'writePaths': ['.']},
         'delegation': origin}
     if arguments.get('dependencies'):
         request['dependencies'] = deepcopy(arguments['dependencies'])
     if arguments.get('rework_of'):
         request['reworkOf'] = deepcopy(arguments['rework_of'])
-    if policy.get('requestBudgetId') and original is None:
-        from lib.project_dispatch.request_budget import allowance
-        available = allowance(repository, current, policy['requestBudgetId'])
-        request['budget']['maxTokens'] = max(1, min(request['budget']['maxTokens'], available['remainingTokens']))
-        request['budget']['maxModelRequests'] = max(1, min(request['budget']['maxModelRequests'], available['remainingModelRequests']))
-        request['profile']['maxToolCalls'] = max(1, min(request['profile']['maxToolCalls'], available['remainingToolCalls']))
-    elif original is not None and policy.get('requestBudgetId'):
-        # Replays retain the exact accepted allocation even after headroom moves.
-        request['budget'] = original['request']['budget']
-        request['profile']['maxToolCalls'] = original['request']['profile']['maxToolCalls']
     if policy.get('requestBudgetId'):
         request['delegationInputHash'] = hashlib.sha256(json.dumps(arguments, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     _validate_schema(request, 'request')
     if original is None:
-        check_allowance(repository, current, request)
+        validate_delegation_policy(repository, current, request)
     from lib.project_dispatch.delegation import validate_source
     validate_source(repository, request)
+    if original is None:
+        # Refuse before any conversation or grant exists: every worker would fail binding.
+        require_isolated_worker_root(repository.project)
     if create is None:
         from .coordinator_tools import _create
         create = _create
@@ -116,12 +151,31 @@ def delegate(task, scope, arguments, *, repository=None, service=None, create=No
     execution = outcome.get('execution') or {}
     return {'assignment_id': assignment['id'], 'conversation_id': request['recipientId'],
             'task_id': execution.get('taskId'), 'status': execution.get('status', outcome['dispatch']),
-            'dispatch': outcome['dispatch'], 'budget': request['budget'],
+            'dispatch': outcome['dispatch'],
             'next_step': 'Delegate independent work, then await_project_workers for results. Review the actual evidence before reporting delivery.'}
 
 
-def await_workers(task, scope, arguments, *, repository=None, service=None):
-    """Wait on existing terminal notifications; no repeated LLM status calls."""
+def _settled_failure(service, assignment, turn_id):
+    """Bounded cause from the settled worker Turn; the dispatch view carries none."""
+    turn = service.turn_get(assignment['request']['recipientId'], turn_id,
+                            user_id=assignment['grant']['owner']) or {}
+    error = (turn.get('settlement') or {}).get('error') or (turn.get('projection') or {}).get('error')
+    if not isinstance(error, dict):
+        return None
+    return {key: str(error[key])[:1000] for key in ('kind', 'detail', 'hint') if error.get(key)} or None
+
+
+def await_workers(task, scope, arguments, *, repository=None, service=None, runtime_context=None):
+    """Wait on existing terminal notifications; no repeated LLM status calls.
+
+    Returns when any Worker unsettled at call start settles (wait=progress names
+    the pending rest), at once when all already settled, on timeout, on Stop, or
+    when input waits for the Coordinator's next round (wait=pending_input names
+    the pending Workers): a human message or other queued steer, another
+    background completion, or a project message submitted after the call
+    started. Polls read settlement evidence only; returned rows carry excerpts
+    and causes.
+    """
     _validate_schema(arguments, 'awaitWorkersRequest')
     repository = repository or ProjectDispatchRepository(scope['user_id'], scope['project_path'])
     service = service or ProjectDispatchService(repository)
@@ -139,46 +193,120 @@ def await_workers(task, scope, arguments, *, repository=None, service=None):
             execution = view.get('execution') or {}
             result = execution.get('result') or {}
             content = result.get('content') or ''
-            rows.append({'assignment_id': identity, 'conversation_id': assignment['request']['recipientId'],
-                         'task_id': execution.get('taskId'), 'turn_id': execution.get('turnId'),
-                         'result_revision': execution.get('resultRevision'), 'delivery': view.get('delivery'),
-                         'canonical_delivery': view.get('canonicalDelivery', False),
-                         'status': 'cancelled' if assignment['grant']['revoked'] else execution.get('status', 'queued'),
-                         'result_excerpt': content[:4000] if isinstance(content, str) else '',
-                         'result_truncated': isinstance(content, str) and len(content) > 4000})
+            row = {'assignment_id': identity, 'conversation_id': assignment['request']['recipientId'],
+                   'task_id': execution.get('taskId'), 'turn_id': execution.get('turnId'),
+                   'result_revision': execution.get('resultRevision'), 'delivery': view.get('delivery'),
+                   'canonical_delivery': view.get('canonicalDelivery', False),
+                   'status': 'cancelled' if assignment['grant']['revoked'] else execution.get('status', 'queued'),
+                   'result_excerpt': content[:4000] if isinstance(content, str) else '',
+                   'result_truncated': isinstance(content, str) and len(content) > 4000}
+            if row['status'] in ('failed', 'interrupted', 'truncated') and row['turn_id']:
+                failure = _settled_failure(service, assignment, row['turn_id'])
+                if failure:
+                    row['error'] = failure
+            rows.append(row)
         return rows
-    terminal = {'completed', 'failed', 'interrupted', 'truncated', 'superseded', 'cancelled'}
+    def poll(identities):
+        """Execution status and delivery receipt; no projection, excerpt or dependency reads."""
+        rows = []
+        for identity in identities:
+            view = service.view_for_coordinator(identity, scope=scope, settlement_only=True)
+            execution = view.get('execution') or {}
+            rows.append({'assignment_id': identity, 'task_id': execution.get('taskId'),
+                         'status': 'cancelled' if view['revoked'] else execution.get('status', 'queued'),
+                         'delivery': view.get('delivery'),
+                         'canonical_delivery': view.get('canonicalDelivery', False)})
+        return rows
     def settled(row):
         if arguments.get('wait_for') == 'delivery':
-            return row['canonical_delivery'] or row['status'] in terminal - {'completed'}
-        return row['status'] in terminal
-    deadline = time.monotonic() + arguments.get('timeout_seconds', 1800)
-    rows = snapshots()
-    while any(not settled(row) for row in rows):
-        if task.get('aborted'):
-            return {'workers': rows, 'wait': 'cancelled'}
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return {'workers': rows, 'wait': 'timeout', 'instruction': 'Workers remain active; timeout is not failure. Wait again with these same assignment IDs.'}
+            return (row['canonical_delivery'] or (row['delivery'] or {}).get('status') in _HELD_DELIVERY
+                    or row['status'] in _TERMINAL - {'completed'})
+        return row['status'] in _TERMINAL
+    # Only Workers unsettled at call start can end the wait early, so a call that
+    # also names already-settled Workers never returns at once in a model loop.
+    rows = [row for row in poll(ids) if not settled(row)]
+    opened = [row['assignment_id'] for row in rows]
+    outcome = 'settled'
+    if opened:
         from lib.agent_core.admission import on_terminal
-        import threading
-        changed = threading.Event()
-        unsubscribers = [on_terminal(row['task_id'], lambda _task_id: changed.set()) for row in rows
-                         if row['task_id'] and row['status'] not in terminal]
+        changed, subscriptions = threading.Event(), {}
+        if runtime_context is not None:
+            runtime_context.register_cancel_callback(changed.set)
+        deadline = time.monotonic() + arguments.get('timeout_seconds', 1800)
+        prompt_until = 0.0
+        # Messages already waiting at call start are acquired by the Coordinator's
+        # rounds; only later submissions end the wait, as with Workers above.
+        known_messages = _incoming_project_messages(task)
+        def message_arrived():
+            current = _incoming_project_messages(task) if known_messages is not None else None
+            return bool(current and current - known_messages)
         try:
-            rows = snapshots()  # Close subscribe-versus-settlement race.
-            if all(settled(row) for row in rows):
-                break
-            # The wait is interruptible and allocates no thread or model request.
-            # A bounded recheck covers process-local notification loss and queued
-            # task admission; durable Turn evidence alone declares completion.
-            check_at = time.monotonic() + min(remaining, 5.0)
-            while not task.get('aborted') and not changed.wait(min(0.25, max(0, check_at - time.monotonic()))):
-                if time.monotonic() >= check_at:
+            while True:
+                if any(settled(row) for row in rows):
+                    outcome = 'progress'
                     break
+                if task.get('aborted'):
+                    outcome = 'cancelled'
+                    break
+                if (runtime_context is not None
+                        and runtime_context.resource_cancel_event.is_set()):
+                    outcome = 'timeout'
+                    break
+                if _input_waiting(task) or message_arrived():
+                    outcome = 'pending_input'
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    outcome = 'timeout'
+                    break
+                fresh = [row['task_id'] for row in rows if row['task_id'] and row['status'] not in _TERMINAL
+                         and row['task_id'] not in subscriptions]
+                for task_id in fresh:
+                    subscriptions[task_id] = on_terminal(task_id, lambda _task_id: changed.set())
+                if fresh:
+                    rows = poll(opened)  # Close subscribe-versus-settlement race.
+                    continue
+                # The wait is interruptible and allocates no thread or model request.
+                # Durable attempt/delivery evidence alone declares settlement.
+                now = time.monotonic()
+                check_at = now + min(remaining, _PROMPT_RECHECK_SECONDS if now < prompt_until
+                                     else _DURABLE_RECHECK_SECONDS)
+                while (not task.get('aborted') and not _input_waiting(task)
+                       and not changed.wait(min(0.25, max(0, check_at - time.monotonic())))):
+                    if time.monotonic() >= check_at:
+                        break
+                if changed.is_set():
+                    changed.clear()
+                    prompt_until = time.monotonic() + _PROMPT_RECHECK_WINDOW_SECONDS
+                rows = poll(opened)
         finally:
-            for unsubscribe in unsubscribers:
+            for unsubscribe in subscriptions.values():
                 unsubscribe()
-        rows = snapshots()
+    rows = snapshots()
+    if outcome == 'cancelled':
+        return {'workers': rows, 'wait': 'cancelled'}
+    pending = [row['assignment_id'] for row in rows if not settled(row)]
+    if outcome == 'timeout' and set(opened) <= set(pending):
+        return {'workers': rows, 'wait': 'timeout', 'instruction': 'Workers remain active; timeout is not failure. Wait again with these same assignment IDs.'}
+    held = [row['assignment_id'] for row in rows if arguments.get('wait_for') == 'delivery'
+            and not row['canonical_delivery'] and (row['delivery'] or {}).get('status') in _HELD_DELIVERY]
+    delivery = (' Delivery of ' + ', '.join(held) + ' is blocked, failed or preserved, not canonical: act on '
+                'its delivery.reason (review_project_work with the exact checkpoint_sha if publication was '
+                'never requested, rework for a conflict or failed gate) or report a cause you cannot resolve. '
+                'Awaiting only held deliveries returns at once.') if held else ''
+    # Workers that all settled meanwhile return as settled; the input still follows.
+    if outcome == 'pending_input' and pending:
+        return {'workers': rows, 'wait': 'pending_input',
+                'instruction': 'New input is waiting for you and arrives right after this result: a human '
+                               'message or steer, a project message, or a background completion. Workers keep '
+                               'running; still pending: ' + ', '.join(pending) + '. Answer or act on that input '
+                               'first, then call await_project_workers again with only the pending assignment IDs '
+                               'and the same wait_for. Ending a wait for input is not failure.' + delivery}
+    if pending:
+        return {'workers': rows, 'wait': 'progress',
+                'instruction': 'Some selected workers settled; still pending: ' + ', '.join(pending) + '. '
+                               'Review the settled evidence and arrange follow-up work now, then call '
+                               'await_project_workers again with only the pending assignment IDs and the same '
+                               'wait_for. Failed/cancelled work is not delivery.' + delivery}
     return {'workers': rows, 'wait': 'settled',
-            'instruction': 'Read full worker evidence using the conversation/Turn links where needed. Failed/cancelled work is not delivery; verify and continue the original objective.'}
+            'instruction': 'Read full worker evidence using the conversation/Turn links where needed. Failed/cancelled work is not delivery; verify and continue the original objective.' + delivery}

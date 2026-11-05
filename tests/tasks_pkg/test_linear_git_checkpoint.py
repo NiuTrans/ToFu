@@ -86,31 +86,41 @@ def _stable(repo: Path) -> str:
     ('candidate', False, 'Integration candidate exists'),
     ('unowned-stable', False, 'no linear baseline ownership'),
     ('missing-stable', False, 'stable ref is missing'),
-    ('stable-mismatch', False, 'Stable and HEAD differ'),
+    ('stable-behind', True, 'owns stable behind HEAD'),
+    ('stable-diverged', False, 'Stable is outside HEAD history'),
     ('foreign-baseline', False, 'outside the linear baseline history'),
+    ('rewritten-history', True, 'unrelated history will be retired'),
     ('detached', False, 'Detached HEAD'),
     ('unborn', False, 'Unborn HEAD'),
 ])
 def test_publication_mode_resolution_is_read_only(repository, state, eligible, reason):
     head = _head(repository)
     _git(repository, 'config', '--local', 'tofu.linearCheckpoint', 'true')
-    if state in {'owned', 'candidate', 'stable-mismatch', 'foreign-baseline'}:
+    if state in {'owned', 'candidate', 'stable-behind', 'stable-diverged', 'foreign-baseline'}:
         for ref in (checkpoint.STABLE_REF, checkpoint.CHECKPOINT_BASELINE_REF):
             _git(repository, 'update-ref', ref, head)
+    tree = _git(repository, 'rev-parse', 'HEAD^{tree}').stdout.strip()
     if state == 'candidate':
         _git(repository, 'update-ref', 'refs/tofu/candidate', head)
     elif state == 'unowned-stable':
         _git(repository, 'update-ref', checkpoint.STABLE_REF, head)
     elif state == 'missing-stable':
         _git(repository, 'update-ref', checkpoint.CHECKPOINT_BASELINE_REF, head)
-    elif state == 'stable-mismatch':
+    elif state == 'stable-behind':
         (repository / 'README.md').write_text('external commit\n')
         _git(repository, 'add', 'README.md')
         _git(repository, 'commit', '-qm', 'external head advance')
+    elif state == 'stable-diverged':
+        side = _git(repository, 'commit-tree', tree, '-p', head, '-m', 'side stable').stdout.strip()
+        _git(repository, 'update-ref', checkpoint.STABLE_REF, side)
     elif state == 'foreign-baseline':
-        tree = _git(repository, 'rev-parse', 'HEAD^{tree}').stdout.strip()
-        foreign = _git(repository, 'commit-tree', tree, '-m', 'foreign baseline').stdout.strip()
+        # Diverged but related: shared history keeps the fail-closed decision.
+        foreign = _git(repository, 'commit-tree', tree, '-p', head, '-m', 'foreign baseline').stdout.strip()
         _git(repository, 'update-ref', checkpoint.CHECKPOINT_BASELINE_REF, foreign)
+    elif state == 'rewritten-history':
+        abandoned = _git(repository, 'commit-tree', tree, '-m', 'abandoned history').stdout.strip()
+        for ref in ('refs/tofu/candidate', checkpoint.STABLE_REF, checkpoint.CHECKPOINT_BASELINE_REF):
+            _git(repository, 'update-ref', ref, abandoned)
     elif state == 'detached':
         _git(repository, 'update-ref', '--no-deref', 'HEAD', head)
     elif state == 'unborn':
@@ -180,6 +190,62 @@ def test_preexisting_dirty_workspace_is_checkpointed_without_admission(
     assert checkpoint._revision(
         repository, checkpoint.CHECKPOINT_BASELINE_REF) == base
     assert _git(repository, 'status', '--porcelain').stdout == ''
+
+
+def test_rewritten_history_refs_are_archived_and_checkpoints_resume(repository: Path):
+    tree = _git(repository, 'rev-parse', 'HEAD^{tree}').stdout.strip()
+    abandoned = _git(repository, 'commit-tree', tree, '-m', 'abandoned history').stdout.strip()
+    stranded = ('refs/tofu/candidate', checkpoint.STABLE_REF, checkpoint.CHECKPOINT_BASELINE_REF)
+    for ref in stranded:
+        _git(repository, 'update-ref', ref, abandoned)
+    base = _head(repository)
+    (repository / 'README.md').write_text('after the rewrite\n', encoding='utf-8')
+
+    result = _settle(repository, _task('task-after-rewrite'))
+
+    row = result['repositories'][0]
+    assert result['status'] == 'committed' and row['stableUpdated'] is True
+    assert row['baseSha'] == base and _stable(repository) == _head(repository) == row['checkpointSha']
+    assert checkpoint._revision(repository, checkpoint.CHECKPOINT_BASELINE_REF) == base
+    assert checkpoint._revision(repository, 'refs/tofu/candidate') == ''
+    archived = _git(repository, 'for-each-ref', '--format=%(refname) %(objectname)',
+                    'refs/tofu/retired').stdout.split('\n')
+    assert sorted(line.split('/', 4)[-1] for line in archived if line) == sorted(
+        f"{ref.removeprefix('refs/tofu/')} {abandoned}" for ref in stranded)
+
+
+def test_stable_trailing_ordinary_commits_still_publishes(repository: Path):
+    first = _settle(repository, _task('task-activate'))
+    assert first['status'] == 'no_changes'
+    activated = _stable(repository)
+    (repository / 'README.md').write_text('landed by a merge\n', encoding='utf-8')
+    _git(repository, 'commit', '-qam', 'ordinary commit outside checkpoints')
+    advanced = _head(repository)
+    (repository / 'NOTES.md').write_text('uncommitted work\n', encoding='utf-8')
+
+    result = _settle(repository, _task('task-after-commit'))
+
+    row = result['repositories'][0]
+    assert row['baseSha'] == advanced != activated
+    assert row['verification'] == 'passed' and row['stableUpdated'] is True
+    assert _stable(repository) == _head(repository) == row['checkpointSha']
+    assert _git(repository, 'merge-base', '--is-ancestor', advanced, row['checkpointSha']).returncode == 0
+
+
+def test_stable_outside_head_history_still_fails_closed(repository: Path):
+    head = _head(repository)
+    tree = _git(repository, 'rev-parse', 'HEAD^{tree}').stdout.strip()
+    side = _git(repository, 'commit-tree', tree, '-p', head, '-m', 'side stable').stdout.strip()
+    _git(repository, 'update-ref', checkpoint.CHECKPOINT_BASELINE_REF, head)
+    _git(repository, 'update-ref', checkpoint.STABLE_REF, side)
+    (repository / 'README.md').write_text('pending\n', encoding='utf-8')
+
+    result = _settle(repository, _task('task-diverged'))
+
+    row = result['repositories'][0]
+    assert row['status'] == 'error' and 'outside HEAD history' in row['verificationDetail']
+    assert _head(repository) == head and _stable(repository) == side
+    assert (repository / 'README.md').read_text() == 'pending\n'
 
 
 def test_semantic_change_is_committed_but_stable_waits_for_gate(
@@ -252,6 +318,70 @@ def test_gate_rewrite_remains_dirty_and_never_moves_stable(
     assert 'README.md' in _git(
         repository, 'status', '--porcelain').stdout
     assert _git(repository, 'show', 'HEAD:README.md').stdout == 'base\n'
+
+
+def test_unrelated_head_commit_is_carried_forward_during_capture(
+        repository: Path, monkeypatch: pytest.MonkeyPatch):
+    real_stage = checkpoint._stage_working_tree
+    moved = False
+
+    def _stage_then_move_head(root: Path, base_sha: str):
+        nonlocal moved
+        captured = real_stage(root, base_sha)
+        if not moved:
+            moved = True
+            (root / 'landed.txt').write_text('LANDED = True\n')
+            _git(root, 'add', 'landed.txt')
+            _git(root, 'commit', '-qm', 'unrelated landing')
+        return captured
+
+    monkeypatch.setattr(checkpoint, '_stage_working_tree', _stage_then_move_head)
+    (repository / 'README.md').write_text('ordinary commit\n')
+    _git(repository, 'add', 'README.md')
+    _git(repository, 'commit', '-m', 'ordinary index against original HEAD')
+    (repository / 'README.md').write_text('checkpoint bytes\n')
+
+    result = _settle(repository, _task('task-unrelated-head-move'))
+
+    row = result['repositories'][0]
+    assert row['status'] == 'committed'
+    assert row['verification'] == 'passed', repr(row)
+    assert row['stableUpdated'] is True
+    assert _head(repository) == _stable(repository) == row['checkpointSha']
+    assert _git(repository, 'log', '-1', '--format=%s', 'HEAD^').stdout == 'unrelated landing\n'
+    assert _git(repository, 'show', 'HEAD:README.md').stdout == 'checkpoint bytes\n'
+    assert _git(repository, 'show', 'HEAD:landed.txt').stdout == 'LANDED = True\n'
+    assert _git(repository, 'status', '--porcelain').stdout == ''
+
+
+def test_conflicting_head_commit_refuses_capture_and_preserves_workspace(
+        repository: Path, monkeypatch: pytest.MonkeyPatch):
+    real_stage = checkpoint._stage_working_tree
+    moved = False
+
+    def _stage_then_move_head(root: Path, base_sha: str):
+        nonlocal moved
+        captured = real_stage(root, base_sha)
+        if not moved:
+            moved = True
+            (root / 'README.md').write_text('concurrent landing\n')
+            _git(root, 'add', 'README.md')
+            _git(root, 'commit', '-qm', 'conflicting landing')
+            (root / 'README.md').write_text('checkpoint bytes\n')
+        return captured
+
+    monkeypatch.setattr(checkpoint, '_stage_working_tree', _stage_then_move_head)
+    (repository / 'README.md').write_text('checkpoint bytes\n')
+
+    result = _settle(repository, _task('task-conflicting-head-move'))
+
+    row = result['repositories'][0]
+    assert row['status'] == 'error'
+    assert 'README.md' in row['verificationDetail']
+    assert _git(repository, 'log', '-1', '--format=%s').stdout == 'conflicting landing\n'
+    assert _git(repository, 'show', 'HEAD:README.md').stdout == 'concurrent landing\n'
+    assert (repository / 'README.md').read_text() == 'checkpoint bytes\n'
+    assert checkpoint._revision(repository, checkpoint.STABLE_REF) != _head(repository)
 
 
 def test_bytes_written_during_capture_survive_for_next_checkpoint(

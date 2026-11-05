@@ -1,13 +1,17 @@
 """Actual private Node bootstrap, secret isolation and provider process bounds."""
+import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
 from lib.identity import PrincipalContext
 from lib.automations.errors import AutomationError
+from lib.skills.automation import mtskills_cli
 from lib.skills.automation.mtskills_cli import (
     MTSkillsCLI, MTSkillsCLIError, OwnedMTSkillsCredential, source_policy,
 )
@@ -63,6 +67,33 @@ else if (args[0] === 'search') {
         tenant_id='source-tenant', scopes={'skills:read'})
     credential = OwnedMTSkillsCredential(7, 'source-tenant', 'prod', 'fixture-owner-token-2026')
     return port, principal, credential, tmp_path
+
+
+def test_loaded_port_never_executes_a_bootstrap_changed_on_disk(metadata_port, tmp_path, monkeypatch):
+    port, principal, credential, root = metadata_port
+    checkout = tmp_path / 'loaded'
+    package = checkout / 'lib' / 'skills' / 'automation'
+    package.mkdir(parents=True)
+    for name in ('mtskills_cli.py', 'mtskills_metadata.mjs', 'mtskills_archive.mjs'):
+        shutil.copyfile(Path(mtskills_cli.__file__).with_name(name), package / name)
+    (checkout / 'contracts').mkdir()
+    contract = 'contracts/automation_skill_sources_v1.json'
+    shutil.copyfile(Path(mtskills_cli.__file__).resolve().parents[3] / contract, checkout / contract)
+    # A server imports the port once, then the checkout changes beneath it.
+    module_name = 'lib.skills.automation._mtskills_cli_loaded_before_checkout_update'
+    spec = importlib.util.spec_from_file_location(module_name, package / 'mtskills_cli.py')
+    loaded = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, loaded)
+    spec.loader.exec_module(loaded)
+    executed = root / 'updated-bootstrap-executed'
+    (package / 'mtskills_metadata.mjs').write_text(
+        "import { writeFileSync } from 'node:fs';\n"
+        f'writeFileSync({json.dumps(str(executed))}, "x");\nprocess.exit(70);\n')
+    loaded_port = loaded.MTSkillsCLI(cli_path=port.cli_path, node_path=port.node_path, policy=port._policy)
+    loaded_credential = loaded.OwnedMTSkillsCredential(7, 'source-tenant', 'prod', credential.token)
+    assert loaded_port.search('citadel', principal=principal, credential=loaded_credential) == {
+        'name': 'citadel', 'sourceId': 'source-123'}
+    assert not executed.exists()
 
 
 def test_three_requested_sources_use_exact_cli_metadata(metadata_port):

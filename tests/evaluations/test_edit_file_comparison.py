@@ -12,6 +12,7 @@ import pytest
 
 from evaluations.edit_file.comparison import ARMS, REPOSITORY, _validate_cases, run_comparison
 from evaluations.edit_file.dataset import CASES_BY_ID
+from evaluations.edit_file.evaluation import score_row, summarize
 from evaluations.edit_file.paired_dataset import CODEX_REFERENCES, PAIRED_CASES, PAIRED_CASES_BY_ID
 
 
@@ -119,6 +120,93 @@ def test_byte_postimage_differences_are_preserved_not_normalized_away(comparison
         "sample.py": "def run():\n      begin()\n      report()\n"}
     assert offset["measured"]["tofu_anchor_atomic"]["reference_postimage_matches"] is False
     assert offset["native_codex"]["standalone_expected"]["files"] == offset["intended_files"]
+
+
+def _model_row(case_id, arguments):
+    return {'model': 'offline-fixture', 'case_id': case_id,
+            'tool_name': 'edit_file', 'arguments': arguments}
+
+
+def test_offline_scorer_accepts_batch_path_and_current_insert_semantics():
+    score = score_row(_model_row('insert_between_blocks', {
+        'path': 'sample.txt',
+        'edits': [{'operation': 'insert_after', 'anchor': 'A',
+                   'content': 'B\n\n'}],
+    }))
+    assert score['valid_call'] is True
+    assert score['correct_edit'] is False
+    assert score['efficient_operation'] is True
+
+
+def test_offline_scorer_valid_longer_additive_replace_is_correct():
+    score = score_row(_model_row('add_import', {
+        'edits': [{'path': 'app.py', 'operation': 'replace',
+                   'anchor': 'import os',
+                   'content': 'import os\nimport json'}],
+    }))
+    assert score['valid_call'] is True
+    assert score['correct_edit'] is True
+    assert score['efficient_operation'] is False
+    assert set(score) == {'model', 'case_id', 'kind', 'valid_call',
+                          'correct_edit', 'efficient_operation', 'argument_chars',
+                          'argument_reduction_rate'}
+
+
+@pytest.mark.parametrize('anchor', ['missing', 'T'])
+def test_offline_scorer_rejects_missing_or_ambiguous_anchor_without_writes(
+        anchor, monkeypatch, tmp_path):
+    outside = tmp_path / 'outside.txt'
+    outside.write_text('untouched', encoding='utf-8')
+    calls = []
+    real_run = subprocess.run
+
+    def observe_worker(*args, **kwargs):
+        calls.append(kwargs['cwd'])
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', observe_worker)
+    score = score_row(_model_row('replace_value', {
+        'edits': [{'path': 'config.py', 'operation': 'replace',
+                   'anchor': anchor, 'content': 'TIMEOUT = 30\n'}],
+    }))
+    assert score['valid_call'] is False
+    assert score['correct_edit'] is False
+    assert outside.read_text(encoding='utf-8') == 'untouched'
+    assert len(calls) == 1
+    assert not Path(calls[0]).exists()
+
+
+def test_offline_scorer_rejects_escape_without_writing_outside_scratch(tmp_path):
+    outside = tmp_path / 'outside.txt'
+    outside.write_text('untouched', encoding='utf-8')
+    score = score_row(_model_row('replace_value', {
+        'edits': [{'path': str(outside), 'operation': 'replace',
+                   'anchor': 'untouched', 'content': 'changed'}],
+        'allow_outside_workspace': True,
+    }))
+    assert score['valid_call'] is False
+    assert score['correct_edit'] is False
+    assert outside.read_text(encoding='utf-8') == 'untouched'
+
+
+def test_offline_scorer_preserves_summary_interface():
+    row = _model_row('replace_value', {
+        'edits': [{'path': 'config.py', 'operation': 'replace',
+                   'anchor': 'TIMEOUT = 10', 'content': 'TIMEOUT = 30'}],
+    })
+    row['baseline_argument_chars'] = 300
+    score = score_row(row)
+    assert score['valid_call'] is score['correct_edit'] is True
+    assert score['argument_reduction_rate'] > 0.30
+    assert summarize([row]) == {'offline-fixture': {
+        'cases': 1,
+        'valid_call_rate': 1.0,
+        'correct_edit_rate': 1.0,
+        'additive_insert_rate': None,
+        'median_argument_chars': score['argument_chars'],
+        'median_argument_reduction_rate': score['argument_reduction_rate'],
+        'meets_30_percent_reduction': True,
+    }}
 
 
 def test_small_run_is_repeatable_and_cleanup_is_owned(tmp_path):

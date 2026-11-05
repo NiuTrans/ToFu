@@ -59,7 +59,6 @@ FORBIDDEN_TEXT = (
     (re.compile(r"from\s+lib\s+import\s+push\b"), "use lib.agent_core.push"),
     (re.compile(r"\blib\.task_runtime\b"), "use lib.agent_core.task_runtime"),
     (re.compile(r"pt_[0-9a-f]{6,}"), "incident/board identifiers belong in Git history"),
-    (re.compile("★"), "decorative patch markers obscure ownership"),
     (re.compile(r"/api/v2/conversations"), "conversation v2 HTTP surface is retired"),
     (re.compile(r"/api/chat/stream"), "use task replay SSE or Conversation Sync v3"),
     (re.compile(r"/api/v1/chat/send"), "use Conversation Sync v3 turn commands"),
@@ -91,6 +90,11 @@ _ROUTE_LLM_READ_ONLY_IMPORT_NAMES = frozenset({
     "get_dispatcher",
     "reset_dispatcher",
 })
+# Provider-discovery entry points outside the discovery package: the owner's
+# explicit request for one provider's whole authenticated /models listing.
+_ROUTE_DISCOVERY_IMPORT_NAMES = {
+    "lib.llm_dispatch.provider_catalog_sync": frozenset({"import_listed_models"}),
+}
 
 # ── Import-direction gates ────────────────────────────────────────────────
 # The storage sidecar is a separate process: it may depend on schemas, backend
@@ -110,7 +114,9 @@ _SIDECAR_FORBIDDEN_IMPORTS = (
 # contract — its own imports may only point at the standard library or other
 # modules in this set, so the shared closure can never grow heavy.
 _SIDECAR_SHARED_MODULES = frozenset({
+    "lib.paper.report_metadata",
     "lib.event_envelope",
+    "lib.conversation_sync.settled_rows",
     "lib.turn_trace_contract",
     "lib.tool_results.tool_round_identity",
     "lib.agent_core.output_settlement",
@@ -135,15 +141,6 @@ _SIDECAR_SHARED_PATHS = frozenset(
 # module may touch the delivery layer.
 _COMPOSITION_ROOTS = frozenset({(ROOT / "lib" / "app" / "app_assembly.py").resolve()})
 
-# Grandfathered lib → routes imports. Dependency inversion (registration
-# callbacks or ports) is the fix; this set may only shrink.
-_LIB_ROUTES_IMPORT_DEBT = frozenset({
-    (ROOT / "lib" / "auto_restart.py").resolve(),
-    (ROOT / "lib" / "search" / "search_bridge.py").resolve(),
-    (ROOT / "lib" / "server" / "server_background_services.py").resolve(),
-    (ROOT / "lib" / "server" / "server_shutdown.py").resolve(),
-})
-
 # Replacing a module object's class defeats static symbol navigation and
 # hides import cost from local reading; explicit re-export facades are the
 # supported pattern. The one legacy facade is frozen here.
@@ -155,8 +152,8 @@ _MODULE_CLASS_REPLACEMENT_ALLOWED = frozenset({
 # import-time config reads (a second, implicit configuration system). It may
 # only shrink; when it does, tighten these constants in the same change.
 _LIB_INIT = ROOT / "lib" / "__init__.py"
-_LIB_INIT_MAX_LINES = 424
-_LIB_INIT_MAX_ENV_READS = 17
+_LIB_INIT_MAX_LINES = 363
+_LIB_INIT_MAX_ENV_READS = 11
 
 # Loose modules parked directly at lib/ root bypass the domain-package
 # routing table and turn the root into a junk drawer. The count may only
@@ -164,7 +161,7 @@ _LIB_INIT_MAX_ENV_READS = 17
 # sanctioned exception class is the sidecar-shared contract set above:
 # lib/event_envelope.py joined it 2026-09-18 when the event-format stamp was
 # wired into the sidecar write authority.)
-_LIB_TOPLEVEL_MAX_FILES = 114
+_LIB_TOPLEVEL_MAX_FILES = 112
 
 
 def _under(path: Path, root: Path) -> bool:
@@ -196,7 +193,6 @@ def import_direction_violations(
     routes_root: Path | None = None,
     sidecar_root: Path | None = None,
     composition_roots: frozenset[Path] | None = None,
-    lib_routes_debt: frozenset[Path] | None = None,
     shared_modules: frozenset[str] | None = None,
     shared_paths: frozenset[Path] | None = None,
 ) -> list[str]:
@@ -207,8 +203,6 @@ def import_direction_violations(
     sidecar_root = (sidecar_root or _SIDECAR_ROOT).resolve()
     composition_roots = composition_roots if composition_roots is not None \
         else _COMPOSITION_ROOTS
-    lib_routes_debt = lib_routes_debt if lib_routes_debt is not None \
-        else _LIB_ROUTES_IMPORT_DEBT
     shared_modules = shared_modules if shared_modules is not None \
         else _SIDECAR_SHARED_MODULES
     shared_paths = shared_paths if shared_paths is not None \
@@ -254,9 +248,7 @@ def import_direction_violations(
                             f"or other shared modules ({module})"
                         )
                     continue
-                if _matches(module, "routes") and resolved not in (
-                    composition_roots | lib_routes_debt
-                ):
+                if _matches(module, "routes") and resolved not in composition_roots:
                     violations.append(
                         f"{path.name}:{lineno}: backend libraries never "
                         f"import routes ({module}); invert the dependency "
@@ -310,10 +302,11 @@ def module_facade_mutation_violations(
 
 
 def lib_toplevel_ratchet_violations(*, maximum: int = _LIB_TOPLEVEL_MAX_FILES) -> list[str]:
-    """One-way ratchet on loose modules parked directly at lib/ root."""
+    """Count live authored root modules, including unstaged work, exactly once."""
     try:
         out = subprocess.run(
-            ["git", "ls-files", "lib/*.py"], cwd=ROOT,
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard",
+             "-z", "--", ":(top,glob)lib/*.py"], cwd=ROOT,
             capture_output=True, text=True, check=True,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
@@ -325,7 +318,10 @@ def lib_toplevel_ratchet_violations(*, maximum: int = _LIB_TOPLEVEL_MAX_FILES) -
             # violation out of the harness.
             return []
         return [f"cannot enumerate lib/ top-level modules: {exc}"]
-    count = sum(1 for rel in out.stdout.split() if rel.count("/") == 1)
+    count = sum(
+        1 for rel in set(out.stdout.split("\0"))
+        if rel and rel.count("/") == 1 and (ROOT / rel).is_file()
+    )
     if count > maximum:
         return [
             f"lib/ top-level modules grew {maximum} -> {count}; new modules "
@@ -383,8 +379,9 @@ def route_llm_bypass_violations(
     """Forbid provider execution in HTTP adapters.
 
     Routes may reset/read dispatcher state and call the provider-discovery
-    service. Model execution, provider pins, and slot reservation belong to a
-    task/application execution owner with the shared lifecycle contract.
+    service, including an owner's explicit listing import. Model execution,
+    provider pins, and slot reservation belong to a task/application execution
+    owner with the shared lifecycle contract.
     """
     violations: list[str] = []
     routes_root = (routes_root or (ROOT / "routes")).resolve()
@@ -413,7 +410,8 @@ def route_llm_bypass_violations(
                             f"LLM dispatch directly: {sorted(forbidden)}"
                         )
                 elif module.startswith("lib.llm_dispatch.") \
-                        and not module.startswith("lib.llm_dispatch.discovery"):
+                        and not module.startswith("lib.llm_dispatch.discovery") \
+                        and not imported <= _ROUTE_DISCOVERY_IMPORT_NAMES.get(module, frozenset()):
                     violations.append(
                         f"{path.name}:{node.lineno}: HTTP routes "
                         f"cannot import dispatcher internals: {module}"

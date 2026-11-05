@@ -134,10 +134,6 @@ fn conflict(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, message)
 }
 
-fn resource_exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
-
 fn is_scoped(scope: &str) -> bool {
     matches!(scope, "library" | "shared")
 }
@@ -392,7 +388,7 @@ fn scan_prefix(
         let full_page = page.len() == page_limit;
         rows.extend(page);
         if overflow {
-            return Err(resource_exhausted("knowledge scan exceeds its row bound"));
+            return Err(crate::resource_exhaustion::domain_bound("knowledge scan exceeds its row bound"));
         }
         if !full_page {
             return Ok(rows);
@@ -671,12 +667,12 @@ pub(crate) fn validate_document(source: &Value) -> io::Result<ValidatedDocument>
         .and_then(Value::as_array)
         .ok_or_else(|| invalid_input("knowledge assets must be an array"))?;
     if raw_chunks.len() > MAX_KNOWLEDGE_CHUNKS_PER_DOCUMENT {
-        return Err(resource_exhausted(
+        return Err(crate::resource_exhaustion::domain_bound(
             "knowledge document exceeds its chunk row bound",
         ));
     }
     if raw_assets.len() > MAX_KNOWLEDGE_ASSETS_PER_DOCUMENT {
-        return Err(resource_exhausted(
+        return Err(crate::resource_exhaustion::domain_bound(
             "knowledge document exceeds its asset row bound",
         ));
     }
@@ -1201,7 +1197,7 @@ fn resync_owner_index(
         if scoped.contains(&asset.document_id) && in_queue_class(&asset.enrichment_status) {
             count = count
                 .checked_add(1)
-                .ok_or_else(|| resource_exhausted("knowledge owner asset count overflow"))?;
+                .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("knowledge owner asset count overflow"))?;
         }
     }
     let key = owner_index_entity_key(transaction)?;
@@ -2099,14 +2095,14 @@ impl KnowledgeRequest {
                     }
                     bytes = bytes
                         .checked_add(field.len() + value.len())
-                        .ok_or_else(|| resource_exhausted("knowledge update byte overflow"))?;
+                        .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("knowledge update byte overflow"))?;
                 }
                 for optional in [chunk_content, chunk_search_text].into_iter().flatten() {
                     match optional {
                         Value::Null => {}
                         Value::String(text) => {
                             bytes = bytes.checked_add(text.len()).ok_or_else(|| {
-                                resource_exhausted("knowledge update byte overflow")
+                                crate::resource_exhaustion::accounting_overflow("knowledge update byte overflow")
                             })?;
                         }
                         _ => {}
@@ -2150,13 +2146,13 @@ impl KnowledgeRequest {
                     }
                     bytes = bytes
                         .checked_add(token.len())
-                        .ok_or_else(|| resource_exhausted("knowledge search byte overflow"))?;
+                        .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("knowledge search byte overflow"))?;
                 }
                 bytes
             }
         };
         if literal_bytes > MAX_LEGACY_DOCUMENT_BYTES {
-            return Err(resource_exhausted(
+            return Err(crate::resource_exhaustion::domain_bound(
                 "knowledge request exceeds the IR literal budget",
             ));
         }
@@ -3158,7 +3154,7 @@ fn search_candidates(
         push_text(&mut prefix, token)?;
         let remaining = MAX_KNOWLEDGE_SEARCH_POSTINGS_SCAN
             .checked_sub(scanned)
-            .ok_or_else(|| resource_exhausted("knowledge search exceeds its posting scan bound"))?;
+            .ok_or_else(|| crate::resource_exhaustion::domain_bound("knowledge search exceeds its posting scan bound"))?;
         let rows = scan_prefix(
             database,
             transaction,

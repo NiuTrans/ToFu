@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tests._runtime_sections import runtime_section_path
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -230,6 +231,7 @@ def test_domain_method_guard_rejects_unknown_names(monkeypatch, domain, method):
 
 def test_browser_contract_scanner_and_native_list_regressions():
     """The shipping guard also exercises adversarial inventory/list examples."""
+    require_node_modules('typescript', 'esbuild')
     import subprocess
 
     root = os.path.dirname(JS_DIR)

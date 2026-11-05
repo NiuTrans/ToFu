@@ -104,3 +104,56 @@ def test_cross_language_fetched_presence_is_not_semantic_rejection_or_upgrade():
     assert evidence['body_present'] is True
     assert evidence['coverage'] == 0
     assert 'rejected' not in evidence
+
+
+CJK_QUERY = '大模型 推理加速 vLLM 原理'
+
+
+def test_characters_of_a_cjk_bigram_are_not_separate_evidence_terms():
+    terms = query_terms(CJK_QUERY)
+    # A longer run in a page yields bigrams only, so these could never match.
+    assert {'原理', '推理', '加速', '模型', 'vllm'} <= terms
+    assert not {'原', '理'} & terms
+    assert query_terms('书 原理') == {'书', '原理'}
+
+
+def test_short_cjk_query_keeps_the_documented_fetch_everything_gate():
+    rows = [{'url': f'https://x.test/{i}', 'title': '天气预报', 'snippet': ''} for i in range(5)]
+    assert query_terms('时间') == {'时间'}
+    to_fetch, skipped = partition_fetchable('时间', rows)
+    assert len(to_fetch) == 5 and skipped == []
+
+
+@pytest.mark.parametrize('title,status', [
+    ('vLLM 推理原理（一）：从一条 HTTP 请求，到第一个输出 token', 'lexical_match'),
+    ('vLLM是什么？完整解析高性能LLM推理引擎的技术原理与部署实践', 'lexical_match'),
+    ('vLLM 学习指南 · 从会用到读懂源码', 'weak_match'),
+])
+def test_cjk_listing_evidence(title, status):
+    assert classify_relevance({'title': title, 'snippet': ''}, CJK_QUERY)['status'] == status
+
+
+def test_relevant_cjk_listing_beyond_the_recall_floor_is_fetched(monkeypatch):
+    from tofu_search.config import get_config
+    from tofu_search.search import orchestrator
+
+    rows = [{'url': f'https://floor{i}.test/a', 'title': f'大模型推理加速 vLLM 原理 第{i}篇',
+             'snippet': '', 'source': 'Bing'} for i in range(3)]
+    relevant = 'https://deep.test/vllm'
+    rows.append({'url': relevant, 'title': 'vLLM 推理原理（一）：从一条 HTTP 请求，到第一个输出 token',
+                 'snippet': '', 'source': 'Bing'})
+    for name in ('search_ddg_html', 'search_brave', 'search_ddg_api',
+                 'search_searxng', 'search_marginalia'):
+        monkeypatch.setattr(orchestrator, name, lambda *a, **kw: [])
+    monkeypatch.setattr(orchestrator, 'search_bing', lambda *a, **kw: rows)
+    monkeypatch.setattr(orchestrator, 'search_via_browser', lambda *a, **kw: [])
+    fetched = []
+
+    def fetch(url, **kwargs):
+        fetched.append(url)
+        return 'vLLM 推理原理：大模型推理加速依赖 PagedAttention。' * 20
+
+    monkeypatch.setattr(orchestrator, 'fetch_page_content', fetch)
+    orchestrator.perform_web_search(CJK_QUERY, filter_pages=False, deepen=False,
+                                    config=get_config().copy(search_deadline_secs=5))
+    assert relevant in fetched

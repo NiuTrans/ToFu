@@ -8,9 +8,10 @@ GNU grep (with the same injected descent guards the old helper used).
 
 Equivalence boundary (documented, deliberately accepted):
 
-  * ripgrep honors ``.gitignore``/ignore rules and skips nothing else — this
-    is the same traversal contract ``grep_search`` already sells as the 5x
-    FUSE fast path, and the reason the translation is worth doing.
+  * ripgrep honors ``.gitignore``/ignore rules and, run with ``--hidden``
+    like GNU grep, skips nothing else — this is the same traversal contract
+    ``search_files`` already sells as the 5x FUSE fast path, and the reason
+    the translation is worth doing.
   * ``-c`` is NOT translated: ripgrep 14+ dropped ``--with-zero-count``, so
     zero-match counts would diverge from GNU (``0`` printed, exit 1).
   * ripgrep's default binary policy reports match-after-NUL as a
@@ -22,7 +23,7 @@ Equivalence boundary (documented, deliberately accepted):
     GNU ``-I`` semantics — so GNU's ``Binary file X matches`` notice lines
     have no counterpart (and an only-binary match reports exit 1 instead
     of GNU's notice-with-exit-0). Both walk deviations match what
-    ``grep_search`` has always surfaced for the same trees.
+    ``search_files`` has always surfaced for the same trees.
   * GNU BRE word anchors ``\\<``/``\\>`` and backreferences ``\\1``..``\\9``
     have no Rust-regex equivalent → GNU fallback.
   * Error MESSAGE text differs (``rg:`` vs ``grep:``, os-error suffixes);
@@ -433,7 +434,7 @@ def translate_grep_to_rg(program, argv, cwd, safe_excludes, *,
             # own notice text — neither is spliceable byte-exactly.
             return None
 
-    command = [rg, '--no-heading', '--color=never']
+    command = [rg, '--no-heading', '--color=never', '--hidden']
     if len(operands) > 1 and not saw_dir:
         # ripgrep's default parallel walker emits multi-file results out of
         # argv order; an explicit file list carries user-intended order, so

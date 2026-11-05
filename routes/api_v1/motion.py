@@ -127,15 +127,9 @@ async def motion_audio_contract():
                       'second identical POST joins the in-flight task.',
           tags=['motion'])
 async def start_motion_task():
-    from lib.motion_video.runtime import (
-        _cleanup_stale_motion_tasks,
-        _motion_index_get,
-        _motion_index_register,
-        _motion_task_id,
-        _new_motion_task,
-    )
-    from lib.motion_video._env import motion_root
-    from lib.motion_video.engine import run_motion_task
+    from lib.error_envelope import BadRequest
+    from lib.motion_video.runtime import _cleanup_stale_motion_tasks
+    from lib.motion_video.service import start_motion_video
 
     owner_user_id = int(request_user_id())
     body = await async_parse_body(exact=('alignment', 'aspect', 'audio_base_dir', 'audio_plan', 'audio_plan_path', 'author_rounds', 'author_token_budget', 'burn_in', 'burn_in_fontsdir', 'creative_mode', 'lang', 'max_scenes', 'model', 'narration', 'parallel', 'quality', 'scene_author', 'scenes_path', 'speed', 'srt', 'srt_path', 'topic', 'voice',))
@@ -262,58 +256,25 @@ async def start_motion_task():
     audio_sha = hashlib.sha256(
         audio_material.encode('utf-8')).hexdigest()[:12]
     creative_identity = creative_mode if topic else ''
-    key = (owner_user_id, srt_sha, voice, alignment, aspect, narration, quality,
+    key = (srt_sha, voice, alignment, aspect, narration, quality,
            burn_in, model, creative_identity, audio_sha)
-    existing = _motion_index_get(key)
-    if existing:
-        logger.info('[Motion.v1] dedup join: %s', existing)
-        return api_ok({'task_id': existing, 'deduped': True})
-
-    task_id = _motion_task_id()
-    workdir = os.path.join(motion_root(), 'jobs', task_id)
-    os.makedirs(workdir, exist_ok=True)
-
-    if srt_text:
-        srt_path = os.path.join(workdir, 'transcription.srt')
-        with open(srt_path, 'w', encoding='utf-8') as f:
-            f.write(srt_text)
-    elif srt_path_in:
-        srt_path = srt_path_in
-        if not os.path.isfile(srt_path):
-            return api_bad_request('srt_path is not a file', field='srt_path')
-    else:
-        srt_path = ''  # scenes-only / topic run — the recipe/storyboard is the source
-
-    task = _new_motion_task(
-        task_id, srt_path=srt_path, workdir=workdir, voice=voice,
-        speed=speed, alignment=alignment, narration=narration,
-        quality=quality, parallel=parallel, width=width, height=height,
-        scenes_path=scenes_path, user_id=owner_user_id)
-    task['burn_in'] = burn_in
-    task['burn_in_fontsdir'] = burn_in_fontsdir
-    if scene_author is not None:
-        task['scene_author'] = scene_author
-    task['author_token_budget'] = author_token_budget
-    if audio_plan:
-        task['audio_plan'] = audio_plan
-    if audio_plan_path:
-        task['audio_plan_path'] = audio_plan_path
-    if audio_base_dir:
-        task['audio_base_dir'] = audio_base_dir
-    if model:
-        task['model'] = model
-        task['qa_model'] = model
-    if topic:
-        task['topic'] = topic
-        task['lang'] = lang
-        task['max_scenes'] = max_scenes
-        task['creative_mode'] = creative_mode
-        task['kind'] = 'topic'
-    _motion_index_register(key, task_id)
-    _motion_runtime.spawn(task_id, run_motion_task, task)
-    logger.info('[Motion.v1] started %s (aspect=%s narration=%s parallel=%d '
-                'topic=%s)', task_id, aspect, narration, parallel, bool(topic))
-    return api_ok({'task_id': task_id, 'deduped': False})
+    try:
+        task_id, joined = start_motion_video(
+            user_id=owner_user_id, dedup_key=key,
+            srt_text=srt_text, srt_path=srt_path_in, scenes_path=scenes_path,
+            voice=voice, speed=speed, alignment=alignment, narration=narration,
+            quality=quality, parallel=parallel, width=width, height=height,
+            burn_in=burn_in, burn_in_fontsdir=burn_in_fontsdir,
+            scene_author=scene_author, author_token_budget=author_token_budget,
+            audio_plan=audio_plan, audio_plan_path=audio_plan_path,
+            audio_base_dir=audio_base_dir, model=model or None, qa_model=model or None,
+            topic=topic, lang=lang, max_scenes=max_scenes, creative_mode=creative_mode)
+    except BadRequest as exc:
+        return api_bad_request(str(exc), field=exc.field)
+    logger.info('[Motion.v1] %s %s (aspect=%s narration=%s parallel=%d topic=%s)',
+                'joined' if joined else 'started', task_id, aspect, narration,
+                parallel, bool(topic))
+    return api_ok({'task_id': task_id, 'deduped': joined})
 
 
 register_task_routes(api_v1_motion_bp, _motion_runtime,

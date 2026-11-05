@@ -716,6 +716,7 @@ class TestRecipe:
                 path, theme=kwargs.get('theme'),
                 subject=kwargs.get('subject', '视频帧'),
                 model=kwargs.get('model', ''),
+                review_context=kwargs.get('review_context', ''),
                 max_tokens=kwargs.get('max_tokens', 1500))
             return {'ok': True, 'skipped': False, 'reason': '',
                     'findings': [], 'has_blocker': False,
@@ -1408,7 +1409,7 @@ elements: []
                 'export': {'pptx_path': str(tmp_path / 'x.pptx'), 'bytes': 0},
             }
 
-        monkeypatch.setattr(recipe, 'run_stages', fake_stages)
+        monkeypatch.setattr(recipe, 'run_workflow', fake_stages)
         recipe.build_deck_from_topic('x', 'relative-slide-job')
 
         assert seen['workdir'] == str(tmp_path / 'relative-slide-job')
@@ -1505,15 +1506,16 @@ elements:
         assert first['cached'] is False and second['cached'] is True
         assert calls == {'launch': 1, 'close': 1, 'native': 1}
 
+    @pytest.mark.parametrize('missing', ['brotli', 'defusedxml.ElementTree'])
     def test_runtime_readiness_rejects_missing_export_dependency(
-            self, monkeypatch):
+            self, monkeypatch, missing):
         import lib.slides.readiness as readiness
 
         native_import = readiness.importlib.import_module
 
         def import_module(name):
-            if name == 'brotli':
-                raise ModuleNotFoundError("No module named 'brotli'")
+            if name == missing:
+                raise ModuleNotFoundError(f"No module named '{missing}'")
             return native_import(name)
 
         monkeypatch.setattr(readiness, '_ready_identity', None)
@@ -1522,7 +1524,7 @@ elements:
         with pytest.raises(readiness.SlidesRuntimeUnavailable) as caught:
             readiness.ensure_slides_runtime_ready()
 
-        assert 'required export dependency brotli' in str(caught.value)
+        assert f'required export dependency {missing}' in str(caught.value)
 
     def test_tool_schema_and_family(self):
         from lib.tools.produce import (PRODUCE_SLIDES_TOOL,

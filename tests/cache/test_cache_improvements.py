@@ -2,7 +2,7 @@
 
 Covers:
   1. last_update_time TTL detection fix — elapsed computation before state update
-  2. Concurrent conversation tracking — cache contention detection
+  2. Cache-miss attribution — concurrent activity does not establish contention
   3. Per-round cache stats logging at INFO level
   4. Session-stable TTL latch — prevents mid-session cache key shift
   5. Cache-aware tool result ordering — deterministic prefix for automatic caching
@@ -15,6 +15,8 @@ import threading
 import pytest
 
 import lib as _lib
+
+pytestmark = pytest.mark.unit
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -970,6 +972,51 @@ class TestExpectedRewriteAccounting:
             'remaining-prefix floor miss must still alarm')
         assert 'prefix_mutation' not in r2
 
+    def _wire(self, messages):
+        from lib.tasks_pkg.wire_fingerprint import (
+            canonical_messages, static_prefix_hash)
+        return {'_wire_fp': canonical_messages(messages),
+                '_wire_static': static_prefix_hash(messages)}
+
+    def _rewrite_after_cold_round(self, conv, caplog, *, advertise):
+        """Pressure-L1 shape: thin an old turn right after a cold full write."""
+        import logging
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._roi import notify_compaction
+
+        m1 = self._msgs()
+        detect_cache_break(conv, m1, None, 'claude-opus-4', usage={
+            'cache_creation_input_tokens': 150000,
+            'cache_read_input_tokens': 0, **self._wire(m1)}, user_id=1)
+        if advertise:
+            notify_compaction(conv, user_id=1, intended_rewrite_index=2)
+        m2 = [*m1[:2], {'role': 'assistant', 'content': 'turn 1 [thinned]'},
+              *m1[3:], {'role': 'assistant', 'content': 'turn 3 answer'},
+              {'role': 'user', 'content': 'turn 4 question'}]
+        with caplog.at_level(logging.INFO,
+                             logger='lib.tasks_pkg.cache_tracking'):
+            return detect_cache_break(conv, m2, None, 'claude-opus-4', usage={
+                'cache_creation_input_tokens': 100000,
+                'cache_read_input_tokens': 0, **self._wire(m2)}, user_id=1)
+
+    def test_advertised_rewrite_is_not_reported_as_client_caused_miss(
+            self, caplog):
+        result = self._rewrite_after_cold_round(
+            'er-wire-advertised', caplog, advertise=True)
+        assert result is None
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelname == 'WARNING']
+        assert not [m for m in warnings if 'WIRE PREFIX CHANGED' in m
+                    or 'INDETERMINATE' in m], warnings
+        assert 'rewritten by an advertised compaction' in caplog.text
+
+    def test_unadvertised_rewrite_still_warns(self, caplog):
+        result = self._rewrite_after_cold_round(
+            'er-wire-unadvertised', caplog, advertise=False)
+        assert result is not None and 'prefix_mutation' in result
+        assert any('WIRE PREFIX CHANGED' in r.getMessage()
+                   and r.levelname == 'WARNING' for r in caplog.records)
+
     def test_l2_blanket_notify_still_suppresses(self):
         from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
         from lib.tasks_pkg.cache_tracking._roi import notify_compaction
@@ -1005,77 +1052,11 @@ class TestExpectedRewriteAccounting:
         assert _first_changed_prefix_index(h1, h_at) == 2
         assert _first_changed_prefix_index(h1, h_early) == 1
 # ═══════════════════════════════════════════════════════════════════════════════
-#  2. Concurrent conversation tracking
+#  2. Cache-miss attribution
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestConcurrentConversationTracking:
-    """When multiple active conversations share the same model,
-    cache contention is a likely cause of unexplained evictions."""
-
-    def test_no_contention_single_conversation(self):
-        """Single conversation — no contention detected."""
-        from lib.tasks_pkg.cache_tracking._ttl import _count_active_on_model
-        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
-
-        msgs = [{'role': 'system', 'content': 'sys'}]
-        detect_cache_break('solo-1', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 50000}, user_id=1)
-
-        count = _count_active_on_model('claude-opus-4', exclude_conv='solo-1')
-        assert count == 0
-
-    def test_contention_detected_with_concurrent_conversations(self):
-        """Two conversations on the same model → contention detected."""
-        from lib.tasks_pkg.cache_tracking._ttl import _count_active_on_model
-        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
-
-        msgs = [{'role': 'system', 'content': 'sys'}]
-
-        # Conversation A on opus
-        detect_cache_break('conv-a', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 50000}, user_id=1)
-        # Conversation B on opus
-        detect_cache_break('conv-b', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 30000}, user_id=1)
-
-        count = _count_active_on_model('claude-opus-4', exclude_conv='conv-a')
-        assert count == 1  # conv-b is active on same model
-
-    def test_no_contention_different_models(self):
-        """Different models don't cause contention."""
-        from lib.tasks_pkg.cache_tracking._ttl import _count_active_on_model
-        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
-
-        msgs = [{'role': 'system', 'content': 'sys'}]
-
-        detect_cache_break('diff-a', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 50000}, user_id=1)
-        detect_cache_break('diff-b', msgs, None, 'claude-sonnet-4',
-                           usage={'cache_read_tokens': 30000}, user_id=1)
-
-        count = _count_active_on_model('claude-opus-4', exclude_conv='diff-a')
-        assert count == 0
-
-    def test_stale_conversation_not_counted(self):
-        """Conversations inactive for >60s are not counted."""
-        from lib.tasks_pkg.cache_tracking._state import (
-            _cache_states,
-            _state_key,
-        )
-        from lib.tasks_pkg.cache_tracking._ttl import _count_active_on_model
-        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
-
-        msgs = [{'role': 'system', 'content': 'sys'}]
-        detect_cache_break('stale-a', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 50000}, user_id=1)
-        detect_cache_break('stale-b', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 30000}, user_id=1)
-
-        # Backdate stale-b to 2 minutes ago
-        _cache_states[_state_key('stale-b', user_id=1)].last_update_time = time.time() - 120
-
-        count = _count_active_on_model('claude-opus-4', exclude_conv='stale-a')
-        assert count == 0  # stale-b is too old
+class TestCacheMissAttribution:
+    """Concurrent activity alone never proves the cause of a cache miss."""
 
     def test_unexplained_drop_reason_no_contention(self):
         """When cache drops without client changes, reason does NOT mention contention.

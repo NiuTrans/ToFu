@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from tests._runtime_sections import _require_frontend_bundler
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,8 +27,7 @@ def reader_page(tmp_path):
         pytest.skip('Chromium is unavailable')
     ensure_chromium_env()
     node = shutil.which('node')
-    if not node:
-        pytest.skip('Node is unavailable')
+    require_node_modules('vite', 'pdfjs-dist')
     # Shared dep guard: skip on dep-less lanes, fail under
     # TOFU_REQUIRE_FRONTEND=1 (was an unguarded bundler call).
     _require_frontend_bundler()

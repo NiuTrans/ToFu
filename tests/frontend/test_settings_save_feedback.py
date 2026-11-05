@@ -22,6 +22,7 @@ def settings_bundle(tmp_path_factory):
     entry.write_text('\n'.join([
         'export { featureRegistry as bridge } from ' + json.dumps(str(ROOT/'frontend/src/feature-registry')) + ';',
         'export { t } from ' + json.dumps(str(ROOT/'frontend/src/i18n')) + ';',
+        'export { runModelRoutingMutation } from ' + json.dumps(str(ROOT/'frontend/src/features/settings/model-routing-authority')) + ';',
         'import ' + json.dumps(str(ROOT/'frontend/src/features/settings/core-panel')) + ';',
         'import ' + json.dumps(str(ROOT/'frontend/src/features/settings/save-export')) + ';',
     ]))
@@ -36,7 +37,7 @@ def settings_bundle(tmp_path_factory):
     return output
 
 @pytest.mark.parametrize('scenario', ['feature_pending','feature_failure','collector_failure',
-    'busy_authority','server_failure','success_hint','authority_retry'])
+    'busy_authority','server_failure','success_hint','authority_retry','close_model_picker'])
 def test_settings_save_feedback_behavior(settings_bundle, scenario):
     harness = r'''
 const assert=require('node:assert/strict');
@@ -58,11 +59,18 @@ const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 function serverReady(){
  bridge._serverConfig={};bridge._stgModelRouting={contract_version:'tofu.model-routing/v2'};
+ bridge._stgModelRoutingSavedJson=JSON.stringify(bridge._stgModelRouting);
  bridge._persistModelRoutingNow=async()=>{};
  bridge.Api={serverConfig:{update:async()=>({json:async()=>({ok:true})})}};
 }
 async function main(){
- if(SCENARIO==='feature_pending'){
+ if(SCENARIO==='close_model_picker'){
+  let disposed=0;
+  bridge._closeProviderModelPicker=()=>{disposed++;};
+  bridge.closeSettings();
+  assert.equal(disposed,1,'closing Settings also retires the Provider model picker');
+  assert.equal(closed,1);
+ } else if(SCENARIO==='feature_pending'){
   elements.settingTradingEnabled=Object.assign(new HTMLInputElement(),{checked:true});
   const gate=defer();bridge.Api={features:{set:()=>{requests++;return gate.promise;}}};
   const saving=bridge.saveSettings();await tick();

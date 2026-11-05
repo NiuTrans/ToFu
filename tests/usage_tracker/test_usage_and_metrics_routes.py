@@ -373,6 +373,67 @@ class UsageRouteTest(unittest.TestCase):
             'tofu_storage_idle_heap_trim_last_duration_seconds'
             '{backend="sqlite"} 0.006', body)
 
+    def test_native_storage_metrics_expose_reclamation_progress(self):
+        """A collector that never completes an epoch, or a retained history
+        that keeps growing, must be visible on a dashboard: on the live
+        authority both went unseen while terabytes of garbage accumulated."""
+        from routes.metrics import _collect_storage_metrics
+
+        class Client:
+            @staticmethod
+            def metrics():
+                return {
+                    'backend': 'tofudb',
+                    'onlineGarbageCollector': {
+                        'epochs_completed': 0,
+                        'failed_epochs': 8,
+                        'deferred_epochs': 8,
+                        'epoch_error': 'kind=WouldBlock error=hold contended',
+                        'total_reclaimed_bytes': 36_054_257_839,
+                        'total_orphan_segments_removed': 295,
+                    },
+                    'searchGarbageCollector': {
+                        'epochs_completed': 3,
+                        'failed_epochs': 0,
+                        'deferred_epochs': 1,
+                        'epoch_error': None,
+                        'total_reclaimed_bytes': 0,
+                        'total_orphan_segments_removed': 0,
+                    },
+                    'maintenance': {'retainedHistorySegments': 30_343},
+                }
+
+        lines = []
+        with mock.patch('lib.storage.get_storage_client',
+                        return_value=Client()):
+            _collect_storage_metrics(lines)
+        body = '\n'.join(lines)
+
+        for sample in (
+            'tofu_storage_gc_epochs_completed_total'
+            '{backend="tofudb",collector="source"} 0',
+            'tofu_storage_gc_epochs_completed_total'
+            '{backend="tofudb",collector="search"} 3',
+            'tofu_storage_gc_epochs_failed_total'
+            '{backend="tofudb",collector="source"} 8',
+            'tofu_storage_gc_epochs_deferred_total'
+            '{backend="tofudb",collector="search"} 1',
+            'tofu_storage_gc_epoch_failing'
+            '{backend="tofudb",collector="source"} 1',
+            'tofu_storage_gc_epoch_failing'
+            '{backend="tofudb",collector="search"} 0',
+            'tofu_storage_gc_reclaimed_bytes_total'
+            '{backend="tofudb",collector="source"} 36054257839',
+            'tofu_storage_gc_orphan_segments_removed_total'
+            '{backend="tofudb",collector="source"} 295',
+            'tofu_storage_history_retained_segments{backend="tofudb"} 30343',
+        ):
+            self.assertIn(sample, body)
+        # One HELP/TYPE header per family, whatever the collector count.
+        self.assertEqual(
+            body.count('# TYPE tofu_storage_gc_epochs_completed_total counter'),
+            1)
+
     def test_metrics_requires_admin(self):
         async def go():
             r = await self.app.test_client().get(

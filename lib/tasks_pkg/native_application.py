@@ -15,9 +15,12 @@ from pathlib import Path
 
 from lib.agent_core.native_process import NativeConfigurationError, _joined
 from lib.identity import PrincipalContext
+from lib.log import get_logger
 from lib.model_routing.domain import NativeModelSelection
 from lib.model_routing.native_route import ROUTE_OVERRIDE_FIELDS
 from lib.tasks_pkg.native_invocation import NativePreparedInvocation
+
+logger = get_logger(__name__)
 
 
 def _repository(principal):
@@ -125,6 +128,8 @@ class NativeApplicationBinding:
                     # Task callbacks special-case control exceptions. Return
                     # them to the lifespan owner, where the remaining owners
                     # still receive cleanup before the failure is raised.
+                    logger.debug('native repository close failure handled: %s',
+                                 type(failure).__name__)
                     return failure
                 return None
 
@@ -169,7 +174,10 @@ class NativeApplicationBinding:
             raise NativeConfigurationError('native application issued route principal differs')
         if task.get('_repository_runtime') is not None and task.get('_repository_runtime') is not self.repository_runtime:
             raise NativeConfigurationError('native application repository owner differs')
-        if self.configuration.worker_reuse:self.host.enable_worker_reuse(runtime.resource_controller.launch_policy)
+        if self.configuration.worker_reuse:
+            from runtime_guards import UNLIMITED, resolve_resource_budget
+            self.host.enable_worker_reuse(resolve_resource_budget(
+                'TOFU_AGENT_WORKERS', runtime.environ, minimum=1, maximum=UNLIMITED))
         profile=json.loads(self.configuration._flow_profile if flow else self.configuration._profile)
         checkpoint_factory=(self.configuration.flow_checkpoint_factory if flow
                             else self.configuration.checkpoint_factory)

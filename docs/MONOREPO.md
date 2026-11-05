@@ -142,7 +142,10 @@ reads and local batch count/byte windows refused valid calls before execution.
 Decision: every explicitly classified read starts a scoped worker; a publication
 gate opens only after all workers start. A physical startup failure withdraws
 unstarted work, wakes and joins already-created workers, and returns WorkerStart
-before any handler effect. Ordered writes retain source order. Legacy count/byte
+before any handler effect. In this qualified composition ordered writes retain
+source order; the concurrent composition (`Scheduler::concurrent`) starts every
+call and keeps only the host-declared call order (TOOL_EXECUTION_POLICY.md,
+"Native application rounds"). Legacy count/byte
 fields are compatibility observations, not admission limits; checked arithmetic,
 authorization, parent/epoch binding and tool argument contracts remain. Dispatch
 joins workers before releasing borrowed inputs or batch accounting; concurrent
@@ -193,6 +196,18 @@ seams. `tofu-search` never imports host modules. The host discovers
 `tofu-trading`; core modules never import `tofu_trading`. Trading uses declared
 host runtime/storage seams and owns durable records only in `tofu.trading`.
 
+Optional browser pages — Problem: the trading wheel referenced retired host
+scripts and imported Flask objects into the native Quart request context.
+Decision: packaged native blueprints use the host's API projection and public
+`tofu_plugin_assets()` Jinja helper. A packaged ES module exports `mount(host)`
+and receives versioned API/Markdown ports; its views remain package-owned.
+The host discovers plugins and never imports a named plugin. Request identity
+delegates to `routes.api_v1.auth.request_user_id`, replacing the removed private
+`routes.common` helper; absent ownership still fails closed. Alternatives:
+vendoring host libraries would fork dependency/security ownership; reintroducing
+classic API globals would restore ambient initialization ordering. Verify a
+freshly installed wheel, actual HTTP assets and root/prefixed browser startup.
+
 `tofu-overleaf-mcp` is excluded from the shared uv workspace: its pinned upstream
 server and protocol SDK resolve in its own process environment. Install the
 package by path to obtain the `tofu-overleaf-mcp` console entry point. It imports
@@ -221,8 +236,9 @@ names the implemented physical executor and remaining domain integrations.
 `tofu-repo-kernel` builds independently of the shared uv workspace. Source builds
 require Rust; platform-wheel consumers do not. Its standard-library-only C ABI
 loads on the first repository-ranking call and retains one immutable binding.
-The application prefers a verified installed wheel and preserves NetworkX when
-the component is absent or invalid. Graphs and Rust buffers are call-local.
+The application prefers a verified installed wheel and uses the dependency-free
+Python kernel (`lib/repo_map/_python_rank.py`) when the component is absent or
+invalid. Graphs and Rust buffers are call-local.
 Build and install a wheel into an isolated target, then run the native graph
 oracle and `tests/repo_map/test_native_rank.py` with that target on `PYTHONPATH`.
 Docker builds compile this standalone wheel once and install it into all three
@@ -248,6 +264,42 @@ scripts and retained tests, including generated protocol clients. `check_monorep
 an ignored file left on a developer machine cannot satisfy a release gate.
 The scripts allow-list in `.gitignore` records these retained owners.
 
+The guard captures one tracked-path inventory for each `check()` invocation and
+reads the current working-copy source. Problem: a process-global path cache
+hid newly tracked imports and retained deleted paths on a second check.
+Decision: share the snapshot only within that invocation. Retaining it across
+checks is rejected because repository changes must be observable; rereading it
+for each policy would mix index revisions within one check. Private-repository
+tests cover added/removed sources and repeated invocations without executing
+the inspected code.
+
+Import discovery still parses each selected source in full, then visits only
+syntax that can contain import statements. Problem: walking every expression
+expanded large call/literal payloads unrelated to dependency direction.
+Decision: both package and script-import checks share a breadth-first traversal
+that skips expression children, retaining import identity and order in all
+statement scopes, handlers and match cases. Lexical import matching and reused
+ASTs across invocations are rejected: they would lose syntax/encoding failures
+or hide working-copy changes. The gate remains read-only and its watchdog is
+unchanged; whole-repository AST comparisons and private Git fixtures verify the
+scan boundary, including staged-versus-working content and tracked symlinks.
+
+Native text-search records follow Git's NUL-separated filename and line-number
+fields, followed by the matched line text. Problem: splitting on newlines first
+confused a legal newline in a tracked filename with a new result. Decision:
+parse those field boundaries before locating the line terminator. Escaping or
+rejecting such names is unnecessary; private Git fixtures verify that the guard
+reports their actual source locations.
+
+Retired sibling-path checks share one native search of the same tracked source
+set. Problem: two full scans repeated file reads and contributed to intermittent
+watchdog failures in an isolated worktree. Decision: search all retired literals
+in one invocation, then classify each matched line into independent diagnostics;
+a line may belong to more than one category. Each check reads current working
+content. Raising the watchdog or retaining search results across checks is
+rejected. Private Git tests verify working-copy changes, shared lines, independent
+diagnostic bounds and one source scan per invocation.
+
 Root gates then verify the integration adapters and full application. A source
 change that affects a public member contract updates producer, consumer,
 compatibility test, and version range together.
@@ -268,6 +320,22 @@ explicit immutable commit. SDK tests exercise runtime identity against package
 metadata. Alternatives rejected: changing only tags or package metadata leaves
 installed clients reporting another release; `export.py --bump` alone updates
 only `VERSION` and cannot prepare a complete release.
+
+`scripts/check_monorepo.py` owns the shared `check_release_identity(root, tag=...)`
+gate. Its normal repository check, public artifact tests, frozen export gate and
+developer-runtime release workflow use that same owner. It compares `VERSION`
+with application and SDK metadata, both SDK runtime constants, the root
+application entry in `uv.lock`, and both npm lockfile identity fields. It reads
+the explicitly selected tree without importing clients or modifying metadata;
+workspace packages with independent release versions are outside this group.
+Malformed, missing or ambiguous identity inputs fail with their source path.
+SDK identity leaf modules contain only documentation and one literal constant.
+After preparing the metadata, run
+`python3 scripts/check_monorepo.py --release-identity --tag v<version>`, build and
+test installed SDK artifacts, then commit before freezing the source ref.
+Alternatives rejected: separate inline CI assertions already omitted runtime
+and lockfile identities; silently synchronizing during export would alter the
+candidate after its source identity was selected.
 
 Shared-export privacy — Problem: the maintainer export package contains private
 sanitization markers, including personal credential patterns. Decision: neither
@@ -368,6 +436,24 @@ verified artifacts once per release/platform. Alternatives: changing only labels
 leaves ambiguous filenames; caching inside fresh environments loses reuse;
 skipping native smoke would certify the builder's environment rather than the
 shipped dependency closure. Platform certification remains a real CI result.
+
+TofuDB musl-static link — Problem: Rust links `*-unknown-linux-musl` as a static
+PIE, which reaches the C driver as `-static-pie` and only links correctly when
+the host `musl-gcc` specs understand that rule. Ubuntu 22.04 ships musl 1.2.2,
+whose specs predate it, so the link kept `-dynamic-linker` while still using
+musl's `rcrt1.o`: the kernel then also mapped `ld-musl` over the self-relocating
+crt and `_start_c` faulted before `main` (x86_64-musl release smoke, exit -11;
+aarch64 musl and macOS never linked that way). Decision:
+`scripts/build_tofudb_prebuilt.py` pins
+`-C target-feature=+crt-static -C relocation-model=static` for every musl triple
+and refuses to package an artifact whose ELF header still declares a program
+interpreter. Alternatives: upgrading the runner's musl leaves every other 1.2.2
+host broken; moving the Rust toolchain pin does not close the specs gap; waiving
+the smoke check would ship an unrunnable asset. Verified by rebuilding with
+Rust 1.96.0 and Ubuntu 22.04 `musl-tools` (musl 1.2.2-4): the pre-fix artifact is
+a static-PIE hybrid that segfaults under the real loader, the fixed artifact is
+a plain static `EXEC` with no `PT_INTERP`/`DT_NEEDED` that passes the no-arg
+smoke.
 
 Frozen desktop contracts — Problem: a partial schema list let installers build
 but fail at startup when a runtime loader opened an omitted authority. Decision:

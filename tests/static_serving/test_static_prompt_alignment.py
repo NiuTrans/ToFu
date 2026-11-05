@@ -66,7 +66,7 @@ class TestSystemPromptSections:
         from lib.tasks_pkg.system_prompt_base import section_using_tools
         section = section_using_tools()
         assert 'parallel' in section.lower()
-        assert 'read_files' in section or 'grep_search' in section
+        assert 'read_files' in section or 'search_files' in section
         assert 'description' in section and 'authoritative' in section
 
     def test_tool_usage_guidance_parallel_calls(self):
@@ -147,7 +147,8 @@ class TestSystemPromptSections:
 @pytest.mark.unit
 class TestWebSourceCitation:
     """Web-research source-emission fix (2026-07): citation nudge gated on web
-    tools + deterministic Sources footer. Guards the platform URL policy."""
+    tools. Guards the platform URL policy; the deterministic Sources footer
+    that backs the nudge is specified in tests/tasks_pkg/test_sources_footer.py."""
 
     MARKER = "IMPORTANT: You must NEVER generate or guess URLs"
     CITE = "cite each key factual claim"
@@ -164,14 +165,14 @@ class TestWebSourceCitation:
         assert self.MARKER in self._build({"web_search", "fetch_url", "read_files"})
 
     def test_marker_byte_intact_code_turn(self):
-        assert self.MARKER in self._build({"read_files", "grep_search"})
+        assert self.MARKER in self._build({"read_files", "search_files"})
 
     def test_citation_bullet_present_with_web_tools(self):
         assert self.CITE in self._build({"web_search", "fetch_url", "read_files"})
 
     def test_citation_bullet_absent_without_web_tools(self):
         # Code turn that did NOT get web tools must render identically (no bullet).
-        assert self.CITE not in self._build({"read_files", "grep_search", "write_file"})
+        assert self.CITE not in self._build({"read_files", "search_files", "write_file"})
 
     def test_code_tone_section_unchanged_without_web(self):
         from lib.tasks_pkg.system_prompt_base import section_tone_and_style
@@ -185,7 +186,7 @@ class TestWebSourceCitation:
 
     def test_corroboration_bullet_absent_without_web_tools(self):
         # Code / no-web turn must be byte-identical (no corroboration nudge).
-        assert self.CORROB not in self._build({"read_files", "grep_search", "write_file"})
+        assert self.CORROB not in self._build({"read_files", "search_files", "write_file"})
 
     def test_corroboration_is_bounded_not_exhaustive(self):
         # Anti-balloon guardrail: the directive must cap the pass (bounded, not
@@ -202,32 +203,6 @@ class TestWebSourceCitation:
         from lib.tasks_pkg.system_prompt_base import section_tone_and_style
         assert (section_tone_and_style(is_code_context=False, web_tools=False)
                 == section_tone_and_style(is_code_context=False))
-
-    def test_footer_appended_when_web_used_but_uncited(self):
-        from lib.tasks_pkg.orchestrator._finalize import _maybe_append_sources_footer
-        t = {'id': 'a' * 8, 'content': 'Python 3.14 GA 2025-10-07.', 'aborted': False}
-        srt = ['[1] Py\n    URL: https://www.python.org/downloads/\n    Source: python.org']
-        _maybe_append_sources_footer(t, srt)
-        assert 'Sources' in t['content'] and 'python.org/downloads' in t['content']
-
-    def test_footer_noop_when_already_cited(self):
-        from lib.tasks_pkg.orchestrator._finalize import _maybe_append_sources_footer
-        t = {'id': 'b' * 8, 'content': 'See https://www.python.org/downloads/ .', 'aborted': False}
-        _maybe_append_sources_footer(t, ['URL: https://www.python.org/downloads/'])
-        assert 'Sources**' not in t['content']
-
-    def test_footer_noop_no_web_and_aborted_and_caps_five(self):
-        from lib.tasks_pkg.orchestrator._finalize import _maybe_append_sources_footer
-        t = {'id': 'c' * 8, 'content': 'reasoning', 'aborted': False}
-        _maybe_append_sources_footer(t, [])
-        assert 'Sources' not in t['content']
-        t2 = {'id': 'd' * 8, 'content': 'partial', 'aborted': True}
-        _maybe_append_sources_footer(t2, ['URL: https://ex.com/a'])
-        assert 'Sources' not in t2['content']
-        t3 = {'id': 'e' * 8, 'content': 'no links', 'aborted': False}
-        _maybe_append_sources_footer(
-            t3, ['\n'.join('URL: https://ex%d.com/x' % i for i in range(9))])
-        assert t3['content'].count('- http') == 5
 
 
 # ═══════════════════════════════════════════════════════════

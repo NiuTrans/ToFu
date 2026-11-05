@@ -18,6 +18,12 @@ export interface TransientTurnOverlay {
   compose(state: TurnState): TurnState;
 }
 
+function durableTailOrdinal(state: TurnState, laneId: string): number {
+  const ids = state.laneOrder[laneId];
+  const ordinal = ids?.length ? Number(state.turnsById[ids[ids.length - 1]]?.ordinal) : NaN;
+  return Number.isFinite(ordinal) ? ordinal : -Infinity;
+}
+
 export function createTransientTurnOverlay(): TransientTurnOverlay {
   const turnsByConversation = new Map<string, Map<string, TransientTurnRecord>>();
 
@@ -67,10 +73,15 @@ export function createTransientTurnOverlay(): TransientTurnOverlay {
         if (authoritativeTurnId && authoritativeTurnId !== turn.turnId) {
           continue;
         }
-        turnsById[turn.turnId] = turn;
         const laneId = turn.laneId || 'main';
-        const order = laneOrder[laneId] ?? (laneOrder[laneId] = []);
-        if (!order.includes(turn.turnId)) order.push(turn.turnId);
+        if (!state.laneOrder[laneId]?.includes(turn.turnId)) {
+          // Off-window overlays may only extend the lane. A swarm presentation
+          // copy of history evicted by a tail snapshot would otherwise render
+          // below the live Turn and read as the end of the conversation.
+          if (Number(turn.ordinal) <= durableTailOrdinal(state, laneId)) continue;
+          (laneOrder[laneId] ?? (laneOrder[laneId] = [])).push(turn.turnId);
+        }
+        turnsById[turn.turnId] = turn;
       }
       return { ...state, turnsById, laneOrder };
     },

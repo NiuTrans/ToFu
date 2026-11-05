@@ -99,13 +99,13 @@ _TODO_TOOL_DEFAULTS = {
     'searchMode': 'off',
     'fetchEnabled': True,  # always on
     'codeExecEnabled': False,
-    'browserEnabled': False,
+    'browserEnabled': True,  # always on
     'projectEnabled': False,
 }
 _TODO_TOOL_MAP = {
     'search':  {'searchMode': 'multi'},
     'code':    {'codeExecEnabled': True},
-    'browser': {'browserEnabled': True},
+    'browser': {},  # browserEnabled always on, no override needed
     'fetch':   {},  # fetchEnabled always on, no override needed
     'project': {'projectEnabled': True},
 }

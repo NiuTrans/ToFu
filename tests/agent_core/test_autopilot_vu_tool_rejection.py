@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -18,8 +18,7 @@ ENTRY = (
 
 
 def test_tool_complete_keeps_rejection_status_and_descriptor(tmp_path: Path):
-    if shutil.which('node') is None:
-        pytest.skip('node is required for the transient reducer test')
+    require_node_modules('vite')
     bundle = tmp_path / 'autopilot-vu.cjs'
     built = subprocess.run(
         [str(BUNDLER), str(ENTRY), '--bundle', '--format=cjs',

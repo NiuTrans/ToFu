@@ -23,13 +23,39 @@
 
 .conversation-surface .bgcmd-summary {
   cursor: pointer;
+  list-style: none;
   font-size: var(--conversation-font-size-meta);
   line-height: 1.5;
   color: var(--text-secondary);
 }
 
+.conversation-surface .bgcmd-summary::-webkit-details-marker {
+  display: none;
+}
+
 .conversation-surface .bgcmd-summary::marker {
-  color: var(--text-tertiary);
+  content: '';
+}
+
+.conversation-surface .bgcmd-summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-xs);
+}
+
+.conversation-surface .bgcmd-summary > .bgcmd-chevron {
+  margin-inline-start: var(--space-1);
+  vertical-align: middle;
+  transform: rotate(-90deg);
+}
+
+.conversation-surface .bgcmd-details[open] > .bgcmd-summary > .bgcmd-chevron {
+  transform: none;
+}
+
+.conversation-surface .bgcmd-summary:is(:hover, :focus-visible) > .bgcmd-chevron {
+  color: var(--text-secondary);
+  opacity: 1;
 }
 
 .conversation-surface .bgcmd-id {

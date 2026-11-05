@@ -14,6 +14,10 @@ Run:  pytest tests/diagnostics/test_request_scoped_errors.py -m unit
 """
 from __future__ import annotations
 
+import lib.tasks_pkg.llm_fallback._pool as _fallback_pool
+import lib.tasks_pkg.llm_fallback._retry as _fallback_retry
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+
 import os
 import sys
 
@@ -227,11 +231,11 @@ def test_request_rejection_never_switches_model_or_pool_rescues(
         stream_calls.append(body.get('model'))
         raise error
 
-    monkeypatch.setattr(fallback, 'stream_llm_response', reject)
-    monkeypatch.setattr(fallback, '_get_fallback_model',
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', reject)
+    monkeypatch.setattr(_fallback_retry, '_get_fallback_model',
                         lambda _task: 'glm-5.3')
     monkeypatch.setattr(
-        fallback, '_attempt_pool_rescue',
+        _fallback_pool, '_attempt_pool_rescue',
         lambda *_args, **_kwargs: rescue_calls.append(True))
     task = {
         'id': 'request-rejection-task', 'convId': 'request-rejection-conv',
@@ -265,10 +269,10 @@ def test_local_request_preparation_never_switches_or_pool_rescues(monkeypatch):
         stream_calls.append(body.get('model'))
         raise error
 
-    monkeypatch.setattr(fallback, 'stream_llm_response', reject)
-    monkeypatch.setattr(fallback, '_get_fallback_model', lambda _task: 'glm-5.3')
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', reject)
+    monkeypatch.setattr(_fallback_retry, '_get_fallback_model', lambda _task: 'glm-5.3')
     monkeypatch.setattr(
-        fallback, '_attempt_pool_rescue',
+        _fallback_pool, '_attempt_pool_rescue',
         lambda *_args, **_kwargs: rescue_calls.append(True))
     task = {
         'id': 'local-prepare-task', 'convId': 'local-prepare-conv',

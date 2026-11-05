@@ -6,7 +6,7 @@ WHY
 ---
 The matrix's "Probe & Recommend" sends a tiny ``/chat/completions`` request
 (``max_tokens: 1``) to every (key × model-id) cell. For models with no chat
-surface the gateway has NO chat binding to route to — the Meituan AIGC
+surface the gateway has NO chat binding to route to — the YourProvider AIGC
 gateway (a Java service) then picks a random upstream from an EMPTY candidate
 list: ``Random.nextInt(0)`` → ``IllegalArgumentException: bound must be
 positive`` → HTTP 500. Confirmed against the live persisted snapshot
@@ -87,6 +87,20 @@ class _ProbeRedirect(unittest.TestCase):
 
 
 class BackendSkipTest(_ProbeRedirect):
+
+    def test_reranking_without_a_probe_surface_is_skipped_without_network(self):
+        task = _task()
+        task['total'] = 1
+        work = [(0, 'synthetic-key', 'ranker', 'ranker', ['reranking'])]
+        with mock.patch.object(pp, 'probe_cell_multi') as send:
+            pp.run_cell_probe_task(task, work, timeout=5)
+
+        send.assert_not_called()
+        cell = task['cells'][pp.probe_cell_key(0, 'ranker')]
+        self.assertEqual(cell['status'], 'skipped')
+        self.assertEqual(cell['probe_surface'], 'none')
+        self.assertFalse(cell['recommend_disable'])
+        self.assertIn('no probe surface', cell['detail'])
 
     def test_known_nonchat_caps_use_modality_probe(self):
         """image_gen / embedding / transcription / TTS cells use

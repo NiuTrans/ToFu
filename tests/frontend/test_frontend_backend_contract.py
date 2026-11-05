@@ -9,12 +9,14 @@ import subprocess
 import pytest
 
 from tests.support.frontend_api_inventory import browser_route_app, route_failure
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_browser_api_ast_inventory():
+    require_node_modules('typescript')
     result = subprocess.run(
         ['node', '--test', 'tests/frontend_api_inventory.test.mjs'],
         cwd=ROOT, capture_output=True, text=True, timeout=60,

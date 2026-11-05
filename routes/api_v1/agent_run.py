@@ -86,7 +86,6 @@ from lib.agent_core.admission import (
 )
 from lib.agent_core.execution_session import (
     acquire_and_bind_admission,
-    bind_billing_reservation,
     bind_model_route,
     bind_tool_environment,
     execution_session_for_task,
@@ -95,12 +94,11 @@ from lib.agent_core.run_contract import (
     build_agent_config, project_agent_result,
 )
 from lib.api_response import (
-    api_bad_request, api_error, api_internal_error, api_ok,
+    api_bad_request, api_internal_error, api_ok,
     api_payload, sse_response,
 )
-from lib.billing.request_flow import (
-    estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
-)
+from lib.billing.request_flow import settle_task
+from lib.error_envelope import BadRequest
 from lib.model_routing import ModelRoutingError
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
@@ -114,6 +112,7 @@ from lib.tools.tool_env import (
 )
 from lib.trajectory import AVAILABLE_FORMATS
 
+from ._task_billing import prepare_task_billing
 from .auth import current_auth, guard_model_relay_or_dispose, require_scope
 from routes.model_routing_adapter import (
     dispose_routed_slot_group,
@@ -350,7 +349,7 @@ async def agent_run():
     owner_user_id = int(request_user_id())
     try:
         messages_in = require_list(body, 'messages')
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e), field='messages')
     if not messages_in:
         return api_bad_request('messages is empty', field='messages')
@@ -362,7 +361,8 @@ async def agent_run():
     # ── 1. Resolve the structured v2 ModelRef ─────────────────────
     route_group = None
     try:
-        model_id, model_selection, route_group = mint_native_request_route(
+        model_id, model_selection, route_group = await asyncio.to_thread(
+            mint_native_request_route,
             body,
             owner_user_id=owner_user_id,
             tenant_id=tenant_id,
@@ -445,8 +445,10 @@ async def agent_run():
     # ── 4. Dispatch ───────────────────────────────────────────────
     from lib.tasks_pkg.manager import create_task, reject_unstarted_chat_task
     from lib.tasks_pkg.spawn import spawn_task
+    # ``conversation_id`` is the caller's job label, never a saved conversation.
     task = create_task(
-        conversation_id, messages_in, cfg, user_id=owner_user_id
+        conversation_id, messages_in, cfg, user_id=owner_user_id,
+        saved_conversation=False,
     )
     task['_tenant_id'] = tenant_id
     task['_inline_messages'] = True
@@ -479,80 +481,25 @@ async def agent_run():
             conv_id=conversation_id)
         raise
 
-    # ── Billing: pre-flight reserve (multi-user installs only) ──
-    # Mirrors routes/api_v1/chat.py. Personal / open installs have an
-    # empty user_id and short-circuit to a no-op. The headline agent-runtime
-    # endpoint must bill identically to /chat/completions — stream and
-    # block alike (see _settle_once in _stream_generator + settle below).
+    # Reserve before dispatch; the session owns release or terminal settlement.
     billing_user_id = auth.account_user_id if auth else ''
-    reservation_micro = 0
-    if billing_user_id:
-        from lib.billing import InsufficientFunds
-        try:
-            est_completion = int(cfg.get('maxTokens')
-                                 or body.get('max_tokens') or 1024)
-            reservation_micro = reserve_for_task(
-                task, user_id=billing_user_id, model=model_id,
-                prompt_tokens=estimate_prompt_tokens(messages_in),
-                max_completion_tokens=est_completion)
-        except InsufficientFunds as e:
-            reject_unstarted_chat_task(
-                task, e, cause='billing_reservation_refused',
-                conv_id=conversation_id)
-            return api_error(
-                f'Insufficient credits. '
-                f'Estimated cost {e.needed_micro / 1_000_000:.4f} credits, '
-                f'balance {e.balance_micro / 1_000_000:.4f}.',
-                status=402, error_kind='insufficient_funds',
-                balance_micro=e.balance_micro, needed_micro=e.needed_micro)
-        except Exception as exc:
-            reject_unstarted_chat_task(
-                task, exc, cause='billing_reservation_failed',
-                conv_id=conversation_id)
-            raise
+    billing_refusal = prepare_task_billing(
+        task, account_user_id=billing_user_id,
+        execution_session=execution_session, conversation_id=conversation_id,
+        messages=messages_in, config=cfg, completion_hint=body.get('max_tokens'),
+        model_for_billing=lambda: model_id,
+    )
+    if billing_refusal is not None:
+        return billing_refusal
 
-    if billing_user_id:
-        try:
-            bind_billing_reservation(
-                execution_session,
-                reservation_micro=reservation_micro,
-                settle=lambda: settle_task(
-                    task, user_id=billing_user_id, model=model_id,
-                    raise_on_error=True,
-                ),
-                release=lambda: release_reservation(
-                    task, user_id=billing_user_id,
-                    reservation_micro=reservation_micro, raise_on_error=True,
-                ),
-            )
-        except Exception as exc:
-            reject_unstarted_chat_task(
-                task, exc, cause='billing_bind_failed',
-                conv_id=conversation_id)
-            raise
-
-    # ── Admission control: bound concurrent in-flight tasks ───────
-    # When the server is saturated, refuse with 503 + Retry-After
-    # instead of spawning unbounded work that starves the thread pool.
+    # ── Execution ownership: an exact lease, never a capacity refusal ──
     try:
-        admission_lease = acquire_and_bind_admission(
-            execution_session, controller)
+        acquire_and_bind_admission(execution_session, controller)
     except Exception as exc:
         reject_unstarted_chat_task(
             task, exc, cause='admission_acquire_failed',
             conv_id=conversation_id)
         raise
-    if admission_lease is None:
-        reject_unstarted_chat_task(
-            task, RuntimeError('Task admission refused'),
-            cause='task_admission_refused', conv_id=conversation_id)
-        logger.warning('[agent.run] admission refused (in_flight=%d/%d) '
-                       'key=%s model=%s',
-                       controller.in_flight, controller.capacity,
-                       credential_key_id or 'open-mode', model_id)
-        return api_error(
-            'Server at capacity; retry shortly.', status=503,
-            error_kind='overloaded', retry_after=5)
     register_waiter(task['id'])
 
     try:

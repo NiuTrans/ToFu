@@ -46,24 +46,18 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
 
 from tests._runtime_sections import runtime_section_path
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 _UPLOAD_SRC = runtime_section_path('upload.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -172,6 +166,7 @@ console.log(out.join('\n'));
 
 
 def _run(upload_src):
+    require_node_modules('jsdom')
     harness = os.path.join(HERE, '_img_reorder_harness.js')
     with open(harness, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)
@@ -189,8 +184,6 @@ def _run(upload_src):
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_reorder_dragover_keeps_move_cursor_everywhere():
     """The shipped dragover handler accepts a reorder drag both OVER a sibling
     chip and OFF any chip (container gap), so the OS reposition cursor persists
@@ -209,8 +202,6 @@ def test_reorder_dragover_keeps_move_cursor_everywhere():
         assert marker in output, output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_offchip_accept_is_load_bearing():
     """NC: byte-revert the "accept everywhere" fix in a COPY of upload.js
     (restore the early ``if (!hit) return;`` bail before preventDefault) → an
@@ -251,8 +242,6 @@ def test_NC_offchip_accept_is_load_bearing():
         assert f.read() == original, 'shipped upload.js must be byte-identical'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_offchip_drop_swallow_is_load_bearing():
     """NC: byte-revert the "swallow everywhere" drop fix in a COPY of upload.js
     (restore the early ``if (!hit) return;`` bail before preventDefault) → an

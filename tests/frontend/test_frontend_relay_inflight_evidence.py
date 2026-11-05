@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -50,6 +51,7 @@ vm.runInNewContext(fs.readFileSync(process.argv[1], 'utf8'), context);
 
 
 def test_urgent_evidence_flushes_after_inflight_request_without_proxy_delay():
+    require_node_modules('typescript')
     root = Path(__file__).resolve().parents[2]
     script = r'''
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');

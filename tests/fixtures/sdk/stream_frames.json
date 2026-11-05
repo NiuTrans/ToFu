@@ -1,0 +1,74 @@
+[
+  {
+    "name": "multiline-json",
+    "wire": "id: 7\nevent: delta\ndata: {\"text\":\ndata: \"豆腐\"}\n\n",
+    "expected": [
+      {
+        "text": "豆腐",
+        "event": "delta",
+        "seq": 7
+      }
+    ]
+  },
+  {
+    "name": "incomplete-frame",
+    "wire": "data: {\"unfinished\":true}\n",
+    "expected": []
+  },
+  {
+    "name": "non-object-payloads",
+    "wire": "data: [1,2]\n\ndata: null\n\ndata: {\"valid\":true}\n\n",
+    "expected": [
+      {
+        "valid": true
+      }
+    ]
+  },
+  {
+    "name": "named-terminal",
+    "wire": "event: done\ndata: {\"ok\":true}\n\ndata: {\"tooLate\":true}\n\n",
+    "expected": [
+      {
+        "ok": true,
+        "event": "done"
+      }
+    ]
+  },
+  {
+    "name": "blank-sequence",
+    "wire": "id:\ndata: {\"value\":1}\n\n",
+    "expected": [
+      {
+        "value": 1
+      }
+    ]
+  },
+  {
+    "name": "non-integer-sequence",
+    "wire": "id: 1e2\ndata: {\"value\":1}\n\n",
+    "expected": [
+      {
+        "value": 1
+      }
+    ]
+  },
+  {
+    "name": "payload-metadata-wins",
+    "wire": "id: 7\nevent: delta\ndata: {\"seq\":9,\"event\":\"custom\"}\n\n",
+    "expected": [
+      {
+        "seq": 9,
+        "event": "custom"
+      }
+    ]
+  },
+  {
+    "name": "bom-crlf-and-terminal",
+    "wire": "﻿: heartbeat\r\nevent: message_stop\r\ndata: {}\r\n\r\ndata: {\"tooLate\":true}\n\n",
+    "expected": [
+      {
+        "event": "message_stop"
+      }
+    ]
+  }
+]

@@ -8,13 +8,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from lib.llm.llm_errors import AbortedError, RequestScopedError
+from lib.agent_core.context_errors import MessageInputScopeError
+from lib.llm.llm_errors import AbortedError
+from lib.tasks_pkg.round_prep_timing import round_prep_lap, round_prep_step
 
 
-class MessageInputScopeError(RequestScopedError, PermissionError):
-    """Local mailbox scope denial: no route retry, fallback, or health penalty."""
-
-    failure_stage = 'before_dispatch'
+DISPATCH_ROUND_FIELD = '_messageInputDispatchRound'
 
 
 def historical_swarm_context(messages: list[dict], *, binding=None) -> list[dict]:
@@ -175,38 +174,42 @@ def matched_ids(task: dict, body: dict) -> dict:
 def validate_matches(task: dict, matches: dict) -> None:
     witnesses = task.get('_messageInputWitnesses') or []
     if matches['swarm']:
-        from lib.swarm.run_messages import validate_target, RunMessageRepository
+        from lib.swarm.run_messages import validate_round_target, RunMessageRepository
         binding = task.get('_swarmMessageBinding')
         if not binding:
             raise PermissionError('Restored child message has no current run authority')
-        validate_target(binding)
+        validate_round_target(task, binding, round_num=task.get(DISPATCH_ROUND_FIELD))
         key = RunMessageRepository(binding).key
         if any(w['family'] == 'swarm' and set(w['ids']) & set(matches['swarm'])
                and w.get('mailbox') != key for w in witnesses):
             raise PermissionError('Restored child message belongs to another run')
     if matches['project']:
-        from lib.conversations.project_messages import identity, scope, ProjectMailbox
+        from lib.conversations.project_messages import identity, validate_sender, ProjectMailbox
         owner, recipient, project = identity(task)
         repository = ProjectMailbox(owner, project, recipient)
         if any(w['family'] == 'project' and set(w['ids']) & set(matches['project'])
                and w.get('mailbox') != repository.key for w in witnesses):
             raise PermissionError('Restored project message belongs to another mailbox')
-        rows = repository.load()[0]['messages']
-        found = {row['id'] for row in rows if row['id'] in matches['project']}
-        if found != set(matches['project']):
+        rows = repository.find(matches['project'])
+        if set(rows) != set(matches['project']):
             raise PermissionError('Restored project message has no durable original')
-        for row in rows:
-            if row['id'] in found:
-                scope(owner, row['sender'], project)
+        for row in rows.values():
+            validate_sender(owner, row['sender'], project)
 
 
 def stream_with_receipts(stream, task: dict, body: dict, **kwargs):
     from lib.llm.stream_result import ensure_provider_stream_result
     task.pop('_verifiedMessageInputIds', None)
     task.pop('_messageInputPhysicalIds', None)
-    matches = matched_ids(task, body)
-    _validate_input_scope(task, matches)
+    # Only the root loop's dispatch of its active round shares that round's
+    # target check: the loop drops the round memo when that dispatch ends, so
+    # a later model call (e.g. post-loop synthesis) starts with a complete check.
+    task[DISPATCH_ROUND_FIELD] = task.get('_activeRoundNum')
     try:
+        round_prep_lap(task, 'dispatch')
+        with round_prep_step(task, 'receipts'):
+            matches = matched_ids(task, body)
+            _validate_input_scope(task, matches)
         result = stream(task, body, **kwargs)
         if ensure_provider_stream_result(result).is_verified_complete:
             # Named non-transport/test seams retain canonical matching. The
@@ -215,3 +218,4 @@ def stream_with_receipts(stream, task: dict, body: dict, **kwargs):
         return result
     finally:
         task.pop('_messageInputPhysicalIds', None)
+        task.pop(DISPATCH_ROUND_FIELD, None)

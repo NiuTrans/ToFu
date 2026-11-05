@@ -9,6 +9,7 @@ and language models can resolve every symbol without PEP 562 indirection.
 
 from lib.tasks_pkg.manager._events import (
     append_event,
+    begin_live_text_paragraph,
     find_message_by_id,
     reset_task_text,
     snapshot_task_text,
@@ -16,6 +17,7 @@ from lib.tasks_pkg.manager._events import (
 from lib.tasks_pkg.manager._maintenance import (
     cleanup_old_tasks,
     reap_stuck_running_tasks,
+    reaper_safe_wait_s,
     shed_memory_under_pressure,
 )
 from lib.tasks_pkg.manager._pending_resume import (
@@ -27,9 +29,11 @@ from lib.tasks_pkg.manager._persist import build_result_meta, persist_task_resul
 from lib.tasks_pkg.manager._recovery import recover_stale_tasks_on_startup
 from lib.tasks_pkg.manager._registry import (
     abort_running_tasks_for_conv,
+    claim_scheduled_compaction,
     create_task,
     discard_task,
     has_abort_tombstone,
+    hint_scheduled_compaction,
     is_carrier_task,
     list_running_tasks,
     make_task_abort_check,
@@ -38,7 +42,6 @@ from lib.tasks_pkg.manager._registry import (
     plant_abort_tombstones_for_conv,
     quiesce_running_tasks,
     task_user_id,
-    write_carrier_terminal_row,
 )
 from lib.tasks_pkg.manager._sync import checkpoint_task_partial
 from lib.tasks_pkg.manager._terminal import (
@@ -71,9 +74,11 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
 __all__ = [
     'abort_running_tasks_for_conv',
     'append_event',
+    'begin_live_text_paragraph',
     'build_result_meta',
     'chat_task_runtime',
     'checkpoint_task_partial',
+    'claim_scheduled_compaction',
     'cleanup_old_tasks',
     'create_task',
     'restore_prepared_task',
@@ -84,6 +89,7 @@ __all__ = [
     'reject_unstarted_chat_task',
     'find_message_by_id',
     'has_abort_tombstone',
+    'hint_scheduled_compaction',
     'is_carrier_task',
     'list_running_tasks',
     'make_task_abort_check',
@@ -94,6 +100,7 @@ __all__ = [
     'quiesce_running_tasks',
     'read_pending_resume',
     'reap_stuck_running_tasks',
+    'reaper_safe_wait_s',
     'record_boot_interrupted_conversations',
     'recover_stale_tasks_on_startup',
     'reset_task_text',
@@ -102,5 +109,4 @@ __all__ = [
     'stamp_chat_task_terminal',
     'stream_llm_response',
     'task_user_id',
-    'write_carrier_terminal_row',
 ]

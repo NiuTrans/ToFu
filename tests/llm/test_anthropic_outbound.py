@@ -220,6 +220,40 @@ class ResponseTranslationTest(unittest.TestCase):
         self.assertIsNone(missing['choices'][0]['finish_reason'])
         self.assertEqual(unknown['choices'][0]['finish_reason'], 'future_limit')
 
+    def test_refusal_keeps_bounded_stop_details_in_usage(self):
+        o = anthropic_response_to_openai({
+            'content': [], 'stop_reason': 'refusal',
+            'stop_details': {
+                'type': 'refusal', 'category': 'cyber',
+                'explanation': '  Declined: could enable cyber harm.  ' + 'x' * 600,
+            },
+            'usage': {'input_tokens': 412, 'output_tokens': 0},
+        })
+        self.assertEqual(o['choices'][0]['finish_reason'], 'content_filter')
+        refusal = o['usage']['_model_refusal']
+        self.assertEqual(refusal['category'], 'cyber')
+        self.assertTrue(refusal['explanation'].startswith('Declined: could'))
+        self.assertEqual(len(refusal['explanation']), 500)
+        self.assertEqual(o['usage']['prompt_tokens'], 412)
+
+    def test_refusal_null_category_is_permanent_not_malformed(self):
+        for stop_details in (
+                {'type': 'refusal', 'category': None, 'explanation': None},
+                None, 'not-an-object', {'category': 7, 'explanation': ['x']}):
+            with self.subTest(stop_details=stop_details):
+                o = anthropic_response_to_openai({
+                    'content': [], 'stop_reason': 'refusal',
+                    'stop_details': stop_details})
+                self.assertNotIn('error', o)
+                self.assertEqual(o['usage']['_model_refusal'],
+                                 {'category': None, 'explanation': None})
+
+    def test_non_refusal_stop_carries_no_refusal_evidence(self):
+        o = anthropic_response_to_openai({
+            'stop_reason': 'end_turn', 'stop_details': None,
+            'content': [{'type': 'text', 'text': 'x'}]})
+        self.assertNotIn('_model_refusal', o['usage'])
+
     def test_malformed_response_shapes_fail_closed(self):
         malformed_payloads = [
             ['not-an-object'],
@@ -392,6 +426,26 @@ class SSETranslationTest(unittest.TestCase):
         self.assertEqual(args, '{"a":1}')
         self.assertEqual(fr, 'tool_calls')
         self.assertTrue(done)
+
+    def test_refusal_stop_details_ride_message_delta(self):
+        translator = AnthropicSSETranslator(model='x')
+        chunks = translator.translate(json.dumps({
+            'type': 'message_delta',
+            'delta': {'stop_reason': 'refusal', 'stop_sequence': None,
+                      'stop_details': {'type': 'refusal', 'category': 'bio',
+                                       'explanation': 'Declined.'}},
+            'usage': {'output_tokens': 0},
+        }))
+        self.assertEqual(chunks[0]['choices'][0]['finish_reason'],
+                         'content_filter')
+        self.assertEqual(translator.model_refusal,
+                         {'category': 'bio', 'explanation': 'Declined.'})
+
+    def test_ordinary_stop_records_no_refusal(self):
+        translator = AnthropicSSETranslator(model='x')
+        translator.translate(json.dumps({
+            'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'}}))
+        self.assertIsNone(translator.model_refusal)
 
     def test_replayed_tool_start_same_position_is_suppressed(self):
         translator = AnthropicSSETranslator(model='x')
@@ -679,6 +733,34 @@ class SSETranslationTest(unittest.TestCase):
         self.assertEqual(u['output_tokens'], 250)
         # prompt_tokens = input + cache_read + cache_write (OpenAI-shape total)
         self.assertEqual(u['prompt_tokens'], 120 + 40000 + 8000)
+
+    def test_cache_creation_ttl_breakdown_survives_stream_and_response(self):
+        breakdown = {'ephemeral_5m_input_tokens': 3000,
+                     'ephemeral_1h_input_tokens': 5000}
+        events = [
+            {'type': 'message_start', 'message': {'usage': {
+                'input_tokens': 120, 'cache_creation_input_tokens': 8000,
+                'cache_read_input_tokens': 0, 'cache_creation': breakdown,
+                'output_tokens': 1}}},
+            {'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'},
+             'usage': {'output_tokens': 250}},
+            {'type': 'message_stop'},
+        ]
+        self.assertEqual(self._last_usage(events)['cache_creation'], breakdown)
+        response = anthropic_response_to_openai({
+            'content': [{'type': 'text', 'text': 'hi'}],
+            'stop_reason': 'end_turn',
+            'usage': {'input_tokens': 120, 'output_tokens': 2,
+                      'cache_creation_input_tokens': 8000,
+                      'cache_creation': breakdown}})
+        self.assertEqual(response['usage']['cache_creation'], breakdown)
+
+    def test_usage_without_ttl_breakdown_gains_no_field(self):
+        u = self._last_usage([
+            {'type': 'message_start', 'message': {'usage': {
+                'input_tokens': 5, 'cache_creation_input_tokens': 10}}},
+            {'type': 'message_stop'}])
+        self.assertNotIn('cache_creation', u)
 
 
 if __name__ == '__main__':

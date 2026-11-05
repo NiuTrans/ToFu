@@ -12,6 +12,7 @@ import threading
 from contextlib import contextmanager
 from functools import lru_cache
 import time
+import weakref
 
 from lib.cost import observed_usage_totals
 from lib.llm.llm_errors import AbortedError
@@ -24,6 +25,26 @@ logger = get_logger(__name__)
 
 def tokens(usage: dict | None) -> int:
     return observed_usage_totals(usage)[0]
+
+
+_LIVE_ACCOUNTS = weakref.WeakSet()
+_LIVE_ACCOUNTS_LOCK = threading.Lock()
+
+
+def model_lease_open(root_task_id, ordinal) -> bool:
+    """Whether this process still holds the exact model lease, i.e. the call may be in flight.
+
+    A durable dispatch intent with no open lease belongs to a request that
+    already returned (its settlement observation was lost) or to a process
+    that no longer exists.
+    """
+    with _LIVE_ACCOUNTS_LOCK:
+        accounts = [account for account in _LIVE_ACCOUNTS if account.root_id == root_task_id]
+    for account in accounts:
+        with account._lock:
+            if ordinal in account._model_leases:
+                return True
+    return False
 
 
 @lru_cache(maxsize=1)
@@ -59,6 +80,15 @@ class ExecutionBudget:
         self._invoice_prefix_restored = None
         self._model_tokens = {root['id']: tokens(root.get('usage'))}
         self._unknown_usage = root.get('_executionActualsComplete') is False
+        # ``fence`` (default) refuses model dispatch while consumption is
+        # unconfirmed. ``continue`` keeps that absence truthful in receipts
+        # but lets the work finish: the paid counters stay a lower bound and
+        # any explicit cap still stops spend. Every conversation turn (chat,
+        # Goal Mode, Flow) passes ``continue``; accounts opened outside a
+        # conversation turn keep the default.
+        policy = (root.get('_unknownUsagePolicy')
+                  or (root.get('config') or {}).get('_unknownUsagePolicy'))
+        self._unknown_usage_policy = policy if policy in ('continue', 'fence') else 'fence'
         self._model_attempt_observer = root.get('_executionModelAttemptObserver')
         self._child_observer = root.get('_executionChildObserver')
         self._child_ordinal = 0
@@ -79,6 +109,8 @@ class ExecutionBudget:
         self._account_frontier_version = 0
         self._account_frontier_failed = False
         self._account_frontier_publishing = False
+        with _LIVE_ACCOUNTS_LOCK:
+            _LIVE_ACCOUNTS.add(self)
 
     def bind_account_frontier_observer(self, observer, *, actor_rebind_observer=None, actor_rebind_bytes=None):
         """Bind whole-account durability before this generation admits effects.
@@ -736,6 +768,15 @@ class ExecutionBudget:
         return max(tokens(task.get('usage')),tokens(owner.get('usage')),
                    self._model_tokens.get(task['id'],0))
 
+    def _unknown_usage_fences(self) -> bool:
+        """Whether unconfirmed consumption blocks the next model request.
+
+        A conversation continuation keeps the missing receipt visible while the
+        turn is allowed to finish; an automated budget keeps refusing. Explicit
+        finite caps under either policy remain the real stop.
+        """
+        return self._unknown_usage_policy == 'fence'
+
     def _model_actor_usage_incomplete(self, task):
         owner=self._active.get(task['id']) or task
         return task.get('_executionActualsComplete') is False or owner.get('_executionActualsComplete') is False
@@ -816,7 +857,8 @@ class ExecutionBudget:
             used, calls = self.consumption()
             if self.limits['deadline'] is not None and time.time() >= self.limits['deadline']:
                 return 'execution_deadline_exceeded'
-            if self._unknown_usage and self.limits['max_tokens'] is not None:
+            if (self._unknown_usage and self.limits['max_tokens'] is not None
+                    and self._unknown_usage_fences()):
                 return 'execution_token_usage_unknown'
             if self.limits['max_tokens'] is not None and used >= self.limits['max_tokens']:
                 return 'execution_token_budget_exhausted'
@@ -931,7 +973,8 @@ class ExecutionBudget:
                 limits = self._model_actor_limits(task)
                 if limits.get('deadline') is not None and time.time() >= limits['deadline']:
                     reason = 'execution_deadline_exceeded'
-                if (self._model_actor_has_unreconciled_checkpoint(task)
+                if self._unknown_usage_fences() and (
+                        self._model_actor_has_unreconciled_checkpoint(task)
                         or (limits.get('max_tokens') is not None
                             and self._model_actor_usage_incomplete(task))):
                     reason = 'execution_token_usage_unknown'
@@ -991,7 +1034,8 @@ class ExecutionBudget:
         limits = self._model_actor_limits(task)
         if limits.get('deadline') is not None and time.time() >= limits['deadline']:
             reason = 'execution_deadline_exceeded'
-        if (self._model_actor_has_unreconciled_checkpoint(task)
+        if self._unknown_usage_fences() and (
+                self._model_actor_has_unreconciled_checkpoint(task)
                 or (limits.get('max_tokens') is not None
                     and self._model_actor_usage_incomplete(task))):
             reason = 'execution_token_usage_unknown'
@@ -1048,9 +1092,12 @@ class ExecutionBudget:
                 self._observe_model_attempt(ordinal,row,
                     'voided' if unsent and not row['dispatched'] else 'settled',observed,complete)
                 self._publish_account_frontier('model_settled')
-            except Exception:
+            except Exception as error:
                 # Settlement/teardown must finish even when observation fails.
                 # Keep the paid lower bound, but never claim complete durability.
+                logger.warning('[ExecutionBudget] model settlement observation lost root=%s ordinal=%s '
+                               'task=%s: %s: %s', self.root_id, ordinal, task['id'],
+                               type(error).__name__, error)
                 self._unknown_usage = True
                 task['_executionActualsComplete'] = False
                 if self.root_id in self._active:

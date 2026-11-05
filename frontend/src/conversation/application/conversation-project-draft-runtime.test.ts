@@ -3,7 +3,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { captureConversationProject, createConversationProjectController, withProjectHydration } from './conversation-project';
 import { buildConversationSettingsSnapshot, createConversationSettingsResolution } from './conversation-settings-resolution';
+import { retryTransientSendStartup } from '../../core/send-startup';
 import { createProjectConversationNavigation } from '../../features/project-conversation-navigation';
+import { createProjectCoordinationSurface } from '../../features/project-coordination-surface';
+import { createSameTaskReadJoin } from '../../features/project-coordination-read-join';
+import { createCoordinatorConversationGroups } from '../../features/coordinator-conversation-group';
+import { createGlobalRouterEntry } from '../../features/global-router';
+import { createRouterWatchdogEntry } from '../../features/router-watchdog';
+import type { RouterState, RouterWatchdogState } from '../../api/router.generated';
 
 import { paintNewChatFolderBadges } from '../ui/new-chat-folder-badges';
 const { readFileSync } = await vi.importActual<{
@@ -16,6 +23,7 @@ const vm = await vi.importActual<{
 const { cwd } = await vi.importActual<{ cwd(): string }>('node:process');
 const retained = ['main_conv_lifecycle.js', 'main_send_pipeline.js'].map(name =>
   readFileSync(`${cwd()}/frontend/src/runtime/sections/main/${name}`, 'utf8')).join('\n');
+const presence = readFileSync(`${cwd()}/frontend/src/runtime/sections/presence.js`, 'utf8');
 const empty = { projectPath: '', projectPaths: [], readOnlyPaths: [] };
 const defaults = () => ({ projectPath: '/a', projectPaths: ['/a', '/a/lib'], readOnlyPaths: ['/a/lib'] });
 
@@ -72,6 +80,7 @@ function harness(input = 'work', folder: { name: string; color: unknown } | null
     captureActiveConversationSettings: noop, _showOptimisticUserTurn: () => ['user', 'assistant'], _removeOptimisticUserTurn: noop,
     _removeTranslatingBubble: noop, debugLog: vi.fn(),
     awaitSendPreparation: (promise: Promise<unknown>) => promise,
+    retryTransientSendStartup,
     createSendStartupLease: () => ({ signal: new AbortController().signal, stoppedByUser: () => false, finish: noop }),
     buildTurnSubmissionExtra: (extra: unknown) => extra,
     runtimeScope: {
@@ -113,7 +122,7 @@ function harness(input = 'work', folder: { name: string; color: unknown } | null
     _buildToolbarOverrides = () => ({});
   `, context);
   return {
-    env, submissions, folderDefaults,
+    env, context, submissions, folderDefaults,
     selectFolder: (id: string) => { selectedFolder = id; },
     newChat: () => vm.runInContext('newChat()', context),
     send: async () => {
@@ -188,6 +197,115 @@ describe('retained draft folder send wiring', () => {
   });
 });
 
+describe('composer delivery into a live reply', () => {
+  const capabilities = { assign: false as const, sendMessage: false as const, steerSubagent: true };
+  const router: RouterState = { projectPath: '/data/router/1', conversationId: 'coordinator-router', revision: 1,
+    availability: 'available', capabilities, workerModel: '' };
+  const watchdog: RouterWatchdogState = { projectPath: '/data/router/1/.tofu-watchdog', conversationId: 'coordinator-watchdog',
+    revision: 1, availability: 'available', capabilities, review: { enabled: false, schedule: '7,37 * * * *', taskId: null } };
+  const folders = [{ id: 'folder-a', projectPaths: ['/project'] }, { id: 'folder-b', projectPaths: ['/other'] }];
+  // The bound Coordinator of each path, as the coordination binding read reports it.
+  const bindings: Record<string, string> = {
+    '/project': 'coordinator-project', '/other': 'coordinator-other',
+    [router.projectPath]: router.conversationId, [watchdog.projectPath]: watchdog.conversationId,
+  };
+  const visible = (selector: string) => expect(document.querySelector<HTMLElement>(selector)?.hidden).toBe(false);
+  const chat = (id: string, projectPath: string, extra: Record<string, unknown> = {}) => ({
+    id, title: id, projectPath, projectPaths: [projectPath], readOnlyPaths: [], ...extra,
+  });
+
+  /** The shipped presence bridge over the real router, Watchdog and coordination owners; every chat is replying. */
+  async function liveChats() {
+    const h = harness('while you reply');
+    document.body.insertAdjacentHTML('beforeend', '<aside id="sidebar"><div class="sidebar-header"></div></aside>'
+      + '<div id="convList"></div><div id="presenceStrip"></div>');
+    const showChoice = vi.fn(async () => 'queue');
+    h.env.conversations.push(
+      chat(router.conversationId, router.projectPath),
+      chat(watchdog.conversationId, watchdog.projectPath),
+      chat('coordinator-project', '/project', { folderId: 'folder-a' }),
+      chat('worker-project', '/project', { folderId: 'folder-a', _coordinatorSource: 'coordinator-project' }),
+      chat('worker-router', router.projectPath, { _coordinatorSource: router.conversationId }),
+      chat('ordinary', '/project', { folderId: 'folder-a' }),
+    );
+    h.env.runtimeScope.ConversationTurnRead = { activeMainAttemptId: (conv: unknown) => (conv ? 'live-attempt' : null) };
+    h.env.composerTranslationStatus = { refresh: () => {}, begin: () => ({}), update: () => {}, finish: () => {} };
+    Object.assign(h.env, {
+      window, showChoice, pushSubscribe: vi.fn(), pushUnsubscribe: vi.fn(),
+      createProjectCoordinationSurface, createSameTaskReadJoin, createGlobalRouterEntry, createRouterWatchdogEntry, createCoordinatorConversationGroups,
+      openProjectCoordinationWorkspace: vi.fn(), getFolders: () => folders,
+      // Retained conversation-list owners the Coordinator groups paint rows and status with.
+      _convStatusFlags: () => ({}), mergeConversationCatalogRows: vi.fn(),
+      _buildConvItemHTML: (c: { id: string; title: string }) =>
+        `<div class="conv-item" data-conv-id="${c.id}"><div class="conv-title">${c.title}</div><div class="conv-date"></div></div>`,
+      Api: { project: {
+        workerConversations: async () => ({ conversations: [], nextCursor: null, coverage: 'complete' }),
+        coordination: async (path: string) => (bindings[path]
+          ? { conversationId: bindings[path], availability: 'available', revision: 1 }
+          : { conversationId: '', availability: 'unbound', revision: 0 }),
+        coordinatorProgress: async () => null, coordinatorReports: async () => undefined,
+        globalRouter: async () => router, routerWatchdog: async () => watchdog,
+      } },
+    });
+    vm.runInContext(presence, h.context);
+    await vi.waitFor(() => {
+      expect(document.querySelector('#projectCoordinatorEntry [data-coordinator-id="coordinator-project"]')).not.toBeNull();
+      // Both passive reads landed: these header controls exist only for an available binding.
+      expect(document.querySelector('.global-router-header .router-worker-model')).not.toBeNull();
+      expect(document.querySelector<HTMLInputElement>('.router-watchdog-schedule input')?.value).toBe(watchdog.review.schedule);
+    });
+    return {
+      ...h, showChoice,
+      open(id: string) { h.env.activeConvId = id; h.env.runtimeScope.presenceRefresh(); },
+      /** A folder tab only filters the sidebar: the open chat stays. */
+      browse(folderId: string) { h.selectFolder(folderId); h.env.runtimeScope.presenceRefresh(); },
+      close() { window.dispatchEvent(new Event('pagehide')); },
+    };
+  }
+
+  /* Each chat's marker is painted from the same server binding that decides
+   * delivery: the router and Watchdog headers, the Coordinator's task board. */
+  it.each([
+    ['Global Router', 'a project folder', router.conversationId, '.global-router-header', 'folder-a'],
+    ['Watchdog', 'a project folder', watchdog.conversationId, '.router-watchdog-header', 'folder-a'],
+    ['Project Coordinator', 'its own folder', 'coordinator-project', '#presenceStrip .coordinator-progress', 'folder-a'],
+    ['Project Coordinator', "another project's folder", 'coordinator-project', '#presenceStrip .coordinator-progress', 'folder-b'],
+  ])('the %s chat steers without the steer/queue prompt while browsing %s', async (_kind, _browsing, id, marker, folder) => {
+    const chats = await liveChats();
+    try {
+      chats.open(id);
+      chats.browse(folder);
+      const shown = bindings[folders.find(item => item.id === folder)!.projectPaths[0]];
+      await vi.waitFor(() => {
+        visible(marker);
+        visible(`#projectCoordinatorEntry [data-coordinator-id="${shown}"]`);
+      });
+      expect(await chats.send()).toBe(true);
+      expect(chats.showChoice).not.toHaveBeenCalled();
+      expect(chats.submissions).toHaveLength(1);
+      expect(chats.submissions[0].conv.id).toBe(id);
+      expect(chats.submissions[0].extra.injectMode).toBe('steer');
+    } finally { chats.close(); }
+  });
+
+  // A Worker's return button shows its project binding was read: the chat is still no Coordinator.
+  it.each([
+    ['Project Worker', 'worker-project', '#presenceStrip .ui-btn'],
+    ['Global Router Worker', 'worker-router', '#presenceStrip .ui-btn'],
+    ['ordinary', 'ordinary', '#projectCoordinatorEntry [data-coordinator-id="coordinator-project"]'],
+  ])('the %s chat still asks steer or queue', async (_kind, id, marker) => {
+    const chats = await liveChats();
+    try {
+      chats.open(id);
+      await vi.waitFor(() => visible(marker));
+      expect(await chats.send()).toBe(true);
+      expect(chats.showChoice).toHaveBeenCalledOnce();
+      expect(chats.submissions).toHaveLength(1);
+      expect(chats.submissions[0].conv.id).toBe(id);
+      expect(chats.submissions[0].extra.injectMode).toBe('queue');
+    } finally { chats.close(); }
+  });
+});
 
 describe('actual newChat folder badge security', () => {
   it.each(['"><svg/onload=alert(1)>', '#abc\n', 'red', 'var(--untrusted)', '#abc;background:red', null, 123])(

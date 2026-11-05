@@ -1,0 +1,42 @@
+/* Capsule slider: a thick groove with one solid fill, a tick dot at each
+ * stop (two-tone — the second dots layer is clipped to the filled width),
+ * and a card-colored knob slightly taller than the groove that overlaps it.
+ * The fill width tracks the knob center, covering the groove edge-to-edge at
+ * "max". The native thumb follows fractional pointer input without easing. */
+.depth-slider{--depth-track:var(--border);--depth-fill:var(--accent);--depth-thumb-size:26px;--depth-track-height:24px;--depth-dot:color-mix(in srgb,var(--text-secondary) 50%,transparent);--depth-dot-on:color-mix(in srgb,#fff 82%,var(--depth-fill));--depth-fraction:.4;padding:10px var(--space-3) 9px;color:var(--text-secondary);min-width:0}
+.depth-slider-heading{display:flex;align-items:baseline;justify-content:space-between;gap:var(--space-2);font-size:var(--font-size-xs);font-weight:500;line-height:1.4}
+.depth-slider-value{font-size:var(--font-size-xs);font-weight:600;color:var(--depth-fill)}
+.depth-slider-rail{--depth-hit-height:44px;position:relative;height:var(--depth-hit-height);user-select:none}
+.depth-slider-rail::before{content:"";position:absolute;left:0;right:0;top:50%;height:var(--depth-track-height);transform:translateY(-50%);border-radius:999px;background:linear-gradient(var(--depth-fill),var(--depth-fill)) left center / calc(var(--depth-thumb-size) / 2 + (100% - var(--depth-thumb-size)) * var(--depth-fraction, .4)) 100% no-repeat,var(--depth-track);box-shadow:inset 0 1px 2px #0001;pointer-events:none}
+.depth-slider-dots{position:absolute;inset:0;z-index:1;pointer-events:none}
+.depth-slider-dots span{position:absolute;top:50%;left:calc(var(--depth-thumb-size) / 2 + (100% - var(--depth-thumb-size)) * var(--i) / var(--depth-step-count,5));width:4px;height:4px;border-radius:50%;transform:translate(-50%,-50%);background:var(--depth-dot)}
+.depth-slider-dots span:nth-child(1){--i:0}
+.depth-slider-dots span:nth-child(2){--i:1}
+.depth-slider-dots span:nth-child(3){--i:2}
+.depth-slider-dots span:nth-child(4){--i:3}
+.depth-slider-dots span:nth-child(5){--i:4}
+.depth-slider-dots span:nth-child(6){--i:5}
+.depth-slider-dots-on{--depth-dot:var(--depth-dot-on);clip-path:inset(0 calc(100% - var(--depth-thumb-size) / 2 - (100% - var(--depth-thumb-size)) * var(--depth-fraction, .4)) 0 0)}
+.depth-slider input[type="range"]{appearance:none;-webkit-appearance:none;position:relative;z-index:2;display:block;width:100%;height:var(--depth-hit-height);margin:0;padding:0;border:0;background:transparent;cursor:grab;accent-color:var(--depth-fill);border-radius:999px;touch-action:none;-webkit-tap-highlight-color:transparent}
+.depth-slider input[type="range"]:active{cursor:grabbing}
+.depth-slider input::-webkit-slider-runnable-track{height:var(--depth-thumb-size);border:0;background:transparent}
+.depth-slider input::-moz-range-track,.depth-slider input::-moz-range-progress{height:var(--depth-thumb-size);border:0;background:transparent}
+.depth-slider input::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;box-sizing:border-box;width:var(--depth-thumb-size);height:var(--depth-thumb-size);margin:0;border:0;border-radius:50%;background:var(--bg-primary);box-shadow:0 1px 3px #0003,0 0 0 1px #0001}
+.depth-slider input::-moz-range-thumb{box-sizing:border-box;width:var(--depth-thumb-size);height:var(--depth-thumb-size);border:0;border-radius:50%;background:var(--bg-primary);box-shadow:0 1px 3px #0003,0 0 0 1px #0001}
+.depth-slider input:focus-visible{outline:2px solid var(--depth-fill);outline-offset:2px}
+.depth-slider input:disabled{cursor:default;opacity:.5}
+@media(forced-colors:active){.depth-slider-rail::before{background:Canvas;outline:1px solid CanvasText}.depth-slider-dots{display:none}.depth-slider input[type="range"]{appearance:auto}.depth-slider input:focus-visible{outline-color:Highlight}}
+/* Thinking-depth footer visibility follows the existing model capability gate. */
+/* The depth footer is the LAST child of the scrollable (`max-height:50vh`)
+ * model dropdown. On a short viewport (landscape phone/tablet, 50vh ≈ 200px)
+ * it was stranded below a long model list and could not be scrolled into view
+ * — the "can't adjust thinking depth in landscape" regression. Pin it as a
+ * sticky footer so it stays visible while the model list scrolls under it, on
+ * every viewport. Its opaque background (dropdown bg) + border-top keep the
+ * scrolled list from bleeding through; the negative bottom margin swallows the
+ * dropdown's own 5px bottom padding so it sits flush to the rounded edge. */
+.ps-dd-depth-wrap{margin-top:5px;padding-top:var(--space-2);border-top:1px solid var(--border);position:sticky;bottom:-5px;margin-bottom:-5px;padding-bottom:5px;background:var(--bg-secondary);z-index:2}
+
+.depth-default-button{padding:2px 6px;border:1px solid var(--border);border-radius:5px;background:transparent;color:var(--text-secondary);font:inherit;cursor:pointer}
+.depth-default-button[aria-pressed="true"]{color:var(--accent);border-color:var(--accent)}
+.depth-slider-notice{margin:7px 0 0;font-size:var(--font-size-xs);line-height:1.5;color:var(--text-secondary);white-space:normal}

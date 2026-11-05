@@ -4,10 +4,11 @@
  * Responsibility: native <dialog> variant sharing the dialog's platform
  * semantics (focus trap, Escape, top layer) with an edge-docked layout.
  * Entry points: createDrawer.
- * Dependencies: createIconButton (button.ts); styles from 30-ui-kit.css.
+ * Dependencies: button and shared backdrop factories; styles from 30-ui-kit.css.
  */
 
 import { createIconButton } from './button';
+import { bindDialogBackdrop } from './dialog-backdrop';
 
 export interface DrawerOptions {
   title: string;
@@ -62,24 +63,7 @@ export function createDrawer(options: DrawerOptions): DrawerHandle {
     resolveOpen = null;
     resolve?.();
   });
-  // Backdrop click: coordinates outside the dialog box mean the backdrop.
-  // The gesture must also START outside — a text-selection drag begins
-  // inside and releases outside, and must not close the drawer.
-  let pressedOutside = false;
-  const isOutsideDialog = (event: MouseEvent): boolean => {
-    const rect = el.getBoundingClientRect();
-    return (
-      event.clientX < rect.left || event.clientX > rect.right ||
-      event.clientY < rect.top || event.clientY > rect.bottom
-    );
-  };
-  el.addEventListener('mousedown', (event) => {
-    pressedOutside = isOutsideDialog(event);
-  });
-  el.addEventListener('click', (event) => {
-    if (pressedOutside && isOutsideDialog(event)) el.close('');
-    pressedOutside = false;
-  });
+  bindDialogBackdrop(el);
 
   return {
     el,

@@ -28,7 +28,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-import re
 import shutil
 import time
 from datetime import datetime
@@ -104,6 +103,27 @@ def _resolve(root_name, rel_path, roots=None):
         raise ProjectError(
             f'path escapes share root {root_name!r}: {rel!r}')
     return root_real, target
+
+
+def shared_path(raw_path):
+    """Real path of a local path that lies inside a declared share root.
+
+    The desktop file reads (``desktop_list_files`` / ``desktop_read_file``)
+    resolve through this on every permission tier, so ``..``, ``~``, absolute
+    paths and symlinks cannot reach outside the shared folders.
+    """
+    roots = _declared_roots()
+    if not roots:
+        raise ProjectError(
+            'no shared folders are declared in the agent config (share_roots) '
+            '— local file reads are disabled on this machine')
+    path = str(raw_path or '').strip()
+    target = os.path.realpath(os.path.expanduser(path)) if path else ''
+    if not target or not any(_is_within(r['path'], target) for r in roots):
+        shared = ', '.join(r['path'] for r in roots)
+        raise ProjectError(
+            f'path is outside the shared folders: {path!r} (shared folders: {shared})')
+    return target
 
 
 # ── Freshness gate + snapshots (constraint ③) ──────────────────────
@@ -450,51 +470,32 @@ def cmd_project_find_files(params):
     return _guarded(_go, params)
 
 
-def _check_delete_targets_within(command, root_real):
-    """Refuse delete commands whose absolute/~/env target escapes the root.
+def _check_delete_targets_within(command, cwd_real, root_real):
+    """Refuse delete commands whose resolved target escapes the share root.
 
-    ``command_analysis._is_catastrophic_delete``'s workspace-containment
-    rule only engages for server-side restricted principals; on the agent
-    EVERY delete of an absolute/~ target must stay inside the share root —
-    this is what stops the ``rm -rf ~`` class (constraint ④, P2).
-    Relative targets stay inside the already-confined cwd and pass.
+    On the agent EVERY delete target must stay inside the share root
+    (constraint ④, P2). Operands resolve against the command's actual workdir
+    (``cwd_real``) through the SAME shared parser
+    (:func:`command_analysis.resolve_delete_targets`) the catastrophic-depth
+    guard uses, so quoting/``..``/in-command-variable shapes cannot bypass
+    containment the way they bypassed the second-generation depth rule; a
+    target the parser cannot prove is refused outright.
     """
-    from lib.project_mod.command_analysis import (
-        _DELETE_COMMANDS,
-        _split_pipeline,
-        _unwrap_command_parts,
-    )
-    for seg in _split_pipeline(command):
-        seg = seg.strip()
-        if not seg:
-            continue
-        while re.match(r'^\w+=\S*\s', seg):
-            seg = re.sub(r'^\w+=\S*\s+', '', seg, count=1)
-        # See through a leading sudo/doas — ``sudo rm -rf <outside>`` must be
-        # judged by the rm, not skipped because the first word is ``sudo``.
-        parts = _unwrap_command_parts(seg.split())
-        if not parts:
-            continue
-        if parts[0].split('/')[-1] not in _DELETE_COMMANDS:
-            continue
-        for arg in parts[1:]:
-            if arg.startswith('-'):
-                continue
-            if not (arg.startswith('/') or arg.startswith('~')
-                    or arg.startswith('$')):
-                continue  # relative → stays inside the confined cwd
-            cleaned = arg.rstrip('/*')
-            expanded = os.path.expanduser(os.path.expandvars(cleaned))
-            if expanded.startswith('$') or not expanded:
+    from lib.project_mod.command_analysis import resolve_delete_targets
+    for operand, paths, unproven in resolve_delete_targets(command, cwd_real):
+        if paths is None:
+            raise ProjectError(
+                f'command blocked: unresolvable delete target {operand!r}')
+        if unproven:
+            names = ', '.join(f'${n}' for n in sorted(unproven))
+            raise ProjectError(
+                f'command blocked: delete target {operand!r} depends on '
+                f'{names}, whose value cannot be proven inside the share root')
+        for path in paths:
+            if not _is_within(root_real, os.path.realpath(path)):
                 raise ProjectError(
-                    f'command blocked: unresolvable delete target {arg!r}')
-            if not expanded.startswith('/') \
-                    and not (len(expanded) > 1 and expanded[1] == ':'):
-                continue
-            tgt_real = os.path.realpath(expanded)
-            if not _is_within(root_real, tgt_real):
-                raise ProjectError(
-                    f'command blocked: delete target outside share root: {arg!r}')
+                    f'command blocked: delete target outside share root: '
+                    f'{operand!r}')
 
 
 def _validate_project_run(params):
@@ -521,7 +522,7 @@ def _validate_project_run(params):
     if bad:
         raise ProjectError(
             f'command blocked: catastrophic delete target {bad!r}')
-    _check_delete_targets_within(command, root_real)
+    _check_delete_targets_within(command, os.path.realpath(target), root_real)
     from lib.desktop_agent._exec import command_timeout
     try:
         timeout = command_timeout(params.get('timeout'))

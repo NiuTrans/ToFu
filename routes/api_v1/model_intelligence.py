@@ -59,10 +59,7 @@ def _models(repository: ModelRoutingRepository, boundary: OwnerBoundary) -> list
     return [dict(row) for row in authority.document.get("models", [])]
 
 
-def _read_block(*, force: bool) -> dict[str, Any]:
-    boundary = _boundary()
-    if boundary is None:
-        raise LookupError("Model intelligence settings not found")
+def _read_block(boundary: OwnerBoundary, *, force: bool) -> dict[str, Any]:
     repository = _repository()
     models = _models(repository, boundary)
     api_key, key_source, key_hint = _effective_key(repository, boundary)
@@ -88,9 +85,10 @@ def _read_block(*, force: bool) -> dict[str, Any]:
 )
 def get_aa_scores():
     try:
-        return api_ok(aa=_read_block(force=False))
-    except LookupError:
-        return api_not_found("Model intelligence settings not found")
+        boundary = _boundary()
+        if boundary is None:
+            return api_not_found("Model intelligence settings not found")
+        return api_ok(aa=_read_block(boundary, force=False))
     except Exception as exc:
         return api_internal_error(exc, context="api_v1.model_intelligence.aa.get")
 
@@ -105,11 +103,12 @@ def get_aa_scores():
 )
 def refresh_aa_scores():
     try:
-        block = _read_block(force=True)
+        boundary = _boundary()
+        if boundary is None:
+            return api_not_found("Model intelligence settings not found")
+        block = _read_block(boundary, force=True)
         audit_log("model_intelligence_aa_refresh", status=block.get("status"))
         return api_ok(aa=block)
-    except LookupError:
-        return api_not_found("Model intelligence settings not found")
     except Exception as exc:
         return api_internal_error(exc, context="api_v1.model_intelligence.aa.refresh")
 
@@ -131,12 +130,10 @@ def get_openrouter_pricing():
     try:
         boundary = _boundary()
         if boundary is None:
-            raise LookupError("Model intelligence settings not found")
+            return api_not_found("Model intelligence settings not found")
         repository = _repository()
         block = pricing_block_for_models(_models(repository, boundary))
         return api_ok(openrouter_pricing=block)
-    except LookupError:
-        return api_not_found("Model intelligence settings not found")
     except Exception as exc:
         return api_internal_error(
             exc, context="api_v1.model_intelligence.openrouter_pricing.get")
@@ -160,7 +157,7 @@ def refresh_openrouter_pricing():
     try:
         boundary = _boundary()
         if boundary is None:
-            raise LookupError("Model intelligence settings not found")
+            return api_not_found("Model intelligence settings not found")
         repository = _repository()
         block = refresh_pricing_block(_models(repository, boundary))
         fillable = block.get("fillable") or {}
@@ -185,8 +182,6 @@ def refresh_openrouter_pricing():
             openrouter_pricing=block, applied=applied, revision=revision)
     except ModelRoutingError as exc:
         return api_bad_request(str(exc), kind=getattr(exc, "kind", "model_routing_error"))
-    except LookupError:
-        return api_not_found("Model intelligence settings not found")
     except Exception as exc:
         return api_internal_error(
             exc, context="api_v1.model_intelligence.openrouter_pricing.refresh")

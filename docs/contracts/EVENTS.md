@@ -32,8 +32,9 @@ number can attribute restarted or delegated calls to the wrong invocation.
 request messages are projected directly; a failed request-body reconstruction
 is labeled `degradedReason=request-build-fallback`. Post-tool state is recorded
 after ordered model-visible results append, with the same reference. Child
-persistence uses the existing acknowledged event writer and restart-safe event
-sequence, never parent SSE fan-out. The existing chronological delta baseline
+persistence uses the existing event writer and restart-safe event sequence
+through the child's ordered evidence lane, never parent SSE fan-out, and never
+delays the child's paid call ([child evidence lane](../TASK_EVENT_DELIVERY.md#a-childs-inspector-evidence-never-blocks-its-paid-call)). The existing chronological delta baseline
 and tools dictionary remain authoritative for bounded incremental storage;
 50 increasing 1 KB rounds with request/state pairs stay below 160 KB in the
 focused budget specification. Cold projections preserve the reference.
@@ -45,7 +46,12 @@ permit. That clears the prior attempt's live clock without rewriting its
 result or declaring the child failed; the next admission publishes running.
 In-run provider retries retain their active phase and execution permit.
 `swarm_agent_phase` declares `detailKey`, `detailArgs`, and `attempt` for the
-same localized retry projection as the root conversation. Network recovery
+same localized retry projection as the root conversation. Its `phase` carries
+either the swarm's own words (`running`, `pending`, `tool_use`) or the worker's
+forwarded chat PHASE values (`waiting_model`, `tool_exec`, ...); clients name
+both through one label policy. Because `waiting_model` has no closing frame,
+the worker publishes `thinking` or `writing` on its first reasoning or answer
+delta, once per change. Network recovery
 uses `stream.retryReason.networkRecovery` inside `retryCooldownWait`, without
 an attempt counter: no model request has failed while waiting for admission.
 The following recovery phase restores `stream.phase.waitingForModel`.
@@ -100,7 +106,8 @@ wire output. So there is no behavioural cost to following the rule, only the
 benefit that every emission references the declared vocabulary. It is also the
 write-side gate: constructing an UNREGISTERED type raises
 `EventContractError` under pytest (`TOFU_EVENT_SCHEMA=strict`) and warns in
-production — see §Versioning.
+production, and `append_event` refuses an unregistered frame in every mode —
+see §Versioning.
 
 ### Scope: what this rule covers
 
@@ -114,9 +121,23 @@ self-contained producer↔consumer pairs, not part of the shared task-event
 contract, so they are not registered here.
 For the private `translate` push channel, running `partialByRound` objects merge
 changed block keys within the pending activity; an explicit empty object resets
-the preview index. Receivers derive joined narration without reasoning blocks.
-Legacy whole-turn `partial` frames remain supported. Preview frames never write
+the preview index. A running preview carries one block's cumulative translation
+and names that block as its latest-value key, so a socket that is behind gets
+the newest partial in place of unsent older ones; receivers replace per block,
+and the block's final translation is its last value. Receivers derive joined
+narration without reasoning blocks. Legacy whole-turn `partial` frames remain
+supported. Preview frames never write
 authoritative Turn state; completion hydrates committed translation facts.
+Each completed narration or reasoning segment publishes its preview under its
+own segment block id (`text:…`, `thinking:…`) as soon as its translation
+streams, with no size floor; pending narration is translated before pending
+reasoning. The final reply streams only under `text:terminal`, from the
+whole-turn translation job after settlement; no other key carries it.
+Receivers keep one preview index per conversation, including conversations that
+are not mounted. Each block's final preview is published once, so a receiver
+that reloads, reconnects or missed frames re-reads the completed previews of
+running turns with `GET /api/v4/translate/previews/<conv_id>` and merges them
+the same way.
 
 
 
@@ -193,6 +214,17 @@ RPC lanes keep sole-writer priority. Encoding, file and socket failures remain
 explicit transport failures; this temporary backlog adds no durable replay
 authority. See [resource control](../RESOURCE_CONTROL.md#push-connection-demand).
 
+A publication whose value contains every earlier value of the same key may name
+that key (`push_event(..., latest_value_key=...)`). Per socket and
+`(channel, taskId)` stream, a newer value then takes the queued position of an
+older value of the key that the sender has not dequeued; any other frame of the
+stream fences that position, and a dequeued value is never replaced. Superseded
+values are never deep-copied, encoded or sent; each socket still receives its newest
+value, encoded once on a demand worker when first sent and shared by the
+sockets sending it, without a file range. Publication listeners (webhooks)
+observe every value. Only frames whose receivers replace state per key may name
+one. See [resource control](../RESOURCE_CONTROL.md#latest-value-push-frames).
+
 Owner-scoped push-hub frames outside the shared chat vocabulary are declared
 in the same authority file as stream events: the `PUSH_FRAME_SPECS` registry
 in `lib/agent_core/events.py` holds each frame's channel, task-id semantics,
@@ -265,7 +297,7 @@ Managed root executors use the task-wide delivery contract
 [`task_event_delivery_v1.json`](../../contracts/task_event_delivery_v1.json).
 The producer freezes projection inputs, assigns the sole event sequence and
 admits bounded pending work; it does not wait for each authority write. A lazy,
-launch-sized coordinator serializes each task's writes and push, while ready
+demand-driven coordinator serializes each task's writes and push, while ready
 tasks share workers fairly. The committed revision stays on the live task;
 queued snapshots rebase against it and never read future executor content.
 Progress frames reuse only detached structural inputs. Completed lanes release
@@ -297,7 +329,10 @@ At the ordered authority writer, a structural frame carries the exact task event
 a revision-checked projection patch in one `turn.event.record` transaction; it
 does not carry a second cumulative projection inside the event payload. The
 running executor retains one last-applied projection/revision under a task-local
-lock. After the shared stable-segment normalizer, it also supplies private
+lock. Commit wakeups of those writes publish after the lock is released, in
+commit order
+([defensive pattern](../DEFENSIVE_PATTERNS.md#commit-wakeups-publish-after-the-writers-critical-section)).
+After the shared stable-segment normalizer, it also supplies private
 boolean stability evidence; absent evidence keeps replay correct but makes the
 Sidecar normalize once at the next structural boundary. A stale patch rebases
 once from authority, and a rejected/terminal attempt clears that state and
@@ -338,6 +373,29 @@ planted the cooperative-abort stamp on the shared task; the swarm's own
 (the mtvj1lls7knjg5 false-positive abort). A swarm frame is a pure
 panel/replay observer, never a turn-authority write, so it persists standalone
 exactly like the commit-round and preference observers.
+
+A `run_command` handed to the background (steer, manual request or the
+60-second timer) also outlives its turn, but is not an observer exception: it
+reports through its durable completion receipt. Its `DetachableCommandTask`
+view reads `status` and `_discarded_at` from the owning task, and
+`append_event` ignores (DEBUG) a detached view's frames once that task is
+terminal; while the turn runs, its wait evidence still reaches the Turn Trace.
+Problem: the view copied `status='running'`, so a `workspace_admission_wait`
+emitted when a lease was admitted 48–85 minutes after the turn settled re-adopted
+the evicted task as a live phantom; the stale-attempt fence then planted its
+cooperative abort on the view and the shared `abort_event`, killing each
+just-admitted command as "Command aborted by user" (2026-10-26, four commands).
+Decision: lifecycle reads follow the owner and a settled owner ignores detached
+frames. Alternatives rejected: allowlisting the wait as a settled observer (no
+settled-Turn CAS owner, and the view still claimed to run); dropping every
+detached frame or scrubbing the clock at detach (loses live Turn Trace evidence).
+
+`EventDeliveryRevoked` is storage's proof of this fence. Only the first
+rejected frame carries the stale-attempt message; later frames meet the revoked
+delivery lane, and `TaskRuntime` now classifies them by type, withholding the
+push at DEBUG instead of ERROR. Matching a second message suffix was rejected:
+message matching is what missed the lane case. Specs:
+`tests/tasks_pkg/test_manager_task_readopt.py`, `tests/tasks_pkg/test_task_runtime.py`.
 
 ### Model request timing boundaries
 
@@ -423,7 +481,15 @@ twice) and per-round `model_request_start` / successful request completion
 bookkeeping (the turn trace owns timing). A model request earns a row only
 when it fails or is aborted.
 Model completion diagnostics additionally carry credential-free `routeId`,
-`routeMode`, `routeDecision`, and `failureStage` fields. Their bounded
+`routeMode`, `routeDecision`, and `failureStage` fields. A failed completion
+also carries `envelopeKind`, the closed error-envelope kind classified from
+the live exception (`_classify_exception`, the same kind a terminal error
+envelope would carry) so the retry-storm group and the member row can name
+the cause in the UI language; `errorKind` keeps the raw class name as
+evidence, since a gateway 503 raised as `RateLimitError` is upstream
+outage, not a per-key rate limit. Classification is diagnostic: in the
+dispatcher attempt observer a classifier fault drops the field rather than
+replacing the transport error it was reporting. Their bounded
 `observerIsolation` receipt names the provider-ingress contract and counts
 physical provider dispatches, memory-local events, and coalesced checkpoint
 requests; it carries no content. Repeated recovery
@@ -443,7 +509,9 @@ with an attempt only when this identity resolves uniquely. Legacy records may
 use a unique one-attempt/one-projection round, never a last-retry-wins guess.
 Multiple physical projections within a dispatch remain explicitly ambiguous.
 It records the ordered final provider tool names, schema-token estimate, resolved
-discovery backend, explicit budget, budget compaction/omission names, and an
+discovery backend, explicit budget, budget compaction/omission names, the joined
+sent-name size `toolNameBytes` (sum of name length + 1) with the route's
+`toolNameBudgetBytes` (zero when the route has none), and an
 opaque fingerprint of the exact cache-relevant tools bytes after provider
 projection. It is deliberately not rendered into the Turn activity
 timeline, does not duplicate full schemas, never enters model context, and
@@ -462,6 +530,16 @@ rewrites the proposed terminal success to `done.error`; recoverable billing or
 TTL lease debt is recorded as deferred without changing the truthful task
 outcome. The execution receipt contains no prompt, output, owner, or request ID
 and is operations evidence, not a second event authority.
+
+Live TaskRuntime pages and its terminal events may include `workerActive`, a
+boolean describing an entered managed callback that has not exited. The shared
+`live_task_replay_response_schema` declares the optional page field. It does not
+change terminal status, `done`, cancellation authority or `finishedAt`. A primary
+artifact may be complete while best-effort postpasses still emit events. Readers
+that display those postpasses retain observation while true, then drain the page
+that observes false; absence preserves legacy terminal behavior. Activity is
+sampled before the page's events so false cannot hide an already-entered worker's
+final append. It does not promise that unrelated future work will never start.
 
 ### Delivery vs construction
 
@@ -543,7 +621,10 @@ reached`, which maps to `detailKey=stream.phase.subscriptionQuotaReached`
 (regardless of the 429 status), and an all-slots-cooling wait whose dominant
 slot `cooldown_reason` is `'quota'` surfaces as `Phase.WAITING_MODEL` +
 `detailKey=stream.phase.waitingQuotaReset`. Billing exhaustion (`Key balance
-exhausted`) stays a separate reason. The sidebar "rate-limited" chip excludes
+exhausted`) stays a separate reason. A gateway no-channel verdict (reason
+`Model route unavailable: <gateway message>`) maps to
+`detailKey=stream.phase.retryRouteUnavailable` with `model`, `attempt` and the
+verbatim gateway `message`; it is a 5xx route hold, never a rate limit. The sidebar "rate-limited" chip excludes
 the quota keys so a multi-hour subscription hold is never rendered as 限流.
 
 Flow role phases may additionally carry `model` plus a structured `modelRoute`
@@ -552,6 +633,13 @@ route emits `detailKey=stream.phase.modelRouted` before dispatch, and the
 manager's current-phase snapshot must preserve the same fields so raw SSE,
 reconnect, and polling render identical disclosure. This is role routing, not
 provider fallback; `model_fallback` remains a separate event and timeline fact.
+
+A model refusal (verified `content_filter` finish) first withdraws the refused
+attempt's partial text with `delta_reset(discard=true)`, then emits `retrying`
++ `detailKey=stream.phase.refusalFallback` (`model`, `fallback`) and
+`model_fallback` with `fallbackKind=content_filter` when a distinct fallback
+model retries the round. Settlement semantics live in
+[TURN_SETTLEMENT.md](TURN_SETTLEMENT.md#content-filter-outcomes).
 
 * `emit_phase(task, Phase.X, **fields)` = `build_phase(Phase.X, **fields)` +
   `append_event` — byte-identical to the old literal, same as `build_event`.
@@ -572,7 +660,12 @@ For model streaming, the three progress phases have non-overlapping meaning:
 
 - `waiting_model` is the current attempt waiting for its first semantic
   provider progress; headers, keep-alives and bytes do not turn it into a
-  retry.
+  retry. The pre-dispatch frame can name only the logical model; when the
+  first provider attempt uses a different request name, a second frame
+  repaints the label with that attempt's physical request name (the
+  deployment's wire model id). After a failed attempt the `retrying` frame
+  owns the label. Phase `detailArgs.model` always carries the full model id,
+  never a prefix-stripped alias; the live-status row wraps long names.
 - `stream_stalled` is the current attempt after reasoning, assistant text or
   valid tool progress has paused.
 - `retrying` is emitted only after an actual failed or rate-limited provider
@@ -632,6 +725,17 @@ load that snapshot first, resume at the next sequence, ignore duplicate or
 out-of-order frames, and replace provisional output with the authoritative
 single final result. A pause in progress is not completion.
 
+A call announced during model streaming that is not pre-executed (writes,
+commands, and every read the streaming prefetcher declines) carries
+`tool_start.status='queued'`; only real prefetched reads are announced running.
+When the dispatcher's worker enters that call's handler (after call order,
+approval and hooks; `tool_dispatch/_execution._run_admitted_call`) the row
+becomes `searching` and exactly one `tool_progress` with `status='searching'`
+is published. A status-bearing `tool_progress` is a structural projection
+update (`turn_lifecycle.task_event_projection_is_progress`), never coalesced,
+so the live row flips when the work starts. A queued row refused, stopped or
+superseded before entry settles through the ordinary terminal paths.
+
 Cancellation may project `cancelling` before the exactly-once terminal
 `cancelled` outcome. A cancelled result may reference retained partial output;
 quota/disk failure instead carries an explicit unretained-overflow state.
@@ -655,6 +759,23 @@ Editing one file — `lib/agent_core/events.py` — covers it:
 That's it — no second registration list, no capabilities-endpoint edit. The
 drift guard (below) confirms you didn't miss a step.
 
+`requires_response` is the only interaction list: the Turn records such an
+event as an `interaction_request` attempt event, and task-event delivery keeps
+it as a barrier in its own transaction
+([barrier class](../TASK_EVENT_DELIVERY.md#queued-structural-runs-persist-in-one-call)).
+An unregistered type never reaches the Turn: delivery refuses it
+(§Versioning).
+
+`custom_tool_call` ([client-mode custom tools](../CUSTOM_TOOLS.md)) is in this
+class for the same reason as `ask_human`, stdin and write approval: its handler
+registers a process-local waiter, publishes the request and blocks until the
+request owner posts the result under the published `callId`. The barrier lets
+that wait start only once the request is committed and visible; on a
+conversation attempt the `interaction_request` attempt event carries the
+request itself, `callId` included, where `projection_updated` carried only its
+kind. Emitted unregistered, it was batched behind earlier frames, so the
+handler could wait while the request was still invisible.
+
 ### Versioning
 
 `EVENT_CONTRACT_VERSION` bumps **only on a breaking change to an existing
@@ -667,6 +788,27 @@ Unknown-vocabulary policy (required-on-read):
   `EventContractError` under pytest / `TOFU_EVENT_SCHEMA=strict`; warns once
   per signature in production). Forward compatibility is achieved by
   REGISTERING the type (additive), never by emitting an undeclared one.
+* **Delivering** — `append_event`, the seam every governed task frame
+  crosses, refuses a frame whose `type` is unregistered or missing with
+  `EventContractError` before it is sequenced, so nothing is persisted or
+  pushed, in every `TOFU_EVENT_SCHEMA` mode (`require_registered_event`).
+  The refusal raises at the emitting call, whose owner handles it like any
+  other failure there (a tool handler's call fails; a loop emitter fails the
+  turn).
+
+  Problem: a raw dict bypasses the construction gate. `custom_tool_call`
+  reached the wire and the durable log unregistered, where the
+  required-on-read gate below refuses it, and the static drift scan sees only
+  literal types in the files it reads. Decision: the seam that writes the log
+  applies the reader's vocabulary unconditionally, as
+  `assert_registered_event_types` does; field-level checks keep their modes
+  because an unknown field is additive. Alternatives considered: the
+  construction gate's modes (warn in production) keep persisting frames that
+  the same runtime's reader then refuses as written by a newer runtime;
+  dropping the frame with a log line leaves an interaction's handler waiting
+  out its budget on a request no client receives, with no error at the
+  emitting call; the drift scan alone misses computed types and frames
+  relayed through sinks.
 * **Durable reconstruction** — readers of the persisted task event log call
   `assert_registered_event_types(...)`: an unknown type means the log was
   written by a newer runtime (or corrupted), and folding past it would resume
@@ -748,13 +890,27 @@ event as object results; clients must not treat a falsy result as absent.
 
 | Test | Enforces |
 |------|----------|
-| `tests/events/test_event_registry.py` | Every event the backend emits — whether written as a `'type': 'x'` literal **or** `EventType.X` — is registered. Every `ev.type === "..."` the frontend handles is registered. No orphan specs. Every spec's `read_policy` is from the closed set; the informational class is pinned exactly; durable-read whitelists (`STRUCTURAL_EVENT_TYPES`) stay registered. |
-| `tests/events/test_event_read_policy.py` | Required-on-write: `build_event` rejects unregistered types. Required-on-read: `assert_registered_event_types` names consumer + unknown types; `fold_cold_state` refuses an unknown-type log (loud checkpoint fallback). |
+| `tests/events/test_event_registry.py` | Every event the backend emits — whether written as a `'type': 'x'` literal **or** `EventType.X` — is registered. Every `ev.type === "..."` the frontend handles is registered. No orphan specs. Every spec's `read_policy` is from the closed set; the informational class is pinned exactly; durable-read whitelists (`STRUCTURAL_EVENT_TYPES`) stay registered. Every terminal replay type `task_terminal_event_type()` can stamp (`done`, `error`, `aborted`) is a registered terminal spec: the type is computed from the task status, so the emitter scan cannot see it, and the write gate would otherwise refuse every task ending in that status. |
+| `tests/events/test_event_read_policy.py` | Required-on-write: `build_event` rejects unregistered types; `append_event` refuses an unregistered or untyped frame in every mode before sequencing it. Required-on-read: `assert_registered_event_types` names consumer + unknown types; `fold_cold_state` refuses an unknown-type log (loud checkpoint fallback). |
 | `tests/events/test_event_emit.py` | `build_event` is byte-identical to the literal (incl. key order); `emit` delivers through `append_event`; a real converted orchestrator helper still emits the exact pre-conversion dict. |
 | `tests/agent_core/test_phase_registry.py` | The PHASE sub-vocabulary: every `phase='x'` in `lib/` is registered (or a documented out-of-channel carve-out), every `.phase === "x"` the frontend branches on is registered, **zero raw `{'type': 'phase'` literals** outside the registry module (the unified-interface ratchet), no dead phase vocabulary, and `build_phase` byte-identity. |
 
-If you add an emitter in a NEW file, add its path to `_BACKEND_FILES` in
-`tests/events/test_event_registry.py` so the new call sites are scanned.
+The backend scan derives its emitters: every module under `lib/`, `routes/`
+and `tofu_agent/` that imports the delivery seam (`append_event` or the
+manager's `_events` module, `emit`, `emit_phase`) is scanned, so a new emitter
+file needs no list edit. `_BACKEND_FILES` in
+`tests/events/test_event_registry.py` names only emitters that reach the seam
+through a callback or sink without importing it.
+
+Problem: the scan read a hand-kept file list that missed
+`lib/tools/tool_env.py` and `lib/tasks_pkg/handlers`, so an unregistered
+`custom_tool_call` was emitted while the guard stayed green. Decision: derive
+the directly emitting modules from their imports of the seam; a seam name that
+stops resolving fails `test_scan_targets_all_resolve`. Alternatives
+considered: adding the two missing paths leaves the list one new emitter away
+from the next blind spot; scanning every module under `lib/` also reads the
+private TaskRuntime channel vocabularies (paper, production, translate) that
+the §1 scope ruling keeps unregistered.
 
 ### Field-level schemas (`EventSpec.schema`)
 
@@ -776,6 +932,41 @@ enforce it:
 `int` (JSON semantics, not Python's). Keep `required` minimal — a field any
 real emitter legitimately omits (e.g. the success path omits `status`) is
 optional, or the strict gate raises on conforming traffic.
+
+**Problem:** Every construction and delivery check rebuilt the complete schema
+field index, parsed each present field's kind, and scanned all optional fields
+for requiredness. A phase frame usually carries only a few of its 66 declared
+fields. **Decision:** Each immutable `EventSpec` / `PushFrameSpec` lazily owns
+one compiled field index and required-name tuple through the same validator.
+Ordinary kinds reuse the closed type table; union kinds are parsed during
+compilation. Validation always reads the current frame, preserves violation
+ordering, and keeps booleans distinct from numeric JSON kinds. The original
+schema remains the generator/capabilities authority. A replacement spec owns
+its own index; no type-name cache or invalidation protocol is needed. Concurrent
+first reads may repeat pure compilation, but the published indexes are read-only
+and no frame/result is retained. **Alternatives rejected:** caching validation
+results or skipping delivery checks would miss post-construction mutations;
+an independent global schema cache would need another ownership lifecycle.
+
+`benchmarks/event_schema.py --baseline-ref 7d0f5ff8a` compares the actual pinned
+and current validators, checks valid/invalid frames and generated contract
+parity, and retains nine alternating samples per workload. Python 3.12.13 local
+medians for representative sparse frames (microseconds per validation):
+
+| Boundary | Previous warm | Compiled warm | Previous first read | Compiled first read |
+|---|---:|---:|---:|---:|
+| `delta` | 3.03 | 1.01 | 3.06 | 5.48 |
+| `phase` | 7.21 | 1.27 | 7.28 | 20.03 |
+| `tool_complete` | 6.59 | 1.94 | 6.64 | 13.83 |
+| `conv_changed` push | 1.71 | 0.90 | 1.64 | 2.72 |
+
+The complete `build_event → identity mutation → check_event` workload measured
+15.11 → 6.16 µs. First use pays compilation once per spec; warming all 74
+registered specs retained about 159 KiB of compiled indexes under tracemalloc.
+These are component observations, not task or provider latency claims.
+`tests/events/test_event_schema_compilation.py` pins kind unions, unknown-kind
+refusal, post-construction mutation, replacement identity, concurrent first
+reads, and the removal of repeated union parsing.
 
 The TypeScript mirror is generated: `scripts/gen_event_contract.py` writes
 `frontend/src/api/event-contract.generated.ts` (one interface per schema'd

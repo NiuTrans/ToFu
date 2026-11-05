@@ -120,9 +120,12 @@ def test_real_gateway_assembly_supplies_the_deferred_context_capability():
 
 
 @pytest.mark.parametrize('wire', [[], ['execute_tools'], ['execute_program']])
-def test_auto_never_injects_javascript_guidance_from_stale_capabilities(wire, monkeypatch):
+def test_default_auto_injects_the_same_guidance_as_on(wire, monkeypatch):
     monkeypatch.delenv('TOFU_PTC_TIER', raising=False)
-    assert providers._programmatic_guidance(request(mode='auto', wire=wire, admitted=True)) == ''
+    auto = providers._programmatic_guidance(request(mode='auto', wire=wire, admitted=True))
+    assert auto
+    assert auto == providers._programmatic_guidance(request(mode='on', wire=wire, admitted=True))
+    assert providers._programmatic_guidance(request(mode='off', wire=wire, admitted=True)) == ''
 
 
 def test_explicit_batch_override_withdraws_program_guidance(monkeypatch):

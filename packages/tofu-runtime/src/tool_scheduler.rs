@@ -1,6 +1,9 @@
 //! Composition-owned demand tool scheduling with atomic publication.
-//! Only explicitly classified read calls overlap; ordered calls retain order.
-//! Scoped workers start before publication and join before callback inputs expire.
+//! The qualified composition overlaps only explicitly classified reads and keeps
+//! every other call in order. The concurrent composition (owner decision
+//! 2026-10-28) starts every call at once; a call waits only for the earlier
+//! calls the host's settled call order names. Scoped workers start before
+//! publication and join before callback inputs expire.
 use crate::{
     session::{ExecutionSession, Registry as Sessions},
     tool_contract::{AdmittedCall, Authorization, Permission, Registry},
@@ -84,8 +87,15 @@ fn start_worker<'scope, 'env>(
         .name(name)
         .spawn_scoped(scope, run)
 }
+/// Which calls of a batch start on their own joined worker.
+enum Overlap {
+    /// Explicitly qualified read names overlap; every other call keeps call order.
+    Qualified(BTreeSet<String>),
+    /// Every call overlaps; only the batch's declared call order is kept.
+    Every,
+}
 pub struct Scheduler {
-    parallel_names: BTreeSet<String>,
+    overlap: Overlap,
     state: Mutex<State>,
     settled: Condvar,
     resident: Arc<AtomicUsize>,
@@ -170,15 +180,20 @@ fn prepare(batch: &Batch<'_>) -> Result<(), Error> {
 }
 fn scopes(
     batch: &Batch<'_>,
-    parallel_names: &BTreeSet<String>,
+    overlap: &Overlap,
     mut calls: Vec<Invocation>,
 ) -> Result<Vec<Prepared>, Error> {
     calls.sort_unstable_by_key(|call| call.position);
     calls
         .into_iter()
         .map(|call| {
-            let parallel = call.proof.permission() == Permission::Read
-                && parallel_names.contains(call.proof.name());
+            let parallel = match overlap {
+                Overlap::Every => true,
+                Overlap::Qualified(names) => {
+                    call.proof.permission() == Permission::Read
+                        && names.contains(call.proof.name())
+                }
+            };
             let scope = Scope::with_parent(
                 batch.sessions,
                 batch.owner,
@@ -198,11 +213,26 @@ fn scopes(
         })
         .collect()
 }
+/// Parent Stop and deadlines reach a call waiting for its predecessor within this interval.
+const ORDER_STOP_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 struct Control {
     stopped: AtomicBool,
     scopes: Vec<Arc<Scope>>,
+    /// Earlier dispatched positions each position must wait for.
+    after: HashMap<usize, Vec<usize>>,
+    finished: Mutex<BTreeSet<usize>>,
+    progress: Condvar,
 }
 impl Control {
+    fn new(prepared: &[Prepared], after: HashMap<usize, Vec<usize>>) -> Self {
+        Self {
+            stopped: AtomicBool::new(false),
+            scopes: prepared.iter().map(|call| call.scope.clone()).collect(),
+            after,
+            finished: Mutex::new(BTreeSet::new()),
+            progress: Condvar::new(),
+        }
+    }
     fn stop(&self, owner: u64) {
         if self.stopped.swap(true, Ordering::SeqCst) {
             return;
@@ -210,9 +240,75 @@ impl Control {
         for scope in &self.scopes {
             let _ = scope.request_cancel(owner, "batch_stop");
         }
+        // Taking the lock orders this wake after any waiter's predicate check.
+        let _finished = self.finished.lock().unwrap_or_else(|e| e.into_inner());
+        self.progress.notify_all();
+    }
+    fn finish(&self, position: usize) {
+        self.finished
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(position);
+        self.progress.notify_all();
+    }
+    /// Returns when every declared predecessor finished or the call must stop.
+    fn await_predecessors(&self, position: usize, scope: &Scope) {
+        let Some(before) = self.after.get(&position) else {
+            return;
+        };
+        let stopped = || {
+            self.stopped.load(Ordering::SeqCst)
+                || scope.snapshot().map_or(true, |snapshot| {
+                    snapshot.cancel_requested
+                        || snapshot
+                            .deadline_remaining_nanos
+                            .is_some_and(|remaining| remaining <= 0)
+                })
+        };
+        let mut finished = self.finished.lock().unwrap_or_else(|e| e.into_inner());
+        while !stopped() && before.iter().any(|earlier| !finished.contains(earlier)) {
+            finished = self
+                .progress
+                .wait_timeout(finished, ORDER_STOP_POLL)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
     }
 }
+/// Publishes a call's completion on every exit, unwinding included, so a
+/// successor can never wait on a call that will not finish.
+struct Finished<'a>(&'a Control, usize);
+impl Drop for Finished<'_> {
+    fn drop(&mut self) {
+        self.0.finish(self.1);
+    }
+}
+/// Keeps only predecessors that are dispatched in this batch; a declared
+/// predecessor must be an earlier call of the same response.
+fn order(calls: &[Invocation], after: &[Vec<usize>]) -> Result<HashMap<usize, Vec<usize>>, Error> {
+    let dispatched: BTreeSet<usize> = calls.iter().map(|call| call.position).collect();
+    let mut order = HashMap::new();
+    for &position in &dispatched {
+        let Some(before) = after.get(position) else {
+            continue;
+        };
+        if before.iter().any(|earlier| *earlier >= position) {
+            return Err(Error::Binding);
+        }
+        let before: Vec<usize> = before
+            .iter()
+            .copied()
+            .filter(|earlier| dispatched.contains(earlier))
+            .collect();
+        if !before.is_empty() {
+            order.insert(position, before);
+        }
+    }
+    Ok(order)
+}
 fn invoke(call: Prepared, batch: &Batch<'_>, control: &Control) -> ResultItem {
+    let _finished = Finished(control, call.position);
+    control.await_predecessors(call.position, &call.scope);
     if control.stopped.load(Ordering::SeqCst) {
         let _ = call.scope.request_cancel(batch.owner, "batch_stop");
     }
@@ -260,11 +356,19 @@ impl Scheduler {
         Ok(scheduler)
     }
     pub fn new(budget: Budget, parallel_names: BTreeSet<String>) -> Result<Self, Error> {
+        Self::build(budget, Overlap::Qualified(parallel_names))
+    }
+    /// Every call of a batch starts at once, writes included (owner decision
+    /// 2026-10-28); `dispatch_in_order` keeps only the declared call order.
+    pub fn concurrent(budget: Budget) -> Result<Self, Error> {
+        Self::build(budget, Overlap::Every)
+    }
+    fn build(budget: Budget, overlap: Overlap) -> Result<Self, Error> {
         if budget.workers == 0 {
             return Err(Error::Configuration);
         }
         Ok(Self {
-            parallel_names,
+            overlap,
             state: Mutex::new(State {
                 closed: false,
                 calls: 0,
@@ -278,8 +382,18 @@ impl Scheduler {
             worker_start: start_worker,
         })
     }
-    pub fn dispatch(&self, mut batch: Batch<'_>) -> Result<Vec<ResultItem>, Error> {
+    pub fn dispatch(&self, batch: Batch<'_>) -> Result<Vec<ResultItem>, Error> {
+        self.dispatch_in_order(batch, &[])
+    }
+    /// `after[position]` names earlier positions whose calls must finish before
+    /// that call enters; predecessors absent from the batch are not awaited.
+    pub fn dispatch_in_order(
+        &self,
+        mut batch: Batch<'_>,
+        after: &[Vec<usize>],
+    ) -> Result<Vec<ResultItem>, Error> {
         prepare(&batch)?;
+        let after = order(&batch.calls, after)?;
         let bytes = weight(&batch.calls, batch.task_id)?;
         let count = batch.calls.len();
         let mut state = self.state.lock().map_err(|_| Error::StatePoisoned)?;
@@ -309,11 +423,8 @@ impl Scheduler {
             caller,
         };
         let calls = std::mem::take(&mut batch.calls);
-        let prepared = scopes(&batch, &self.parallel_names, calls)?;
-        let control = Control {
-            stopped: AtomicBool::new(false),
-            scopes: prepared.iter().map(|call| call.scope.clone()).collect(),
-        };
+        let prepared = scopes(&batch, &self.overlap, calls)?;
+        let control = Control::new(&prepared, after);
         let results = Mutex::new(Vec::with_capacity(count));
         let publication = (Mutex::new(None::<bool>), Condvar::new());
         let dispatch = std::thread::scope(|scope| {
@@ -430,14 +541,10 @@ impl Drop for Scheduler {
 }
 /// Zero-pool ordered fallback used when no parallel scheduler was composed.
 pub fn ordered(mut batch: Batch<'_>) -> Result<Vec<ResultItem>, Error> {
-    let names = BTreeSet::new();
     prepare(&batch)?;
     let calls = std::mem::take(&mut batch.calls);
-    let prepared = scopes(&batch, &names, calls)?;
-    let control = Control {
-        stopped: AtomicBool::new(false),
-        scopes: prepared.iter().map(|call| call.scope.clone()).collect(),
-    };
+    let prepared = scopes(&batch, &Overlap::Qualified(BTreeSet::new()), calls)?;
+    let control = Control::new(&prepared, HashMap::new());
     Ok(prepared
         .into_iter()
         .map(|call| invoke(call, &batch, &control))

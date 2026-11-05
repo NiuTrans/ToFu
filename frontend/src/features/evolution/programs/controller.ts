@@ -27,7 +27,7 @@ export interface ProgramState {
 }
 export type ProgramApi = Pick<EvolutionApi, 'listPrograms' | 'getProgram' | 'getProgramExperiments'
   | 'getProgramMemories' | 'getRun' | 'listRunModels' | 'createProgram' | 'commandProgram' | 'appendProgramSteps' | 'answerRun'>
-  & Partial<Pick<EvolutionApi, 'getStageOutcome' | 'setProgramPacing'>>;
+  & Partial<Pick<EvolutionApi, 'getStageOutcome' | 'setProgramPacing' | 'listInstalledSkills'>>;
 export const emptyProgramState = (): ProgramState => ({programs: [], questions: [], models: [],
   historyAfter: 0, loading: false, catalogPending: false, historyPending: false, errors: []});
 

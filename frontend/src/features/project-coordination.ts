@@ -4,22 +4,23 @@
 import type { CoordinationCanvasState } from './project-coordination-canvas';
 import { createButton, createDialog, createAlert, createTabs } from '../ui';
 import '../styles/application/33-project-coordination.css';
-import { coordinationText as text, coordinationDecisions, coordinationTaskDigest, createCoordinationBoard, createCoordinationDecisions, projectCoordinationWorkGroups } from './project-coordination-board';
+import { coordinationText as text, coordinationTaskDigest, createCoordinationBoard, projectCoordinationWorkGroups } from './project-coordination-board';
 export { projectCoordinationWorkGroups } from './project-coordination-board';
 import { t } from '../i18n';
 import { projectCoordinationGraph } from './project-coordination-graph';
 import { createCoordinationWorkList, type CoordinationConversation } from './project-coordination-work-list';
 import { captureCoordinationView, createCoordinationReference } from './project-coordination-reference';
 import { createCoordinationManagement } from './project-coordination-management';
-import type { ProjectDispatchView, ProjectDispatchPage, CoordinatorBudgetState } from '../api/project-dispatch.generated';
+import type { ProjectDispatchView, ProjectDispatchPage, CoordinatorUsageState } from '../api/project-dispatch.generated';
 import { createAssignmentHistoryNavigation } from './project-assignment-history';
-import type { CoordinatorReportState, CoordinatorReportReadRequest, CoordinationBinding, ProjectMessagePage, CoordinatorConversationPage } from '../api/project-coordination.generated';
+import type { CoordinatorReportState, CoordinatorReportReadRequest, CoordinationBinding, CoordinatorProgressState, ProjectMessagePage, CoordinatorConversationPage } from '../api/project-coordination.generated';
 import { createProjectMessageReceipts } from './project-message-receipts';
 import { createProjectDispatch, type ProjectDispatchPorts } from './project-dispatch';
 import { createProjectScopeChanges, type ProjectScopeChangePorts } from './project-scope-changes';
 import { createProjectResponsibilities, type ProjectResponsibilityPorts } from './project-responsibilities';
 import { createProjectSharedFiles, type ProjectSharedFilesPorts } from './project-shared-files';
 import { createCoordinatorBudget, type CoordinatorBudgetPorts } from './coordinator-budget';
+import type { RouterWorkerModelPorts } from './router-worker-model';
 
 export interface CoordinationWork {
   id: string; conversationId?: string; title?: string;
@@ -34,16 +35,21 @@ export interface ProjectCoordinationPorts {
   responsibilities?: ProjectResponsibilityPorts;
   sharedFiles?: ProjectSharedFilesPorts;
   conversations?(): CoordinationConversation[];
-  workerConversations?(path: string, cursor?: string): Promise<CoordinatorConversationPage>;
+  workerConversations?(path: string, cursor?: string, signal?: AbortSignal): Promise<CoordinatorConversationPage>;
   subscribe?(refresh: () => void): () => void;
-  binding(path: string): Promise<CoordinationBinding>;
+  binding(path: string, signal?: AbortSignal): Promise<CoordinationBinding>;
   reports?: {
-    read(path: string): Promise<CoordinatorReportState>;
+    read(path: string, signal?: AbortSignal): Promise<CoordinatorReportState>;
     markRead(request: CoordinatorReportReadRequest): Promise<CoordinatorReportState>;
   };
   budget?: CoordinatorBudgetPorts;
+  /** The owner's Worker model control of this Project Router; absent for the
+   * router home, whose control lives in the Global Router header. */
+  workerModel?: RouterWorkerModelPorts;
+  /** The Coordinator's task board: the session-free progress view shown to the human. */
+  progress?: { read(path: string, signal?: AbortSignal): Promise<CoordinatorProgressState> };
   messages?(path: string, conversationId: string, beforeId: string): Promise<ProjectMessagePage>;
-  board(path: string): Promise<{ active: CoordinationWork[]; recentOutcomes: CoordinationWork[] } | null>;
+  board(path: string, signal?: AbortSignal): Promise<{ active: CoordinationWork[]; recentOutcomes: CoordinationWork[] } | null>;
   bind(path: string, conversationId: string, expectedRevision: number): Promise<CoordinationBinding>;
   create?(path: string, expectedRevision: number): Promise<CoordinationBinding>;
   navigate(conversationId: string): void;
@@ -70,7 +76,7 @@ export async function openProjectCoordination(ports: ProjectCoordinationPorts): 
   let rosterUnavailable = false;
   let historyCursor: string | undefined, rosterCursor: string | undefined;
   const graphState: CoordinationCanvasState = {}, teamState: CoordinationCanvasState = {};
-  let updateView: ((budget: CoordinatorBudgetState | null) => void) | undefined;
+  let updateView: ((budget: CoordinatorUsageState | null) => void) | undefined;
   let management: ReturnType<typeof createCoordinationManagement> | undefined;
   const feedback = document.createElement('div'); feedback.className = 'coordination-refresh-feedback'; feedback.setAttribute('role', 'status');
   const closed = drawer.open().then(() => {
@@ -128,7 +134,7 @@ export async function openProjectCoordination(ports: ProjectCoordinationPorts): 
         valid: () => valid() && binding?.revision === snapshot.revision, readBinding: ports.binding };
     };
     const budgetView = ports.budget ? createCoordinatorBudget(ports.budget, scope()) : undefined;
-    if (budgetView) { overview.append(budgetView.summary); controls.append(budgetView.settings); }
+    if (budgetView) overview.append(budgetView.summary);
     management = createCoordinationManagement(ports, { binding: () => binding!, valid, refresh: () => load(), inspect, diagnose });
     controls.append(management.el, controlFeedback, controlForms);
     reveal = () => {
@@ -182,8 +188,7 @@ export async function openProjectCoordination(ports: ProjectCoordinationPorts): 
       const options = { assignments, coordinatorId: binding!.conversationId, activeConversationId: ports.currentConversationId };
       const graph = projectCoordinationGraph(groups, options);
       const roster = conversations();
-      const decisions = assignments === null ? null : coordinationDecisions(assignments);
-      const nextOverview = JSON.stringify([board !== null, graph, decisions, historyCursor, assignmentPage?.olderCursor,
+      const nextOverview = JSON.stringify([board !== null, graph, historyCursor, assignmentPage?.olderCursor,
         assignmentPage?.newerCursor, roster, rosterUnavailable, workerPage?.nextCursor]);
       if (nextOverview !== overviewSignature) {
         overviewSignature = nextOverview; overviewContent.replaceChildren();
@@ -193,10 +198,8 @@ export async function openProjectCoordination(ports: ProjectCoordinationPorts): 
         }));
         if (!board) overviewContent.append(createAlert({ variant: 'warning', title: t('projectCoordination.boardUnavailable'),
           body: t('projectCoordination.boardUnavailableBody') }).el);
-        overviewContent.append(createCoordinationBoard(groups, navigate, decisions?.length ?? null, options,
+        overviewContent.append(createCoordinationBoard(groups, navigate, options,
           { viewState: graphState, conversations: roster, inspect, manage: () => tabs.activate('controls') }));
-        if (decisions) overviewContent.append(createCoordinationDecisions(decisions, () => tabs.activate('controls')));
-        else if (ports.dispatch) overviewContent.append(createAlert({ variant: 'warning', title: t('projectCoordination.decisionsUnavailable') }).el);
         if (!board || assignments === null || rosterUnavailable) overviewContent.append(createButton({ label: t('projectCoordination.retry'),
           size: 'sm', onClick: () => { void load(); } }));
         if (rosterUnavailable) overviewContent.append(text(t('projectCoordination.roster.unavailable'), 'small'));

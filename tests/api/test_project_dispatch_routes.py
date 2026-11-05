@@ -11,6 +11,8 @@ from jsonschema import Draft202012Validator
 from lib.identity import PrincipalContext
 from lib.project_dispatch.contract import schema
 from lib.project_dispatch.repository import CONTRACT
+from tests.project_mod.test_project_dispatch_history_projection import bound_rows as bound_rows
+from tests.project_mod.test_project_dispatch_repository import context as context
 
 pytestmark = pytest.mark.unit
 
@@ -82,6 +84,8 @@ def test_get_command_receipt_delegates_exact_query_without_authorize(monkeypatch
     principal = PrincipalContext.user(subject_id='user:7', owner_user_id=7, scopes={'chat'})
     calls = []
     def read_only(**kwargs):
+        # The view passes its client's disconnect state; a connected client is not cancelled.
+        assert kwargs.pop('cancelled')() is False
         calls.append(kwargs)
         return {'assignments': [], 'olderCursor': None, 'newerCursor': None}
     monkeypatch.setattr(routes, '_dispatch_service', lambda path: (SimpleNamespace(history_page=read_only), principal))
@@ -91,7 +95,7 @@ def test_get_command_receipt_delegates_exact_query_without_authorize(monkeypatch
     async def run():
         app = Quart(__name__)
         async with app.test_request_context('/?path=/project' + suffix):
-            return inspect.unwrap(handler)()
+            return await inspect.unwrap(handler)()
     assert asyncio.run(run()) == {'assignments': [], 'olderCursor': None, 'newerCursor': None}
     assert calls == [{'principal': principal, 'command_id': None, 'assignment_id': None, 'cursor': None, **expected}]
 
@@ -104,7 +108,7 @@ def test_empty_command_query_is_denied_before_service_lookup(monkeypatch, suffix
     async def run():
         app = Quart(__name__)
         async with app.test_request_context('/?path=/project&' + suffix):
-            return inspect.unwrap(routes.project_assignment_list)()
+            return await inspect.unwrap(routes.project_assignment_list)()
     assert asyncio.run(run()) == ('invalid', 400)
 
 
@@ -115,7 +119,11 @@ def test_v4_asgi_get_preserves_auth_scope_and_read_only_command_projection(monke
     principal = PrincipalContext.user(subject_id='user:7', owner_user_id=7, scopes={'chat'})
     calls = []
     empty = {'assignments': [], 'olderCursor': None, 'newerCursor': None}
-    service = SimpleNamespace(history_page=lambda **kwargs: calls.append(kwargs) or empty)
+    def history_page(**kwargs):
+        assert kwargs.pop('cancelled')() is False
+        calls.append(kwargs)
+        return empty
+    service = SimpleNamespace(history_page=history_page)
     monkeypatch.setattr(routes, '_dispatch_service', lambda path: (service, principal))
     monkeypatch.setattr(auth, 'current_auth', lambda: SimpleNamespace(
         is_authenticated=authenticated, has_scope=lambda scope: scope == 'chat'))
@@ -193,3 +201,54 @@ def test_create_route_passes_dependency_pins_without_inference(monkeypatch):
     assert calls == [(body, {'principal': principal, 'command_id': 'stable-dependent'})]
     assert result['dispatch'] == 'deferred'
     assert result['dependencyStates'][0]['reference'] == body['dependencies'][0]
+
+
+def test_client_disconnect_stops_the_history_build_before_its_next_row(monkeypatch, bound_rows):
+    """Quart cancels only the awaiting view; its disconnect event stops the build between rows."""
+    import threading
+    import time
+    from routes.api_v1 import project_brain as routes, auth
+    from lib.api_v4 import attach_v4_envelope, copy_blueprint_to_v4
+    c, service, reads = bound_rows
+    assert asyncio.iscoroutinefunction(routes.project_assignment_list)
+    disconnected, first_row = {}, threading.Event()
+    read_turn = service.turn_get
+
+    def held_first_turn(*args, **kwargs):
+        turn = read_turn(*args, **kwargs)
+        if len(reads) == 1:
+            # The first row's read is in flight when the client goes away.
+            first_row.set()
+            deadline = time.monotonic() + 30
+            while not disconnected['predicate']():
+                assert time.monotonic() < deadline, 'the disconnect never reached the build'
+                time.sleep(0.01)
+        return turn
+    service.turn_get = held_first_turn
+    build = service.history_page
+
+    def history_page(**kwargs):
+        disconnected['predicate'] = kwargs['cancelled']
+        return build(**kwargs)
+    service.history_page = history_page
+    monkeypatch.setattr(routes, '_dispatch_service', lambda path: (service, c.principal))
+    monkeypatch.setattr(auth, 'current_auth', lambda: SimpleNamespace(
+        is_authenticated=True, has_scope=lambda scope: scope == 'chat'))
+    app = Quart(__name__)
+    app.config['TESTING'] = True
+    app.register_blueprint(attach_v4_envelope(copy_blueprint_to_v4(
+        routes.api_v1_project_brain_bp, name='disconnect_dispatch_v4')))
+
+    async def run():
+        async with app.test_client() as client:
+            connection = client.request('/api/v4/project/coordination/assignments',
+                                        query_string={'path': '/project'})
+            async with connection:
+                await connection.send_complete()
+                assert await asyncio.to_thread(first_row.wait, 30)
+                await connection.disconnect()
+            return connection.status_code
+    # The request ends only after its build thread did, without sending a response,
+    # and no row after the in-flight one is read.
+    assert asyncio.run(run()) is None
+    assert reads == ['turn-2', 'attempt-2']

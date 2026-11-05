@@ -3,9 +3,13 @@
 //! Each invalidation gets a fresh persisted UUID token. Exact-byte ACK remains
 //! safe across delete/recreate cycles as well as concurrent writes. Legacy
 //! 8-byte epochs stay readable until the next invalidation replaces them.
+//! `SearchInvalidations` counts committed invalidations per worker scope: it
+//! wakes the maintenance worker and keeps query coverage `indexing` until a
+//! round has consumed them.
 
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::entity::EntityKey;
@@ -56,6 +60,69 @@ fn marker_key(
     )
 }
 
+/// Process-local commit sequence for the scopes one maintenance worker
+/// consumes. A commit that staged a dirty token advances its scope under the
+/// authority mutex and rings the worker; a round that publishes READY from an
+/// empty dirty listing records the sequence it observed in that same hold as
+/// consumed. Durable tokens stay the only source of work: the sequence only
+/// fences READY coverage and schedules rounds, so losing it on restart drops
+/// no invalidation.
+pub(crate) struct SearchInvalidations {
+    scopes: Vec<(u64, u64)>,
+    committed: Vec<AtomicU64>,
+    consumed: Vec<AtomicU64>,
+    wake: Box<dyn Fn(usize) + Send + Sync>,
+}
+
+impl SearchInvalidations {
+    /// `wake` receives the index of the scope in sorted `(tenant, owner)` order.
+    pub(crate) fn new(
+        scopes: impl IntoIterator<Item = (u64, u64)>,
+        wake: impl Fn(usize) + Send + Sync + 'static,
+    ) -> Self {
+        let mut scopes = scopes.into_iter().collect::<Vec<_>>();
+        scopes.sort_unstable();
+        scopes.dedup();
+        Self {
+            committed: scopes.iter().map(|_| AtomicU64::new(0)).collect(),
+            consumed: scopes.iter().map(|_| AtomicU64::new(0)).collect(),
+            scopes,
+            wake: Box::new(wake),
+        }
+    }
+
+    fn index(&self, tenant_id: u64, owner_user_id: u64) -> Option<usize> {
+        self.scopes.binary_search(&(tenant_id, owner_user_id)).ok()
+    }
+
+    pub(crate) fn note_commit(&self, tenant_id: u64, owner_user_id: u64) {
+        if let Some(index) = self.index(tenant_id, owner_user_id) {
+            self.committed[index].fetch_add(1, Ordering::AcqRel);
+            (self.wake)(index);
+        }
+    }
+
+    /// Read under the authority hold that lists the scope's dirty tokens.
+    pub(crate) fn committed(&self, tenant_id: u64, owner_user_id: u64) -> Option<u64> {
+        self.index(tenant_id, owner_user_id)
+            .map(|index| self.committed[index].load(Ordering::Acquire))
+    }
+
+    pub(crate) fn mark_consumed(&self, tenant_id: u64, owner_user_id: u64, observed: u64) {
+        if let Some(index) = self.index(tenant_id, owner_user_id) {
+            self.consumed[index].fetch_max(observed, Ordering::AcqRel);
+        }
+    }
+
+    /// An acknowledged invalidation has not yet been proven consumed.
+    pub(crate) fn pending(&self, tenant_id: u64, owner_user_id: u64) -> bool {
+        self.index(tenant_id, owner_user_id).is_some_and(|index| {
+            let consumed = self.consumed[index].load(Ordering::Acquire);
+            self.committed[index].load(Ordering::Acquire) > consumed
+        })
+    }
+}
+
 pub(crate) fn valid_token(value: &[u8]) -> bool {
     value.len() == crate::generated_conversation_search::LEGACY_DIRTY_TOKEN_BYTES
         || value.len() == crate::generated_conversation_search::DIRTY_TOKEN_BYTES
@@ -75,6 +142,7 @@ pub(crate) fn mark(
     }
     let next = uuid::Uuid::new_v4().as_bytes().to_vec();
     database.entity_put(transaction, key, next.clone())?;
+    transaction.note_search_invalidation();
     Ok(next)
 }
 
@@ -156,6 +224,47 @@ mod tests {
             0
         );
         assert_eq!(list(&database, 7, 11).unwrap()[0].tokens[0].value, new);
+    }
+
+    #[test]
+    fn only_committed_invalidations_of_tracked_scopes_advance_and_ring() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let rings = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&rings);
+        let invalidations = Arc::new(SearchInvalidations::new([(7, 12), (7, 11), (7, 11)],
+            move |index| recorded.lock().unwrap().push(index)));
+        database.attach_search_invalidations(&invalidations);
+        let mut abandoned = database.begin(7, 11).unwrap();
+        mark(&database, &mut abandoned, TURN_SEARCH_DIRTY_NAMESPACE, "abandoned").unwrap();
+        drop(abandoned);
+        let mut plain = database.begin(7, 11).unwrap();
+        database.entity_put(&mut plain, EntityKey::new(7, 11, "record", b"plain").unwrap(),
+            b"value".to_vec()).unwrap();
+        database.commit(plain).unwrap();
+        let mut untracked = database.begin(7, 13).unwrap();
+        mark(&database, &mut untracked, TURN_SEARCH_DIRTY_NAMESPACE, "other").unwrap();
+        database.commit(untracked).unwrap();
+        assert!(rings.lock().unwrap().is_empty());
+        assert_eq!(invalidations.committed(7, 13), None);
+        assert!(!invalidations.pending(7, 13));
+
+        let mut first = database.begin(7, 11).unwrap();
+        let mut conflicting = database.begin(7, 11).unwrap();
+        mark(&database, &mut first, TURN_SEARCH_DIRTY_NAMESPACE, "conversation").unwrap();
+        mark(&database, &mut first, CONVERSATION_SEARCH_DIRTY_NAMESPACE, "conversation").unwrap();
+        mark(&database, &mut conflicting, TURN_SEARCH_DIRTY_NAMESPACE, "conversation").unwrap();
+        database.commit(first).unwrap();
+        assert!(database.commit(conflicting).is_err(), "stale marker read must not commit");
+        // (7, 11) sorts first; one ring per committed transaction.
+        assert_eq!(*rings.lock().unwrap(), [0]);
+        assert_eq!(invalidations.committed(7, 11), Some(1));
+        assert!(invalidations.pending(7, 11));
+        assert!(!invalidations.pending(7, 12));
+        invalidations.mark_consumed(7, 11, 1);
+        assert!(!invalidations.pending(7, 11));
+        invalidations.mark_consumed(7, 11, 0);
+        assert!(!invalidations.pending(7, 11), "a stale observation cannot reopen coverage");
     }
 
     #[test]

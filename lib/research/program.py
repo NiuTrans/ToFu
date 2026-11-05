@@ -424,14 +424,18 @@ def _validated_evidence(raw: Mapping[str, Any]) -> tuple[list[dict], list[dict]]
                            else 'stale')
     unresolved = has_unresolved_evidence(runs, summary_for_program(raw), raw.get('protocol'))
     claims = _normalize_claims(raw.get('claims'))
+    # Numerical validity belongs to the frozen run, independent of how many
+    # claims cite it. Keep this index local: another call must recheck edits.
+    supported_refs_by_outcome: dict[str, set[str]] = {}
+    if claims:
+        for run in runs:
+            if authoritative(run) and receipt_outcome_consistent(run, raw.get('protocol')):
+                refs = supported_refs_by_outcome.setdefault(run['scientific_outcome'], set())
+                refs.update([run['id'], run['task_id'], run['artifact_ref']])
+                refs.update(run['artifact_refs'])
     for claim in claims:
         refs = set(claim['evidence_refs'])
-        supported_refs = set()
-        for run in runs:
-            if (authoritative(run) and receipt_outcome_consistent(run, raw.get('protocol'))
-                    and run['scientific_outcome'] == claim.get('outcome_scope', 'supported')):
-                supported_refs.update([run['id'], run['task_id'], run['artifact_ref']])
-                supported_refs.update(run['artifact_refs'])
+        supported_refs = supported_refs_by_outcome.get(claim.get('outcome_scope', 'supported'), set())
         missing = not all(claim.get(k) for k in (*dependencies, 'evidence_digest'))
         current = (not missing and not unresolved
                    and all(claim[k] == v for k, v in dependencies.items())

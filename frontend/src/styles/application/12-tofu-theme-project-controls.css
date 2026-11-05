@@ -38,12 +38,6 @@
   transform:translateY(-2px) scale(1.03);
   box-shadow:var(--clay-md)}
 
-/* ── Folder browser ── */
-[data-theme="tofu"] .folder-browser{border-radius:var(--radius-sm);border:1px solid rgba(184,176,160,0.4);box-shadow:0 2px 8px rgba(74,63,47,0.06);overflow:hidden}
-[data-theme="tofu"] .folder-browser-header{background:#EFE6D2;border-bottom:var(--stitch)}
-[data-theme="tofu"] .folder-browser-footer{background:#EFE6D2;border-top:var(--stitch)}
-[data-theme="tofu"] .folder-item.selected{background:rgba(143,81,38,0.08);border-left:3px solid #8F5126}
-[data-theme="tofu"] .folder-code-badge{background:rgba(143,81,38,0.1);color:#7A441F;border-radius:var(--radius-sm)}
 [data-theme="tofu"] .recent-search .recent-search-input{border:2px solid #3B2E1E;border-radius:var(--radius-sm);background:#FBF6E9}
 [data-theme="tofu"] .recent-search .recent-search-input:focus{border-color:#3B2E1E;box-shadow:var(--clay-sm)}
 [data-theme="tofu"] .recent-hl{background:rgba(143,81,38,0.22);color:#7A441F}
@@ -155,13 +149,16 @@
 [data-theme="tofu"] .submenu-item:hover,
 [data-theme="tofu"] .flow-menu-item:hover{background:#F7EEDD}
 /* Active row: a warm wash plus a 2px caramel spine — the same "selected"
-   grammar as the sidebar's conversation rows, so the two read as one system. */
+   grammar as the sidebar's conversation rows, so the two read as one system.
+   The spine marks the one choice of a single-select menu. Capability toggles
+   are often on together and stacked spines read as a curly bracket, so an
+   "on" toggle is marked by its seal alone. */
 [data-theme="tofu"] .submenu-item.active,
 [data-theme="tofu"] .flow-menu-item.selected{
   background:linear-gradient(90deg,rgba(143,81,38,0.13),rgba(143,81,38,0.045));
-  border-radius:10px;
-  box-shadow:inset 2px 0 0 var(--accent)
+  border-radius:10px
 }
+[data-theme="tofu"] .flow-menu-item.selected{box-shadow:inset 2px 0 0 var(--accent)}
 [data-theme="tofu"] .submenu-item-icon,
 [data-theme="tofu"] .flow-menu-icon{
   width:28px;
@@ -331,14 +328,17 @@
    :not(.settings-panel) — SAME source-exclusion: this bleed (0,3,1) out-
    specified BOTH the retired tofu pixel settings inputs (0,2,1) and the
    2026-09-04 unified soft settings inputs, flattening them to a 1px no-shadow
-   box. Settings inputs now come solely from 07's cross-theme soft system. */
-[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input){
+   box. Settings inputs now come solely from 07's cross-theme soft system.
+   :not(.folder-browser-input) — SAME source-exclusion: the shared folder
+   browser (10-project-browser.css) draws its own filter/create fields inside
+   the Co-Pilot .modal; this bleed would otherwise box them a second time. */
+[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input){
   border-radius:var(--radius);
   border:1px solid rgba(184,176,160,0.4);
   background:#FBF6E9;
   box-shadow:none
 }
-[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):focus{border-color:#BB9572;box-shadow:none}
+[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input):focus{border-color:#BB9572;box-shadow:none}
 
 /* ── Project modal — tofu header band + blocky close (it nests its own
       .pm-header, so the generic > h3 rule doesn't reach it). ── */

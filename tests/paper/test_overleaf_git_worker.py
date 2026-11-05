@@ -196,14 +196,19 @@ def test_git_credentials_are_origin_scoped_and_never_enter_remote_urls(operation
     assert foreign.returncode == 1 and not foreign.stdout
 
 
-def test_low_resource_probe_is_lean_and_overrides_cannot_exceed_contract(monkeypatch):
+def test_git_memory_is_fixed_on_every_host_and_overrides_cannot_exceed_contract(monkeypatch):
+    from types import SimpleNamespace
     monkeypatch.syspath_prepend(str(PACKAGE))
     from tofu_overleaf_mcp import git_resources
+    mib = 1024**2
     monkeypatch.setattr(git_resources.psutil, 'virtual_memory', lambda: (_ for _ in ()).throw(OSError()))
     monkeypatch.setattr(git_resources.shutil, 'disk_usage', lambda _: (_ for _ in ()).throw(OSError()))
     budget = git_resources.probe_budget({})
-    assert budget.memory_bytes == 128 * 1024**2 and budget.workspace_bytes == 64 * 1024**2
+    assert budget.memory_bytes == 256 * mib and budget.workspace_bytes == 64 * mib
     assert budget.cpu_count == 1
+    monkeypatch.setattr(git_resources.psutil, 'virtual_memory',
+                        lambda: SimpleNamespace(total=512 * mib, available=32 * mib))
+    assert git_resources.probe_budget({}).memory_bytes == 256 * mib
     for env in ({'TOFU_OVERLEAF_GIT_MEMORY_MIB': '513'}, {'TOFU_OVERLEAF_GIT_WORKSPACE_MIB': '257'},
                 {'TOFU_OVERLEAF_GIT_MEMORY_MIB': 'no'}):
         with pytest.raises(ValueError, match='git_budget_invalid'):

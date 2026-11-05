@@ -1,6 +1,7 @@
 import { destroyVideoArtifact } from './video-artifact';
 import { featureRegistry } from '../../feature-registry';
 import type { I18nKey } from '../../i18n';
+import { createPaperTaskObserver, type PaperTaskSnapshot } from './push-transport';
 import {
   adoptMediaModel,
   adoptServerClocks,
@@ -8,16 +9,17 @@ import {
 } from './media-model-ui';
 
 type LooseObject = Record<string, any>;
+type MediaState = LooseObject & { status: string; lastEventAt: number };
 type MediaWindow = Window & Record<string, any>;
 
 function globals(): MediaWindow {
   return featureRegistry as unknown as MediaWindow;
 }
 
-function video(): LooseObject {
+function video(): MediaState {
   const state = globals()._pvideo;
   if (!state) throw new Error('Video view state is unavailable');
-  return state as LooseObject;
+  return state as MediaState;
 }
 
 function apiDomain(name: 'paper' | 'motion'): LooseObject | undefined {
@@ -46,12 +48,36 @@ function render(): void { requiredPresentationPort('_pvRender')(); }
 function renderProgress(): void { requiredPresentationPort('_pvRenderProgress')(); }
 function renderActivity(): void { requiredPresentationPort('_pvRenderActivity')(); }
 
+export const videoTaskObserver = createPaperTaskObserver({
+  channel: 'motion', pollIntervalMs: 1500,
+  state: video,
+  taskId: () => video().regenTaskId || video().taskId,
+  read: async (taskId, cursor) => apiDomain('motion')?.poll(taskId, cursor),
+  consume: consumeVideoEvent,
+  snapshot(response) {
+    const state = video();
+    adoptServerClocks(state, response);
+  },
+  terminal: settleVideoTask,
+  lost() {
+    const state = video();
+    if (state.regenTaskId) {
+      state.regenTaskId = ''; state.regenSceneId = '';
+      state.revisionMessage = translate('paper.studioRevisionFailed', 'Scene update failed. Your current film is kept.');
+      requiredPresentationPort('_pvRenderSceneGrid')(0);
+      return;
+    }
+    state.taskId = '';
+    state.status = 'lost';
+    render();
+  },
+  presentation: { render, progress: renderProgress, activity: renderActivity },
+  warn: (error) => console.warn('[Paper:Video] poll failed:', error),
+});
+
 export function resetVideoRun(): void {
   const state = video();
-  globals().paperDetachPush?.(state);
-  state._seqSeen = -1;
-  state._replayCursor = 0;
-  state.pollFails = 0;
+  videoTaskObserver.reset();
   state.phases = [];
   state.phaseIndex = 0;
   state.genStartedAt = Date.now();
@@ -66,38 +92,13 @@ export function resetVideoRun(): void {
   state.revisionMessage = '';
 }
 
-export function stopVideoPoll(): void {
-  const state = video();
-  if (state.pollTimer) window.clearTimeout(state.pollTimer);
-  state.pollTimer = null;
-}
-
-export function stopVideoTick(): void {
-  const state = video();
-  if (state.tickTimer) window.clearInterval(state.tickTimer);
-  state.tickTimer = null;
-}
-
-export function stopVideoPolling(): void {
-  const state = video();
-  stopVideoPoll();
-  stopVideoTick();
-  globals().paperDetachPush?.(state);
-}
-
-export function startVideoTick(): void {
-  const state = video();
-  if (state.tickTimer) return;
-  state.tickTimer = window.setInterval(renderActivity, 1000);
-}
-
 export async function initVideoTab(force = false): Promise<void> {
   const state = video();
   const host = document.getElementById('paperVideoContent');
   if (!host) return;
   const selectedHash = String(globals()._paperHash ?? '');
   if (!force && state.status === 'done' && state.paperHash === selectedHash && state.result && state._doneTaskId) { render(); return; }
-  stopVideoPolling();
+  videoTaskObserver.stop();
   state.scenes = []; state.scenesLoading = false; state.scenesError = ''; state.revisionMessage = '';
   state._revisionGeneration = Number(state._revisionGeneration || 0) + 1;
   state.paperHash = selectedHash;
@@ -123,13 +124,12 @@ export async function initVideoTab(force = false): Promise<void> {
       state._doneTaskId = lookup.task_id;
       if (lookup.running) {
         state.taskId = lookup.task_id;
-        state.cursor = 0;
-        state.status = 'generating';
+          state.status = 'generating';
         if (lookup.model) adoptMediaModel('video', lookup.model);
         resetVideoRun();
         adoptServerClocks(state, lookup);
         render();
-        scheduleVideoPoll();
+        videoTaskObserver.schedule();
         return;
       }
       if (lookup.interrupted) {
@@ -210,141 +210,48 @@ export function consumeVideoEvent(event: LooseObject): boolean | undefined {
   return undefined;
 }
 
-export function attachVideoPush(): void {
+async function settleVideoTask(response: PaperTaskSnapshot): Promise<void> {
   const state = video();
-  const taskId = state.regenTaskId || state.taskId;
-  if (!taskId) return;
-  globals().paperAttachPush?.(state, taskId, {
-    channel: 'motion',
-    isCurrent: () => (state.regenTaskId || state.taskId) === taskId,
-    onEvent: (event: LooseObject) => {
-      if ((state.regenTaskId || state.taskId) !== taskId) return;
-      state.lastEventAt = Date.now();
-      const changed = globals().paperIngestEvent?.(
-        state, event, (_target: LooseObject, row: LooseObject) => consumeVideoEvent(row),
-      );
-      if (changed) render(); else renderProgress();
-      renderActivity();
-      if (['done', 'error', 'aborted'].includes(String(event.type))) {
-        void pollVideoOnce();
-      }
-    },
-  });
-}
-
-export function scheduleVideoPoll(): void {
-  const state = video();
-  stopVideoPoll();
-  attachVideoPush();
-  const delay = Number(globals()._PVIDEO_POLL_MS) || 1500;
-  state.pollTimer = window.setTimeout(() => void pollVideoOnce(), delay);
-}
-
-export function failVideoPoll(): void {
-  const state = video();
-  state.pollFails = Number(state.pollFails || 0) + 1;
-  const limit = Number(globals()._PV_POLL_FAIL_LIMIT) || 5;
-  if (state.pollFails >= limit) {
-    if (state.regenTaskId) {
-      stopVideoPolling(); state.regenTaskId = ''; state.regenSceneId = '';
-      state.revisionMessage = translate('paper.studioRevisionFailed', 'Scene update failed. Your current film is kept.');
-      requiredPresentationPort('_pvRenderSceneGrid')(0); return;
-    }
-    stopVideoPolling();
-    state.taskId = '';
+  if (state.regenTaskId) {
     state.regenTaskId = '';
-    state.status = 'lost';
-    render();
+    state.regenSceneId = '';
+    if (response.status !== 'done') {
+      state.revisionMessage = translate('paper.studioRevisionFailed', 'Scene update failed. Your current film is kept.');
+      requiredPresentationPort('_pvRenderSceneGrid')(0);
+    } else if (response.result?.applied === false) {
+      state.revisionMessage = translate('paper.studioRevisionKept', 'The current scene was kept.');
+      requiredPresentationPort('_pvRenderSceneGrid')(0);
+    } else {
+      state.revisionMessage = translate('paper.studioRevisionApplied', 'Scene updated.');
+      await loadVideoScenes(true);
+    }
     return;
   }
-  scheduleVideoPoll();
-}
-
-export async function pollVideoOnce(): Promise<void> {
-  const state = video();
-  const taskId = state.regenTaskId || state.taskId;
-  if (!taskId || state.pollBusy) return;
-  state.pollBusy = true;
-  try {
-    const transport = await apiDomain('motion')?.poll(taskId, state.cursor);
-    // The API transport owns v4 envelope decoding on Response.json().
-    const response = transport?.ok ? await transport.json() : null;
-    const current = state.regenTaskId
-      ? state.regenTaskId === taskId
-      : state.taskId === taskId;
-    if (!current) return;
-    if (!response?.ok) {
-      failVideoPoll();
-      return;
-    }
-    state.pollFails = 0;
-    const replay = globals().taskReplayIngestPage?.(
-      state,
-      response,
-      (_target: LooseObject, event: LooseObject) => consumeVideoEvent(event),
-      state.cursor,
-    ) ?? { accepted: 0, nextCursor: state.cursor, changed: false };
-    if (replay.accepted) state.lastEventAt = Date.now();
-    adoptServerClocks(state, response);
-    state.cursor = replay.nextCursor;
-    if (response.done) {
-      if (state.regenTaskId) {
-        state.regenTaskId = '';
-        state.regenSceneId = '';
-        stopVideoPolling();
-        if (response.status !== 'done') {
-          state.revisionMessage = translate('paper.studioRevisionFailed', 'Scene update failed. Your current film is kept.');
-          requiredPresentationPort('_pvRenderSceneGrid')(0);
-        } else if (response.result?.applied === false) {
-          state.revisionMessage = translate('paper.studioRevisionKept', 'The current scene was kept.');
-          requiredPresentationPort('_pvRenderSceneGrid')(0);
-        } else {
-          state.revisionMessage = translate('paper.studioRevisionApplied', 'Scene updated.');
-          await loadVideoScenes(true);
-        }
-        return;
-      }
-      if (response.status === 'done') {
-        state.result = response.result || null;
-        state.quality_axis = response.artifact_quality || null;
-        if (response.model) adoptMediaModel('video', response.model);
-        state._doneTaskId = state.taskId;
-        state.status = 'done';
-        state.scenesLoading = true;
-        state.taskId = '';
-        stopVideoPolling();
-        render();
-        void loadVideoScenes();
-      } else if (response.status === 'aborted') {
-        state.status = 'idle';
-        state.taskId = '';
-        stopVideoPolling();
-        render();
-      } else if (response.error?.kind === 'worker_lost') {
-        state.status = 'lost';
-        state.taskId = '';
-        stopVideoPolling();
-        render();
-      } else {
-        state.status = 'error';
-        state.errorText = response.error?.detail
-          || (typeof response.error === 'string' ? response.error : '')
-          || translate('paper.videoFailed', 'Video generation failed');
-        state.taskId = '';
-        stopVideoPolling();
-        render();
-      }
-      return;
-    }
-    if (replay.changed) render(); else renderProgress();
-    if (state.status === 'generating') startVideoTick();
-    renderActivity();
-    scheduleVideoPoll();
-  } catch (error: unknown) {
-    console.warn('[Paper:Video] poll failed:', error);
-    if ((state.regenTaskId || state.taskId) === taskId) failVideoPoll();
-  } finally {
-    state.pollBusy = false;
+  if (response.status === 'done') {
+    state.result = response.result || null;
+    state.quality_axis = response.artifact_quality || null;
+    if (response.model) adoptMediaModel('video', response.model);
+    state._doneTaskId = state.taskId;
+    state.status = 'done';
+    state.scenesLoading = true;
+    state.taskId = '';
+    render();
+    void loadVideoScenes();
+  } else if (response.status === 'aborted') {
+    state.status = 'idle';
+    state.taskId = '';
+    render();
+  } else if (response.error?.kind === 'worker_lost') {
+    state.status = 'lost';
+    state.taskId = '';
+    render();
+  } else {
+    state.status = 'error';
+    state.errorText = response.error?.detail
+      || (typeof response.error === 'string' ? response.error : '')
+      || translate('paper.videoFailed', 'Video generation failed');
+    state.taskId = '';
+    render();
   }
 }
 
@@ -399,9 +306,8 @@ export async function generateVideo(force = false): Promise<void> {
     }
     if (response?.ok && response.task_id) {
       state.taskId = response.task_id;
-      state.cursor = 0;
       renderProgress();
-      scheduleVideoPoll();
+      videoTaskObserver.schedule();
       return;
     }
     state.status = 'error';
@@ -428,7 +334,7 @@ export async function abortVideo(): Promise<void> {
     try { await apiDomain('motion')?.abort(state.taskId); }
     catch (error: unknown) { console.warn('[Paper:Video] abort failed:', error); }
   }
-  stopVideoPolling();
+  videoTaskObserver.stop();
   state.taskId = '';
   state.regenTaskId = '';
   state.status = 'idle';
@@ -476,12 +382,9 @@ export async function regenerateVideoScene(sceneId: string): Promise<void> {
     const response = await apiDomain('motion')?.regenScene(taskId, sceneId);
     if (!current()) return;
     if (response?.ok && response.task_id) {
-      globals().paperDetachPush?.(state);
-      state._seqSeen = -1;
-      state._replayCursor = 0;
+      videoTaskObserver.reset();
       state.regenTaskId = response.task_id;
-      state.cursor = 0;
-      scheduleVideoPoll();
+      videoTaskObserver.schedule();
       return;
     }
   } catch (error: unknown) {
@@ -498,7 +401,7 @@ export function destroyVideoRuntime(): void {
   const state = globals()._pvideo as LooseObject | undefined;
   if (!state) return;
   state._startAttempt = null;
-  stopVideoPolling();
+  videoTaskObserver.stop();
   state._sceneLoadGeneration = Number(state._sceneLoadGeneration || 0) + 1;
   state._revisionGeneration = Number(state._revisionGeneration || 0) + 1;
   state.taskId = '';
@@ -508,23 +411,11 @@ export function destroyVideoRuntime(): void {
 
 export function installVideoRuntime(): void {
   const target = globals();
-  target._pvResetRun = resetVideoRun;
-  target._pvStopPoll = stopVideoPoll;
-  target._pvStopPolling = stopVideoPolling;
-  target._pvStartTick = startVideoTick;
-  target._pvStopTick = stopVideoTick;
   target._initVideoTab = initVideoTab;
-  target._pvSchedulePoll = scheduleVideoPoll;
-  target._pvAttachPush = attachVideoPush;
-  target._pvEtaTick = updateVideoEta;
-  target._pvConsumeEvent = consumeVideoEvent;
-  target._pvPollFail = failVideoPoll;
-  target._pvPollOnce = pollVideoOnce;
   target._videoGenerate = generateVideo;
   target._videoAbort = abortVideo;
   target._pvLoadScenes = loadVideoScenes;
   target._videoRegenScene = regenerateVideoScene;
-  target._destroyVideoRuntime = destroyVideoRuntime;
 }
 
 installVideoRuntime();

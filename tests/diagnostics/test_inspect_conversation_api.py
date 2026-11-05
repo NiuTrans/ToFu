@@ -51,7 +51,8 @@ def api_server(callback):
         assert not worker.is_alive()
 
 
-def pages(request, *, total=203, projection=None, patches=None, source_format='projection'):
+def pages(request, *, total=203, projection=None, patches=None, source_format='projection',
+          revision=7):
     path = urlsplit(request.path)
     if path.path.endswith('/compactions'):
         return 200, {'compactions': [{'id': 'archive-1'}], 'count': 1}
@@ -62,11 +63,11 @@ def pages(request, *, total=203, projection=None, patches=None, source_format='p
     args = parse_qs(path.query)
     kind = args['kind'][0]
     if kind == 'header':
-        return 200, {'revision': 7, 'totalCount': total, 'turnNative': True,
-                     'document': {'metadata': {'id': 'conversation', 'rev': 7,
+        return 200, {'revision': revision, 'totalCount': total, 'turnNative': True,
+                     'document': {'metadata': {'id': 'conversation', 'rev': revision,
                          'title': 'native document', 'settings': {}, 'msg_count': total},
                          'messages': []}}
-    assert args['revision'] == ['7']
+    assert args['revision'] == [str(revision)]
     index = int(args['index'][0])
     source = projection if projection is not None else {'content': str(index)}
     if source_format == 'turn':
@@ -77,7 +78,7 @@ def pages(request, *, total=203, projection=None, patches=None, source_format='p
 
     source_token = hashlib.sha256(raw).hexdigest()
     if kind == 'turn':
-        return 200, {'revision': 7, 'totalCount': total, 'index': index,
+        return 200, {'revision': revision, 'totalCount': total, 'index': index,
                      'turn': {'turnId': f'turn-{index}', 'conversationId': 'conversation',
                               'laneId': 'main', 'actor': 'human', 'ordinal': index * 3 + 2,
                               'projectionRevision': 1 + len(patches or [])},
@@ -91,7 +92,7 @@ def pages(request, *, total=203, projection=None, patches=None, source_format='p
     offset, limit = int(args['offset'][0]), int(args['limit'][0])
     data = raw[offset:offset + limit]
     end = offset + len(data)
-    return 200, {'revision': 7, 'index': index, 'offset': offset,
+    return 200, {'revision': revision, 'index': index, 'offset': offset,
                  'totalBytes': len(raw), 'sourceToken': source_token,
                  'nextOffset': end if end < len(raw) else None,
                  'data': base64.b64encode(data).decode()}
@@ -118,6 +119,34 @@ def test_api_cli_pages_and_uses_authorization_without_database_access(monkeypatc
     assert '--- #204' not in output.out
     assert '--- #203' in output.out
     assert 'logs: omitted' in output.out
+
+
+def test_api_cli_reports_failed_turn_settlement_without_attempt_rows(monkeypatch, capsys):
+    def serve(request):
+        status, body = pages(request, total=1, projection={'content': 'unfinished response'})
+        if 'kind=turn' in request.path:
+            body['turn'].update({
+                'actor': 'agent', 'kind': 'response', 'status': 'failed',
+                'currentAttemptId': 'attempt-synthetic',
+                'settlement': {
+                    'outcome': 'failed', 'cause': 'provider_stream_error',
+                    'evidence': 'provider_stream_failure', 'streamState': 'premature_close',
+                    'error': {'code': 'provider_stream_error', 'message': 'synthetic stream closed'},
+                },
+            })
+        return status, body
+    monkeypatch.setattr(inspector, 'resolve_readonly_sqlite_authority',
+                        lambda *a, **k: pytest.fail('native diagnostic must not read attempt tables'))
+
+    with api_server(serve) as url:
+        assert inspector.main(['conversation', '--api-url', url, '--no-logs']) == 0
+
+    output = capsys.readouterr().out
+    assert '== Anomalies == (1 found' in output
+    assert '[turn]' in output and 'status=failed' in output
+    assert 'synthetic stream closed' in output and 'premature_close' in output
+    assert 'attempt=attempt-' in output and 'turn=turn-0' in output
+    assert 'REJECTED' not in output and '[attempt]' not in output
 
 
 @pytest.mark.parametrize('mutation', ['revision', 'identity', 'cursor', 'empty'])
@@ -323,6 +352,122 @@ def test_api_mode_scans_explicit_logs_dir_with_original_values(tmp_path, capsys)
     assert 'logs: omitted' not in output
 
 
+def test_api_mode_log_match_filters_before_the_cap_and_keeps_file_headers(tmp_path, capsys):
+    (tmp_path / 'app.log').write_text(
+        '[ModelReplay] conv=conversa restore=checkpoint_missing\n'
+        '[Chat] conversation queued\n'
+        '[Translate] committed field=content conv=conversa turn=t1\n'
+        '[Translate] committed field=content conv=conversa turn=t2\n', encoding='utf-8')
+    with api_server(pages) as url:
+        assert inspector.main(['conversation', '--api-url', url, '--logs-dir', str(tmp_path),
+                               '--logs', '2', '--log-match', r'ModelReplay|Translate\] committed']) == 0
+    output = capsys.readouterr().out
+    logs = output.split('== Logs ==', 1)[1].splitlines()
+    assert logs == [r' (--log-match ModelReplay|Translate\] committed)',
+                    '--- app.log: 2 line(s) (last 4 MiB)',
+                    '[Translate] committed field=content conv=conversa turn=t1',
+                    '[Translate] committed field=content conv=conversa turn=t2']
+
+
+JSON_KEYS = {'conversationId', 'found', 'exitCode', 'document', 'messages',
+             'anomalies', 'compactionArchives'}
+
+
+def test_api_json_mode_prints_one_document_with_every_read_turn(tmp_path, capsys):
+    (tmp_path / 'app.log').write_text('conversation bootstrap ok\nunrelated line\n',
+                                      encoding='utf-8')
+    with api_server(lambda request: pages(request, total=30)) as url:
+        assert inspector.main(['conversation', '--api-url', url,
+                               '--logs-dir', str(tmp_path), '--json']) == 0
+    captured = capsys.readouterr()
+    assert captured.out.count('\n') == 1 and not captured.err
+    payload = json.loads(captured.out)
+    assert set(payload) == JSON_KEYS | {'logs'}
+    assert (payload['conversationId'], payload['found'], payload['exitCode']) == (
+        'conversation', True, 0)
+    assert 'messages' not in payload['document']
+    assert payload['document']['metadata']['title'] == 'native document'
+    assert payload['document']['diagnostic_unread_count'] == 0
+    # Like --raw, --json reads every turn instead of the head/tail selection.
+    assert [message['content'] for message in payload['messages']] == [
+        str(index) for index in range(30)]
+    assert payload['compactionArchives'][0]['summary'] == 'retained summary'
+    assert payload['anomalies'] == []
+    assert payload['logs'] == ['conversation bootstrap ok']
+
+
+def test_api_json_mode_absence_errors_and_partial_evidence(monkeypatch, capsys):
+    problem = {'status': 404, 'code': 'diagnostic_conversation_not_found'}
+    with api_server(lambda request: (404, problem)) as url:
+        assert inspector.main(['missing', '--api-url', url, '--json']) == 2
+    assert json.loads(capsys.readouterr().out) == {
+        'conversationId': 'missing', 'found': False, 'exitCode': 2}
+
+    with api_server(lambda request: (404, {})) as url:
+        assert inspector.main(['missing', '--api-url', url, '--json']) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ''
+    assert 'Diagnostic endpoint unavailable or incompatible' in captured.err
+
+    monkeypatch.setattr(inspector._DiagnosticAPI, 'MAX_TOTAL_BYTES', 3 * 1024 * 1024)
+    with api_server(lambda request: pages(
+            request, total=1, projection={'content': 'x' * (3 * 1024 * 1024)})) as url:
+        assert inspector.main(['conversation', '--api-url', url, '--json',
+                               '--no-anomalies']) == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert set(payload) == JSON_KEYS - {'anomalies'}
+    assert payload['exitCode'] == 3 and payload['messages'] == []
+    assert payload['document']['diagnostic_resume_index'] == 0
+
+
+def _rule_note(llm_round):
+    return {'type': 'system_note', 'noteKind': 'system-intervention',
+            'reason': 'project_scoped_rules', 'llmRound': llm_round,
+            'text': 'Project Intelligence — AGENTS.md\nSource: /repo/AGENTS.md\n'
+                    'Applies only within: /repo\n\n# Rules\n- keep it small'}
+
+
+def _context_pages(request):
+    index = int(parse_qs(urlsplit(request.path).query).get('index', ['0'])[0])
+    segments = {0: [_rule_note(0)],
+                5: [{'type': 'system_note', 'noteKind': 'intent-stall', 'llmRound': 1,
+                     'text': 'Continue the plan.'}, _rule_note(2)]}.get(index, [])
+    return pages(request, total=30,
+                 projection={'content': f'turn {index}', 'segments': segments})
+
+
+def test_api_context_reads_every_turn_and_keeps_the_default_transcript_view(capsys):
+    with api_server(_context_pages) as url:
+        assert inspector.main(['conversation', '--api-url', url, '--context']) == 0
+    output = capsys.readouterr().out
+    section = output.split('== Context injections ==\n', 1)[1].split('\n\n', 1)[0]
+    assert section.splitlines() == [
+        '  #1 r0 project_scoped_rules: 5 line(s) source: /repo/AGENTS.md',
+        '  #6 r1 intent-stall: 1 line(s)',
+        '  #6 r2 project_scoped_rules: 5 line(s) source: /repo/AGENTS.md (repeat of #1 r0)',
+        '  3 note(s), 2 distinct text(s), 1 repeat(s)',
+    ]
+    transcript = output.split('== Transcript ==', 1)[1].split('coverage:', 1)[0]
+    assert '(30 message(s), head 3 + tail 20)' in transcript
+    assert '--- #3 [' in transcript and '--- #4 [' not in transcript
+    assert '--- #6 [' not in transcript and '--- #11 [' in transcript
+    assert '… <7 message(s) omitted; use --full>' in transcript
+    assert 'unread message' not in transcript
+    assert 'coverage: 30 read, 0 unread' in output
+
+    with api_server(_context_pages) as url:
+        assert inspector.main(['conversation', '--api-url', url, '--context', '--json']) == 0
+    records = json.loads(capsys.readouterr().out)['contextInjections']
+    assert [(record['messageNumber'], record['llmRound'], record['reason'] or record['noteKind'],
+             record['nonBlankLines'], record['sources'], record['repeatOf'])
+            for record in records] == [
+        (1, 0, 'project_scoped_rules', 5, ['/repo/AGENTS.md'], None),
+        (6, 1, 'intent-stall', 1, [], None),
+        (6, 2, 'project_scoped_rules', 5, ['/repo/AGENTS.md'],
+         {'messageNumber': 1, 'llmRound': 0}),
+    ]
+
+
 def test_api_mode_without_logs_dir_keeps_logs_omitted(capsys):
     with api_server(pages) as url:
         assert inspector.main(['conversation', '--api-url', url]) == 0
@@ -372,20 +517,30 @@ def test_patch_chain_is_reconstructed_using_storage_codec():
     assert document['messages'][0]['segments'] == target['segments']
 
 
-def test_final_header_revision_change_is_not_reported_as_consistent():
+def test_final_header_revision_change_is_not_reported_as_consistent(monkeypatch):
+    """A write lands before every header after the first, so no witness ever closes."""
+    monkeypatch.setattr(inspector, 'SNAPSHOT_RETRY_DELAYS_S', (0, 0))
+    revision = 7
     headers = 0
+    seen = []
     def serve(request):
-        nonlocal headers
-        status, body = pages(request, total=1)
+        nonlocal revision, headers
+        seen.append(request.path)
         if 'kind=header' in request.path:
             headers += 1
-            if headers % 2 == 0:
-                body['revision'] = body['document']['metadata']['rev'] = 8
-        return status, body
+            revision += headers > 1
+        return pages(request, total=1, revision=revision)
     with api_server(serve) as url:
-        with pytest.raises(inspector.DiagnosticAPIError, match='changed'):
-            inspector._load_api_document(inspector._DiagnosticAPI(url, None),
-                                         'conversation', full=True)
+        document, _ = inspector._load_api_document(inspector._DiagnosticAPI(url, None),
+                                                   'conversation', full=True)
+    assert document['diagnostic_snapshot'] == 'best-effort'
+    assert document['diagnostic_revision'] == revision
+    assert document['diagnostic_revision_bounds'] == [revision - 1, revision]
+    assert document['diagnostic_turn_revisions'] == [revision - 1]
+    assert [message['content'] for message in document['messages']] == ['0']
+    # Downloaded once, then re-verified by one-byte witnesses at each new revision.
+    assert sum('kind=turn' in path for path in seen) == 1
+    assert sum('kind=chunk' in path for path in seen) == inspector.SNAPSHOT_PASSES
 
 
 def test_unaffordable_turn_reports_unread_and_resume_without_downloading(monkeypatch, capsys):
@@ -607,28 +762,35 @@ def test_result_surfaces_observer_never_promotes_frontend_metadata_to_delivery()
 
 
 @pytest.mark.parametrize('conflict_at', ['turn', 'chunk', 'witness'])
-def test_diagnostic_conflict_restarts_whole_read_without_mixing_sources(conflict_at):
-    headers = 0
-    conflicted = False
+def test_diagnostic_conflict_never_mixes_sources(conflict_at, monkeypatch):
+    """Both Turns change at one conflict; only the new content is ever reported.
+
+    ``turn``/``chunk``: the sources change at an unchanged revision (native reserves
+    that for a streaming tail), so the whole verification window is distrusted.
+    ``witness``: an ordinary write advances the revision before the final header.
+    Each changed Turn is downloaded again; nothing read before the conflict survives.
+    """
+    monkeypatch.setattr(inspector, 'SNAPSHOT_RETRY_DELAYS_S', (0, 0))
+    revision, headers, conflicted = 7, 0, False
     seen = []
     def serve(request):
-        nonlocal headers, conflicted
+        nonlocal revision, headers, conflicted
         seen.append(request.path)
         args = parse_qs(urlsplit(request.path).query)
         kind = args.get('kind', [''])[0]
-        if kind == 'header':
-            headers += 1
-        trigger = ((kind == conflict_at and args.get('index') == ['1'])
-                   or (conflict_at == 'witness' and kind == 'header' and headers == 2))
-        old = not conflicted
-        if trigger and not conflicted:
+        headers += kind == 'header'
+        if not conflicted and ((kind == conflict_at and args.get('index') == ['1'])
+                               or (conflict_at == 'witness' and kind == 'header' and headers == 2)):
             conflicted = True
             if kind != 'header':
-                return 409, {'status': 409, 'code': 'conflict', 'detail': 'database_conflict'}
-        status, body = pages(request, total=2, projection={'content': 'old' if old else 'new'})
-        if trigger and kind == 'header':
-            body['revision'] = body['document']['metadata']['rev'] = 8
-        return status, body
+                return 409, CONFLICT
+            revision += 1
+        if kind in ('turn', 'chunk') and args['revision'] != [str(revision)]:
+            return 409, CONFLICT
+        status, body = pages(request, total=2, revision=revision,
+                             projection={'content': 'new' if conflicted else 'old'})
+        # A stale source token is a typed storage conflict on every authority.
+        return (409, CONFLICT) if status == 409 else (status, body)
     with api_server(serve) as url:
         api = inspector._DiagnosticAPI(url, None)
         deadline = api.deadline
@@ -636,6 +798,8 @@ def test_diagnostic_conflict_restarts_whole_read_without_mixing_sources(conflict
     assert conflicted
     assert [message['content'] for message in document['messages']] == ['new', 'new']
     assert document['diagnostic_message_indices'] == [0, 1]
+    assert document['diagnostic_snapshot'] == 'consistent'
+    assert document['diagnostic_revision'] == revision
     assert api.requests == len(seen)
     assert api.deadline == deadline
     assert api.reserved_bytes == api.reserved_requests == 0
@@ -663,22 +827,131 @@ def test_only_typed_diagnostic_conflicts_restart(status, problem):
     assert len(seen) == 2
 
 
-def test_persistent_diagnostic_conflict_exhausts_without_partial_output(capsys):
+CONFLICT = {'status': 409, 'code': 'conflict', 'detail': 'database_conflict'}
+
+
+def test_persistent_revision_churn_exhausts_without_partial_output(monkeypatch, capsys):
+    monkeypatch.setattr(inspector, 'SNAPSHOT_RETRY_DELAYS_S', (0, 0))
+    revision = 7
     headers = 0
     def serve(request):
-        nonlocal headers
+        nonlocal revision, headers
         if 'kind=header' in request.path:
             headers += 1
+            revision += 1
+            return pages(request, total=1, revision=revision)
+        return 409, CONFLICT
+    with api_server(serve) as url:
+        assert inspector.main(['conversation', '--api-url', url, '--no-logs']) == 1
+    output = capsys.readouterr()
+    # Every probe sees a newer revision: each pass follows the move a bounded
+    # number of times, and with no turn ever read the run fails without output.
+    assert headers == 1 + inspector.SNAPSHOT_PASSES * (inspector.SNAPSHOT_MOVE_RETRIES + 1)
+    assert 'no selected turn could be read' in output.err
+    assert 'writes settle' in output.err
+    assert 'written continuously' in output.err
+    assert not output.out
+
+
+def test_persistent_final_turn_conflict_reports_verified_snapshot_and_live_turn(
+        monkeypatch, capsys):
+    """A streaming final Turn conflicts at an unchanged revision until it settles."""
+    monkeypatch.setattr(inspector, 'SNAPSHOT_RETRY_DELAYS_S', (0, 0))
+    seen = []
+    def serve(request):
+        seen.append(request.path)
         if 'kind=turn' in request.path and 'index=1' in request.path:
-            return 409, {'status': 409, 'code': 'conflict', 'detail': 'database_conflict'}
+            return 409, CONFLICT
+        return pages(request, total=2)
+    with api_server(serve) as url:
+        assert inspector.main(['conversation', '--api-url', url, '--no-logs']) == 3
+    output = capsys.readouterr()
+    assert not output.err
+    assert '--- #1 [' in output.out and '\n0\n' in output.out
+    assert '--- #2 [live]' in output.out
+    assert 'LIVE: turn #2' in output.out
+    assert '--start-index 1 --max-turns 1' in output.out
+    # Two unchanged-header observations classify it; the rest of the snapshot
+    # is re-verified by a one-byte witness instead of being downloaded again.
+    assert sum('kind=turn' in path and 'index=1' in path for path in seen) == 2
+    assert sum('kind=turn' in path and 'index=0' in path for path in seen) == 1
+    assert sum('kind=chunk' in path and 'index=0' in path for path in seen) == 2
+    assert sum('kind=header' in path for path in seen) == 4
+    assert 'coverage: 1 read, 1 unread; revision 7;' in output.out
+
+
+def test_transient_final_turn_conflict_is_not_reported_live(monkeypatch, capsys):
+    monkeypatch.setattr(inspector, 'SNAPSHOT_RETRY_DELAYS_S', (0, 0))
+    conflicts = 0
+    def serve(request):
+        nonlocal conflicts
+        if 'kind=turn' in request.path and 'index=1' in request.path and not conflicts:
+            conflicts += 1
+            return 409, CONFLICT
+        return pages(request, total=2)
+    with api_server(serve) as url:
+        assert inspector.main(['conversation', '--api-url', url, '--no-logs']) == 0
+    output = capsys.readouterr()
+    assert conflicts == 1
+    assert '[live]' not in output.out and 'LIVE:' not in output.out
+    assert '--- #2 [' in output.out and '\n1\n' in output.out
+
+
+def test_persistent_nonfinal_turn_conflict_is_never_classified_live(monkeypatch, capsys):
+    monkeypatch.setattr(inspector, 'SNAPSHOT_RETRY_DELAYS_S', (0, 0))
+    seen = []
+    def serve(request):
+        seen.append(request.path)
+        if 'kind=turn' in request.path and 'index=0' in request.path:
+            return 409, CONFLICT
         return pages(request, total=2)
     with api_server(serve) as url:
         assert inspector.main(['conversation', '--api-url', url, '--no-logs']) == 1
     output = capsys.readouterr()
-    assert headers == 3
-    assert 'no consistent snapshot after 3 attempts' in output.err
-    assert 'writes settle' in output.err
+    assert 'Turn 0 conflicted at unchanged revision 7' in output.err
+    assert 'not write churn' in output.err
+    assert '--start-index 0 --max-turns 1' in output.err
+    assert sum('kind=turn' in path and 'index=0' in path for path in seen) == inspector.SNAPSHOT_TURN_READS
     assert not output.out
+
+
+def test_live_classification_is_discarded_when_the_revision_moves(monkeypatch):
+    monkeypatch.setattr(inspector, 'SNAPSHOT_RETRY_DELAYS_S', (0, 0))
+    revision, refused = 7, 0
+    def serve(request):
+        nonlocal revision, refused
+        args = parse_qs(urlsplit(request.path).query)
+        kind = args.get('kind', [''])[0]
+        if refused == 2 and kind in ('turn', 'chunk'):
+            # After the stream was classified live at revision 7, a structural
+            # write retires its text tail and advances the revision to 8.
+            revision, refused = 8, 3
+        if kind in ('turn', 'chunk') and args['revision'] != [str(revision)]:
+            return 409, CONFLICT
+        if revision == 7 and kind == 'turn' and args.get('index') == ['1']:
+            refused += 1
+            return 409, CONFLICT
+        return pages(request, total=2, revision=revision)
+    with api_server(serve) as url:
+        document, _ = inspector._load_api_document(
+            inspector._DiagnosticAPI(url, None), 'conversation', full=True)
+    assert refused == 3
+    assert 'diagnostic_live_index' not in document
+    assert document['diagnostic_revision'] == 8
+    assert document['diagnostic_snapshot'] == 'consistent'
+    assert [message['content'] for message in document['messages']] == ['0', '1']
+
+
+def test_api_server_error_is_not_reported_as_an_authorization_refusal():
+    def serve(request):
+        return 500, {'status': 500, 'code': 'internal_error'}
+    with api_server(serve) as url:
+        with pytest.raises(inspector.DiagnosticAPIError) as error:
+            inspector._DiagnosticAPI(url, None).get(
+                '/api/v4/conversations/x/diagnostic?kind=header')
+    message = str(error.value)
+    assert 'HTTP 500' in message and 'server-side' in message
+    assert 'authorization' not in message
 
 
 @pytest.mark.parametrize('bound', ['bytes', 'requests', 'deadline'])

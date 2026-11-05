@@ -1,7 +1,9 @@
-"""Per-call admission controls; no task registry or durable ownership state.
+"""Per-call tool controls; no task registry or durable ownership state.
 
 The project dispatcher installs this scope before file preimage acquisition.
-Waiting writers recheck cancellation and content freshness after admission.
+It carries cancellation, the recorded background command binding, journal
+conversation attribution and isolated-workspace target checks. It is not a
+workspace lease: tool calls take none.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -11,11 +13,12 @@ import os
 
 _control = ContextVar('project_tool_admission', default=None)
 
-# Task marker published for the DURATION of a wait for workspace admission, by
-# the wait owner (``workspace_lease._publish_admission_wait``). A wait has no
-# process and no output, so silence-based liveness decisions must read it
-# instead of concluding the task is wedged; ``lib.tasks_pkg.explained_wait``
-# owns that classification and imports this constant, never the reverse.
+# Task marker published for the DURATION of a task-bound internal lease
+# acquisition (dependency setup, integration snapshot), by the wait owner
+# (``workspace_lease._publish_admission_wait``). A wait has no process and no
+# output, so silence-based liveness decisions must read it instead of
+# concluding the task is wedged; ``lib.tasks_pkg.explained_wait`` owns that
+# classification and imports this constant, never the reverse.
 WORKSPACE_ADMISSION_KEY = '_workspaceAdmission'
 
 
@@ -23,6 +26,8 @@ WORKSPACE_ADMISSION_KEY = '_workspaceAdmission'
 class RecordedCommandSource:
     """Trusted background adapter binding, never a model-supplied argument.
 
+    ``original`` is the execution body after ``command_execution_source``
+    preparation and before record wrapping, not the unprepared model text.
     Only the exact generated wrapper may borrow this original admission source;
     changing the executed bytes invalidates the binding and fails closed.
     """
@@ -44,7 +49,7 @@ class Cancellation:
 
 
 def admission_timeout():
-    """An optional operator wait bound; default admission owns completion."""
+    """An optional operator bound on internal lease waits; default waits to completion."""
     raw = os.environ.get('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', '')
     if not raw.strip():
         return None

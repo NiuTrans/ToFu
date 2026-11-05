@@ -256,6 +256,23 @@ class TestListBackgroundCommands:
         assert statuses[cid2] == 'running'
         blocker.set()
 
+    def test_command_text_shares_completion_display_bound(self):
+        from lib.conversation_sync.generated_contract import OPENAPI_SCHEMAS
+        limit = OPENAPI_SCHEMAS['BackgroundCommandCompletion']['properties']['command']['maxLength']
+        task = _make_task()
+        blocker = threading.Event()
+        commands = {
+            start_background_command(
+                task=task, command=command,
+                execute=lambda t, _ctx: blocker.wait(10) or 'done'): command
+            for command in ('echo ' + 'm' * 400, 'x' * (limit + 500))
+        }
+        try:
+            listed = {c['command_id']: c['command'] for c in list_background_commands()}
+            assert listed == {cid: command[:limit] for cid, command in commands.items()}
+        finally:
+            blocker.set()
+
 
 class TestHistoryAndAdmission:
     def test_live_commands_exceed_old_ceiling_and_remain_controllable(self, monkeypatch):

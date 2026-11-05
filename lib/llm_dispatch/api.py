@@ -75,10 +75,15 @@ from lib.llm_dispatch._api_chat import (
     pick_key_for_model as pick_key_for_model,
 )
 
-from lib.llm_dispatch._api_stream_state import (
-    _StreamRetryState as _StreamRetryState,
-    _adapt_stream_body_for_slot as _adapt_stream_body_for_slot,
+# Retain the historical facade name for callers that patch the streaming seam.
+from lib.llm_dispatch._api_retry_state import (
+    DispatchRetryState,
     _cycling_can_ever_serve as _cycling_can_ever_serve,
+)
+_StreamRetryState = DispatchRetryState
+
+from lib.llm_dispatch._api_stream_state import (
+    _adapt_stream_body_for_slot as _adapt_stream_body_for_slot,
     _first_output_callbacks as _first_output_callbacks,
     _readjust_thinking_params as _readjust_thinking_params,
     _settle_stream_result as _settle_stream_result,
@@ -123,6 +128,8 @@ _SHARD_MODULES = (
     'lib.llm_dispatch._api_chat',
     'lib.llm_dispatch._api_stream_state',
     'lib.llm_dispatch._api_stream',
+    'lib.llm_dispatch._api_failures',
+    'lib.llm_dispatch._api_retry_state',
     'lib.llm_dispatch._api_multi',
 )
 

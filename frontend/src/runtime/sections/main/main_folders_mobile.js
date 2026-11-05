@@ -110,6 +110,9 @@ function _folderSettingsPorts(assignConvId) {
       return folder;
     },
     browse: (path, showHidden, signal) => Api.project.browse(path, showHidden, { onError: 'throw', signal }),
+    mkdir: (parent, name) => Api.project.mkdir(parent, name),
+    rmdir: path => Api.project.rmdir(path),
+    browseStorage: () => window.sessionStorage,
     recent: () => Api.project.recentList(),
     remove: async id => {
       const result = await deleteFolder(id);
@@ -413,7 +416,7 @@ function closeMobileSheet() {
 function updateMobileSheet() {
   paintOptionalProjectAttachment(document, t);
 
-  const agentMode = resolveAgentMode(planMode, autopilotEnabled);
+  const agentMode = resolveAgentMode(planMode, autopilotEnabled, delegateMode);
   document.querySelectorAll('.mobile-agent-mode-item').forEach((item) => {
     const selected = !activeFlow && item.dataset.mode === agentMode;
     item.classList.toggle('active', selected);
@@ -476,16 +479,17 @@ function updateMobileContext() {
   const summary = (typeof runtimeScope.contextUsageSummary === "function")
     ? runtimeScope.contextUsageSummary() : null;
 
-  /* "Compact now" — disabled while a task is live (can't rewrite mid-turn). */
+  /* "Compact now" — while a task is live the server schedules it for the
+   * running reply's next model call instead of rewriting mid-turn. */
   const compactItem = document.getElementById("mobileCompactNow");
   const desc = document.getElementById("mobileCompactDesc");
   const busy = Boolean(conv && typeof convIsBusy === 'function' && convIsBusy(conv));
   if (compactItem) {
-    compactItem.classList.toggle("disabled", busy || !conv);
+    compactItem.classList.toggle("disabled", !conv);
     if (desc) {
       if (busy) {
         desc.textContent = (typeof t === "function")
-          ? t("compactNow.busy") : "A task is running — cannot compact";
+          ? t("compactNow.schedule") : "Compact at the next model call";
       } else if (summary && summary.hasUsage) {
         /* Show the live percentage so the user sees WHY they'd compact. */
         desc.textContent = (typeof t === "function")

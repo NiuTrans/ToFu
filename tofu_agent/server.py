@@ -154,7 +154,7 @@ class _IdempotencyEntry:
 
 
 class _IdempotencyStore:
-    """Bounded process-lifetime idempotency index with atomic reservations."""
+    """Atomic live reservations plus evict-only terminal response retention."""
 
     def __init__(self, *, ttl_s: float, max_entries: int) -> None:
         self.ttl_s = ttl_s
@@ -163,16 +163,24 @@ class _IdempotencyStore:
         self._lock = threading.Lock()
 
     def _prune_locked(self, now: float) -> None:
-        expired = [key for key, entry in self._entries.items()
-                   if now - entry.created_at >= self.ttl_s]
+        expired = []
+        retained = []
+        for key, entry in self._entries.items():
+            # A reservation or live execution is still an execution identity,
+            # not a disposable response. Evicting it permits duplicate effects.
+            if entry.execution is None or not entry.execution.done:
+                continue
+            if now - entry.created_at >= self.ttl_s:
+                expired.append(key)
+            else:
+                retained.append(key)
         for key in expired:
             self._entries.pop(key, None)
-        overflow = len(self._entries) - self.max_entries
-        if overflow > 0:
-            oldest = sorted(
-                self._entries.items(), key=lambda pair: pair[1].created_at)
-            for key, _entry in oldest[:overflow]:
-                self._entries.pop(key, None)
+        # Dict insertion order is reservation order (created_at is monotonic).
+        # Active requests may exceed the terminal retention hint without refusal.
+        overflow = max(0, len(retained) - self.max_entries)
+        for key in retained[:overflow]:
+            self._entries.pop(key, None)
 
     def claim(
         self, key: str, fingerprint: str,
@@ -195,6 +203,7 @@ class _IdempotencyStore:
             if self._entries.get(key) is entry:
                 entry.execution = execution
                 entry.ready.set()
+                self._prune_locked(time.monotonic())
 
     def cancel(self, key: str, entry: _IdempotencyEntry) -> None:
         with self._lock:
@@ -568,7 +577,9 @@ def create_app(
             return _json_error(
                 'internal_error', 'Model-routing settings could not be removed.', 500)
 
-    async def _execution_from_body(body: dict) -> AgentExecution:
+    async def _execution_from_body(
+        body: dict, *, store_key: str, entry: _IdempotencyEntry | None,
+    ) -> AgentExecution:
         if 'provider' in body:
             raise AgentConfigurationError(
                 'inline provider blocks were removed; configure '
@@ -591,7 +602,34 @@ def create_app(
             timeout_s=(body['timeout_s']
                        if body.get('timeout_s') is not None else 600.0),
         )
-        return await asyncio.to_thread(agent_runtime.start, request_value)
+        def start_and_publish() -> AgentExecution:
+            try:
+                execution = agent_runtime.start(request_value)
+            except BaseException:
+                if entry is not None:
+                    idempotency.cancel(store_key, entry)
+                raise
+            if entry is not None:
+                idempotency.publish(store_key, entry, execution)
+            return execution
+
+        # Disconnecting the observer cannot revoke a physical startup already
+        # in progress. Its worker publishes or withdraws the reservation, and
+        # cancellation joins that admission before leaving the request scope.
+        admission = asyncio.create_task(asyncio.to_thread(start_and_publish))
+        try:
+            return await asyncio.shield(admission)
+        except asyncio.CancelledError:
+            while not admission.done():
+                try:
+                    await asyncio.shield(admission)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not admission.cancelled():
+                admission.exception()
+            raise
 
     @app.post('/api/v1/agent/run')
     async def _run_agent():
@@ -635,9 +673,8 @@ def create_app(
                     )
                 execution = entry.execution
             else:
-                execution = await _execution_from_body(body)
-                if entry is not None:
-                    idempotency.publish(store_key, entry, execution)
+                execution = await _execution_from_body(
+                    body, store_key=store_key, entry=entry)
         except AgentConfigurationError as exc:
             if entry is not None and creator:
                 idempotency.cancel(store_key, entry)

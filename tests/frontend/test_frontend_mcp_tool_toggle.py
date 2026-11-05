@@ -16,7 +16,6 @@ NEGATIVE CONTROL (patches a COPY; shipped file stays byte-identical):
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -29,12 +28,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 JS_DIR = runtime_sections_dir()
 _MCP_SRC = os.path.join(JS_DIR, 'settings', 'mcp.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -173,8 +166,6 @@ def _run(js_path: str) -> str:
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_tool_toggle_panel_and_put_payload():
     output = _run(_MCP_SRC)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -183,8 +174,6 @@ def test_tool_toggle_panel_and_put_payload():
     print(output)
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NEUTER_without_panel_render_expanded_card_shows_nothing():
     """Patch a COPY so the panel render call is dropped — the expanded card
     must then show NO checkbox rows, proving the expansion branch is

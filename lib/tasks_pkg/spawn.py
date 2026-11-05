@@ -1,9 +1,8 @@
 """Chat worker submission onto the serving loop and agent executor.
 
-This module is the single owner of the process-level executor and serving-loop
-references. ``spawn_task`` leaves accepted work pending while it waits in the
-bounded executor, then publishes worker entry before invoking the task runner.
-A daemon thread is reserved for CLI/test contexts with no serving loop.
+This module owns the process-level executor/serving-loop references and chat's
+durable worker admission. TaskRuntime owns submission, isolated worker context
+and activity observation. Accepted tasks stay pending until physical entry.
 """
 
 from __future__ import annotations
@@ -231,6 +230,22 @@ def _owned_task_callable(
             return None
         native_invocation_owned = task.get('_nativePreparedInvocation') is not None
         try:
+            # After worker entry/workspace binding, before any runner reads
+            # the model view (root and Flow alike).
+            from lib.tasks_pkg.input_translation import (
+                apply_deferred_input_translation,
+            )
+            settled_input = apply_deferred_input_translation(task)
+            if settled_input is not None:
+                # A deferred translation verdict makes the accepted input
+                # final only now; every other request bound at registration,
+                # and the command pinned the replay proof before it.
+                from lib.project_dispatch.request_budget import (
+                    bind_source_account,
+                )
+                bind_source_account(task, expected_input=settled_input)
+                from lib.tasks_pkg.model_replay import rebind_history_proof
+                rebind_history_proof(task, settled_input)
             return run_task(task)
         except BaseException as error:
             committed_native_stop=(isinstance(error,asyncio.CancelledError)
@@ -244,7 +259,6 @@ def _owned_task_callable(
         finally:
             _settle_unscheduled_workspace(task)
 
-    _run_owned_task._tofu_task_id = str(task.get('id') or '')  # type: ignore[attr-defined]
     return _run_owned_task
 
 
@@ -364,68 +378,6 @@ async def _report_executor_queue(
         await asyncio.sleep(_QUEUE_STATUS_POLL_SECONDS)
 
 
-def _executor_runner(loop, run_task, task):
-    """Return the coroutine that runs one task on the configured executor.
-
-    ``run_task`` owns all failures after entry. This wrapper owns only a
-    rejected submission, before the worker callable begins; that distinction
-    prevents both ghost-running tasks and duplicate terminal settlements.
-    """
-    worker_started = threading.Event()
-    scheduling_phase_lock = threading.Lock()
-
-    _run_owned_task = _owned_task_callable(
-        run_task, task, worker_started, scheduling_phase_lock)
-
-    async def _async_wrapper():
-        queue_reporter = None
-        try:
-            if _agent_executor is not None:
-                execution = loop.run_in_executor(
-                    _agent_executor, _run_owned_task)
-                if callable(getattr(
-                        _agent_executor, 'scheduling_snapshot', None)):
-                    queue_reporter = asyncio.create_task(
-                        _report_executor_queue(
-                            task, worker_started, scheduling_phase_lock))
-                await execution
-            else:
-                await asyncio.to_thread(_run_owned_task)
-        except Exception as error:
-            if not worker_started.is_set():
-                logger.error(
-                    '[Spawn] Executor rejected task %s before worker entry: %s',
-                    task.get('id', '?')[:8],
-                    error,
-                    exc_info=True,
-                )
-                # This is an exceptional, fail-closed path. Run the canonical
-                # settlement synchronously so a shutdown/rejected executor
-                # cannot reject the recovery operation as well.
-                _finalize_rejected_submission(task, error)
-                return
-            logger.error(
-                '[Spawn] Task %s failed after worker entry: %s',
-                task.get('id', '?')[:8],
-                error,
-                exc_info=True,
-            )
-        finally:
-            if queue_reporter is not None:
-                queue_reporter.cancel()
-                try:
-                    await queue_reporter
-                except asyncio.CancelledError:
-                    pass
-                except Exception as error:
-                    logger.debug(
-                        '[Spawn] queue reporter stopped task=%s: %s',
-                        str(task.get('id') or '?')[:8], error,
-                    )
-
-    return _async_wrapper
-
-
 def cancel_queued_task(task_id: str) -> bool:
     """Cancel a task only if it has not acquired an agent worker yet."""
     executor = _agent_executor
@@ -455,84 +407,32 @@ def spawn_task(task: dict, *, runner=None, executor=None):
         from lib.tasks_pkg.orchestrator.api import run_task
         runner = run_task
 
-    if executor is not None:
-        # An embedded runtime owns its worker lifetime. Never put its blocking
-        # agent loop on the caller's asyncio I/O pool or replace the full
-        # application's process-wide executor when both are embedded together.
-        worker_started = threading.Event()
-        owned = _owned_task_callable(
-            runner, task, worker_started, threading.Lock())
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    worker_started = threading.Event()
+    scheduling_phase_lock = threading.Lock()
+    owned = _owned_task_callable(
+        runner, task, worker_started, scheduling_phase_lock)
 
-        def completed(future):
-            if future.cancelled():
-                return
-            error = future.exception()
-            if error is not None:
-                if not worker_started.is_set():
-                    _finalize_rejected_submission(task, error)
-                else:
-                    logger.error('[Spawn] owned worker failed task=%s: %s',
-                                 task.get('id', '?')[:8], error)
-
-        try:
-            future = executor.submit(owned)
-        except Exception as error:
+    def failed(error):
+        if not worker_started.is_set():
+            # A rejected scheduler cannot be used to schedule its own repair.
             _finalize_rejected_submission(task, error)
         else:
-            future.add_done_callback(completed)
-            return future
-        return
+            logger.error('[Spawn] Task %s failed after worker entry: %s',
+                         task.get('id', '?')[:8], error, exc_info=True)
 
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError as error:
-        logger.debug('[Spawn] no running asyncio loop, using fallback: %s', error)
-        loop = None
-
-    if loop and loop.is_running():
-        asyncio.ensure_future(_executor_runner(loop, runner, task)())
-        return
-
-    serving_loop = _serving_loop
-    if serving_loop is not None:
-        try:
-            if serving_loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    _executor_runner(serving_loop, runner, task)(),
-                    serving_loop,
-                )
-                return
-        except RuntimeError as error:
-            logger.warning(
-                '[Spawn] serving-loop hop failed (%s) — thread fallback for task %s',
-                error,
-                task.get('id', '?')[:8],
-            )
-
-    worker_started = threading.Event()
-    owned = _owned_task_callable(
-        runner, task, worker_started, threading.Lock())
-
-    def _fallback_runner():
-        try:
-            owned()
-        except Exception as error:
-            if not worker_started.is_set():
-                _finalize_rejected_submission(task, error)
-            else:
-                logger.error(
-                    '[Spawn] fallback task %s failed after worker entry: %s',
-                    task.get('id', '?')[:8], error, exc_info=True,
-                )
-
-    try:
-        threading.Thread(
-            target=_fallback_runner,
-            name=f'run_task-{task.get("id", "?")[:8]}',
-            daemon=True,
-        ).start()
-    except Exception as error:
-        _finalize_rejected_submission(task, error)
+    if executor is not None:
+        # Embeddings retain their own executor and inspect its original Future.
+        return chat_task_runtime.submit_owned_worker(
+            task, executor.submit, owned, on_error=failed)
+    on_queued = None
+    if callable(getattr(_agent_executor, 'scheduling_snapshot', None)):
+        on_queued = lambda: _report_executor_queue(
+            task, worker_started, scheduling_phase_lock)
+    chat_task_runtime.spawn_owned_worker(
+        task, owned, executor=_agent_executor, serving_loop=_serving_loop,
+        on_error=failed, on_queued=on_queued,
+        thread_name=f'run_task-{task.get("id", "?")[:8]}')
 
 
 __all__ = [

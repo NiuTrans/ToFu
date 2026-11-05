@@ -171,6 +171,8 @@ def test_normal_close_waits_for_userspace_bytes_when_kernel_queue_is_empty(monke
     async def scenario():
         connection = object.__new__(_OwnedTCPServer)
         connection.writer = Writer()
+        connection.reader = asyncio.StreamReader()
+        connection.reader.feed_eof()
         connection.idle_task = IdleTask()
         connection.config = Config()
         before = asyncio.all_tasks()
@@ -561,6 +563,82 @@ def test_repeated_unread_peers_release_ports_without_server_restart():
             stop.set()
             for peer in peers:
                 peer.close()
+            await asyncio.wait_for(server, 2)
+            listener.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(sys.platform != 'linux', reason='Linux TCP state and retained tuple recovery')
+@pytest.mark.parametrize('body_size', [4096, 256 * 1024])
+@pytest.mark.parametrize('close_header', [True, False], ids=['response-close', 'idle-close'])
+def test_fully_acknowledged_abandoned_response_reclaims_peer_without_client_close(body_size, close_header):
+    """ACK/FIN delivery is not consumption: paused proxy readers keep CLOSE_WAIT."""
+    async def scenario():
+        started, stop = asyncio.Event(), asyncio.Event()
+        peers = []
+        body = b'x' * body_size
+
+        async def app(scope, receive, send):
+            if scope['type'] == 'lifespan':
+                while True:
+                    event = await receive()
+                    if event['type'] == 'lifespan.startup':
+                        await send({'type': 'lifespan.startup.complete'})
+                        started.set()
+                    else:
+                        await send({'type': 'lifespan.shutdown.complete'})
+                        return
+            await send({'type': 'http.response.start', 'status': 200,
+                        'headers': [(b'content-length', str(len(body)).encode())]})
+            await send({'type': 'http.response.body', 'body': body, 'more_body': False})
+
+        listener = socket.socket()
+        bind_ephemeral_loopback(listener)
+        listener.listen(8)
+        listener.setblocking(False)
+        config = Config()
+        config.errorlog = None
+        config.graceful_timeout = .1
+        config.keep_alive_timeout = .1
+        config.connection_close_timeout = 1.0
+        server = asyncio.create_task(worker_serve(
+            wrap_app(app, config.wsgi_max_body_size, 'asgi'), config,
+            sockets=Sockets([], [listener], []), shutdown_trigger=stop.wait))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            loop = asyncio.get_running_loop()
+            for _ in range(3):
+                peer = socket.socket()
+                peers.append(peer)
+                peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+                peer.bind(('127.0.0.2', 0))
+                peer.setblocking(False)
+                await loop.sock_connect(peer, listener.getsockname())
+                headers = b'Connection: close\r\n' if close_header else b''
+                await loop.sock_sendall(peer, b'GET / HTTP/1.1\r\nHost: localhost\r\n' + headers + b'\r\n')
+            # CLOSE_WAIT proves the complete response and FIN reached the peer
+            # kernel, while the application has consumed none of those bytes.
+            async with asyncio.timeout(2):
+                while not all(peer.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 1) == b'\x08'
+                              for peer in peers):
+                    await asyncio.sleep(.01)
+            for peer in peers:
+                local = peer.getsockname()
+                async with asyncio.timeout(2):
+                    while True:
+                        with socket.socket() as reuse:
+                            try:
+                                reuse.bind(local)
+                                break
+                            except OSError as error:
+                                assert error.errno == errno.EADDRINUSE
+                        await asyncio.sleep(.01)
+            assert not server.done()
+        finally:
+            for peer in peers:
+                peer.close()
+            stop.set()
             await asyncio.wait_for(server, 2)
             listener.close()
 

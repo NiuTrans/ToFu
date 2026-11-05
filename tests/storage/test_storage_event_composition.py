@@ -1,17 +1,25 @@
 """Native-advertised composition leaves admission, cancellation and ACK intact."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import threading
 
 import pytest
 
+from lib.storage.deadline_policy import reset_storage_service_observations
 from lib.storage.errors import StorageError
 from lib.storage.event_batcher import StorageEventBatcher, _PendingEvent
 from lib.storage.event_composition import native_event_batch_composition_budget
 from lib.storage.v2_client import StorageV2Client
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _clean_service_observations():
+    reset_storage_service_observations()
+    yield
+    reset_storage_service_observations()
 
 
 def declaration(cap=4096, headroom=1024):
@@ -348,21 +356,31 @@ def test_future_provider_failure_cannot_invalidate_head_barrier():
         client.release.set(); assert batcher.close(5)
 
 
-def test_observational_callback_failure_and_claimed_timeout_do_not_invent_failed_prefix():
+def test_observational_callback_failure_and_claimed_confirmation_do_not_invent_failed_prefix(
+        monkeypatch):
     client = Client(native_event_batch_composition_budget(declaration()), block_first=True)
     def callback(_ids):
         raise ValueError('observational callback')
     batcher = StorageEventBatcher(lambda **_kwargs: client, coalesce_ms=0, on_commit=callback)
+    cancel_queued = batcher._cancel_queued
+    def cancel_after_dispatch(pending):
+        # Expiry is judged once the event is claimed, whatever the scheduling.
+        assert client.started.wait(5)
+        return cancel_queued(pending)
+    monkeypatch.setattr(batcher, '_cancel_queued', cancel_after_dispatch)
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
             first = pool.submit(batcher.append, 'claimed', 1, {'type':'delta'}, timeout=.05)
             assert client.started.wait(5)
-            with pytest.raises(StorageError) as raised:
-                first.result(5)
-            assert raised.value.code == 'database_timeout'
-        assert batcher.metrics['cancelled_before_start'] == 0
-        assert batcher._prefix_failure is None
-        client.release.set(); assert batcher.flush(5)
+            # A claimed event outlives its confirmation wait: the producer
+            # awaits the in-flight batch rather than answering early.
+            with pytest.raises(FutureTimeout):
+                first.result(.5)
+            assert batcher.metrics['cancelled_before_start'] == 0
+            assert batcher._prefix_failure is None
+            client.release.set()
+            assert first.result(5)['inserted'] is True
+        assert batcher.flush(5)
         assert batcher._prefix_failure is None and batcher.metrics['inserted'] == 1
     finally:
         client.release.set(); assert batcher.close(5)

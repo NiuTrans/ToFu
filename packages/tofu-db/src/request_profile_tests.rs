@@ -128,15 +128,15 @@ fn real_vfs_errors_remain_visible_without_retaining_paths() {
 }
 
 #[test]
-fn authority_commit_diagnostics_are_opt_in_and_partition_ir_commit() {
+fn authority_commit_phases_are_always_recorded_and_partition_ir_commit() {
+    // Once-per-commit validation/publication timers stay on, like their
+    // prepare/engine/apply siblings, so a slow hold can name them.
     let guard = RequestGuard::begin(901, "record.put").unwrap();
-    let timer = crate::fsync_stats::StageTimer::diagnostic(
+    let timer = crate::fsync_stats::StageTimer::new(
         crate::fsync_stats::STAGE_AUTHORITY_COMMIT_VALIDATE_REBASE);
-    assert_eq!(timer.is_some(), enabled());
     drop(timer);
     ACTIVE.with(|active| assert_eq!(active.borrow().as_ref().unwrap().sample.stages[
-        crate::fsync_stats::STAGE_AUTHORITY_COMMIT_VALIDATE_REBASE].calls,
-        u64::from(enabled())));
+        crate::fsync_stats::STAGE_AUTHORITY_COMMIT_VALIDATE_REBASE].calls, 1));
     drop(guard);
     let mut state = state();
     let parent = state.enter(crate::fsync_stats::STAGE_IR_COMMIT).unwrap();
@@ -231,4 +231,118 @@ fn completed_search_backfill_reuses_checkpoint_without_another_read() {
     eprintln!("completed_search_backfill_batch_entity_gets={entity_gets}");
     assert_eq!(entity_gets, required_non_checkpoint_reads + 1,
         "reuse consume_page's checkpoint, preserving activation and target checks");
+}
+
+fn idle_hold() -> HoldState {
+    let mut hold = HoldState::idle();
+    hold.reset();
+    hold
+}
+
+#[test]
+fn hold_phases_partition_elapsed_and_inherit_only_where_a_stage_declares_none() {
+    use crate::authority_watch::HoldPhase;
+    use crate::fsync_stats::{STAGE_BLOCK_GET, STAGE_IR_STEPS, STAGE_WAL};
+    let mut hold = idle_hold();
+    let execute = hold.enter(STAGE_IR_STEPS).unwrap();
+    let read = hold.enter(STAGE_BLOCK_GET).unwrap();
+    let io = hold.enter(VFS_READ).unwrap();
+    hold.exit(io, 20);
+    hold.exit(read, 30);
+    hold.exit(execute, 100);
+    let journal = hold.enter(STAGE_WAL).unwrap();
+    // A generic write charges its enclosing journal append; an fsync is a
+    // durability barrier whatever encloses it.
+    let write = hold.enter(VFS_WRITE).unwrap();
+    hold.exit(write, 25);
+    let sync = hold.enter(VFS_SYNC).unwrap();
+    hold.exit(sync, 10);
+    hold.exit(journal, 40);
+    let unowned_write = hold.enter(VFS_WRITE).unwrap();
+    hold.exit(unowned_write, 5);
+    let report = hold.finish(160, true);
+    assert_eq!(report.invalid_spans, 0);
+    let phase = |phase: HoldPhase| report.phases[phase as usize];
+    assert_eq!(phase(HoldPhase::Execute), 70);
+    assert_eq!(phase(HoldPhase::Read), 30);
+    assert_eq!(phase(HoldPhase::Journal), 30);
+    assert_eq!(phase(HoldPhase::Sync), 10);
+    // The top-level write has no phase to inherit; 15 ns ran outside spans.
+    assert_eq!(phase(HoldPhase::Other), 20);
+    assert_eq!(report.phases.iter().sum::<u64>(), 160);
+    assert_eq!(report.stages, vec![("ir_steps", 70), ("vfs_write", 30), ("vfs_read", 20),
+        ("block_get", 10), ("vfs_sync", 10), ("wal", 5)]);
+    assert!(hold.finish(0, false).stages.is_empty());
+}
+
+#[test]
+fn hold_attribution_rejects_crossing_unclosed_and_stale_spans() {
+    use crate::authority_watch::HoldPhase;
+    use crate::fsync_stats::{STAGE_IR_STEPS, STAGE_WAL};
+    assert!(enter(STAGE_WAL).is_none());
+    let first = begin_hold().unwrap();
+    assert!(begin_hold().is_none(), "a nested hold must not take over attribution");
+    let outer = enter(STAGE_IR_STEPS);
+    let crossing = enter(STAGE_WAL);
+    assert!(outer.is_some() && crossing.is_some());
+    exit(outer, 10);
+    let report = finish_hold(first, 50, false);
+    // One out-of-order exit plus two frames still open at the hold's end.
+    assert_eq!(report.invalid_spans, 3);
+    assert_eq!(report.phases[HoldPhase::Other as usize], 50);
+    let second = begin_hold().unwrap();
+    exit(crossing, 5);
+    let report = finish_hold(second, 7, false);
+    assert_eq!(report.invalid_spans, 0);
+    assert_eq!(report.phases.iter().sum::<u64>(), 7);
+    assert_eq!(report.phases[HoldPhase::Other as usize], 7);
+    assert!(enter(STAGE_WAL).is_none());
+}
+
+#[test]
+fn real_stage_timers_and_probes_split_a_hold_exactly() {
+    use crate::authority_watch::HoldPhase;
+    use std::time::Duration;
+    let token = begin_hold().unwrap();
+    let started = Instant::now();
+    {
+        let _journal = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_WAL);
+        std::thread::sleep(Duration::from_millis(20));
+        let _sync = Probe::new(VFS_SYNC);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(5));
+    let elapsed = started.elapsed().as_nanos() as u64;
+    let report = finish_hold(token, elapsed, true);
+    assert_eq!(report.invalid_spans, 0);
+    assert!(report.phases[HoldPhase::Journal as usize] >= 20_000_000, "{:?}", report.phases);
+    assert!(report.phases[HoldPhase::Sync as usize] >= 10_000_000, "{:?}", report.phases);
+    assert!(report.phases[HoldPhase::Other as usize] >= 5_000_000, "{:?}", report.phases);
+    assert_eq!(report.phases.iter().sum::<u64>(), elapsed);
+    assert_eq!(report.stages.iter().map(|(name, _)| *name).collect::<Vec<_>>(), ["wal", "vfs_sync"]);
+}
+
+#[test]
+fn sampled_requests_total_the_phases_of_their_holds() {
+    use crate::authority_watch::HoldPhase;
+    let guard = RequestGuard::begin(903, "turn.event.record").unwrap();
+    let token = begin_hold().unwrap();
+    let span = enter(crate::fsync_stats::STAGE_WAL);
+    exit(span, 40);
+    let report = finish_hold(token, 100, false);
+    assert_eq!(report.phases[HoldPhase::Journal as usize], 40);
+    ACTIVE.with(|active| {
+        let active = active.borrow();
+        let sample = &active.as_ref().unwrap().sample;
+        assert_eq!(sample.holds, 1);
+        assert_eq!(sample.stages[crate::fsync_stats::STAGE_WAL].calls, 1);
+        assert_eq!(sample.hold_phases[HoldPhase::Journal as usize], 40);
+        assert_eq!(sample.hold_phases[HoldPhase::Other as usize], 60);
+        let encoded = sample_json(sample);
+        assert_eq!(encoded["holds"], 1);
+        assert_eq!(encoded["holdPhaseNanos"]["journal"], 40);
+        assert_eq!(encoded["holdPhaseNanos"].as_object().unwrap().len(),
+            crate::authority_watch::HOLD_PHASE_NAMES.len());
+    });
+    drop(guard);
 }

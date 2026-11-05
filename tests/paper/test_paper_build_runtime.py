@@ -76,7 +76,7 @@ def test_retention_capacity_error_keeps_its_actionable_task_envelope(scheduler):
         raise StorageError('database_busy', 'Retained manuscript capacity is full', retryable=True)
     task = _wait(_start(scheduler, execute))
     assert task['status'] == 'error'
-    assert task['error']['kind'] == 'server_busy'
+    assert task['error']['kind'] == 'storage_unavailable'
     assert task['error']['code'] == 'database_busy'
     assert task['error']['message'] == 'Retained manuscript capacity is full'
 

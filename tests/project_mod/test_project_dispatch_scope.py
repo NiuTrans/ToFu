@@ -30,19 +30,20 @@ def granted(tmp_path, monkeypatch):
     task = {'id': 'scope-task', 'convId': 'scope-conversation-' + root.name + str(tmp_path),
             'config': {'projectPath': str(root)}, '_fileGrant': binding}
     live = {'revoked': False, 'owner': True}
-    def validate(task, **kwargs):
+    def validated(task, **kwargs):
         if '_fileGrant' not in (task or {}):
             return None
         if live['revoked'] or task.get('aborted'):
             raise AbortedError('Revoked or cancelled test grant')
-        return binding
+        return binding, assignment
     def owned(task, binding=None):
         if not live['owner'] or task['config']['projectPath'] != row['workspace_path']:
             raise AbortedError('Durable test workspace owner changed')
         return row
-    monkeypatch.setattr(admission, 'validate_task', validate)
+    # One synthetic live validation answers both admission and descriptor-I/O rechecks.
+    monkeypatch.setattr(admission, 'validated_dispatch', validated)
+    monkeypatch.setattr(admission, 'validate_task', lambda task, **kwargs: (validated(task) or (None,))[0])
     monkeypatch.setattr(admission, 'owned_workspace', owned)
-    monkeypatch.setattr(admission, 'repository_for', lambda binding: SimpleNamespace(validate=lambda binding: assignment))
     # All journal/history authority is local to this test, never selected live storage.
     monkeypatch.setattr(modifications, 'SESSIONS_DIR', str(tmp_path / 'sessions'))
     monkeypatch.setattr(modifications, '_live_change_listeners', [])
@@ -72,7 +73,7 @@ def test_rejects_aliases_traversal_and_runtime_metadata_before_io(granted, path,
         granted.call('read_files', {'path': path})
 
 
-@pytest.mark.parametrize('name', ['run_command', 'find_files', 'grep_search', 'execute_program',
+@pytest.mark.parametrize('name', ['run_command', 'find_files', 'search_files', 'grep_search', 'execute_program',
                                   'mcp_call', 'spawn_agent', 'todo', 'apply_diff', 'inspect_image'])
 def test_file_grants_do_not_admit_opaque_or_recursive_tools(granted, name):
     with pytest.raises(AbortedError):
@@ -431,6 +432,29 @@ def test_applied_journal_failure_is_not_retryable_and_retains_recovery_evidence(
     assert (granted.root / 'src/a.txt').read_bytes() == b'applied\n'
 
 
+def test_scoped_edit_batches_never_reread_or_sweep_an_oversized_history(granted, monkeypatch):
+    from lib.project_mod import undo_payloads
+    monkeypatch.setattr(modifications, '_MODS_CACHE_MAX_BYTES', 1)
+    monkeypatch.setattr(modifications, '_MODS_CACHE_MAX_SESSION_BYTES', 1)
+    granted.call('read_files', {'path': 'src/a.txt'})
+
+    def edit(anchor, content):
+        result = granted.call('edit_file', {'edits': [
+            {'path': 'src/a.txt', 'operation': 'replace', 'anchor': anchor, 'content': content}]})
+        assert 'Applied 1/1' in result, result
+
+    edit('alpha', 'gamma')
+    loads, sweeps = [], []
+    load = modifications._load_from_disk
+    monkeypatch.setattr(modifications, '_load_from_disk', lambda session: (loads.append(session), load(session))[1])
+    monkeypatch.setattr(undo_payloads, 'reclaim_orphans', lambda *args, **kwargs: sweeps.append(args))
+    edit('gamma', 'delta')
+    edit('delta', 'epsilon')
+    assert loads == [] and sweeps == []
+    assert [row['taskId'] for row in modifications.get_modifications(
+        str(granted.root), include_content=False)] == [granted.task['id']] * 3
+
+
 def test_complete_scoped_read_batch_past_twenty_and_file_byte_quota(granted):
     marker='LAST_COMPLETE_SCOPED_READ'
     for number in range(32):
@@ -506,6 +530,26 @@ def test_scoped_batch_preflights_all_files_before_any_write(granted, atomic):
     assert (granted.root / 'src/b.txt').read_text() == 'second\n'
 
 
+def test_scoped_batch_validates_the_journal_without_rereading_history(granted, monkeypatch):
+    """The scoped batch holds the project journal admission over its plan and
+    publication; inside it the journal is validated by identity, never re-read
+    in full, so a history above the cache budget does not stall other writers."""
+    granted.call('read_files', {'reads': [{'path': 'src/a.txt'}]})
+    assert 'Applied 1/1' in granted.call('edit_file', {'edits': [
+        {'path': 'src/a.txt', 'operation': 'replace', 'anchor': 'alpha', 'content': 'gamma'}]})
+    monkeypatch.setattr(modifications, '_mods_cache_weight', lambda *a: float('inf'))
+    modifications._invalidate_cache(modifications._get_session_dir(str(granted.root)))
+    loads = []
+    load = modifications._load_from_disk
+    monkeypatch.setattr(modifications, '_load_from_disk',
+                        lambda session: (loads.append(session), load(session))[1])
+    assert 'Applied 1/1' in granted.call('edit_file', {'edits': [
+        {'path': 'src/a.txt', 'operation': 'replace', 'anchor': 'gamma', 'content': 'delta'}]})
+    assert loads == []
+    assert (granted.root / 'src/a.txt').read_text() == 'delta\nbeta\n'
+    assert len(modifications.get_modifications(str(granted.root))) == 2
+
+
 def test_scoped_later_unread_file_never_follows_an_earlier_write(granted):
     (granted.root / 'src/b.txt').write_text('second\n')
     granted.call('read_files', {'path': 'src/a.txt'})
@@ -548,3 +592,21 @@ def test_scoped_whole_empty_file_read_remains_a_valid_observation(granted):
     with write_freshness._lock:
         observation = write_freshness._tokens[(granted.task['convId'], str(target))]
     assert observation[0][0] == 's' and observation[0][1] == 0
+
+
+def test_admission_refusals_are_typed_failures_naming_the_tool(granted):
+    from lib.llm.llm_errors import ToolAdmissionRefused
+    granted.profile['tools'] = ['read_files']
+    with pytest.raises(ToolAdmissionRefused) as refused:
+        scope.admit_tool(granted.task, 'write_file', {'path': 'src/a.txt', 'content': 'no'}, str(granted.root))
+    assert refused.value.tool_name == 'write_file'
+    with pytest.raises(ToolAdmissionRefused, match='durably owned workspace'):
+        scope.admit_tool(granted.task, 'read_files', {'path': 'src/a.txt'}, str(granted.outside))
+
+
+def test_missing_registered_worktree_is_a_typed_refusal(monkeypatch):
+    from lib.llm.llm_errors import ToolAdmissionRefused
+    monkeypatch.setattr('lib.integration_state_repository.find_workspace', lambda *a, **kw: None)
+    with pytest.raises(ToolAdmissionRefused, match='registered owned isolated worktree'):
+        admission.owned_workspace({'id': 'worker', 'config': {'projectPath': '/plain'}},
+                                  {'projectPath': '/plain', 'owner': 7})

@@ -45,6 +45,7 @@ def _run_py(code: str, env_extra=None) -> subprocess.CompletedProcess:
     # Never leak a real override into the child unless the test sets one.
     env.pop('TOFU_DATA_DIR', None)
     env.pop('CHATUI_DATA_DIR', None)
+    env.pop('TOFU_DATA_LAYOUT', None)
     if env_extra:
         env.update(env_extra)
     return subprocess.run([sys.executable, '-c', textwrap.dedent(code)],
@@ -53,13 +54,23 @@ def _run_py(code: str, env_extra=None) -> subprocess.CompletedProcess:
 
 class RuntimePathsTest(unittest.TestCase):
 
+    def test_subprocess_layout_does_not_inherit_the_test_runner(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ, {'TOFU_DATA_LAYOUT': 'xdg'}):
+            r = _run_py("""
+                import os
+                print('LAYOUT', repr(os.environ.get('TOFU_DATA_LAYOUT')))
+            """)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('LAYOUT None', r.stdout)
+
     def test_source_mode_uses_repo_root(self):
-        """A plain source checkout keeps the legacy repo-root paths (no drift)."""
+        """Explicit in-tree source layout uses the repo, including fresh worktrees."""
         r = _run_py("""
             import lib.runtime.runtime_paths as rp
             print('DATA', rp.data_root())
             print('LOGS', rp.logs_root())
-        """)
+        """, env_extra={'TOFU_DATA_LAYOUT': 'intree'})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('DATA %s' % os.path.join(_REPO, 'data'), r.stdout)
         self.assertIn('LOGS %s' % os.path.join(_REPO, 'logs'), r.stdout)
@@ -155,7 +166,8 @@ class LogDirTwinTest(unittest.TestCase):
         return line[len('RTLOGS '):]
 
     def test_log_source_mode_repo_logs(self):
-        self.assertEqual(self._log_dir(''), os.path.join(_REPO, 'logs'))
+        self.assertEqual(self._log_dir('', env_extra={'TOFU_DATA_LAYOUT': 'intree'}),
+                         os.path.join(_REPO, 'logs'))
 
     def test_log_override_agrees_with_runtime_paths(self):
         base = os.path.realpath(tempfile.mkdtemp())

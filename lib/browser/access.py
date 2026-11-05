@@ -12,6 +12,7 @@ import time
 from urllib.parse import urlsplit
 
 from lib.config_dir import config_path
+from lib.error_envelope import BadRequest
 from lib.json_store import read_json, update_json_atomic
 from lib.log import audit_log, get_logger
 
@@ -148,6 +149,20 @@ def require_access(user_id, url_or_domain: str, *, access='read', client_id='',
     return host
 
 
+def require_existing_write_access(user_id, url_or_domain: str, *, client_id='',
+                                  profile='') -> str:
+    """Borrow an existing script/mutation grant; never create human authority.
+
+    Synthetic repair and learned code use this narrower policy. Ordinary
+    unattended browser actions retain require_access's automatic grant policy.
+    """
+    host = require_access(user_id, url_or_domain, access='read',
+                          client_id=client_id, profile=profile)
+    if not has_write_grant(user_id, host, client_id=client_id, profile=profile, touch=True):
+        raise BrowserWriteAuthorizationRequired(host, client_id=client_id, profile=profile)
+    return host
+
+
 def replace_read_denials(user_id, domains) -> dict:
     normalized = sorted({normalize_domain(v) for v in (domains or [])
                          if normalize_domain(v)})
@@ -169,9 +184,9 @@ def grant_write(user_id, domain: str, *, client_id='', profile='',
                 granted_by='') -> dict:
     host = normalize_domain(domain)
     if not host:
-        raise ValueError('valid domain is required')
+        raise BadRequest('valid domain is required', field='domain')
     if not client_id:
-        raise ValueError('browser client_id is required')
+        raise BadRequest('browser client_id is required', field='client_id')
     now = time.time()
 
     def _mut(data):
@@ -220,16 +235,16 @@ def revoke_write(user_id, domain: str, *, client_id='', profile='') -> dict:
 def replace_write_grants(user_id, grants, *, granted_by='') -> dict:
     """Replace durable grants for a user (the PUT full-state form)."""
     if not isinstance(grants, list):
-        raise ValueError('write_grants must be an array')
+        raise BadRequest('write_grants must be an array', field='write_grants')
     now = time.time()
     normalized = []
     for grant in grants:
         if not isinstance(grant, dict):
-            raise ValueError('each write grant must be an object')
+            raise BadRequest('each write grant must be an object', field='write_grants')
         domain = normalize_domain(grant.get('domain'))
         client_id = str(grant.get('client_id') or grant.get('clientId') or '')
         if not domain or not client_id:
-            raise ValueError('each write grant requires domain and client_id')
+            raise BadRequest('each write grant requires domain and client_id', field='write_grants')
         normalized.append({
             'domain': domain, 'client_id': client_id,
             'profile': str(grant.get('profile') or ''),
@@ -287,8 +302,9 @@ _DEVTOOLS_READ_OR_LIFECYCLE_ACTIONS = frozenset({
 def browser_tool_requires_write(fn_name: str, fn_args: dict | None) -> bool:
     """Return the action-aware write classification for browser access.
 
-    ``browser_devtools`` deliberately remains in the serial write partition:
-    one tab must never receive concurrent CDP state changes.  This finer
+    ``browser_devtools`` deliberately remains in the write partition: page
+    actions on one tab apply in call order, so a tab never receives concurrent
+    CDP state changes from one model round.  This finer
     classification controls only domain grants and attended approval, allowing
     console/source diagnostics and debugger cleanup without a write grant.
     Expressions are writes because JavaScript syntax cannot prove purity.

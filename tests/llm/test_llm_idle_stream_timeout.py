@@ -39,14 +39,18 @@ pytestmark = pytest.mark.unit
 
 class TestStreamIdleWatchdogIdleTimeout:
     @pytest.mark.parametrize(('configured', 'expected'), [
-        (None, 300.0),
+        # Default is DISABLED (0). The rolling stream-idle window is sealed
+        # off — see the env-var comment in lib/llm/_transport.py and
+        # docs/modules/llm_io.md. A deployment that wants it opts in
+        # explicitly; there is no silent 300s fallback to revive.
+        (None, 0.0),
         ('91', 91.0),
         ('0', 0.0),
         ('-1', 0.0),
         ('12', 30.0),
-        ('invalid', 300.0),
-        ('inf', 300.0),
-        ('nan', 300.0),
+        ('invalid', 0.0),
+        ('inf', 0.0),
+        ('nan', 0.0),
     ])
     def test_stream_idle_window_configuration(
             self, configured, expected):
@@ -69,6 +73,30 @@ class TestStreamIdleWatchdogIdleTimeout:
             check=True,
         )
         assert probe.stdout.strip() == f'{expected} 0.0'
+
+    def test_stream_idle_timeout_is_disabled_by_default(self):
+        """The window stays off unless a deployment opts in (2026-10-23 seal).
+
+        A provider that buffers response headers past a fixed window otherwise
+        gets its healthy answer discarded as a zero-byte premature close. This
+        pins the default so it cannot be silently revived.
+        """
+        env = dict(os.environ)
+        env.pop('TOFU_LLM_IDLE_STREAM_TIMEOUT_S', None)
+        env.pop('TOFU_LLM_SEMANTIC_IDLE_TIMEOUT_S', None)
+        env.pop('TOFU_LLM_NO_ACTIONABLE_TIMEOUT_S', None)
+        probe = subprocess.run(
+            [sys.executable, '-c',
+             'from lib.llm._transport import stream_idle_timeout_seconds, '
+             'IDLE_STREAM_TIMEOUT_S; '
+             'print(IDLE_STREAM_TIMEOUT_S, stream_idle_timeout_seconds())'],
+            cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        assert probe.stdout.strip() == '0.0 0.0'
 
     def test_canonical_stream_idle_timeout_has_priority_over_legacy_alias(self):
         env = dict(os.environ)
@@ -324,6 +352,18 @@ class _FakeSession:
         self._resp = resp
 
     def post(self, *a, **k):
+        return self._resp
+
+
+class _SlowHeadersSession:
+    """A gateway that answers only after ``delay`` (buffers until first token)."""
+
+    def __init__(self, delay, resp):
+        self.delay = delay
+        self._resp = resp
+
+    def post(self, *a, **k):
+        time.sleep(self.delay)
         return self._resp
 
 
@@ -612,6 +652,93 @@ def test_sync_silent_stream_finalizes_as_premature_close(monkeypatch):
         'idle-timeout close must be classified as a premature close')
     assert finish == 'stop'
     assert (msg.get('content') or '') == ''
+
+
+# ── Response-header wait must not consume the rolling stream-idle window ──
+# Regression for 2026-10-23: the sync watchdog was armed before the POST, so a
+# provider that held headers past IDLE_STREAM_TIMEOUT_S latched idle_timed_out
+# with no socket to interrupt, and the body loop then dropped the first chunk
+# of the late healthy answer — a zero-byte premature close at exactly the
+# window. The header wait's own bounds are the abort poll and the caller's
+# first_byte/attempt deadline; the live response anchors the idle clock.
+
+_LATE_OK_LINES = [
+    'data: {"choices":[{"delta":{"content":"ok"},'
+    '"finish_reason":null}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    'data: [DONE]',
+]
+
+
+def _direct_route(monkeypatch):
+    import lib.desktop.egress as _eg
+    monkeypatch.setattr(_eg, 'route_request', lambda url, **kw: 'direct')
+
+
+def test_late_headers_do_not_consume_the_idle_window(monkeypatch):
+    """A complete answer whose headers arrive after the idle window is kept."""
+    monkeypatch.setattr('lib.llm._transport.IDLE_STREAM_TIMEOUT_S', 0.3)
+    monkeypatch.setattr('lib.llm._transport.ABORT_POLL_INTERVAL', 0.05)
+    monkeypatch.setattr('lib.llm._transport.IDLE_HEARTBEAT_S', 0.05)
+    monkeypatch.setattr(
+        'lib.llm.stream.get_sync_session',
+        lambda: _SlowHeadersSession(0.6, _FiniteResp(list(_LATE_OK_LINES))))
+    _direct_route(monkeypatch)
+
+    from lib.llm.stream import _stream_chat_once
+
+    result = _stream_chat_once(
+        {'model': 'm', 'messages': [{'role': 'user', 'content': 'hi'}]},
+        api_key='sk-x', base_url='http://fake.local/v1', log_prefix='[t]')
+
+    assert result.state is ProviderStreamState.PROVIDER_FINISHED
+    assert result.message.get('content') == 'ok'
+    assert '_missing_done' not in result.usage
+
+
+def test_idle_window_still_applies_once_the_body_is_streaming(monkeypatch):
+    """Headers arrive promptly; a silent body past the window is still cut."""
+    monkeypatch.setattr('lib.llm._transport.IDLE_STREAM_TIMEOUT_S', 0.3)
+    monkeypatch.setattr('lib.llm._transport.ABORT_POLL_INTERVAL', 0.05)
+    monkeypatch.setattr('lib.llm._transport.IDLE_HEARTBEAT_S', 0.05)
+    monkeypatch.setattr(
+        'lib.llm.stream.get_sync_session',
+        lambda: _SlowHeadersSession(0.05, _IdleWedgedResp()))
+    _direct_route(monkeypatch)
+
+    from lib.llm.stream import _stream_chat_once
+
+    t0 = time.monotonic()
+    result = _stream_chat_once(
+        {'model': 'm', 'messages': [{'role': 'user', 'content': 'hi'}]},
+        api_key='sk-x', base_url='http://fake.local/v1', log_prefix='[t]')
+
+    assert time.monotonic() - t0 < 5.0
+    assert result.state is ProviderStreamState.PREMATURE_CLOSE
+    assert result.usage.get('_missing_done') is True
+    assert (result.message.get('content') or '') == ''
+
+
+def test_first_byte_deadline_still_bounds_the_header_wait(monkeypatch):
+    """A caller's first_byte_timeout abandons a slot that never sends headers."""
+    monkeypatch.setattr('lib.llm._transport.IDLE_STREAM_TIMEOUT_S', 0.0)
+    monkeypatch.setattr('lib.llm._transport.ABORT_POLL_INTERVAL', 0.05)
+    monkeypatch.setattr(
+        'lib.llm.stream.get_sync_session',
+        lambda: _SlowHeadersSession(10.0, _FiniteResp(list(_LATE_OK_LINES))))
+    _direct_route(monkeypatch)
+
+    from lib.llm.llm_errors import ResponseReadTimeoutError
+    from lib.llm.stream import stream_chat
+
+    t0 = time.monotonic()
+    with pytest.raises(ResponseReadTimeoutError):
+        stream_chat(
+            {'model': 'm', 'messages': [{'role': 'user', 'content': 'hi'}]},
+            api_key='sk-x', base_url='http://fake.local/v1', log_prefix='[t]',
+            first_byte_timeout=0.4)
+
+    assert time.monotonic() - t0 < 5.0
 
 
 @pytest.mark.parametrize(('lines', 'expected_ok'), [
@@ -958,3 +1085,106 @@ def test_async_keepalive_only_interval_renews_stream_idle_window(monkeypatch):
     assert '_semantic_progress_timeout' not in usage
     assert result.message['content'] == 'finished'
     assert route_outcomes == [True]
+
+
+# ── The response-header wait must not consume the rolling stream-idle window ──
+# 2026-10-23: the sync watcher was armed with the idle timeout before the POST.
+# A gateway that buffered headers past the window latched ``idle_timed_out``
+# with no response handle to interrupt; the body loop then dropped the first
+# chunk of the late healthy answer and recorded a zero-byte premature close.
+# The watcher still runs during the header wait for Stop/heartbeat polling, and
+# the rolling window is armed at response headers.
+
+class _DelayedHeadersSession:
+    """A gateway that buffers the response headers for ``delay`` seconds."""
+
+    def __init__(self, delay, resp):
+        self.delay = delay
+        self._resp = resp
+        self.returned_at = None
+
+    def post(self, *a, **k):
+        time.sleep(self.delay)
+        self.returned_at = time.monotonic()
+        return self._resp
+
+
+_LATE_HEALTHY_LINES = [
+    'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    'data: [DONE]',
+]
+
+
+def _force_direct_route(monkeypatch):
+    import lib.desktop.egress as _eg
+    monkeypatch.setattr(_eg, 'route_request', lambda url, **kw: 'direct')
+
+
+def test_late_headers_keep_the_healthy_answer(monkeypatch):
+    monkeypatch.setattr('lib.llm._transport.IDLE_STREAM_TIMEOUT_S', 0.3)
+    monkeypatch.setattr('lib.llm._transport.ABORT_POLL_INTERVAL', 0.05)
+    monkeypatch.setattr('lib.llm._transport.IDLE_HEARTBEAT_S', 0.05)
+    monkeypatch.setattr(
+        'lib.llm.stream.get_sync_session',
+        lambda: _DelayedHeadersSession(
+            0.6, _FiniteResp(list(_LATE_HEALTHY_LINES))))
+    _force_direct_route(monkeypatch)
+
+    from lib.llm.stream import _stream_chat_once
+
+    result = _stream_chat_once(
+        {'model': 'm', 'messages': [{'role': 'user', 'content': 'hi'}]},
+        api_key='sk-x', base_url='http://fake.local/v1', log_prefix='[t]')
+
+    assert result.state is ProviderStreamState.PROVIDER_FINISHED
+    assert result.message.get('content') == 'ok'
+    assert '_missing_done' not in result.usage
+
+
+def test_stop_during_header_wait_aborts_promptly(monkeypatch):
+    monkeypatch.setattr('lib.llm._transport.IDLE_STREAM_TIMEOUT_S', 30.0)
+    monkeypatch.setattr('lib.llm._transport.ABORT_POLL_INTERVAL', 0.05)
+    monkeypatch.setattr('lib.llm._transport.IDLE_HEARTBEAT_S', 0.05)
+    monkeypatch.setattr(
+        'lib.llm.stream.get_sync_session',
+        lambda: _DelayedHeadersSession(
+            10.0, _FiniteResp(list(_LATE_HEALTHY_LINES))))
+    _force_direct_route(monkeypatch)
+
+    from lib.llm.llm_errors import AbortedError
+    from lib.llm.stream import _stream_chat_once
+
+    started = time.monotonic()
+
+    def aborted():
+        return time.monotonic() - started >= 0.2
+
+    with pytest.raises(AbortedError):
+        _stream_chat_once(
+            {'model': 'm', 'messages': [{'role': 'user', 'content': 'hi'}]},
+            api_key='sk-x', base_url='http://fake.local/v1', log_prefix='[t]',
+            abort_check=aborted)
+
+    assert time.monotonic() - started < 3.0
+
+
+def test_header_wait_keeps_heartbeats_alive(monkeypatch):
+    monkeypatch.setattr('lib.llm._transport.IDLE_STREAM_TIMEOUT_S', 0.3)
+    monkeypatch.setattr('lib.llm._transport.ABORT_POLL_INTERVAL', 0.05)
+    monkeypatch.setattr('lib.llm._transport.IDLE_HEARTBEAT_S', 0.05)
+    session = _DelayedHeadersSession(
+        0.5, _FiniteResp(list(_LATE_HEALTHY_LINES)))
+    monkeypatch.setattr('lib.llm.stream.get_sync_session', lambda: session)
+    _force_direct_route(monkeypatch)
+
+    from lib.llm.stream import _stream_chat_once
+
+    beats = []
+    result = _stream_chat_once(
+        {'model': 'm', 'messages': [{'role': 'user', 'content': 'hi'}]},
+        api_key='sk-x', base_url='http://fake.local/v1', log_prefix='[t]',
+        on_first_byte_wait=beats.append)
+
+    assert result.state is ProviderStreamState.PROVIDER_FINISHED
+    assert any(beat < session.returned_at for beat in beats)

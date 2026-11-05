@@ -21,6 +21,7 @@ import tempfile
 import pytest
 
 from tests._runtime_sections import native_module_graph
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -50,8 +51,7 @@ def _read(path: str) -> str:
 
 def _format_lines(events: list[dict], lang: str) -> list[list[dict]]:
     node = shutil.which('node')
-    if not node:
-        pytest.skip('node not available for extraction-and-eval')
+    require_node_modules('vite')
     runtime = _read(native_module_graph([
         (
             f'.native/task-mode-event-format{"" if index == 0 else f"-{index}"}.js',
@@ -145,6 +145,19 @@ def test_goal_run_transition_renders_english_copy():
     assert len(completed) == 1
     assert 'Run ended: Completed' in completed[0]['html']
     assert completed[0]['className'] == 'is-done'
+
+
+def test_flow_complete_headline_localizes_status_and_outcome_category():
+    (by_status, by_outcome) = _format_lines([
+        {'type': 'flow_complete', 'status': 'completed', 'agents_run': 2,
+         'elapsed': 3},
+        {'type': 'flow_complete', 'status': 'completed',
+         'outcome_category': 'incomplete', 'agents_run': 2, 'elapsed': 3},
+    ], 'zh')
+    assert '<b>完成</b>' in by_status[0]['html']
+    assert by_status[0]['className'] == 'is-done'
+    assert '<b>未完成</b>' in by_outcome[0]['html']
+    assert by_outcome[0]['className'] == 'is-warn'
 
 
 def test_goal_run_event_keys_exist_in_both_locales():

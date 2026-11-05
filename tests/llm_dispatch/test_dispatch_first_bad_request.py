@@ -13,7 +13,7 @@ from lib.llm_dispatch._api_budget import (
     _raise_dispatch_exhausted,
     _remember_route_missing_error,
 )
-from lib.llm_dispatch._api_stream_state import _StreamRetryState
+from lib.llm_dispatch._api_retry_state import DispatchRetryState
 from lib.llm.llm_errors import (
     BadRequestError,
     ModelRouteMissingError,
@@ -61,7 +61,7 @@ def test_no_first_err_kwarg_keeps_legacy_behavior():
 
 
 def test_retry_state_tracks_first_400_field():
-    state = _StreamRetryState()
+    state = DispatchRetryState()
     assert state.first_bad_request_err is None
     first = BadRequestError('first')
     state.first_bad_request_err = state.first_bad_request_err or first

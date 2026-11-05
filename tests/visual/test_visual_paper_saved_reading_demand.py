@@ -6,11 +6,13 @@ publication, ordering and persistent recovery. This proves browser lifecycle.
 from pathlib import Path
 import subprocess
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 
 
 def test_independent_saved_documents_drain_in_real_browser(page, tmp_path):
+    require_node_modules('vite')
     root = Path(__file__).resolve().parents[2]
     bundle = tmp_path / 'saved-reading.js'
     subprocess.run(['node', 'scripts/vite_test_bundle.mjs',

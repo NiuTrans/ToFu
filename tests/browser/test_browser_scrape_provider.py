@@ -190,3 +190,49 @@ def test_wait_not_found_still_extracts(monkeypatch):
                                   extractor_js='[]')
     assert out == CARDS
     assert [c[0] for c in calls][-2] == 'execute_js'
+
+
+def test_learned_script_checks_write_grant_on_the_redirected_page(monkeypatch):
+    from lib.browser import access
+    calls = _fake_bridge(monkeypatch, {
+        'create_tab': {'id': 71},
+        'list_tabs': [{'id': 71, 'url': 'https://other.example/redirect'}],
+        'close_tab': {},
+    })
+    permissions = []
+    def require(owner, url, **kwargs):
+        permissions.append((url, 'write'))
+        if 'other.example' in url:
+            raise access.BrowserWriteAuthorizationRequired('other.example')
+    monkeypatch.setattr(access, 'require_existing_write_access', require)
+    provider = _make_provider()
+    assert provider.scrape('https://www.xiaohongshu.com/search_result',
+                           extractor_js='[]', require_script_grant=True) is None
+    assert [name for name, _ in calls] == ['create_tab', 'list_tabs', 'close_tab']
+    assert permissions == [('https://www.xiaohongshu.com/search_result', 'write'),
+                           ('https://other.example/redirect', 'write')]
+
+
+def test_scrape_cancellation_keeps_owned_tab_cleanup_live(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from lib.browser import queue, access
+    cancel = threading.Event()
+    seen = []
+    def send(name, params=None, **kwargs):
+        seen.append((name, kwargs.get('cancel_event')))
+        if name == 'create_tab':
+            cancel.set()
+            return {'id': 72}, None
+        if name == 'list_tabs':
+            assert kwargs['cancel_event'] is cancel
+            return None, 'cancelled'
+        assert name == 'close_tab' and 'cancel_event' not in kwargs
+        return {}, None
+    monkeypatch.setattr(queue, 'send_browser_command', send)
+    monkeypatch.setattr(queue, 'is_extension_connected', lambda *a, **kw: True)
+    monkeypatch.setattr(access, 'require_access', lambda *a, **kw: None)
+    provider = _make_provider()
+    provider.knowledge_scope = SimpleNamespace(task={'abort_event': cancel})
+    assert provider.scrape('https://www.xiaohongshu.com/search_result', extractor_js='[]') is None
+    assert [name for name, _ in seen] == ['create_tab', 'list_tabs', 'close_tab']

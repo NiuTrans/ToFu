@@ -191,12 +191,15 @@ def ingest_mcp_image(
     ).hexdigest()[:20]
     filename = f'mcp-image-{identity}{extension}'
     command_id = f'mcp.image.persist:{owner_user_id}:{identity}'
+    # The receipt needs only the durable original; OCR text follows from an
+    # owned background job so the tool result never waits for Tesseract.
     document = add_document(
         raw,
         filename,
         user_id=owner_user_id,
         scope='attachment',
         command_id=command_id,
+        defer_image_ocr=True,
     )
     actual_mime = {
         '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',

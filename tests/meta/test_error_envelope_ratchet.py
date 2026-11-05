@@ -26,7 +26,11 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 # 2026-09-18 audit: 88 was a miscount from the day it was pinned — the same
 # AST census reads 89 on 33ae2e9b1 (the pinning commit's own tree) and 89
 # today, with zero growth in between. Corrected to the true baseline.
-PINNED_LEGACY_STRING_ERROR_CALLS = 89
+#
+# 2026-10-25: the census reads 82; locked in the shrink.
+# 2026-11-02: the census reads 83 after the typed-fault route migration;
+# authored client messages remain, while raw builtin-to-400 handlers are gone.
+PINNED_LEGACY_STRING_ERROR_CALLS = 83
 
 
 def _legacy_string_error_calls() -> dict[str, list[int]]:

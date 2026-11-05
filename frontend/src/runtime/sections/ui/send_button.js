@@ -22,8 +22,16 @@ function _stopTranslation(conv) {
     console.warn('[stop] translation abort marker failed:', error));
   conv._translateAborted = true;
   conv._translating = false;
-  conv._translateAbortCtrl?.abort();
+  const controller = conv._translateAbortCtrl;
   conv._translateAbortCtrl = null;
+  // Send-time translation runs inside the generation-start lease. Ending it
+  // ends that startup too; a live startup Stop would invite repeat clicks that
+  // each re-send the conversation abort while the send recovers.
+  if (controller && controller === conv._genStartCtrl) {
+    conv._genStartStop = controller;
+    conv._genStartCtrl = null;
+  }
+  controller?.abort();
   updateSendButton();
   renderConversationList();
 }

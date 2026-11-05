@@ -23,6 +23,7 @@ so the agent can feed them straight back into a repair prompt.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -340,11 +341,14 @@ def check_text_fidelity(html: str, scene: dict) -> list[str]:
 
 # ── Media probing ─────────────────────────────────────────
 
-def _probe_with_ffprobe(ffprobe: str, path: str) -> dict | None:
+def _probe_with_ffprobe(ffprobe: str, path: str, *,
+                        allow_audio_only: bool = False) -> dict | None:
     try:
         out = subprocess.run(
             [ffprobe, '-v', 'error',
-             '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,duration',
+             '-show_entries',
+             'stream=codec_type,codec_name,width,height,r_frame_rate,duration'
+             ':stream_disposition=attached_pic:format=duration',
              '-of', 'json', path],
             capture_output=True, text=True, timeout=60)
     except Exception as e:
@@ -360,7 +364,13 @@ def _probe_with_ffprobe(ffprobe: str, path: str) -> dict | None:
         logger.warning('[MotionVideo] ffprobe JSON parse failed for %s: %s', path, e)
         return None
     info: dict = {'has_audio': False}
+    audio_duration = None
     for st in data.get('streams', []):
+        # An embedded cover (ID3 APIC, MP4 covr) is an attached picture, not a
+        # playable video stream; ``ffmpeg -i`` lists it without a frame rate,
+        # so the fallback probe never reports it either.
+        if (st.get('disposition') or {}).get('attached_pic'):
+            continue
         if st.get('codec_type') == 'video':
             info['codec'] = st.get('codec_name', '')
             info['width'] = int(st.get('width') or 0)
@@ -380,17 +390,37 @@ def _probe_with_ffprobe(ffprobe: str, path: str) -> dict | None:
                     # 'duration 0 != expected' — log the root cause here.
                     logger.debug('[MotionVideo] ffprobe duration parse failed for %s (%r): %s', path, st['duration'], e)
         elif st.get('codec_type') == 'audio':
+            if not info['has_audio']:
+                info['audio_codec'] = st.get('codec_name', '')
+                audio_duration = st.get('duration')
             info['has_audio'] = True
+    if 'codec' not in info and info['has_audio'] and allow_audio_only:
+        info.update(codec='', width=0, height=0, fps=0.0)
+        if audio_duration:
+            try:
+                info['duration'] = float(audio_duration)
+            except (TypeError, ValueError) as e:
+                logger.debug('[MotionVideo] ffprobe audio duration parse failed for %s (%r): %s',
+                             path, audio_duration, e)
+    container_duration = (data.get('format') or {}).get('duration')
+    if 'codec' in info and 'duration' not in info and container_duration:
+        # Matroska/WebM record duration only on the container, not per stream.
+        try:
+            info['duration'] = float(container_duration)
+        except (TypeError, ValueError) as e:
+            logger.debug('[MotionVideo] ffprobe container duration parse failed for %s (%r): %s',
+                         path, container_duration, e)
     return info if 'codec' in info else None
 
 
 _FFMPEG_I_VIDEO_RE = re.compile(
     r'Stream .*Video: (\w+).*?(\d{2,5})x(\d{2,5}).*?([0-9.]+) fps')
-_FFMPEG_I_AUDIO_RE = re.compile(r'Stream .*Audio:')
+_FFMPEG_I_AUDIO_RE = re.compile(r'Stream .*Audio: (\w+)')
 _FFMPEG_I_DUR_RE = re.compile(r'Duration: (\d+):(\d+):(\d+\.\d+)')
 
 
-def _probe_with_ffmpeg(ffmpeg: str, path: str) -> dict | None:
+def _probe_with_ffmpeg(ffmpeg: str, path: str, *,
+                       allow_audio_only: bool = False) -> dict | None:
     """Fallback probe parsing ``ffmpeg -i`` stderr (ffprobe absent)."""
     try:
         out = subprocess.run([ffmpeg, '-hide_banner', '-i', path],
@@ -400,19 +430,33 @@ def _probe_with_ffmpeg(ffmpeg: str, path: str) -> dict | None:
         return None
     blob = out.stderr + out.stdout
     v = _FFMPEG_I_VIDEO_RE.search(blob)
-    if not v:
+    audio = _FFMPEG_I_AUDIO_RE.search(blob)
+    if v:
+        info: dict = {'codec': v.group(1), 'width': int(v.group(2)),
+                      'height': int(v.group(3)), 'fps': float(v.group(4)),
+                      'has_audio': bool(audio)}
+    elif audio and allow_audio_only:
+        info = {'codec': '', 'width': 0, 'height': 0, 'fps': 0.0, 'has_audio': True}
+    else:
         return None
-    info: dict = {'codec': v.group(1), 'width': int(v.group(2)),
-                  'height': int(v.group(3)), 'fps': float(v.group(4)),
-                  'has_audio': bool(_FFMPEG_I_AUDIO_RE.search(blob))}
+    if audio:
+        info['audio_codec'] = audio.group(1)
     d = _FFMPEG_I_DUR_RE.search(blob)
     if d:
         info['duration'] = int(d.group(1)) * 3600 + int(d.group(2)) * 60 + float(d.group(3))
     return info
 
 
-def probe_video(path: str, *, ffprobe: str = '', ffmpeg: str = '') -> dict | None:
+def probe_video(path: str, *, ffprobe: str = '', ffmpeg: str = '',
+                allow_audio_only: bool = False) -> dict | None:
     """Probe a media file → ``{codec,width,height,fps,duration,has_audio}``.
+
+    ``audio_codec`` is added when an audio stream exists. ``duration`` falls
+    back to the container duration (Matroska/WebM omit per-stream durations).
+    An attached cover picture (ID3 APIC, MP4 covr) is not a video stream. A
+    file without a video stream returns None unless ``allow_audio_only``:
+    then an audio-only file returns ``codec=''``, zero width/height/fps,
+    ``has_audio=True``, its ``audio_codec`` and duration.
 
     Uses ffprobe when resolvable, else falls back to parsing ``ffmpeg -i``.
     Returns None on failure (logged).
@@ -425,11 +469,11 @@ def probe_video(path: str, *, ffprobe: str = '', ffmpeg: str = '') -> dict | Non
         ffprobe = ffprobe or ffprobe_bin()
         ffmpeg = ffmpeg or ffmpeg_bin()
     if ffprobe:
-        info = _probe_with_ffprobe(ffprobe, path)
+        info = _probe_with_ffprobe(ffprobe, path, allow_audio_only=allow_audio_only)
         if info is not None:
             return info
     if ffmpeg:
-        return _probe_with_ffmpeg(ffmpeg, path)
+        return _probe_with_ffmpeg(ffmpeg, path, allow_audio_only=allow_audio_only)
     logger.warning('[MotionVideo] probe_video: neither ffprobe nor ffmpeg available')
     return None
 
@@ -445,10 +489,12 @@ def verify_spec(probe: dict, *, width: int, height: int, fps: float,
         errors.append(f'resolution {probe.get("width")}x{probe.get("height")} '
                       f'!= expected {width}x{height}')
     got_fps = float(probe.get('fps') or 0)
-    if abs(got_fps - fps) > 0.6:  # 29.97 vs 30 style slack
+    if (not math.isfinite(got_fps) or not math.isfinite(fps)
+            or abs(got_fps - fps) > 0.6):  # 29.97 vs 30 style slack
         errors.append(f'fps {got_fps} != expected {fps}')
     got_dur = float(probe.get('duration') or 0)
-    if abs(got_dur - duration) > tol:
+    if (not math.isfinite(got_dur) or not math.isfinite(duration)
+            or abs(got_dur - duration) > tol):
         errors.append(f'duration {got_dur:.3f}s != expected {duration:.3f}s '
                       f'(tol {tol}s)')
     if require_silent and probe.get('has_audio'):

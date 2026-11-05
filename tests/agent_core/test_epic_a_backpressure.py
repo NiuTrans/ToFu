@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Root/SSE lifetime accounting and the separate open-mode authority boundary."""
+"""Root/stream lifetime accounting and the separate open-mode authority boundary."""
 import importlib
 import os
 import sys
@@ -13,55 +13,12 @@ pytestmark = pytest.mark.unit
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  Cap 1 — per-principal concurrent-SSE semaphore (re-keyed onto the shared
-#  runtime_state_store atomic acquire_slot; token contract, N-invariant)
+#  Root execution accounting (shared runtime_state_store counters)
 # ══════════════════════════════════════════════════════════════════════
 def _reset_state_store():
-    """Reset the shared runtime-state store so each test starts clean (the SSE
-    cap + admission controller now count their slots there)."""
+    """Reset the shared runtime-state store so each test starts clean."""
     import lib.runtime.runtime_state_store as rss
     rss.reset_for_test()
-
-
-def test_sse_explicit_zero_cap_preserves_unbounded_escape_hatch():
-    from lib.agent_core.sse_limit import SSELimiter
-    limiter = SSELimiter(cap=0)
-    tokens = [limiter.try_acquire('owner:7') for _ in range(256)]
-    foreign = limiter.try_acquire('owner:8')
-    assert len(set(tokens)) == 256
-    assert limiter.active('owner:7') == 256
-    limiter.release(foreign)
-    for token in tokens:
-        limiter.refresh(token)
-        limiter.release(token)
-        limiter.release(token)
-    assert limiter.active('owner:7') == limiter.active('owner:8') == 0
-
-
-def test_sse_probed_cap_enforces_per_principal_refusal(monkeypatch):
-    from lib.agent_core.sse_limit import SSELimiter
-    monkeypatch.setenv('TOFU_MAX_SSE_PER_PRINCIPAL', '2')
-    limiter = SSELimiter()
-    assert limiter.cap == 2
-    first = limiter.try_acquire('owner:7')
-    second = limiter.try_acquire('owner:7')
-    assert first is not None and second is not None
-    assert limiter.try_acquire('owner:7') is None
-    # A different principal retains its own independent budget.
-    assert limiter.try_acquire('owner:8') is not None
-    limiter.release(first)
-    assert limiter.try_acquire('owner:7') is not None
-
-
-def test_sse_explicit_cap_refuses_above_limit():
-    from lib.agent_core.sse_limit import SSELimiter
-    limiter = SSELimiter(cap=1)
-    assert limiter.cap == 1
-    token = limiter.try_acquire('owner:7')
-    assert token is not None
-    assert limiter.try_acquire('owner:7') is None
-    limiter.release(token)
-    assert limiter.try_acquire('owner:7') is not None
 
 
 def test_root_accounting_accepts_every_concurrent_execution():
@@ -143,26 +100,12 @@ def test_open_mode_has_no_peer_resource_admission(monkeypatch):
 # ══════════════════════════════════════════════════════════════════════
 #  WIRING — drive the actual route/generator boundaries. These assertions
 #  deliberately avoid shipped-source anchors: a renamed helper is harmless
-#  when the externally visible cap, heartbeat and release behavior survives.
+#  when the externally visible heartbeat and release behavior survives.
 # ══════════════════════════════════════════════════════════════════════
 
 
 @pytest.mark.anyio
-async def test_chat_sse_accounting_keeps_owner_identity_without_quota_response(flask_app):
-    import routes.api_v1.chat as chat
-    auth = SimpleNamespace(owner_user_id=47, key_id='rotatable-key')
-    async with flask_app.app_context():
-        token, rejection = chat._try_acquire_sse_slot(auth)
-    try:
-        assert token and rejection is None
-        assert chat.sse_limiter.active('owner:47') == 1
-    finally:
-        chat.sse_limiter.release(token)
-    assert chat.sse_limiter.active('owner:47') == 0
-
-
-@pytest.mark.anyio
-async def test_chat_stream_close_releases_observer_slot_without_aborting_task(
+async def test_chat_stream_close_unregisters_waiter_without_aborting_task(
         monkeypatch):
     from types import SimpleNamespace
 
@@ -179,32 +122,21 @@ async def test_chat_stream_close_releases_observer_slot_without_aborting_task(
         assert timeout == 15.0
         return False
 
-    refreshed = []
-    released = []
     unregistered = []
     monkeypatch.setattr(chat, 'wait_for_event', idle_wait)
-    monkeypatch.setattr(chat.sse_limiter, 'refresh', refreshed.append)
-    monkeypatch.setattr(chat.sse_limiter, 'release', released.append)
     monkeypatch.setattr(chat, 'unregister_waiter', unregistered.append)
 
     task = {'id': 'stream-task', 'status': 'running', 'aborted': False}
-    stream = chat._stream_generator(
-        task,
-        'test-model',
-        'completion-id',
-        sse_slot_token='owner-slot',
-    )
+    stream = chat._stream_generator(task, 'test-model', 'completion-id')
     assert await anext(stream) == ': heartbeat\n\n'
-    assert refreshed == ['owner-slot']
     await stream.aclose()
-    assert released == ['owner-slot']
     assert unregistered == ['stream-task']
     assert task['status'] == 'running'
     assert task['aborted'] is False
 
 
 @pytest.mark.anyio
-async def test_chat_completion_admission_refusal_releases_stream_slot(
+async def test_chat_completion_admission_failure_disposes_route(
         flask_app, monkeypatch):
     from types import SimpleNamespace
     from lib.agent_core.execution_session import ExecutionSession
@@ -216,10 +148,11 @@ async def test_chat_completion_admission_refusal_releases_stream_slot(
         task_manager,
         'create_task',
         lambda *_args, **_kwargs: {
-            'id': 'refused-task',
+            'id': 'failed-admission-task',
             'status': 'pending',
             '_executionSession': ExecutionSession(
-                execution_id='refused-task', kind='chat', owner_user_id=1),
+                execution_id='failed-admission-task', kind='chat',
+                owner_user_id=1),
         },
     )
     rejected = []
@@ -229,10 +162,12 @@ async def test_chat_completion_admission_refusal_releases_stream_slot(
         lambda task, _error, *, cause, conv_id='': rejected.append(
             (task['id'], cause, conv_id)),
     )
-    monkeypatch.setattr(chat.controller, 'acquire', lambda: None)
-    monkeypatch.setattr(chat.sse_limiter, 'try_acquire', lambda _key: 'slot')
-    released = []
-    monkeypatch.setattr(chat.sse_limiter, 'release', released.append)
+    def failed_acquire():
+        raise RuntimeError('ownership store unavailable')
+
+    # Ownership accounting never refuses for capacity; only an owner failure
+    # can stop a request here, and it must unwind every earlier resource.
+    monkeypatch.setattr(chat.controller, 'acquire', failed_acquire)
     # This backpressure contract is deliberately storage-free. Supply the
     # already-authorized route-group seam so the test reaches admission while
     # still sending the native structured model shape.
@@ -261,18 +196,64 @@ async def test_chat_completion_admission_refusal_releases_stream_slot(
             'stream': True,
         },
     )
-    assert response.status_code == 503
-    assert released == ['slot']
+    assert response.status_code == 500
     assert disposed == [route_group]
-    assert rejected[0][0] == 'refused-task'
-    assert rejected[0][1] == 'task_admission_refused'
+    assert rejected[0][0] == 'failed-admission-task'
+    assert rejected[0][1] == 'admission_acquire_failed'
     assert rejected[0][2].startswith('api-')
 
 
 @pytest.mark.anyio
-async def test_direct_chat_stream_releases_admission_and_sse_slots(
+async def test_one_principal_opens_concurrent_direct_streams_without_refusal(
         flask_app, monkeypatch):
-    import routes.api_v1.chat as chat
+    """Open stream bodies are never counted against a per-principal ceiling."""
+    import routes.api_v1.chat_direct as direct
+
+    async def frames():
+        yield 'data: [DONE]\n\n'
+
+    selection = SimpleNamespace(
+        model=SimpleNamespace(public_dict=lambda: {
+            'creator_id': 'tofu-test', 'model_id': 'stub-model',
+        }),
+        provider_offering=None,
+    )
+    monkeypatch.setattr(
+        direct, 'mint_native_request_route',
+        lambda *_args, **_kwargs: (
+            'stub-model', selection, SimpleNamespace(pin_id='direct-route')),
+    )
+    monkeypatch.setattr(
+        direct, 'guard_model_relay_or_dispose', lambda _group: None)
+    monkeypatch.setattr(direct, 'dispose_routed_slot_group', lambda _group: None)
+    monkeypatch.setattr(direct, 'run_direct_stream',
+                        lambda *_args, **_kwargs: frames())
+    leases = iter(range(1_000_000))
+    monkeypatch.setattr(direct.controller, 'acquire',
+                        lambda: f'lease-{next(leases)}')
+    released = []
+    monkeypatch.setattr(direct.controller, 'release',
+                        lambda lease: released.append(lease) or True)
+
+    client = flask_app.test_client()
+    responses = []
+    for _ in range(80):
+        responses.append(await client.post(
+            '/api/v4/chat/stream-direct',
+            json={
+                'model': {'creator_id': 'tofu-test', 'model_id': 'stub-model'},
+                'messages': [{'role': 'user', 'content': 'concurrent'}],
+            },
+        ))
+    assert [response.status_code for response in responses] == [200] * 80
+    for response in responses:
+        assert await response.get_data(as_text=True) == 'data: [DONE]\n\n'
+    assert len(set(released)) == 80
+
+
+@pytest.mark.anyio
+async def test_direct_chat_stream_releases_admission_lease(
+        flask_app, monkeypatch):
     import routes.api_v1.chat_direct as direct
 
     async def frames():
@@ -301,11 +282,6 @@ async def test_direct_chat_stream_releases_admission_and_sse_slots(
     admission_releases = []
     monkeypatch.setattr(direct.controller, 'release',
                         lambda lease: admission_releases.append(lease) or True)
-    monkeypatch.setattr(chat.sse_limiter, 'try_acquire', lambda _key: 'slot')
-    refreshed = []
-    released = []
-    monkeypatch.setattr(chat.sse_limiter, 'refresh', refreshed.append)
-    monkeypatch.setattr(chat.sse_limiter, 'release', released.append)
 
     response = await flask_app.test_client().post(
         '/api/v4/chat/stream-direct',
@@ -316,8 +292,6 @@ async def test_direct_chat_stream_releases_admission_and_sse_slots(
     )
     assert response.status_code == 200
     assert await response.get_data(as_text=True) == 'data: [DONE]\n\n'
-    assert refreshed == ['slot']
-    assert released == ['slot']
     assert admission_releases == ['admission-lease']
     assert disposed == [route_group]
 
@@ -325,7 +299,6 @@ async def test_direct_chat_stream_releases_admission_and_sse_slots(
 @pytest.mark.anyio
 async def test_direct_chat_terminal_settles_usage_billing_and_route_once(
         flask_app, monkeypatch):
-    import routes.api_v1.chat as chat
     import routes.api_v1.chat_direct as direct
     from lib.llm.stream_result import ProviderStreamResult
 
@@ -370,9 +343,6 @@ async def test_direct_chat_terminal_settles_usage_billing_and_route_once(
     monkeypatch.setattr(
         direct.controller, 'release',
         lambda lease: admission_releases.append(lease) or True)
-    monkeypatch.setattr(chat.sse_limiter, 'try_acquire', lambda _key: 'slot')
-    monkeypatch.setattr(chat.sse_limiter, 'refresh', lambda _token: None)
-    monkeypatch.setattr(chat.sse_limiter, 'release', lambda _token: None)
 
     async def frames(*_args, **kwargs):
         kwargs['on_dispatch_started']()

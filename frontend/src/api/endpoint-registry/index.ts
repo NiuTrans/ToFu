@@ -58,10 +58,12 @@ import { createMediaEndpoints } from './media';
 import { createAudioEndpoints } from './audio';
 import { createVideosEndpoints } from './videos';
 import { createArtifactsEndpoints } from './artifacts';
+import { createChannelsEndpoints } from './channels';
 export function createEndpointRegistry(transport: ApiTransport, readLanguage: () => string) {
   const ports = createEndpointPorts(transport, readLanguage);
   return { request: ports.request, get: ports.get, post: ports.post, put: ports.put, patch: ports.patch, del: ports.del, stream: ports.stream, ApiError: transport.ApiError, _resolve: transport.resolvePath, pageRequestId: transport.pageRequestId,
     folders: createFoldersEndpoints(ports),
+    channels: createChannelsEndpoints(ports),
     users: createUsersEndpoints(ports),
     paperFolders: createPaperFoldersEndpoints(ports),
     orchestrations: createOrchestrationsEndpoints(ports),

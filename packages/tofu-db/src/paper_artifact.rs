@@ -43,9 +43,6 @@ fn invalid_input(message: &str) -> io::Error {
 fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
-fn exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
 fn payload_too_large(message: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -148,7 +145,7 @@ fn write_count(
     maximum: usize,
 ) -> io::Result<()> {
     if count > maximum {
-        return Err(exhausted("paper artifact owner capacity is exhausted"));
+        return Err(crate::resource_exhaustion::capacity_quota("paper artifact owner capacity is exhausted"));
     }
     db.entity_put(
         tx,
@@ -255,7 +252,7 @@ impl Request {
                     .map_err(|_| invalid_input("paper report metadata cannot be encoded"))?
                     .len();
                 if meta_bytes > MAX_PAPER_REPORT_META_BYTES {
-                    return Err(exhausted("paper report metadata exceeds its bound"));
+                    return Err(crate::resource_exhaustion::domain_bound("paper report metadata exceeds its bound"));
                 }
                 Ok(value.paper_hash.len() + value.lang.len() + value.model.len() + meta_bytes)
             }
@@ -361,7 +358,7 @@ impl Request {
                     .map_err(|_| invalid_input("paper pass entry cannot be encoded"))?
                     .len();
                 if bytes > MAX_PAPER_REPORT_META_BYTES {
-                    return Err(exhausted("paper pass entry exceeds its bound"));
+                    return Err(crate::resource_exhaustion::domain_bound("paper pass entry exceeds its bound"));
                 }
                 Ok(paper_hash.len() + lang.len() + name.len() + bytes)
             }
@@ -490,7 +487,7 @@ fn store<T: Serialize>(
     let raw = serde_json::to_vec(request.value)
         .map_err(|_| invalid_data("paper artifact document cannot be encoded"))?;
     if raw.len() > request.maximum {
-        return Err(exhausted("paper artifact document exceeds its byte bound"));
+        return Err(crate::resource_exhaustion::domain_bound("paper artifact document exceeds its byte bound"));
     }
     versioned_document::put_with_blob_owner_bounded(
         db,
@@ -567,7 +564,7 @@ fn encode(value: &Value, maximum: usize) -> io::Result<Vec<u8>> {
     let raw = serde_json::to_vec(value)
         .map_err(|_| invalid_data("paper artifact response cannot be encoded"))?;
     if raw.len() > maximum {
-        return Err(exhausted("paper artifact response exceeds its bound"));
+        return Err(crate::resource_exhaustion::domain_bound("paper artifact response exceeds its bound"));
     }
     Ok(raw)
 }
@@ -585,7 +582,7 @@ fn report_upsert(
         MAX_PAPER_REPORT_ROWS_PER_OWNER,
     )?;
     if previous.is_none() && count == MAX_PAPER_REPORT_ROWS_PER_OWNER {
-        return Err(exhausted("paper report owner capacity is exhausted"));
+        return Err(crate::resource_exhaustion::capacity_quota("paper report owner capacity is exhausted"));
     }
     if let Some((core, _)) = &previous {
         db.entity_delete(
@@ -759,9 +756,10 @@ fn recompute_totals(meta: &mut Map<String, Value>) {
                 sum += number(pass.get(field));
             }
         }
-        if sum != 0.0 {
+        let total_field = format!("totalCost{}", &field[4..]);
+        if sum != 0.0 || meta.contains_key(&total_field) {
             if let Some(value) = serde_json::Number::from_f64(sum) {
-                meta.insert(format!("totalCost{}", &field[4..]), Value::Number(value));
+                meta.insert(total_field, Value::Number(value));
             }
         }
     }
@@ -834,7 +832,7 @@ fn translation_upsert(
         MAX_PAPER_TRANSLATION_ROWS_PER_OWNER,
     )?;
     if exists.is_none() && count == MAX_PAPER_TRANSLATION_ROWS_PER_OWNER {
-        return Err(exhausted("paper translation owner capacity is exhausted"));
+        return Err(crate::resource_exhaustion::capacity_quota("paper translation owner capacity is exhausted"));
     }
     let document = Translation {
         paper_hash: value.paper_hash.clone(),
@@ -1096,7 +1094,7 @@ fn parse_report_restore(payload: Value) -> io::Result<ReportRestoreRequest> {
         .map_err(|_| invalid_input("paper report metadata cannot be encoded"))?
         .len();
     if meta_bytes > MAX_PAPER_REPORT_META_BYTES {
-        return Err(exhausted("paper report metadata exceeds its bound"));
+        return Err(crate::resource_exhaustion::domain_bound("paper report metadata exceeds its bound"));
     }
     Ok(request)
 }
@@ -1227,7 +1225,7 @@ fn report_restore(
         MAX_PAPER_REPORT_ROWS_PER_OWNER,
     )?;
     if count == MAX_PAPER_REPORT_ROWS_PER_OWNER {
-        return Err(exhausted("paper report owner capacity is exhausted"));
+        return Err(crate::resource_exhaustion::capacity_quota("paper report owner capacity is exhausted"));
     }
     let logical = identity(&request.paper_hash, &request.lang)?;
     let core_updated = deterministic_updated_at_ms(&core)?;
@@ -1368,7 +1366,7 @@ fn translation_restore(
         MAX_PAPER_TRANSLATION_ROWS_PER_OWNER,
     )?;
     if count == MAX_PAPER_TRANSLATION_ROWS_PER_OWNER {
-        return Err(exhausted("paper translation owner capacity is exhausted"));
+        return Err(crate::resource_exhaustion::capacity_quota("paper translation owner capacity is exhausted"));
     }
     store(
         db,
@@ -1594,6 +1592,24 @@ pub(crate) fn translation_migration_execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_total_replaces_prior_cost_without_inventing_unpriced_currency() {
+        let mut meta = json!({
+            "promptTokens": 10, "totalCostCny": 3,
+            "secondPasses": {"insight": {
+                "usage": {"prompt_tokens": 1}, "costCny": 0
+            }}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        recompute_totals(&mut meta);
+        assert_eq!(meta["totalUsage"]["prompt_tokens"], 11);
+        assert_eq!(meta["totalCostCny"], 0.0);
+        assert!(!meta.contains_key("totalCostUsd"));
+    }
+
     #[test]
     fn identities_and_latest_order_are_prefix_safe() {
         assert_ne!(identity("a", "bc").unwrap(), identity("ab", "c").unwrap());

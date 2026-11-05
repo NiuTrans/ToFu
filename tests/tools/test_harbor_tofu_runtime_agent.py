@@ -239,7 +239,7 @@ def test_adapter_uses_exclusive_production_runtime_and_guest_exec(
         model_name="kimi-k3",
         upstream_base_url_env="KIMI_CHAT_BASE_URL",
         upstream_api_key_env="KIMI_API_KEY",
-        provider_face="meituan-chat",
+        provider_face="yourprovider-chat",
         provider_slot_id="slot-a",
         experiment_arm="prompt_lean_kimi",
         runtime_config=runtime_config,
@@ -428,7 +428,7 @@ def test_adapter_persists_partial_runtime_evidence_on_timeout_or_cancel(
         model_name="kimi-k3",
         upstream_base_url_env="KIMI_CHAT_BASE_URL",
         upstream_api_key_env="KIMI_API_KEY",
-        provider_face="meituan-chat",
+        provider_face="yourprovider-chat",
         provider_slot_id="slot-a",
         experiment_arm="prompt_lean_kimi",
         runtime_config=runtime_config,
@@ -519,7 +519,7 @@ def test_production_catalog_contents_and_digests():
     names = {tool["function"]["name"] for tool in catalog}
     # Production registry names, verbatim.
     for expected in (
-        "read_files", "inspect_image", "grep_search", "find_files",
+        "read_files", "inspect_image", "search_files", "find_files",
         "repo_map", "write_file", "edit_file", "fetch_url", "todo_write",
         "custom__run_command", "custom__submit_result",
     ):
@@ -579,8 +579,14 @@ def test_production_catalog_contents_and_digests():
     assert settings.agent_kwargs()["tool_surface"] == "production"
 
 
-def test_guest_cwd_mapping():
-    from rootless_vm.harbor_tofu_runtime_agent import _guest_cwd
+def test_guest_cwd_mapping(monkeypatch):
+    # Harbor is not installed here; never depend on a module an earlier test
+    # imported over its fake.
+    _install_fake_harbor(monkeypatch)
+    monkeypatch.delitem(
+        sys.modules, "rootless_vm.harbor_tofu_runtime_agent", raising=False)
+    _guest_cwd = importlib.import_module(
+        "rootless_vm.harbor_tofu_runtime_agent")._guest_cwd
 
     rootfs = "/tmp/rootfs-instance"
     assert _guest_cwd(None, guest_rootfs=rootfs) is None
@@ -726,7 +732,7 @@ def test_production_surface_run_wires_catalog_and_guest_exec(
         model_name="kimi-k3",
         upstream_base_url_env="KIMI_CHAT_BASE_URL",
         upstream_api_key_env="KIMI_API_KEY",
-        provider_face="meituan-chat",
+        provider_face="yourprovider-chat",
         provider_slot_id="slot-a",
         experiment_arm="production_surface",
         runtime_config=runtime_config,
@@ -751,7 +757,7 @@ def test_production_surface_run_wires_catalog_and_guest_exec(
         for tool in config["_explicitToolSchemas"]
     }
     assert {
-        "read_files", "write_file", "edit_file", "grep_search",
+        "read_files", "write_file", "edit_file", "search_files",
         "find_files", "repo_map", "fetch_url",
         "custom__run_command", "custom__submit_result",
     } <= catalog_names
@@ -829,7 +835,7 @@ def test_agent_init_rejects_unknown_tool_surface(tmp_path, monkeypatch):
             model_name="kimi-k3",
             upstream_base_url_env="KIMI_CHAT_BASE_URL",
             upstream_api_key_env="KIMI_API_KEY",
-            provider_face="meituan-chat",
+            provider_face="yourprovider-chat",
             provider_slot_id="slot-a",
             experiment_arm="arm",
             runtime_config=runtime_config,

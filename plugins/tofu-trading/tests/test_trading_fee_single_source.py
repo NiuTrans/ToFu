@@ -2,11 +2,9 @@
 
 WHAT THIS PROTECTS (and why each guard exists)
 ----------------------------------------------
-1. **Zero network inside the loop.** ``info.estimate_trade_fee`` scrapes the
-   vendor on the fund path — measured 1317.8 ms for ``110022`` versus 0.1 ms for
-   ``600519``. Putting that in a decision loop makes backtest output depend on
-   whether the network answered. The guard installs a socket that RAISES, so a
-   reintroduced fetch fails loudly instead of merely being slow.
+1. **Zero network inside the loop.** Fee resolution must remain independent of
+   vendor availability. Every test blocks socket connections and DNS, and the
+   guard records attempts so a provider cannot hide I/O by catching the error.
 
 2. **Bit-identical determinism.** Same inputs → same bytes, twice. Without this
    a backtest is not reproducible and therefore not evidence.
@@ -25,9 +23,11 @@ WHAT THIS PROTECTS (and why each guard exists)
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import socket
 import sys
+from unittest.mock import Mock
 
 import pytest
 
@@ -35,23 +35,50 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class _NetworkUsed(AssertionError):
-    """Raised when guarded code attempts a socket connection."""
+    """Raised when guarded code attempts a connection or DNS lookup."""
 
 
-@pytest.fixture
-def no_network(monkeypatch):
-    """Make ANY socket connection raise.
+@contextmanager
+def _network_guard(monkeypatch):
+    """Reject I/O immediately and detect attempts swallowed by provider code."""
+    attempts = 0
 
-    Stronger than asserting on a call count: it fails at the moment of the
-    attempt, so the traceback points straight at the offending line.
-    """
     def _boom(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
         raise _NetworkUsed('network access attempted on a path that must be pure')
 
-    monkeypatch.setattr(socket.socket, 'connect', _boom)
-    monkeypatch.setattr(socket.socket, 'connect_ex', _boom)
-    monkeypatch.setattr(socket, 'create_connection', _boom)
-    return _boom
+    with monkeypatch.context() as scoped:
+        scoped.setattr(socket.socket, 'connect', _boom)
+        scoped.setattr(socket.socket, 'connect_ex', _boom)
+        scoped.setattr(socket, 'create_connection', _boom)
+        scoped.setattr(socket, 'getaddrinfo', _boom)
+        yield _boom
+        if attempts:
+            raise _NetworkUsed(f'{attempts} network attempt(s) swallowed by guarded code')
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    with _network_guard(monkeypatch) as guard:
+        yield guard
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('operation', ['connect', 'connect_ex', 'create_connection', 'getaddrinfo'])
+def test_network_guard_detects_a_swallowed_connection_attempt(monkeypatch, operation):
+    with pytest.raises(_NetworkUsed):
+        with _network_guard(monkeypatch):
+            try:
+                if operation == 'getaddrinfo':
+                    socket.getaddrinfo('test.invalid', 443)
+                elif operation == 'create_connection':
+                    socket.create_connection(('test.invalid', 443))
+                else:
+                    with socket.socket() as connection:
+                        getattr(connection, operation)(('test.invalid', 443))
+            except _NetworkUsed:
+                pass  # Provider wrappers may catch Exception and return defaults.
 
 
 # ═══════════════════════════════════════════════════════════
@@ -71,24 +98,11 @@ class TestZeroNetwork:
                 assert r['fee_amount'] >= 0
 
     def test_loop_path_never_invokes_the_io_method(self, monkeypatch):
-        """The loop path must not CALL the I/O method — a structural assertion.
-
-        Latency alone is a conditionally-blind judge here: TradingClient caches
-        its network state, so once anything has marked the host offline,
-        ``_from_network`` returns fast without a real fetch and a timing check
-        sees nothing. Measured: the legacy fund path takes 1151 ms standalone
-        but resolves instantly once that cache is poisoned — so a NEUTER that
-        reintroduced a fetch slipped past a timing-only guard.
-
-        Asserting the method is never invoked holds regardless of network
-        state, cache state, or machine speed.
-        """
+        """Even a cached I/O entry point must not run in the decision loop."""
         from tofu_trading.trading.fee_book import FeeBook
 
-        def _forbidden(self, *args, **kwargs):
-            raise AssertionError('loop path invoked _from_network — must stay pure')
-
-        monkeypatch.setattr(FeeBook, '_from_network', _forbidden)
+        forbidden = Mock(side_effect=AssertionError('loop path invoked _from_network'))
+        monkeypatch.setattr(FeeBook, '_from_network', forbidden)
 
         book = FeeBook()
         book.prewarm(['600519', '510300'])
@@ -96,23 +110,19 @@ class TestZeroNetwork:
         book.fee_for('003003', 20000.0, 'sell', holding_days=5)   # never prewarmed
         book.fee_for('161725', 20000.0, 'buy')                    # never prewarmed
         assert book.schedule_for('110022').asset_type == 'bond'
+        forbidden.assert_not_called()
 
     def test_fee_book_lookup_never_touches_network(self, no_network):
         """Loop-path lookups stay pure even for symbols never prewarmed."""
-        import time
-
         from tofu_trading.trading.fee_book import FeeBook
 
         book = FeeBook()
-        t0 = time.time()
         r = book.fee_for('161725', 20000.0, 'sell', holding_days=5)
         r2 = book.fee_for('003003', 20000.0, 'buy')
-        elapsed_ms = (time.time() - t0) * 1000
 
         assert r['fee_amount'] >= 0
         assert r2['fee_amount'] >= 0
         assert book.schedule_for('600519').asset_type == 'stock'
-        assert elapsed_ms < 10, f'loop-path lookups took {elapsed_ms:.1f}ms — must be pure'
 
     def test_prewarm_without_network_flag_stays_pure(self, no_network):
         """Default construction must not reach the vendor even during prewarm."""
@@ -121,40 +131,6 @@ class TestZeroNetwork:
         book = FeeBook()
         resolved = book.prewarm(['600519', '510300', '003003'])
         assert set(resolved) == {'600519', '510300', '003003'}
-
-    def test_estimate_trade_fee_is_the_one_that_bites(self):
-        """Pin the reason this module exists: the old entry point DOES fetch.
-
-        Asserting on a raised socket error does NOT work here — info.py wraps
-        the scrape in check_network() + try/except and swallows the failure,
-        returning a default. That swallowing is precisely what makes the
-        latency invisible in correctness terms and lethal in a loop.
-
-        So the guard measures WALL TIME instead, which is the property that
-        actually matters. Measured on this host: 003003 → 1068 ms,
-        110011 → 295 ms, versus 0.0 ms for exchange-traded codes.
-        """
-        import time
-
-        from tofu_trading.trading.fee_book import compute_fee, default_schedule_for
-        from tofu_trading.trading.info import estimate_trade_fee
-
-        t0 = time.time()
-        estimate_trade_fee('003003', 10000, 'buy')
-        legacy_ms = (time.time() - t0) * 1000
-
-        sched = default_schedule_for('003003')
-        t0 = time.time()
-        compute_fee(sched, 10000, 'buy')
-        pure_ms = (time.time() - t0) * 1000
-
-        assert pure_ms < 1.0, f'the pure path must be sub-millisecond, got {pure_ms:.1f}ms'
-        if legacy_ms < 50:
-            pytest.skip('vendor unreachable this run — latency gap not observable')
-        assert legacy_ms > pure_ms * 100, (
-            f'legacy fund path {legacy_ms:.1f}ms vs pure {pure_ms:.3f}ms — '
-            'the gap this module exists to remove')
-
 
 # ═══════════════════════════════════════════════════════════
 #  2. Determinism

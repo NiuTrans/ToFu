@@ -91,10 +91,10 @@ def test_reported_tool_cards_survive_reload(browser, live_server, tmp_path, widt
             expect(chat).to_contain_text('Synthetic tool-card verification complete.', timeout=20000)
 
             page.screenshot(path=str(tmp_path / f'reported-tool-cards-initial-{width}-{iteration}.png'), full_page=True)
-            process = chat.locator('.conversation-history-process')
-            expect(process).to_have_count(1)
-            if not process.evaluate('node => node.open'):
-                process.locator(':scope > summary').click()
+            panel = chat.locator('.conversation-tool-panel__toggle')
+            expect(panel).to_have_count(1)
+            if panel.get_attribute('aria-expanded') == 'false':
+                panel.click()
             expect(chat.locator('.ptc-card')).to_have_count(2)
             raw_card = chat.locator('.ptc-card').filter(has_text='not recorded / unavailable')
             expect(raw_card).to_have_count(1)

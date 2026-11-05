@@ -19,6 +19,10 @@ from .registry import block_spec, injection_spec
 
 MANIFEST_LIMIT = 128
 MANIFEST_BYTES_LIMIT = 128 * 1024
+
+# Only these owners have a dedicated UI receipt for the shared inbox carrier.
+# New sources default to a system_note; suppressing it is an explicit contract.
+_INBOX_DISPLAY_OWNERS = frozenset({'inbox-lanes', 'peer-lane'})
 _ALLOWED_FLAGS = frozenset({
     '_isUrlPrefetch', '_isLifecycleCaution', '_isBranchContext',
     '_isPaperToolGuidance',
@@ -89,31 +93,59 @@ def append_injection(messages: list[dict], injection_id: str, text: str, *,
                      task: dict | None = None, round_num: int | None = None,
                      reason: str = '', contains_human_steer: bool = False,
                      flags: dict | None = None, action: str = 'prompt',
-                     record_note: bool = True) -> dict | None:
+                     record_note: bool = True, display_owner: str = '') -> dict | None:
     """Append one registered chronological carrier and record its exact cost.
 
     Event identity is chronology, not text equality: identical retries in
     distinct rounds are real events. Domain producers own retry/delivery caps.
     ``injected`` means appended, NEVER provider consumption. Queue ACK remains
     deferred until the existing verified provider-return boundary.
+
+    Runtime events default to a system_note even when their spec omits a kind.
+    Dedicated inbox lanes must declare their display owner instead; bootstrap
+    contracts belong only to the Inspector, never the conversation timeline.
     """
     spec = injection_spec(injection_id)
     if spec.lane not in ('event', 'inbox', 'bootstrap'):
         raise ValueError(f'{injection_id} cannot append a runtime message')
     if flags and set(flags) - _ALLOWED_FLAGS:
         raise ValueError('Unsupported injection classification flag')
+
+    if not record_note and not display_owner:
+        raise ValueError('record_note=False requires an explicit display_owner')
+    if display_owner and not (
+        (injection_id == 'inbox_delivery' and display_owner in _INBOX_DISPLAY_OWNERS)
+        or (spec.lane == 'bootstrap' and display_owner == 'inspector')
+    ):
+        raise ValueError('Unsupported display_owner for this injection')
+    if spec.lane == 'bootstrap':
+        display = dict(displaySurface='inspector', displayOwner='inspector',
+                       displayReason='bootstrap_policy')
+    elif display_owner:
+        display = dict(displaySurface='sidecar', displayOwner=display_owner,
+                       displayReason='dedicated_sidecar')
+    elif task is None:
+        display = dict(displaySurface='inspector', displayOwner='inspector',
+                       displayReason='no_task_projection')
+    else:
+        display = dict(displaySurface='system_note', displayOwner='context-composer',
+                       displayReason='registered_note_kind' if spec.note_kind else 'fallback_note_kind')
     from . import disabled_context_blocks
     if not spec.required and injection_id in disabled_context_blocks((task or {}).get('config')):
         record_manifest_rows(task, [{
             'id': injection_id, 'source': spec.source, 'authority': spec.authority,
             'injected': False, 'appended': False, 'placement': 'tail',
             'reason': 'disabled', 'chars': 0, 'tokens': 0, 'appendedTokens': 0,
+            'displaySurface': 'none', 'displayOwner': display['displayOwner'],
+            'displayReason': 'disabled',
         }])
         return None
     if not isinstance(text, str) or not text.strip():
         record_manifest_rows(task, [{
             'id': injection_id, 'injected': False, 'appended': False,
             'placement': 'tail', 'reason': reason or 'empty', 'chars': 0, 'tokens': 0,
+            'displaySurface': 'none', 'displayOwner': display['displayOwner'],
+            'displayReason': 'empty',
         }])
         return None
     if not can_append_injection(messages):
@@ -129,7 +161,6 @@ def append_injection(messages: list[dict], injection_id: str, text: str, *,
     else:
         message['_isMeta'] = True
     message.update(flags or {})
-    messages.append(message)
     from ._render import _count_tokens
     row = {
         'id': injection_id, 'source': spec.source, 'authority': spec.authority,
@@ -139,17 +170,47 @@ def append_injection(messages: list[dict], injection_id: str, text: str, *,
         'chars': len(text), 'tokens': _count_tokens(text, str((task or {}).get('model') or '')),
         'hash': hashlib.sha256(text.encode('utf-8')).hexdigest()[:16],
         'reason': (reason or spec.trigger)[:240], 'round': round_num,
+        **display,
     }
     # Position/round/text can repeat after compaction or checkpoint recovery.
     # A receipt identity is minted once and travels with that carrier.
     row['eventId'] = uuid.uuid4().hex
     row['appendedTokens'] = row['tokens']
-    message['_contextInjection'] = dict(row)
-    record_manifest_rows(task, [row])
-    if spec.note_kind and record_note and task is not None:
-        from lib.tasks_pkg.segments import record_injected_note
-        record_injected_note(task, llm_round=round_num, kind=spec.note_kind,
-                             text=text, action=action, reason=reason or injection_id)
+    from lib.tasks_pkg.segments import INJECTED_NOTES_FIELD, record_injected_note
+
+    # Both recorders are synchronous: notes append; manifest replaces its list.
+    # Retain only touched preimages, never copy the task or its message history.
+    missing = object()
+    previous = {key: task.get(key, missing) for key in (
+        INJECTED_NOTES_FIELD, '_contextManifest', '_contextManifestDropped',
+    )} if task is not None else {}
+    notes_before = previous.get(INJECTED_NOTES_FIELD)
+    note_count = len(notes_before) if isinstance(notes_before, list) else 0
+    messages.append(message)
+    try:
+        if display['displaySurface'] == 'system_note':
+            note = record_injected_note(
+                task, llm_round=round_num, kind=spec.note_kind or 'context-injection',
+                text=text, action=action, reason=reason or injection_id)
+            if note is None:
+                raise ValueError(f'{injection_id} could not record its system_note')
+            row['blockId'] = note['blockId']
+        message['_contextInjection'] = dict(row)
+        record_manifest_rows(task, [row])
+    except BaseException:
+        # A failed projection/receipt write is not an appended input. Producers
+        # may retry their drained item only after every touched lane rolls back.
+        if messages and messages[-1] is message:
+            messages.pop()
+        if task is not None:
+            if isinstance(notes_before, list):
+                del notes_before[note_count:]
+            for key, value in previous.items():
+                if value is missing:
+                    task.pop(key, None)
+                else:
+                    task[key] = value
+        raise
     return message
 
 

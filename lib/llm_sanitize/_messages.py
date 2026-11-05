@@ -5,7 +5,7 @@ same-role messages — both defensive against Anthropic HTTP 400s.
 """
 
 from lib.log import get_logger
-from lib.llm_sanitize._fields import _SAME_ROLE_SEAM_HINT_FIELD
+from lib.llm_sanitize._fields import _ASSISTANT_REPLAY_FIELDS, _SAME_ROLE_SEAM_HINT_FIELD
 from lib.llm_sanitize.text_blocks import is_blank_text_block, normalize_text_blocks
 
 logger = get_logger(__name__)
@@ -211,7 +211,8 @@ def _drop_empty_assistant_messages(messages: list) -> list:
     Kept: any assistant with ``tool_calls``/``function_call`` (a function
     request — required for tool adjacency) or ``reasoning_content`` /
     ``reasoning_details`` / ``thinking_signature`` (a signed thinking block
-    the Anthropic/Gemini replay protocol needs).
+    the Anthropic/Gemini replay protocol needs), or native ``_responses_items`` /
+    ``_anthropic_content_blocks`` (opaque replay state without visible text).
 
     Runs BEFORE ``_merge_consecutive_same_role`` so the adjacency the drop
     creates is merged right after. Returns a new list (input untouched).
@@ -224,7 +225,9 @@ def _drop_empty_assistant_messages(messages: list) -> list:
             return False
         if (msg.get('tool_calls') or msg.get('function_call')
                 or msg.get('reasoning_content') or msg.get('reasoning_details')
-                or msg.get('thinking_signature')):
+                or msg.get('thinking_signature')
+                or msg.get('_responses_items')
+                or msg.get('_anthropic_content_blocks')):
             return False
         content = msg.get('content')
         if content is None:
@@ -362,6 +365,7 @@ def _merge_consecutive_same_role(messages: list) -> list:
       - tool messages: never merged (each maps to a specific tool_call_id)
       - user/assistant: consecutive same-role messages are merged with \\n\\n separator
       - Messages with tool_calls are never merged (they are function-call requests)
+      - Assistant replay state and distinct named participants keep their boundaries
 
     Observability: merges involving a synthetic-context
     seam (``_is_synthetic_context_msg`` on either ORIGINAL side) are BY DESIGN
@@ -402,13 +406,15 @@ def _merge_consecutive_same_role(messages: list) -> list:
         # Never merge system, tool, or messages with tool_calls
         if (role == prev_role
                 and role in ('user', 'assistant')
+                and msg.get('name') == merged[-1].get('name')
                 and not msg.get('tool_calls')
                 and not merged[-1].get('tool_calls')
-                # Native assistant state belongs to this exact message. A
+                # Assistant replay state belongs to this exact message. A
                 # prose merge drops the right side's phases/reasoning and
                 # invalidates the left side's replay-content witness.
-                and not msg.get('_responses_items')
-                and not merged[-1].get('_responses_items')):
+                and not (role == 'assistant' and (
+                    _ASSISTANT_REPLAY_FIELDS.intersection(msg)
+                    or _ASSISTANT_REPLAY_FIELDS.intersection(merged[-1])))):
             # Merge content by concatenation
             prev_content = merged[-1].get('content', '') or ''
             new_content = msg.get('content', '') or ''

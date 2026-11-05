@@ -99,6 +99,15 @@ marks it stale. Storage failures propagate instead of synthesizing a current
 pass. Missing or foreign facts never enter a decision. Synthetic/system
 principals cannot write owner attestations.
 
+The shared owner types its rejections of the caller's command. Each of these
+raises `BadRequest` naming the command field, which HTTP answers with 400: a
+schema violation, duplicate criterion, output, binding or fact IDs, blank text
+or note, a global constraint that omits a declared output, or omitted fact
+bindings that the prior judgment carried. Some failures stay builtin server
+faults: a server-built view that fails validation, a full record and an
+unacknowledged write. The Turn review endpoint answers those with a logged,
+redacted 500 ([API contract §2.3](API_CONTRACT.md#23-status-code-mapping)).
+
 ## Resource lifecycle and verification
 
 Review queries start only when the user opens the review section. A mount owns
@@ -323,11 +332,38 @@ recovery boundary; it cannot trigger a fallback without current scope. Ordinary
 transport resends retain their already admitted snapshot. ROOT and native/Flow
 preparation share this owner. `turn_requirements` is a required user-authority
 registry block, with no local truncation or optional-ablation bypass. It uses
-the existing provider executor and 15-second context acquisition deadline; a
-timeout, unavailable authority or invalid binding refuses the request. Late
-results cannot mutate the task or prompt; cancellation releases the local lease.
+the existing provider executor. An invalid binding, missing or superseded Turn,
+owner mismatch, malformed record or non-transient storage refusal refuses the
+request with its typed error. Late results cannot mutate the task or prompt.
 The canonical prompt/body admission counts the complete block and refuses an
 irreducible request. Content-addressed reuse avoids appending unchanged copies.
+
+Problem: a read still running at the 15-second context deadline raised
+`TurnRequirementsDeadlineError` out of prompt admission, so storage slowness
+under host load ended accepted multi-hour work as a fatal task error.
+Decision: the read runs through the common
+[persistence wait owner](../TASK_EXECUTION_MODES.md#origin-neutral-persistence-and-retry-lifecycle)
+as an effect-free read, and the deadline is a patience window, not a verdict.
+The typed `TurnRequirementsDeadlineError` marks each elapsed window while the
+same in-flight read is retained, never resubmitted. The owner publishes the
+`retrying` "Waiting for storage" phase with `storageOperation`, the explained
+wait that exempts the stall guard and reaper, the child phase hint and a
+throttled log naming the cause. A transient storage classification starts one
+new read. Stop, an execution deadline and shutdown cancel the wait with
+`AbortedError`; a queued read is withdrawn. No model call is made until a fresh
+read succeeds. If the typed deadline error ever surfaces, it still renders with
+`source=context-acquisition`, `failureStage=turn_requirements`,
+`providerReached=false` and no model attribution; a faster-model hint would
+misidentify the failed subsystem. Sibling required state at this boundary needs
+no wait: checklist restoration reads only task-local state, and working facts and
+optional providers degrade explicitly. Alternatives rejected: a longer deadline
+still fails under heavier load; resubmitting after each deadline multiplies
+reads while storage is starved; the previous snapshot would admit stale scope; a
+bounded retry budget only moves the fatal error later; a private wait loop would
+fork the phase, beacon and explained-wait publication. Specs:
+`tests/artifacts/test_turn_requirements_context.py`,
+`tests/artifacts/test_turn_requirement_read_cost.py` and
+`tests/tasks_pkg/test_agent_persistence_wait.py`.
 
 Delegated invocations carry a frozen, read-only source identity from the common
 child factory in `tasks_pkg/requirement_source.py`. Descendants share the same
@@ -384,10 +420,49 @@ this is delivery evidence, not proof that a model followed every requirement.
 Alternatives rejected: a separate review/model loop would split execution
 authority; letting summaries stand in for current requirements can preserve
 superseded constraints; treating acquisition failure as optional would permit
-silent execution against old scope. Read cost is one attempt, one owned Turn
-(including its projection), and one requirement-record query per admission.
-Large Turn projection read amplification remains a measurement target; this
-increment does not claim whole-task speed or correctness improvements.
+silent execution against old scope. Read cost is one Attempt, one owned Turn
+metadata read, and one requirement-record query per ordinary admission; inherited
+continuations retain their two Attempt/two metadata-Turn/one record bound.
+
+**Problem:** rehydrating a growing answer/tool projection just to validate its
+Turn/Attempt identity amplified every required-context acquisition. **Decision:**
+`get_turn(include_projection=False)` uses the existing `turn.get` operation and
+public metadata normalization. SQL selects only metadata columns. Native reads
+the scoped physical Turn document and conversation epoch, selectively decodes
+public metadata, and does not reconstruct projection checkpoints, structural
+patches or text pages. A blob-carried settled document is answered from its
+[header-bound metadata summary](../STORAGE_TOFUDB.md#header-bound-turn-metadata-summaries)
+without reading the blob. Default and explicit `true` retain the complete read.
+Owner, tenant, source identity, current Attempt, execution epoch, model-context
+revision, strict boolean input and malformed-metadata fences remain unchanged.
+The private head and projection never enter requirement context. The metadata-only
+lifecycle response is checked against the existing public `TurnRecord` metadata
+constraints, with an empty validation-only projection, and exact requested
+Turn/conversation IDs. This does not invent missing response fields. Nonobjects,
+missing or malformed fields, unknown actor/status, boolean revisions and private
+locators fail as `database_protocol_error`; malformed actor evidence cannot become
+legitimate requirement absence. The default full-read path remains unchanged.
+
+Legacy monolithic native documents still require the existing bounded whole-byte
+JSON/blob validation; its rare Serde-marker compatibility fallback is retained.
+The metadata selector does not construct the projection itself. This is not a
+migration or a promise of constant-time reads for every historical physical
+format. Alternatives rejected: caching requirements misses owner corrections;
+raising the deadline masks read amplification; silently using stale/empty
+requirements weakens admission. No new cache, worker, storage authority or
+review state is introduced.
+
+`tests/artifacts/test_turn_requirement_read_cost.py` grows a real running Turn
+from 0 to 256 KiB and 2 MiB, then checks unchanged requirements and bounded
+metadata bytes. One local SQL probe returned 480 metadata JSON bytes at all
+three sizes; complete admission samples took 1.49, 1.46 and 1.67 ms respectively.
+These small warm samples exclude model/tool latency and are not an end-to-end
+SLO. `test_turn_metadata_read.py` verifies SQL/native/default parity and strict
+facade input/result boundaries. `test_turn_metadata_validation.py` verifies
+malformed/mismatched response refusal and downstream required-context admission. Native metadata fault tests remove each private
+projection source in an uncommitted transaction: metadata still reads while a
+full projection correctly refuses. They also cover malformed legacy JSON,
+owner/tenant isolation and real delete/restore execution-epoch fences.
 
 Specs: `tests/artifacts/test_turn_requirements_context.py`, shared presenter and
 mount tests, and `tests/visual/test_visual_turn_review.py` on desktop/mobile.

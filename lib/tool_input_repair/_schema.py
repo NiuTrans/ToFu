@@ -35,6 +35,8 @@ def _schema_owner_modules():
     (per-vertical shim schemas that would clobber the canonical
     ``web_search`` / ``fetch_url`` index entries).
     """
+    import lib.channels.tools as channel_tools
+    import lib.desktop.device_waits as device_waits
     import lib.knowledge.tool as knowledge_tool
     import lib.memory.tools as memory_tools
     import lib.scheduler.tool_defs as scheduler_tool_defs
@@ -44,6 +46,7 @@ def _schema_owner_modules():
     import lib.tools.code_exec as code_exec
     import lib.tools.conversation as conversation
     import lib.tools.coordinator as coordinator
+    import lib.tools.exploration as exploration
     import lib.tools.human_guidance as human_guidance
     import lib.tools.image_edit as image_edit
     import lib.tools.image_gen as image_gen
@@ -59,12 +62,16 @@ def _schema_owner_modules():
     import lib.tools.search as search
     import lib.tools.todo as todo
     import lib.tools.tool_result_artifacts as tool_result_artifacts
+    import lib.tools.video_inspect as video_inspect
 
     return (
         browser,
+        channel_tools,
         code_exec,
         conversation,
         coordinator,
+        device_waits,
+        exploration,
         human_guidance,
         image_edit,
         image_gen,
@@ -85,6 +92,7 @@ def _schema_owner_modules():
         swarm_tools,
         todo,
         tool_result_artifacts,
+        video_inspect,
     )
 
 

@@ -23,7 +23,6 @@ DB-free; skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -34,12 +33,6 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 REPORT_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'report.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -102,7 +95,6 @@ win._loadReadingPosition = () => null;
 win._restoreReadingAnchor = () => {};
 win._persistReadingPosition = () => {};
 _syncReportToolbar = () => {};
-_renderReportFinishTag = () => '';
 if (typeof _reportView === 'function') {
   // Give _renderFinalReport a minimal view when meta is passed explicitly.
 }
@@ -167,8 +159,6 @@ def _run(report_js: str) -> subprocess.CompletedProcess:
             pass
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_terminology_card_rendered_to_reader():
     proc = _run(REPORT_JS)
     out = proc.stdout.strip()
@@ -178,8 +168,6 @@ def test_terminology_card_rendered_to_reader():
     assert out.count('PASS') >= 8, f'expected >=8 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_render_call_is_load_bearing():
     """Neuter the terminologyAudit prepend in _renderFinalReport → the gappy
     meta no longer produces the card → the positive check FAILS. Proves the

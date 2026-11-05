@@ -32,6 +32,7 @@ def verification_sources() -> dict[str, str]:
         'routes', 'server', 'templates', 'static', 'app.py', 'vite.config.mjs',
         'package.json', 'package-lock.json', 'pyproject.toml',
         'scripts/certify_storage_backends.py', 'scripts/tofudb_perf_compare.py',
+        'scripts/tofudb_workloads',
         'scripts/audit_storage_logs.py', 'scripts/gen_tofudb_ir_contract.py',
         'scripts/gen_storage_operation_catalog.py'], cwd=ROOT, text=True).splitlines()
     # Browser tests execute generated assets, including ignored Vite outputs.

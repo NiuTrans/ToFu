@@ -86,11 +86,13 @@ class TestSharedRetryPhaseFields(unittest.TestCase):
         })
         self.assertEqual(f['detail'], 'X')
 
-    def test_gateway_prefix_stripped_in_label(self):
-        f = self._fields(model='aws.claude-opus-4.8', attempt=1,
-                         reason='Endpoint unreachable', status_code=0,
-                         legacy_detail='X')
-        self.assertEqual(f['detailArgs']['model'], 'claude-opus-4.8')
+    def test_label_keeps_full_request_name(self):
+        for model in ('aws.claude-opus-4.8',
+                      'kunlunbedrock.claude-opus-4.5-m17'):
+            f = self._fields(model=model, attempt=1,
+                             reason='Endpoint unreachable', status_code=0,
+                             legacy_detail='X')
+            self.assertEqual(f['detailArgs']['model'], model)
 
     def test_all_dispatcher_static_tokens_have_keys(self):
         """Every STATIC reason token the dispatcher can pass must map to a

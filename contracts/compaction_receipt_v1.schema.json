@@ -50,12 +50,26 @@
         "usage": {"$ref": "#/$defs/usage"},
         "projectedUsageTokens": {"$ref": "#/$defs/count", "description": "Pre-call usage estimate, not observed billing or a physical prompt limit."},
         "rejectionReason": {"type": "string", "maxLength": 160},
+        "failure": {"$ref": "#/$defs/summaryFailure"},
+        "attempts": {
+          "type": "array", "minItems": 1, "maxItems": 3,
+          "items": {"$ref": "#/$defs/summaryAttempt"},
+          "description": "At most three recorded summary routes, separate from transport retries and cost.calls. Missing attempts or providerReached means unknown, not no call or no ingress. No credential identifiers, source references, exception text or prompt material."
+        },
         "route": {"$ref": "#/$defs/route"},
         "cost": {"$ref": "#/$defs/summaryCost"}
       },
       "allOf": [{
         "if": {"required": ["complete"], "properties": {"complete": {"const": false}}},
         "then": {"properties": {"accepted": {"const": false}}}
+      }, {
+        "if": {"required": ["failure"]},
+        "then": {
+          "properties": {
+            "generated": {"const": false}, "complete": {"const": false}, "accepted": {"const": false},
+            "attempts": {"items": {"required": ["providerReached"], "properties": {"status": {"const": "failed"}, "providerReached": {"const": false}}}}
+          }
+        }
       }]
     },
     "contextBudget": {
@@ -146,6 +160,50 @@
       },
       "description": "Normalized counters may be zero when provider usage is absent; they alone never establish known billing."
     },
+    "summaryAuthIssue": {
+      "enum": [
+        "codex_command_timeout", "codex_command_unavailable",
+        "codex_home_storage_full", "codex_home_unavailable",
+        "desktop_login_stale", "desktop_login_unavailable", "desktop_disconnected",
+        "credential_source_unavailable", "codex_credentials_unreadable",
+        "credential_store_unsupported", "invalid_codex_home", "credential_unavailable"
+      ],
+      "description": "Allowlisted typed subscription-source availability reasons only. Account/owner/reference/source-binding conflicts, sign-in expiry, untyped exception text and local payload defects are not availability evidence."
+    },
+    "summaryCredentialSource": {"enum": ["local", "desktop", "tofu_oauth"]},
+    "summaryFailure": {
+      "type": "object",
+      "required": ["code", "authIssue", "credentialSource", "providerReached"],
+      "properties": {
+        "code": {"const": "summary_credentials_unavailable"},
+        "authIssue": {"$ref": "#/$defs/summaryAuthIssue"},
+        "credentialSource": {"$ref": "#/$defs/summaryCredentialSource"},
+        "providerReached": {"const": false}
+      },
+      "additionalProperties": false,
+      "description": "Executor-validated current keyed summary failure before any summary-provider ingress. Absent on older receipts means unknown. This metadata neither proves main-provider delivery nor authorizes credential rebinding, fallback or source deletion."
+    },
+    "summaryAttempt": {
+      "type": "object",
+      "required": ["modelId", "providerId", "status"],
+      "properties": {
+        "modelId": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[^\\u0000-\\u001f\\u007f]+$"},
+        "providerId": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[^\\u0000-\\u001f\\u007f]+$"},
+        "status": {"enum": ["failed", "succeeded"]},
+        "providerReached": {"type": "boolean", "description": "Recorded ingress evidence, not inferred from an exception's message. Omitted means unknown."},
+        "authIssue": {"$ref": "#/$defs/summaryAuthIssue"},
+        "credentialSource": {"$ref": "#/$defs/summaryCredentialSource"}
+      },
+      "dependentRequired": {"authIssue": ["credentialSource", "providerReached"], "credentialSource": ["authIssue", "providerReached"]},
+      "allOf": [{
+        "if": {"properties": {"status": {"const": "succeeded"}}},
+        "then": {"required": ["providerReached"], "properties": {"providerReached": {"const": true}}}
+      }, {
+        "if": {"required": ["authIssue"]},
+        "then": {"properties": {"status": {"const": "failed"}, "providerReached": {"const": false}}}
+      }],
+      "additionalProperties": false
+    },
     "route": {
       "type": "object",
       "properties": {
@@ -166,14 +224,14 @@
       "oneOf": [
         {"properties": {"source": {"const": "Artificial Analysis"}, "metric": {"const": "intelligence"}, "match": {"const": "exact"}, "score": {"type": "number"}}},
         {"properties": {"source": {"const": "maintained_declared_rule"}, "metric": {"const": "declared_capability"}, "match": {"const": "declared"}, "score": {"type": "number"}}},
-        {"properties": {"source": {"const": "routing_admission"}, "metric": {"const": "text_capability"}, "match": {"const": "confirmed"}, "score": {"type": "null"}, "ranking": {"const": "authorized_resource_cost_then_aa"}}}
+        {"properties": {"source": {"const": "routing_admission"}, "metric": {"const": "text_capability"}, "match": {"const": "confirmed"}, "score": {"type": "null"}, "ranking": {"enum": ["authorized_resource_cost_then_aa", "paid_api_then_resource_cost_aa"]}}}
       ],
       "properties": {
         "source": {"enum": ["Artificial Analysis", "maintained_declared_rule", "routing_admission"]},
         "metric": {"enum": ["intelligence", "declared_capability", "text_capability"]},
         "score": {"type": ["number", "null"], "minimum": 0},
         "match": {"enum": ["exact", "declared", "confirmed"]},
-        "ranking": {"enum": ["cost_asc_aa_desc", "subscription_resource_tier_then_cost_aa", "authorized_resource_cost_then_aa"]},
+        "ranking": {"enum": ["cost_asc_aa_desc", "subscription_resource_tier_then_cost_aa", "authorized_resource_cost_then_aa", "paid_api_then_resource_cost_aa"]},
         "qualityTier": {"type": "string", "maxLength": 30},
         "resourceTier": {"type": "integer", "minimum": 0, "maximum": 5},
         "paidCeilingUsd": {"type": ["number", "null"], "minimum": 0},

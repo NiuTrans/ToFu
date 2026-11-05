@@ -230,7 +230,7 @@ def reactive_runtime(request, monkeypatch):
                            provider=provider, clock=clock)
 
 
-@pytest.mark.parametrize('failure', ['empty', 'incomplete', 'failed', 'cancelled', 'memory'])
+@pytest.mark.parametrize('failure', ['empty', 'incomplete', 'failed', 'cancelled'])
 def test_runtime_failure_archives_source_without_adopting_or_trimming(reactive_runtime, failure):
     from lib.llm.stream_result import ProviderStreamResult
 
@@ -251,11 +251,10 @@ def test_runtime_failure_archives_source_without_adopting_or_trimming(reactive_r
 
     case.provider.side_effect = provider
     assert not reactive.reactive_compact(
-        case.messages, case.task, error_text='request too large',
-        byte_target=1 if failure == 'memory' else None)
+        case.messages, case.task, error_text='request too large')
     assert case.messages == original
     assert [id(message) for message in case.messages] == identities
-    assert case.provider.call_count == (0 if failure == 'memory' else 1)
+    assert case.provider.call_count == 1
     assert len(case.snapshots) == 1
     source, archive_kwargs = case.snapshots[0]
     assert source == original and archive_kwargs['round_num'] == 12

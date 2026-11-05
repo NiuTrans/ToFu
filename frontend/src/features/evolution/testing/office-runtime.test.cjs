@@ -14,7 +14,6 @@ const {stepWalker,seatPose,STRIDE_DISTANCE,WALK_FRAMES,SEAT_TRANSITION_MS}=load(
 const {authoredFrame,spriteGeometry}=load('office-sprite-geometry');
 const {GAME_FRAMES}=load('office-game-frames');
 const {findOfficePath,walkableSegment}=load('office-navigation');
-const {createOfficeCanvasSurface}=load('office-canvas');
 const near=(a,b)=>assert.ok(Math.abs(a-b)<1e-7,`${a} != ${b}`);
 const walker=()=>({x:430,y:350,path:[{x:450,y:350},{x:450,y:470},{x:600,y:470}],direction:0,frame:1,strideDistance:0});
 test('distance gait preserves cardinal direction and consumes corner leftovers independently of frame cadence',()=>{
@@ -74,20 +73,12 @@ test('routes preserve exact non-grid endpoints and every interpolated segment cl
  for(const to of [{x:630,y:500},{x:NaN,y:300},{x:500,y:Infinity}])assert.deepEqual(findOfficePath(points[0],to),[]);
  assert.equal(walkableSegment({x:430,y:350},{x:450,y:370}),false);
 });
-test('dirty canvas invalidates on decode/resize, caps backing pixels and disposes idempotently',()=>{
- let clears=0,draws=0;
- const ctx={setTransform(){},clearRect(){clears++;},imageSmoothingEnabled:true};
- const canvas={width:300,height:150,getContext:()=>ctx};
- const surface=createOfficeCanvasSurface(canvas);
- assert.equal(surface.resize(4000,4),true);assert.equal(canvas.width*canvas.height,1440*1080);
- assert.equal(ctx.imageSmoothingEnabled,false);assert.equal(surface.resize(4000,4),false);
- const draw=()=>draws++;
- assert.equal(surface.paint('stationary',draw),true);assert.equal(surface.paint('stationary',draw),false);
- surface.invalidate();assert.equal(surface.paint('stationary',draw),true);
- assert.equal(surface.resize(390,1),true);assert.equal(surface.paint('stationary',draw),true);
- assert.equal(clears,3);assert.equal(draws,3);
- assert.deepEqual(surface.metrics(),{paintRequests:4,paints:3,skippedPaints:1,resizes:2,backingPixels:390*293});
- surface.dispose();surface.dispose();assert.equal(canvas.width+canvas.height,0);
- assert.equal(surface.paint('new',draw),false);assert.equal(surface.resize(640,2),false);
- assert.equal(surface.metrics().backingPixels,0);assert.equal(draws,3);
+test('a prop already at its destination is settled at once, and a finished slide lands exactly',()=>{
+ const {createProp,slideProp,stepProps,propSettled}=load('office-objects');
+ const chair=createProp('chair','chair',{x:205,y:292});
+ slideProp(chair,{x:205,y:292},400);assert.equal(propSettled(chair),true,'a tucked-in chair does not report motion');
+ slideProp(chair,{x:205.1,y:338.3},400);assert.equal(propSettled(chair),false);
+ for(let i=0;i<60&&!propSettled(chair);i++)stepProps([chair],1000/60);
+ assert.deepEqual([chair.x,chair.y],[205.1,338.3]);
+ slideProp(chair,{x:205.1,y:338.3},400);assert.equal(propSettled(chair),true);
 });

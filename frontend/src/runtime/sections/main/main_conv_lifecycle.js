@@ -182,7 +182,7 @@ function loadConversation(id) {
   runtimeScope.ConversationSurfacePresentation?.activateConversation?.(id);
 
   composerTranslationStatus.refresh();
-  renderComposerModelNotice(document.getElementById('composerModelNotice'), null);
+  holdComposerModelNotice(document.getElementById('composerModelNotice'));
   const draftOwner = getActiveConv();
   if (draftOwner?._unsentComposerDraft) {
     const draft = draftOwner._unsentComposerDraft;
@@ -247,6 +247,9 @@ function loadConversation(id) {
         c._turnSnapshotRequired = true;
         console.error('[loadConversation] authoritative hydration failed:',
                       error?.message || error);
+        if (activeConvId === id) {
+          renderComposerModelNotice(document.getElementById('composerModelNotice'), null);
+        }
         if (activeConvId === id && typeof showToast === 'function') {
           showToast(_conversationLoadFailureText(error), 'error');
         }
@@ -436,6 +439,75 @@ function _showUndoDeleteToast(deletedConv, origIndex, wasActive) {
 // ══════════════════════════════════════════════════════
 // Duplicate (copy) a conversation as a completely independent new conversation
 // ══════════════════════════════════════════════════════
+/**
+ * Pick the message that names the actual clone failure.
+ *
+ * The clone route reports a live source as 409 `conversation_active` and a
+ * storage refusal as 503 whose problem detail carries the storage code. One
+ * generic "unavailable or still generating" line was shown for all of them,
+ * so a storage or size failure sent the user waiting for a generation that
+ * had already finished.
+ */
+function _conversationCloneFailureKey(error) {
+  const status = Number(error && error.status) || 0;
+  const detail = String(
+    (error && error.problem && error.problem.detail)
+    || (error && error.body && error.body.detail)
+    || '',
+  );
+  if (status === 404) return 'convLifecycle.copyFailedMissing';
+  if (status === 409) {
+    return detail === 'conversation_active'
+      ? 'convLifecycle.copyFailedGenerating'
+      : 'convLifecycle.copyFailedBody';
+  }
+  if (status === 502 || status === 503 || status === 504
+      || detail.startsWith('database_')) {
+    return 'convLifecycle.copyFailedStorage';
+  }
+  return 'convLifecycle.copyFailedBody';
+}
+
+/**
+ * Save the complete transcript as a Markdown file.
+ *
+ * This is the recovery path when the atomic clone cannot produce a copy: the
+ * clone is one bounded transaction, while an export is a read the user can
+ * always keep. It is deliberately not a silent fallback inside the copy path —
+ * a copy must copy or say why it could not.
+ */
+async function _downloadConversationTranscript(id) {
+  const conv = conversations.find((item) => item.id === id);
+  const label = (conv && conv.title) || id;
+  try {
+    if (typeof Api === 'undefined' || !Api.conversations
+        || typeof Api.conversations.exportMarkdown !== 'function') {
+      throw new Error('transcript export is unavailable in this client');
+    }
+    const text = await Api.conversations.exportMarkdown(id);
+    if (typeof text !== 'string' || !text) {
+      throw new Error('the server returned an empty transcript');
+    }
+    const slug = String(label).replace(/[^\w\u4e00-\u9fff.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${slug || id}.md`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 500);
+    if (typeof showToast === "function") {
+      showToast("", t('convLifecycle.exported'), t('convLifecycle.exportedBody', { title: label }), 3000);
+    }
+  } catch (error) {
+    debugLog(`[exportConv] transcript export failed: ${error?.message || error}`, 'warn');
+    if (typeof showToast === "function") {
+      showToast("", t('convLifecycle.exportFailed'), t('convLifecycle.exportFailedBody'), 4000);
+    }
+  }
+}
+
 const _conversationCloneFlights = new Set();
 async function duplicateConversation(id, e) {
   if (e && e.stopPropagation) e.stopPropagation();
@@ -471,7 +543,10 @@ async function duplicateConversation(id, e) {
   } catch (error) {
     debugLog(`[duplicateConv] authoritative clone failed: ${error?.message || error}`, 'warn');
     if (typeof showToast === "function") {
-      showToast("", t('convLifecycle.copyFailed'), t('convLifecycle.copyFailedBody'), 4000);
+      // The failure text names what happened; the export hint is the way out.
+      // A copy the server cannot make is still a conversation the user can keep.
+      const message = t(_conversationCloneFailureKey(error));
+      showToast("", t('convLifecycle.copyFailed'), `${message} ${t('convLifecycle.copyFailedExportHint')}`, 6000);
     }
   } finally {
     _conversationCloneFlights.delete(id);
@@ -734,7 +809,7 @@ async function _buildConvSettings(conv) {
   );
 }
 
-async function _buildConvSubmission(conv, workspace = captureConversationProject(conv)) {
+async function _buildConvSubmission(conv, workspace = captureConversationProject(conv), options = {}) {
   // Freeze roots for this command, not a later project choice during parsing.
   const submissionConv = { ...conv, ...workspace };
   const configInputs = _buildConvConfigInputs(submissionConv);
@@ -743,5 +818,6 @@ async function _buildConvSubmission(conv, workspace = captureConversationProject
   return _conversationSettingsResolution.resolveSubmission(
     configInputs,
     _buildConvSettingsInputs(submissionConv, configInputs.overrides),
+    options,
   );
 }

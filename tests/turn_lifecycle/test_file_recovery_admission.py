@@ -87,6 +87,8 @@ def test_continue_rehydrates_the_file_dependency_before_any_new_write(
     monkeypatch.setattr(repository,'SidecarConversationSyncRepository',
         lambda:repository_type(client_factory=lambda write=False:storage.client))
     _,old=_task(turn_service,storage,'continued-file-admission')
+    # A completed tool batch leaves no prose tail, so the turn continues.
+    old['content']=''
     original=_ops._record_modification_checked
     def interrupted(*a,**kw):raise LostExecutor()
     monkeypatch.setattr(_ops,'_record_modification_checked',interrupted)
@@ -110,7 +112,7 @@ def test_continue_rehydrates_the_file_dependency_before_any_new_write(
         _principalContext=PrincipalContext.user(subject_id='test-user:1',owner_user_id=1).to_payload())
     try:
         definitions=prepare(task,project)
-        apply_resume_state(task=task,cfg=config,messages=task['messages'],model='fixture',tid=target)
+        apply_resume_state(task=task,cfg=config,messages=task['messages'],tid=target)
         assert task['_checkpointToolRounds'][0]['executionEffect']['operationId']==operation
         arguments={'path':'new.txt','content':'resumed work\n','append':True}
         row,result=invoke(task,project,definitions,'write_file',arguments,1)

@@ -18,6 +18,8 @@ const MAX_RESULT_CHARS = 120_000;
 // Backend messageChars counts code points: a valid 4096-emoji message uses
 // 8192 UTF-16 units. This bound must not silently clip a valid authored body.
 const MAX_MESSAGE_CODE_UNITS = 8192;
+// The collapsed row shows one authored line; CSS truncates it to the row.
+const MAX_PREVIEW_CODE_UNITS = 240;
 function record(value: unknown): RecordValue {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as RecordValue : {};
@@ -138,6 +140,11 @@ export function renderSendAgentMessageHtml(
     : translate('tool.agentMessageSubmitted');
   const content = typeof args.content === 'string'
     ? args.content.slice(0, MAX_MESSAGE_CODE_UNITS) : '';
+  // A routine send reads as one row: the first authored line previews the
+  // message and the full text stays one disclosure away. Failures and
+  // unconfirmed deliveries need the reader's attention and open by default.
+  const preview = content.split('\n').map(line => line.trim()).find(Boolean)?.slice(0, MAX_PREVIEW_CODE_UNITS) ?? '';
+  const openByDefault = failed || state === 'unconfirmed';
   const body = content ? `<pre class="ptool-result-pre"><code>${escapeHtmlText(content)}</code></pre>`
     : `<p class="ptool-result-trunc">${escapeHtmlText(translate('tool.agentMessageUnavailable'))}</p>`;
   const clipped = typeof args.content === 'string' && args.content.length > MAX_MESSAGE_CODE_UNITS;
@@ -146,10 +153,10 @@ export function renderSendAgentMessageHtml(
     || translate('tool.agentMessageErrorUnavailable'))}</code></pre>` : '';
   const reconciliationHtml = state === 'unconfirmed'
     ? `<p class="ptool-result-trunc">${escapeHtmlText(translate('tool.agentMessageUnconfirmedAction'))}</p>` : '';
-  return `<details class="ptool-result-block ptool-agent-message${failed ? ' ptool-error' : ''}" data-tool-result-authority="${authoritative?.source || 'request'}" data-rn="${escapeHtmlText(round.roundNum)}" open>
+  return `<details class="ptool-result-block ptool-agent-message${failed ? ' ptool-error' : ''}" data-tool-result-authority="${authoritative?.source || 'request'}" data-rn="${escapeHtmlText(round.roundNum)}"${openByDefault ? ' open' : ''}>
     <summary class="ptool-line ptool-result-header">
       <span class="ptool-icon">${header.iconHtml}</span>${compactionLabelHtml}${header.rootPillHtml}
-      <span class="ptool-text">${escapeHtmlText(title)}</span>${header.repairedBadgeHtml || ''}
+      <span class="ptool-text">${escapeHtmlText(title)}</span>${preview ? `<span class="ptool-line-preview">${escapeHtmlText(preview)}</span>` : ''}${header.repairedBadgeHtml || ''}
       <span class="ptool-line-status${failed ? ' ptool-line-status--err' : ''}">${escapeHtmlText(status)}</span>
       ${header.rightControlsHtml || ''}
     </summary>

@@ -5,7 +5,14 @@ cannot undo a mailbox commit or acknowledge model consumption.
 """
 from __future__ import annotations
 
-from lib.log import get_logger
+from collections import OrderedDict
+import logging
+import os
+import re
+import threading
+import time
+
+from lib.log import get_logger, log_event
 
 from lib.swarm.message_contract import LIMITS
 
@@ -13,6 +20,15 @@ logger = get_logger(__name__)
 RECEIPT_FIELDS = ('state', 'senderTaskId', 'submittedAt', 'content', 'kind',
                   'messageSequence', 'inputInjectedAt',
                   'inputTaskId', 'inputRound', 'inputInjectedRound', 'inputConfirmedAt')
+
+# Activity polls and snapshot persists re-read every mailbox, so one broken
+# run would otherwise warn on each poll. Report at most one failure and one
+# recovery line per run per interval, carrying the suppressed repeat count.
+_SNAPSHOT_FAILURE_LOG_INTERVAL_S = 300.0
+_SNAPSHOT_FAILURE_LOG_RUNS = 256
+_snapshot_failures_lock = threading.Lock()
+_snapshot_failures: OrderedDict[str, dict] = OrderedDict()
+_ERROR_CODE = re.compile(r'[a-z][a-z0-9_]{0,63}')
 
 
 def receipt_fields(binding: dict, item: dict) -> dict:
@@ -68,6 +84,57 @@ def persist_receipt_snapshot(binding: dict) -> None:
         logger.warning('Swarm message snapshot publication failed')
 
 
+def _failure_signature(error: BaseException) -> str:
+    """Class, typed code and raise site; exception text may carry mailbox content."""
+    signature = type(error).__name__
+    code = getattr(error, 'code', None)
+    if isinstance(code, str) and _ERROR_CODE.fullmatch(code):
+        signature += ':' + code
+    frame = error.__traceback__
+    while frame is not None and frame.tb_next is not None:
+        frame = frame.tb_next
+    if frame is not None:
+        origin = frame.tb_frame.f_code
+        signature += f'@{os.path.basename(origin.co_filename)}:{origin.co_name}'
+    return signature[:200]
+
+
+def _report_snapshot_failure(run_id: str, signature: str, failed: int, total: int) -> None:
+    now = time.monotonic()
+    with _snapshot_failures_lock:
+        state = _snapshot_failures.get(run_id)
+        if state is not None and now - state['reported_at'] < _SNAPSHOT_FAILURE_LOG_INTERVAL_S:
+            state['suppressed'] += 1
+            state['failing'] = True
+            _snapshot_failures.move_to_end(run_id)
+            return
+        suppressed = state['suppressed'] if state is not None else 0
+        _snapshot_failures[run_id] = {'reported_at': now, 'suppressed': 0, 'failing': True}
+        _snapshot_failures.move_to_end(run_id)
+        while len(_snapshot_failures) > _SNAPSHOT_FAILURE_LOG_RUNS:
+            _snapshot_failures.popitem(last=False)
+    log_event(logger, logging.WARNING, 'swarm_receipt_snapshot_read_failed',
+              'Swarm receipt snapshot read failed run=%s error=%s failed_targets=%d/%d '
+              'suppressed_repeats=%d', run_id, signature, failed, total, suppressed,
+              swarm_run_id=run_id, error=signature, failed_targets=failed,
+              total_targets=total, suppressed_repeats=suppressed)
+
+
+def _report_snapshot_success(run_id: str) -> None:
+    now = time.monotonic()
+    with _snapshot_failures_lock:
+        state = _snapshot_failures.get(run_id)
+        # Inside the window a flapping run keeps its state, so failure and
+        # recovery lines stay bounded by the same interval.
+        if (state is None or not state['failing']
+                or now - state['reported_at'] < _SNAPSHOT_FAILURE_LOG_INTERVAL_S):
+            return
+        del _snapshot_failures[run_id]
+    if state['suppressed']:
+        logger.info('Swarm receipt snapshot read recovered run=%s suppressed_repeats=%d',
+                    run_id, state['suppressed'])
+
+
 def snapshot_receipts(session, agents: list[dict], specs: list) -> dict:
     """Read bounded owned mailboxes once; the parent is not a child row.
 
@@ -80,18 +147,18 @@ def snapshot_receipts(session, agents: list[dict], specs: list) -> dict:
     from lib.tasks_pkg.manager import task_user_id
 
     receipts, participants, versions = [], [], {}
-    available = True
+    failures: list[BaseException] = []
     agent_rows = {agent['id']: agent for agent in agents}
     targets = [(spec.id, spec.role, spec) for spec in specs]
     # Run parent identity is topology, not the project Coordinator role.
     targets.append((session.task_id, 'Main agent', None))
     for agent_id, label, spec in targets:
         try:
-            binding = (binding_for(session._parent_task_proxy, spec, session.inbox_key)
+            binding = (binding_for(session._parent_task_proxy, spec, session.inbox_key,
+                                   run_id=session.task_id)
                        if spec is not None else coordinator_binding(session))
             if (binding['owner'] != session.user_id
-                    or binding['conversationId'] != session.conv_id
-                    or binding['swarmRunId'] != session.task_id):
+                    or binding['conversationId'] != session.conv_id):
                 raise ValueError('Snapshot owner does not match mailbox owner')
             validate_target(binding, active_retained=False)
             payload, revision = RunMessageRepository(binding).load()
@@ -106,11 +173,12 @@ def snapshot_receipts(session, agents: list[dict], specs: list) -> dict:
             if spec is None:
                 task_ids = {session.task_id}
             else:
+                # This session's live invocation of the assignment is the proof;
+                # its execution parent may be a later caller, not the run root.
                 child = getattr(session._agents.get(agent_id), '_child', None)
                 if (isinstance(child, dict) and child.get('_swarmMessageBinding') == binding
                         and task_user_id(child) == binding['owner']
                         and str(child.get('_tenant_id') or '') == binding['tenant']
-                        and child.get('_parentTaskId') == session.task_id
                         and isinstance(child.get('id'), str) and child['id']):
                     task_ids.add(child['id'])
             participants.extend({'id': agent_id, 'label': label, 'taskId': task_id}
@@ -122,8 +190,12 @@ def snapshot_receipts(session, agents: list[dict], specs: list) -> dict:
             if agent is not None:
                 agent['messageReceiptsVersion'] = revision
                 agent['messageReceipts'] = rows
-        except Exception:
-            available = False
-            logger.warning('Swarm receipt snapshot read failed')
+        except Exception as error:
+            failures.append(error)
+    if failures:
+        _report_snapshot_failure(session.task_id, _failure_signature(failures[0]),
+                                 len(failures), len(targets))
+    else:
+        _report_snapshot_success(session.task_id)
     return {'messageReceipts': receipts, 'messageReceiptsVersions': versions,
-            'messageReceiptsAvailable': available, 'messageParticipants': participants}
+            'messageReceiptsAvailable': not failures, 'messageParticipants': participants}

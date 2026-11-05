@@ -10,6 +10,10 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
 
 @dataclass
 class _Callback:
@@ -59,6 +63,7 @@ class NativeToolControl:
             except asyncio.CancelledError:
                 error = RuntimeError('native tool callback cancelled before returning a result')
         except Exception as failure:
+            logger.debug('native tool callback failure handled: %s', type(failure).__name__)
             error = failure
         finally:
             if callback is not None:

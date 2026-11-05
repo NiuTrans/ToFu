@@ -10,6 +10,8 @@ import textwrap
 
 import pytest
 
+from tests._jsdom import require_node_modules
+
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
@@ -17,11 +19,9 @@ BUNDLER = ROOT / "scripts/vite_test_bundle.mjs"
 SOURCE = ROOT / "frontend/src/core/debug-runtime-owner.ts"
 
 
-@pytest.mark.skipif(not BUNDLER.is_file(), reason="Vite test bundler unavailable")
 def test_debug_owner_bounds_evidence_cleans_up_and_fails_soft(tmp_path: Path) -> None:
+    require_node_modules("vite")
     node = shutil.which("node")
-    if not node:
-        pytest.skip("node not available")
     built = tmp_path / "debug-runtime-owner.cjs"
     compiled = subprocess.run(
         [

@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
-import os
+import json
 import random
 
 import pytest
@@ -255,7 +255,7 @@ class TestNoSameBarExecution:
 
 
 # ═══════════════════════════════════════════════════════════
-#  3. Source-level ban on the silent fallback
+#  3. Deterministic fill prices and unavailable-open behavior
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
@@ -461,52 +461,58 @@ class TestDeterministicFillPrice:
 
 @pytest.mark.unit
 class TestNoSilentFallback:
-    def test_execution_sites_do_not_read_the_decision_bar_price(self):
-        """No execution path may resolve its fill from `sim_date`.
+    @pytest.mark.parametrize('path', ['buy', 'sell', 'stop_loss', 'take_profit'])
+    @pytest.mark.parametrize('missing_open', [-1.0, 0.0])
+    def test_unavailable_next_open_never_falls_back_to_a_close(
+        self, sim_db, monkeypatch, path, missing_open,
+    ):
+        """Every execution path must defer when the next opening is unavailable."""
+        import lib.llm_dispatch as dispatch
+        import lib.llm_dispatch.api as dispatch_api
+        from tofu_trading.trading.llm_simulator import SimulatorConfig, run_simulation
 
-        Comments are stripped first: the reason the fallback is forbidden is
-        DISCUSSED at length in the comments around these very lines, so a naive
-        scan would flag exactly the code that documents the fix.
-        """
-        path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            'tofu_trading', 'trading', 'llm_simulator.py')
-        stripped = []
-        for line in open(path, encoding='utf-8'):
-            quote = None
-            cut = len(line)
-            for i, ch in enumerate(line):
-                if quote:
-                    if ch == quote:
-                        quote = None
-                elif ch in '"\'':
-                    quote = ch
-                elif ch == '#':
-                    cut = i
-                    break
-            stripped.append(line[:cut])
-        code = '\n'.join(stripped)
+        middle = 9.0 if path == 'stop_loss' else 11.0 if path == 'take_profit' else 10.0
+        bars = [('2024-01-01', 10.0, 10.0),
+                ('2024-01-02', missing_open if path == 'buy' else 10.0, middle),
+                ('2024-01-03', missing_open, 7.0)]
+        for date, opening, closing in bars:
+            sim_db.execute(
+                'INSERT INTO trading_sim_prices (symbol,date,nav,open,close) VALUES (?,?,?,?,?)',
+                ('510300', date, closing, opening, closing))
+        sim_db.commit()
+        calls, events = [], []
 
-        # Valuation may read the decision bar (marking a position to market at T
-        # is correct and necessary); EXECUTION may not. So the ban is scoped to
-        # the FILL sites, identified by the variables that become a trade price —
-        # a blanket ban on price_data['nav'] would wrongly flag the valuation
-        # line `current_nav = price_data['nav']`, which is legitimate.
-        assert '_next_bar_fill(' in code
-        assert code.count('_next_bar_fill(') >= 4, (
-            'expected buy, sell, stop-loss and take-profit to all fill via T+1')
-        # Match whole assignments, not substrings: the legitimate valuation line
-        # `current_nav = price_data['nav']` ENDS WITH the banned fill pattern
-        # `nav = price_data['nav']`, so a substring test flags valid code. Compare
-        # the assignment TARGET instead.
-        banned_targets = {'nav', 'close_price', 'fill_price', 'price'}
-        offenders = []
-        for lineno, raw in enumerate(stripped, 1):
-            line = raw.strip()
-            if '=' not in line or 'price_data' not in line:
-                continue
-            target = line.split('=', 1)[0].strip()
-            if target in banned_targets:
-                offenders.append(f'{lineno}: {line}')
-        assert not offenders, (
-            'fill price taken from the decision bar again: ' + '; '.join(offenders))
+        def decide(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                decisions = [{'action': 'buy', 'symbol': '510300', 'amount': 10000,
+                              'confidence': 95}]
+            elif len(calls) == 2 and path == 'sell':
+                decisions = [{'action': 'sell', 'symbol': '510300', 'confidence': 95}]
+            else:
+                decisions = []
+            return '<decisions>' + json.dumps(decisions) + '</decisions>', {}
+
+        monkeypatch.setattr(dispatch, 'smart_chat', decide)
+        monkeypatch.setattr(dispatch_api, 'smart_chat', decide)
+        config = SimulatorConfig(
+            symbols=['510300'], start_date='2024-01-01', end_date='2024-01-03', step_days=1,
+            initial_capital=100000, adaptive_stop=False,
+            stop_loss_pct=5 if path == 'stop_loss' else 99,
+            take_profit_pct=5 if path == 'take_profit' else 999,
+        )
+        result = run_simulation(sim_db, config, lambda kind, data: events.append((kind, data)), uid=1)
+
+        assert result['status'] == 'completed'
+        assert len(calls) == 3
+        assert not [data for kind, data in events if kind == 'sim_error']
+        expected_positions = int(path != 'buy')
+        assert [data['positions'] for kind, data in events if kind == 'sim_step_done'] == [expected_positions] * 3
+        assert [trade['action'] for trade in result['trade_log']] == (['buy'] if expected_positions else [])
+        assert [data['action'] for kind, data in events if kind == 'sim_trade'] == (['buy'] if expected_positions else [])
+        positions = [dict(row) for row in sim_db.execute('SELECT * FROM trading_sim_positions').fetchall()]
+        assert len(positions) == expected_positions
+        if positions:
+            # The only close is the separate end-of-run liquidation, at its last mark.
+            assert positions[0]['close_date'] == '2024-01-03'
+            assert positions[0]['close_price'] == 7.0

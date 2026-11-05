@@ -37,7 +37,6 @@ when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -48,12 +47,6 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -270,8 +263,6 @@ def _run(presence_src: str | None = None) -> str:
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_presence_strip_renders_end_to_end():
     output = _run()
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -279,8 +270,6 @@ def test_presence_strip_renders_end_to_end():
     assert output.count('PASS') >= 24, f'expected >=24 PASS lines, got:\n{output}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_projectstate_fallback_is_load_bearing(tmp_path):
     """NEUTER: strip the projectState fallback from _displayedRoot() → a New
     Chat whose project is still armed in the singleton no longer resolves a

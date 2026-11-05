@@ -11,6 +11,7 @@ import subprocess
 import threading
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 ROOT = Path(__file__).resolve().parents[2]
@@ -18,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture(scope='module')
 def rail_server(tmp_path_factory):
+    require_node_modules('esbuild')
     root = tmp_path_factory.mktemp('rail-css-browser')
     owner = ROOT / 'frontend/src/conversation/ui/folder-config-control.ts'
     entry = root / 'entry.ts'

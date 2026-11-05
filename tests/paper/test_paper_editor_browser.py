@@ -1,7 +1,6 @@
 """Track B browser editing: proposal review card, source editor chrome,
 bubble-menu message construction and the chat composer bridge — all through
 the real typed TS owners under node/jsdom."""
-import shutil
 import subprocess
 from pathlib import Path
 import pytest
@@ -43,7 +42,6 @@ def run_node(bundle: str, body: str, label: str) -> None:
     assert result.stdout.strip().splitlines()[-1] == 'ok', f'{label}: {result.stdout}'
 
 
-@pytest.mark.skipif(shutil.which('node') is None, reason='Node required')
 def test_proposal_card_renders_decides_and_reports_failures():
     bundle = native_module_path(
         'paper-proposal-card.js', ROOT / 'frontend/src/features/paper/proposal-card.ts')
@@ -117,7 +115,6 @@ document.body.append(host);
     run_node(bundle, body, 'proposal card')
 
 
-@pytest.mark.skipif(shutil.which('node') is None, reason='Node required')
 def test_proposal_skeleton_parse_and_render_from_tool_round():
     bundle = native_module_path(
         'paper-tool-result-presentation.js',
@@ -172,7 +169,6 @@ function makeFakeAdapter(init){
 """
 
 
-@pytest.mark.skipif(shutil.which('node') is None, reason='Node required')
 def test_source_editor_conflict_banner_bubble_and_fallback():
     bundle = native_module_path(
         'paper-source-editor.js', ROOT / 'frontend/src/features/paper/source-editor.ts')
@@ -284,7 +280,6 @@ const digest=async text=>'sha:'+text.length;
     run_node(bundle, body, 'source editor')
 
 
-@pytest.mark.skipif(shutil.which('node') is None, reason='Node required')
 def test_source_view_keeps_read_only_fallback_and_wires_editor():
     bundle = native_module_path(
         'paper-preview-source-view.js', ROOT / 'frontend/src/features/paper/preview-source-view.ts')
@@ -344,7 +339,6 @@ const ctxFor=(overrides={})=>({api:{bytes:async()=>new ArrayBuffer(0)},
     run_node(bundle, body, 'source view integration')
 
 
-@pytest.mark.skipif(shutil.which('node') is None, reason='Node required')
 def test_chat_composer_prefill_send_and_draft_preservation():
     bundle = native_module_path(
         'paper-chat-composer.js', ROOT / 'frontend/src/features/paper/chat-composer.ts')

@@ -23,15 +23,96 @@ This domain owns discoverable instruction packages. A skill can improve model be
 | Shared bounded browser package-upload transport | `frontend/src/features/skills/package-installer.ts` |
 | Package-upload presentation | `frontend/src/features/skills/package-install-panel.ts`, `frontend/src/features/memory/skill-package-install.ts` |
 
+Settings library discovery, source identity and explicit filesystem destinations
+are specified in [Skill library and filesystem scope](../SKILL_LIBRARY.md).
+
 ## Context lifecycle
 
 At task composition the runtime builds a deterministic, token-bounded index of
 eligible installed skills — identifiers and compact descriptions, never full
 instructions — frozen for the task so prompt-cache prefixes stay stable.
 
-Project discovery reads `.tofu/skills`, `.agents/skills`, and `.codex/skills` in order.
+Installed discovery takes a fresh root snapshot on every call, even when parsed
+instructions are cached. Problem: regular-file admission and fingerprinting
+separately probed each `SKILL.md` with `lstat`, `isfile` and an mtime `stat`.
+Decision: one no-follow stat result supplies both regular-file admission and
+mtime for that snapshot. Missing, unreadable, linked and special instruction
+files remain rejected; precedence and shadowed-source projection stay unchanged.
+The cache fingerprint is still refreshed after migrations, and cached results
+still re-derive environment/vault eligibility without rereading instructions.
+No snapshot is reused across calls and no cache, knob or admission limit is added.
+Alternatives rejected: directory-mtime-only caching misses in-place instruction
+edits; skipping file-type validation weakens the symlink boundary. The executable
+specification `tests/skills/test_skill_discovery_snapshot.py` measures 384 to 128
+instruction-file metadata probes for an unchanged 128-package listing (three to
+one per package), with exact result equality. This is a filesystem-operation
+reduction, not an end-to-end latency claim.
+
+Project discovery reads `.tofu/skills`, `.agents/skills`, `.codex/skills`, then
+`bundles/yourprovider/skills`, in the order declared by `lib/skills/paths.py`.
 Owner-global packages live outside any project, under the server data root's
-`skills/users/<owner>` store.
+`skills/users/<owner>` store. Internal-only source packages under `bundles/`
+reach internal/personal source exports, never the opensource mirror. Their
+content manifest records reviewed file hashes; it is not an upstream signature,
+a credential store, or live-platform acceptance. Installed packages may keep
+owner-specific overrides. Skills are owner-global (owner decision
+2026-10-31): the owner-global store precedes every project root, so the
+global package wins its id in every conversation and a same-id project copy is
+reported as shadowed; among project roots the earlier root wins.
+`python -m lib.skills.promote --owner <id> --scan <project> [--apply]` moves
+project packages into the global store through the validated installer
+(`missing` installs, `identical` skips, `differs` needs `--replace`; the
+project source is never removed). Problem: a skill kept in one project's
+`.agents/skills` was invisible to every other conversation, and where a global
+copy existed the project copy replaced it inside that project, so edits landed
+in a copy other conversations never saw. Decision: one runtime authority per id
+(the owner-global package); installs and settings moves always target it.
+Alternatives rejected: scanning every recent project for every conversation
+(loads unrelated workspaces and makes runtime depend on navigation history);
+keeping project-wins precedence after promotion (the stale project copy would
+keep masking the promoted package in that project). Too-many-skills selection
+is a later design concern, not a reason for project-only skills.
+`tests/skills/test_skill_global_policy.py` pins precedence and promotion.
+
+Promotion keeps provenance and never reverts global edits. A package Tofu
+installed into a project carries its own origin markers; the installer
+excludes them only when the promoter asks (uploads still cannot carry them),
+and while their content seal matches the source bytes the recorded catalog id,
+revision, registry and URL are passed into the global install. An edited
+source carries none, and every promoted install is pinned to the inspected
+digest. `global-edited` means the global package was installed from content
+identical to this source and changed afterwards: the source is the older copy,
+so promotion refuses it even with `--replace`. Problem: promotion rejected
+every installer-made project package as carrying reserved metadata, copies
+made around that lost the upstream URL and revision, and `--replace` could
+revert global edits from a stale project copy. Decision: provenance travels as
+verified installer arguments and the install seal decides direction.
+Alternatives rejected: copying the markers (a stale record would describe
+bytes it no longer seals); letting `--replace` override `global-edited` (a bulk
+`--scan --apply --replace` cannot review each row). Packages without a seal,
+such as hand copies, stay `differs`, whose direction the owner must check.
+`test_skill_global_policy.py` and `test_skill_installation_contract.py` pin
+this.
+
+Connector companion skills (2026-11-01). Problem: an MCP connector supplies
+tools but no workflow judgment; no default skill root reaches every owner; and
+the vendors' own skill packages (Tencent Docs, Kingsoft Docs) wrap the same MCP
+endpoint behind a CLI that hides read/write intent and stores tokens outside
+the owner's MCP configuration. Decision: a curated MCP catalog entry may name an
+in-tree package under `lib/mcp/companion_skills/` (`companion_skill`), and the
+catalog install route calls `lib/skills/companion.ensure_companion_skill` for
+the requesting owner. It reuses `promote.inspect_package` and the digest-pinned
+installer with `source_registry='tofu-companion'`: a missing guide is installed,
+an identical one is left alone, an unedited copy from an earlier companion
+revision is updated, and any other same-id package (the owner's own or edited
+copy) is kept. The outcome is returned as `companion_skill.action`; a failure
+never fails the connector install, and uninstalling the connector leaves the
+guide in place as owner data. Alternatives rejected: a built-in skill root
+visible to every owner (it needs read-only scope semantics, per-owner disable
+state and settings/export changes), installing the vendors' CLI-wrapped skills,
+and a curated skills-catalog entry (it requires a pinned GitHub archive of this
+repository). `tests/skills/test_skill_companion.py` pins install, update, keep,
+owner isolation and failure isolation.
 
 Internal exports carry installed packages. An internal `export.py` run restores
 both install stores — `.tofu/skills` and `data/skills` — after its bulk copy,
@@ -46,8 +127,17 @@ into unrelated host files. This follows ZIP installation's link prohibition;
 silently skipping linked resources would ship incomplete packages.
 `tests/export/test_installed_skill_copy_safety.py` checks refusal without
 replacing existing packages or writing outside the destination.
-Opensource and personal exports
-carry no skill catalogue. `PROJECT_SKILL_ROOTS` therefore keeps
+
+Two content rules decide whether a carried package actually WORKS on the
+destination (owner decision 2026-11-01): vendored `node_modules` IS carried,
+because packages such as dx-pura-api ship their engine there and dropping it
+produced a skill whose CLI cannot start; and a package's own `.skillignore`
+plus `.cache/`/`.tofu/` is NOT carried, because those hold the operator's live
+session tickets and identity binding, which would both leak a session and
+misidentify the colleague. `tests/export/test_internal_carried_state.py` pins
+both, alongside the carried vault, MCP and memory rules.
+Opensource and personal exports carry no owner-installed skill catalogue;
+personal exports can still carry the reviewed internal source bundle above. `PROJECT_SKILL_ROOTS` therefore keeps
 `exported_in=()` for the runtime root (it describes the tree, not the restore
 pass); `tests/skills/test_skill_roots_contract.py` locks the pass to roots the
 scanner actually reads. `export.py --handoff` reaches the same state through
@@ -100,11 +190,34 @@ checks and opaque package references remain independent safety boundaries.
 Inputs, metadata, instruction files, and the resident index have independent
 limits; selection never injects a whole catalog into a request.
 
+Hidden package entries — Problem: the manifest skipped dot-prefixed files and
+folders, but `read_skill_resource` served them by exact path, so package-private
+state such as `.cache/` session tickets or `.secrets/` credentials could enter
+model context, including Delegate Mode, whose root reads packages through
+`read_skill_resource` without file tools. Decision: reads apply the listing
+rule; any dot-prefixed path component is refused with an explicit
+`Invalid skill resource request` before the filesystem is consulted, so present
+and absent hidden entries are indistinguishable. Alternatives rejected: listing
+hidden entries (publishes private state on every load); redacting secret-shaped
+content (opaque tickets evade patterns and other private state still leaks);
+denying only known names such as `.cache`/`.secrets` (every other dot entry
+stays readable). `tests/skills/test_skill_installation_contract.py` pins the
+refusal.
+
 A package may declare tool dependencies via top-level `requires_tools` (or
 `metadata.openclaw.requires.tools`): built-in names or MCP `mcp__server__tool`
 ids. `load_skill` marks each available/unavailable/unknown against the live
 registry and any running owner MCP bridge (never starting one); advisory only,
 unlike the `requires_bins`/`requires_env` gates — a missing tool never blocks.
+
+Every `run_command` child receives the configured env bindings of each enabled
+skill (`lib/skills/env.py` `exec_env_overlay`). The overlay resolves all of them
+from one vault store read (`credentials_vault.get_entries_with_prefixes`).
+Problem: it used to re-read and re-parse the vault file once per enabled skill
+and bound entry, under the vault lock, before each command — about 4.7 s on the
+FUSE host (py-spy, 2026-11-01), serialized across concurrent commands.
+Rejected: caching decrypted values (it would put secrets in a long-lived cache
+and need invalidation on every vault write).
 
 Online discovery is not part of task composition. Only the bounded capability
 phrase supplied to an explicit search call leaves the server; the tool schema
@@ -127,7 +240,7 @@ remaining in the task-frozen executable catalog; small surfaces keep it direct.
 ## Installation trust boundary
 
 `request_skill_install` accepts only an exact catalog id, immutable source
-revision when supplied by discovery, and scope. It is a serial write governed
+revision when supplied by discovery, and scope. It is a write governed
 by the task's Auto / Manual mode: Auto authorizes verified catalog
 installation, including unattended tasks; Manual requires an attended decision
 and fails closed without one. The gateway issues an exact, expiring,
@@ -179,6 +292,41 @@ lazy feature chunks. Picker and OS-drop inputs share ZIP validation, FormData
 construction, response parsing, and a one-active-upload guard. Each surface
 installs one fixed page-lifetime set of four drag listeners; feature adapters
 retain scope selection, localized toasts, diagnostics, and refresh policy.
+
+## Internal platform skills and MCP boundary
+
+The YourProvider workflow set keeps separate instruction owners for Hope/MLP jobs,
+LongCat canvas evaluation, 学城 documents, EnvSandbox read-only forensics,
+CodeLab SSH, image/container provisioning, and FRIDAY/AIGC LLM-gateway usage
+for synthesis/distillation traffic. Team operating evidence (dated, cited to
+its 学城 source) lives in each owner's `references/rsi-*-2026q4.md`, never as an
+admission gate. Knowledge belongs in those
+skills; frequent executable capabilities belong in their native MCP catalogues.
+CodeLab container-management guidance is consolidated into image/provisioning
+rather than retaining a competing UI-only container skill. Raw marketplace
+archives are evidence, not executable installs: local safety/redaction overrides
+survive updates, and embedded upstream credentials require issuer rotation.
+
+`packages/tofu-mtsso-auth/README.md` owns internal authentication. Three isolated
+MCP launches share that adapter: registered official Agent SSO remains first and
+cannot downgrade after denial; without a registration, the same-user installed
+DataFE session may be reused through the official exchange/introspection APIs.
+Business calls never start shared interactive login; only explicit login tools
+may do so. Local status is not identity verification. Tickets never enter model
+results or copied MCP stores; cache partitions carry the launching Tofu owner,
+source digest, environment and exact audience set. Connecting an MCP or loading
+a skill does not authorize job submission, container creation, document writes,
+SSH execution or publication. An unsupported upstream API stays unsupported;
+platform acceptance, runtime completion and experiment verdict are distinct.
+
+The portable internal bundle retains reviewed guides, selected transport/read
+helpers and their references without activating any helper. It excludes marketplace archives, signatures,
+installed dependencies, sessions, cached credentials and executable legacy
+build/auth workflows. EnvSandbox read auth remains a caller-injection contract,
+not an activated live transport. CodeLab SSH requires trusted credential stdin
+and host identity; bundling the helper neither installs Paramiko nor grants
+remote access. `tests/skills/test_internal_platform_bundle.py` checks manifest
+integrity, resource availability and the private export boundary.
 
 ## Ownership and activation
 
@@ -232,3 +380,15 @@ pytest -q tests/skills/test_skill_package_installer.py \
 ```
 
 Online verification demand — Problem: concurrent catalog searches queued exact-version verification behind four local workers. Decision: one shared demand generation owns each eligible candidate; the legacy worker value is an idle hint. Genuine unstarted worker failure preserves that candidate as unverified/uninstallable with the existing safe catalog-unavailable code, while siblings still verify in input order. Batch counts belong to each executor generation, so closing an old batch cannot retire a new generation. Installation admission, archive/path/digest limits, search evidence and cache lifetimes remain. Alternatives: larger quotas retain queues; unknown verification cannot authorize installation; detached workers lose teardown ownership. Rendezvous, failure and lifecycle tests verify the boundary. Measurement: 32 exact-version verifications across eight concurrent searches completed in 19.81 ms; zero workers remain after shutdown.
+
+Explicit programme/run selections use `activation.bind_skill_selection` and the
+same `explicit_skill_context` owner as Chat's `$skill` requests. The former pins
+installed guide IDs/hashes, never installs or changes enabled state. Task config
+`skillSelection` carries those references into the registered `selected_skills`
+block; provider failure, version drift and whole-group budget overflow cannot
+silently omit a required guide. `skillSelectionMode=review` makes the guides
+criteria to inspect, not procedures to execute. `skillSelectionProjectPath` grants
+only package discovery/resource reads when ordinary project tools are disabled.
+These scoped reads do not grant shell, installation or additional tool rights.
+See [EVOLUTION_DESIGN.md](../EVOLUTION_DESIGN.md) for programme acceptance and handoff semantics, and
+`tests/skills/test_skill_selection.py` for scope, hash, budget and failure probes.

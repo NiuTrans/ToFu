@@ -161,3 +161,29 @@ def test_invalid_parallel_qualification_refuses_before_binary_acquisition(names)
         assert group.client._image is None and group.client.active_runs == 0
         await group.client.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('settings,policy', [
+    (dict(concurrent_tool_dispatch=True, tool_sibling_control=True), False),
+    (dict(concurrent_tool_dispatch=True), True),
+    (dict(concurrent_tool_dispatch=True, tool_sibling_control=True, parallel_tool_names=[]), True),
+    (dict(concurrent_tool_dispatch='yes', tool_sibling_control=True), True),
+])
+def test_invalid_concurrent_dispatch_refuses_before_binary_acquisition(settings, policy):
+    """Concurrent dispatch needs the settled call order: round sibling control,
+    an explicit round policy and no competing read qualification."""
+    from lib.agent_core.native_process import NativeConfigurationError
+    async def run():
+        async def read(_request): pytest.fail('invalid concurrent dispatch reached a tool')
+        class Rounds:
+            async def reserve(self, _request): return True
+            async def settle(self, _result): return None
+        group, _ = control(read)
+        configuration = dict(version='fixture/v1', type='configure', owner_user_id=7, task_id='task',
+            tools={'read': {'permission': 'read'}}, **settings)
+        with pytest.raises(NativeConfigurationError, match='concurrent native tools'):
+            await group.client.run(configuration, callbacks={'read': read}, working_directory=Path('/tmp'),
+                round_policy=Rounds() if policy else None)
+        assert group.client._image is None and group.client.active_runs == 0
+        await group.client.close()
+    asyncio.run(run())

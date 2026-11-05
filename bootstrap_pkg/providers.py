@@ -20,9 +20,11 @@ from .env_reexec import BASE_DIR
 #  Provider templates — reused from Settings UI
 # ══════════════════════════════════════════════════════════
 # The template catalog is FILE-BACKED and HOT-RELOADED: every HTTP request
-# re-reads lib/model_info/data/*.json (package catalog) and
-# static/provider_templates/*.json (deployment overrides), merging by key in
-# that order, so template edits never require a restart.  The main Settings
+# re-reads lib/model_info/data/*.json (package catalog),
+# static/provider_templates/*.json (deployment overrides),
+# bundles/*/provider_templates/*.json (release-tiered bundles) and
+# <data>/config/provider_templates/*.json (user-tier drop-ins), merging by key
+# in that order, so template edits never require a restart.  The main Settings
 # loader (lib/provider/provider_template_recipes.py) merges the same directories in
 # the same order, so bootstrap and Settings always offer identical providers.
 #
@@ -51,7 +53,7 @@ _BUILTIN_PROVIDER_TEMPLATES = [
      ]},
 ]
 def _load_provider_templates() -> list:
-    """Return builtins merged with package-owned and deployment templates.
+    """Return builtins merged with package, deployment, bundle and user templates.
 
     Extras from disk override builtins on key conflict (so a deployment
     template replaces an inline stub of the same key). Called on every HTTP request
@@ -59,9 +61,11 @@ def _load_provider_templates() -> list:
     """
     out: list = [dict(t) for t in _BUILTIN_PROVIDER_TEMPLATES]
     seen = {t['key']: i for i, t in enumerate(out)}
-    # Same three repo tiers as lib/provider_template_recipes.load_provider_templates:
+    # Same four tiers as lib/provider/provider_template_recipes.load_provider_templates:
     # package catalog ← deployment overrides ← release-tiered bundles
-    # (docs/SITE_PACKS.md §4; meituan.json lives under bundles/meituan/).
+    # (docs/SITE_PACKS.md §4; yourprovider.json lives under bundles/yourprovider/)
+    # ← user-tier drop-ins, located by the stdlib data-root twin that also
+    # stages the provider draft the full application later imports.
     template_dirs = [
         os.path.join(BASE_DIR, 'lib', 'model_info', 'data'),
         os.path.join(BASE_DIR, 'static', 'provider_templates'),
@@ -73,6 +77,8 @@ def _load_provider_templates() -> list:
             for bundle in sorted(os.listdir(bundles_dir))
             if os.path.isdir(os.path.join(
                 bundles_dir, bundle, 'provider_templates')))
+    template_dirs.append(os.path.join(
+        _bootstrap_data_root(), 'config', 'provider_templates'))
     template_dirs = tuple(template_dirs)
     for extras_dir in template_dirs:
         if not os.path.isdir(extras_dir):
@@ -356,8 +362,22 @@ def _bootstrap_persist_provider(base_url: str, api_key: str, models: list,
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         previous_pending = {}
 
-    catalog_models = [dict(row) for row in models[:1024]
-                      if isinstance(row, dict) and row.get('model_id')]
+    rows = [dict(row) for row in models
+            if isinstance(row, dict) and row.get('model_id')]
+    # The stage stays bounded, but the bound never drops what setup chose:
+    # the default model and pinned rows always survive, and unselected rows
+    # fill the remaining room in catalogue order.
+    chosen = {row['model_id'] for row in rows
+              if row['model_id'] == default_model
+              or row.get('catalog_pinned') is True}
+    room = 1024 - len(chosen)
+    catalog_models = []
+    for row in rows:
+        if row['model_id'] in chosen:
+            catalog_models.append(row)
+        elif room > 0:
+            catalog_models.append(row)
+            room -= 1
     live_ids = {m.get('model_id') for m in catalog_models if isinstance(m, dict)}
     previous_models = (
         previous_pending.get('models')

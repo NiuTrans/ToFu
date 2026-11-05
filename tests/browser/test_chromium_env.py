@@ -101,29 +101,136 @@ def _have_playwright():
 
 
 def _chromium_present():
-    """True when a Playwright browser build is actually on disk.
+    """True when a browser build is on disk in Playwright's registry.
 
     Distinguishes "not installed" (legitimate skip) from "installed but cannot
     launch" (the defect this file guards). Without this split a broken env
-    would silently skip instead of failing.
+    would silently skip instead of failing. The registry comes from the
+    product resolver, whose Playwright parity is specified below.
     """
-    base = os.path.expanduser('~/.cache/ms-playwright')
-    if not os.path.isdir(base):
-        return False
-    for entry in os.listdir(base):
-        if not entry.startswith(('chromium-', 'chromium_headless_shell-')):
-            continue
-        for rel in ('chrome-linux64/chrome', 'chrome-linux/chrome',
-                    'chrome-headless-shell-linux64/chrome-headless-shell'):
-            if os.path.isfile(os.path.join(base, entry, rel)):
-                return True
-    return False
+    return bool(chromium_env.chromium_binaries(include_system=False))
 
 
 requires_browser = pytest.mark.skipif(
     not _have_playwright() or not _chromium_present(),
     reason='playwright/chromium not installed (run: python -m playwright '
            'install chromium) — nothing to guard on this host')
+
+
+# ── Which registry Playwright launches from ────────────────────────────
+
+_REGISTRY_CANDIDATES = ('xdg/ms-playwright', 'appdata/ms-playwright',
+                        'home/.cache/ms-playwright',
+                        'home/Library/Caches/ms-playwright',
+                        'home/AppData/Local/ms-playwright')
+
+
+@pytest.mark.parametrize('platform,env,expected', [
+    ('linux', {'XDG_CACHE_HOME': 'xdg'}, 'xdg/ms-playwright'),
+    ('linux', {'XDG_CACHE_HOME': ''}, 'home/.cache/ms-playwright'),
+    ('linux', {}, 'home/.cache/ms-playwright'),
+    ('darwin', {'XDG_CACHE_HOME': 'xdg'}, 'home/Library/Caches/ms-playwright'),
+    ('win32', {'LOCALAPPDATA': 'appdata'}, 'appdata/ms-playwright'),
+    ('win32', {}, 'home/AppData/Local/ms-playwright'),
+    ('freebsd14', {'XDG_CACHE_HOME': 'xdg'}, None),
+])
+def test_browsers_root_is_the_one_registry_playwright_uses(
+        tmp_path, monkeypatch, platform, env, expected):
+    """Every other platform's cache exists here as a decoy.
+
+    Rules from Playwright's driver: ``$XDG_CACHE_HOME`` (else ``~/.cache``) on
+    Linux, ``~/Library/Caches`` on macOS, ``%LOCALAPPDATA%`` (else
+    ``~/AppData/Local``) on Windows, no registry elsewhere. Reporting a decoy
+    names a browser Playwright will not launch.
+    """
+    monkeypatch.setattr(chromium_env.sys, 'platform', platform)
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    for name in ('PLAYWRIGHT_BROWSERS_PATH', 'XDG_CACHE_HOME', 'LOCALAPPDATA'):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, str(tmp_path / value) if value else '')
+    for candidate in _REGISTRY_CANDIDATES:
+        (tmp_path / candidate).mkdir(parents=True)
+
+    assert chromium_env.browsers_root() == (
+        [str(tmp_path / expected)] if expected else [])
+
+
+def test_browsers_path_override_replaces_the_default_registry(tmp_path, monkeypatch):
+    for candidate in _REGISTRY_CANDIDATES:
+        (tmp_path / candidate).mkdir(parents=True)
+    (tmp_path / 'operator').mkdir()
+    monkeypatch.setattr(chromium_env.sys, 'platform', 'linux')
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path / 'xdg'))
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setenv('PLAYWRIGHT_BROWSERS_PATH', 'operator')
+    assert chromium_env.browsers_root() == [str(tmp_path / 'operator')]
+    monkeypatch.setenv('PLAYWRIGHT_BROWSERS_PATH', str(tmp_path / 'missing'))
+    assert chromium_env.browsers_root() == []
+
+
+def test_browsers_path_zero_selects_the_package_local_registry(tmp_path, monkeypatch):
+    package = tmp_path / 'site' / 'playwright'
+    local = package / 'driver' / 'package' / '.local-browsers'
+    local.mkdir(parents=True)
+    (package / '__init__.py').write_text('')
+    (tmp_path / 'xdg' / 'ms-playwright').mkdir(parents=True)
+    monkeypatch.delitem(sys.modules, 'playwright', raising=False)
+    monkeypatch.syspath_prepend(str(tmp_path / 'site'))
+    monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path / 'xdg'))
+    monkeypatch.setenv('PLAYWRIGHT_BROWSERS_PATH', '0')
+
+    assert chromium_env.browsers_root() == [str(local)]
+
+
+@pytest.mark.skipif(not _have_playwright(), reason='playwright not installed')
+def test_browsers_root_matches_the_installed_playwright(tmp_path):
+    """The product resolver cannot drift from the Playwright that launches.
+
+    Playwright's driver derives ``chromium.executable_path`` from its registry
+    whether or not a build exists, so no browser download is needed.
+    """
+    (tmp_path / 'xdg' / 'ms-playwright').mkdir(parents=True)
+    (tmp_path / 'operator').mkdir()
+    env = _scrubbed_env()
+    env.pop('PLAYWRIGHT_BROWSERS_PATH', None)
+    rc, out = _run_probe(f'''
+        import os, chromium_env
+        from playwright.sync_api import sync_playwright
+        chromium_env.__file__ = {str(tmp_path / 'chromium_env.py')!r}
+        chromium_env.ensure_chromium_env()
+        os.chdir({str(tmp_path)!r})
+        inherited = dict(os.environ)
+        shapes = {{
+            'inherited': {{}},
+            'xdg': {{'XDG_CACHE_HOME': {str(tmp_path / 'xdg')!r}}},
+            'no_xdg': {{'XDG_CACHE_HOME': None}},
+            'override': {{'PLAYWRIGHT_BROWSERS_PATH': 'operator'}},
+            'package_local': {{'PLAYWRIGHT_BROWSERS_PATH': '0'}},
+        }}
+        for name, shape in shapes.items():
+            os.environ.clear()
+            os.environ.update(inherited)
+            for key, value in shape.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            with sync_playwright() as p:
+                parts = p.chromium.executable_path.split(os.sep)
+            build = max(i for i, part in enumerate(parts)
+                        if part.startswith('chromium-'))
+            registry = os.sep.join(parts[:build])
+            expected = [registry] if os.path.isdir(registry) else []
+            assert chromium_env.browsers_root() == expected, (
+                name, expected, chromium_env.browsers_root())
+            print('REGISTRY', name, registry)
+        print('REGISTRY_PARITY_OK')
+    ''', env=env)
+    assert rc == 0, out[-2500:]
+    assert 'REGISTRY_PARITY_OK' in out, out[-2000:]
 
 
 # ── Scan-surface report (charter: print what you actually cover) ─────
@@ -152,10 +259,8 @@ def test_new_process_launches_from_restored_installer_cache(tmp_path):
     """Prove the exported cache choice reaches Playwright's child driver."""
     cache = tmp_path / '.tofu-install-cache' / 'ms-playwright'
     cache.parent.mkdir()
-    existing_cache = os.environ.get('PLAYWRIGHT_BROWSERS_PATH') or os.path.expanduser('~/.cache/ms-playwright')
-    if existing_cache == '0' or not os.path.isdir(existing_cache):
-        pytest.skip('requires a directory-based Playwright browser cache')
-    cache.symlink_to(existing_cache, target_is_directory=True)
+    [registry] = chromium_env.browsers_root()
+    cache.symlink_to(registry, target_is_directory=True)
     env = _scrubbed_env()
     env.pop('PLAYWRIGHT_BROWSERS_PATH', None)
     rc, out = _run_probe(f'''
@@ -231,6 +336,35 @@ def test_text_actually_renders_not_blank_but_styled():
     assert 'GLYPH_WIDTH=' in out, out[-2000:]
 
 
+@requires_browser
+def test_chinese_glyphs_do_not_resolve_to_missing_glyph_boxes():
+    """A successful launch and Latin text do not prove CJK font coverage."""
+    rc, out = _run_probe(r'''
+        from chromium_env import chromium_executable, ensure_chromium_env
+        ensure_chromium_env()
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            b = p.chromium.launch(
+                executable_path=chromium_executable(),
+                headless=True, args=['--no-sandbox'])
+            pg = b.new_page()
+            pg.set_content('<p style="font:60px sans-serif">中文截图</p>')
+            widths = pg.evaluate("""() => {
+                const c = document.createElement('canvas').getContext('2d');
+                c.font = '60px sans-serif';
+                return [c.measureText('中').width,
+                        c.measureText('\\u{10ffff}').width];
+            }""")
+            b.close()
+        assert widths[0] != widths[1], (
+            'Chinese resolves to the same missing-glyph box as an unassigned '
+            f'codepoint: {widths}')
+        print('CJK_GLYPH_WIDTH=%.1f' % widths[0])
+    ''')
+    assert rc == 0, f'CJK font probe failed:\n{out[-2500:]}'
+    assert 'CJK_GLYPH_WIDTH=' in out, out[-2000:]
+
+
 def test_resolution_does_not_depend_on_the_env_marker():
     """``.tofu_env.json`` is stripped from every export (export.py:348).
 
@@ -283,17 +417,29 @@ def test_existing_paths_are_preserved_and_idempotent(tmp_path):
     assert env['LD_LIBRARY_PATH'] == first, 'not idempotent — path grew'
 
 
-def test_system_fontconfig_is_never_overridden(tmp_path, monkeypatch):
-    """A host WITH /etc/fonts must keep using it (regression direction #2).
-
-    The complement of the fallback test: without this, "always export our own
-    config" would also pass, and we would break every normal Linux desktop.
-    """
-    monkeypatch.setattr(os.path, 'isdir',
-                        lambda p: True if p == '/etc/fonts' else os.path.lexists(p))
+def test_system_fontconfig_with_cjk_coverage_is_never_overridden(monkeypatch):
+    """A working system font configuration remains authoritative."""
+    monkeypatch.setattr(chromium_env, '_fontconfig_supports_chinese', lambda _config_file: True)
     conf_dir, conf_file = chromium_env.fontconfig_paths()
-    assert conf_dir is None and conf_file is None, \
-        'fontconfig fallback fired even though /etc/fonts exists'
+    assert conf_dir is None and conf_file is None
+
+
+def test_environment_fontconfig_fills_system_cjk_gap(tmp_path, monkeypatch):
+    """A Latin-only system configuration must not hide installed CJK fonts."""
+    prefix = tmp_path / 'env'
+    config = prefix / 'etc' / 'fonts' / 'fonts.conf'
+    config.parent.mkdir(parents=True)
+    config.write_text('<fontconfig/>', encoding='utf-8')
+    monkeypatch.setattr(
+        chromium_env, '_fontconfig_supports_chinese',
+        lambda config_file: config_file == str(config))
+
+    assert chromium_env.fontconfig_paths(env_prefix=str(prefix)) == (
+        str(config.parent), str(config))
+    env = {}
+    chromium_env.ensure_chromium_env(env=env, env_prefix=str(prefix))
+    assert env['FONTCONFIG_FILE'] == str(config)
+    assert env['FONTCONFIG_PATH'] == str(config.parent)
 
 
 def test_operator_fontconfig_file_wins(tmp_path):
@@ -322,6 +468,53 @@ def test_module_imports_without_dragging_third_party():
     ''')
     assert rc == 0, out[-2000:]
     assert 'CLEAN_IMPORT' in out, out[-1500:]
+
+
+def test_environment_setup_stays_stdlib_only_and_preserves_debug_logging():
+    """Preparing browser dependencies must also work before app deps exist."""
+    rc, out = _run_probe('''
+        import importlib.abc
+        import io
+        import logging
+        import os
+        from pathlib import Path
+        import sys
+        import tempfile
+        from unittest.mock import patch
+        import chromium_env
+
+        attempted = []
+        class StdlibOnly(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.partition('.')[0] not in sys.stdlib_module_names:
+                    attempted.append(fullname)
+                    raise ModuleNotFoundError('optional dependency unavailable: ' + fullname)
+        sys.meta_path.insert(0, StdlibOnly())
+        output = io.StringIO()
+        logger = logging.getLogger('chromium_env')
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(logging.StreamHandler(output))
+        chromium_env.sys.platform = 'linux'
+        with tempfile.TemporaryDirectory() as directory:
+            libs = Path(directory) / 'lib'
+            libs.mkdir()
+            (libs / 'libatk-1.0.so.0').write_bytes(b'ELF fixture')
+            env = {'PLAYWRIGHT_NODEJS_PATH': sys.executable}
+            result = chromium_env.ensure_chromium_env(env, env_prefix=directory)
+            assert str(libs) in result['lib_dirs_added'], result
+            assert str(libs) in env['LD_LIBRARY_PATH'], env
+            assert str(libs) in output.getvalue(), output.getvalue()
+            registry = Path(directory) / 'browser-cache'
+            registry.mkdir()
+            os.environ['PLAYWRIGHT_BROWSERS_PATH'] = str(registry)
+            with patch.object(chromium_env.os, 'listdir', side_effect=PermissionError('denied')):
+                assert chromium_env.chromium_binaries(include_system=False) == []
+            assert str(registry) in output.getvalue(), output.getvalue()
+        assert not attempted, ('browser setup imported optional modules', attempted)
+        print('STDLIB_SETUP_LOGGED')
+    ''')
+    assert rc == 0, out[-2500:]
+    assert 'STDLIB_SETUP_LOGGED' in out
 
 
 def test_conftest_browser_fixture_helper_actually_runs():
@@ -450,12 +643,29 @@ requires_prefix_gui_libs = pytest.mark.skipif(
            '(libatk/libnss/libgbm) — the pool self-heal has nothing to add, '
            'so LD_LIBRARY_PATH staying empty is correct here')
 
+_MISSING_BROWSER_ROOT = '/nonexistent-browser-root'
+
+
+def _headed_browser_without_a_registry():
+    """headed_chromium_executable() as the degradation probe sees it: its
+    Playwright registry is missing, so only a system browser can count."""
+    saved = os.environ.get('PLAYWRIGHT_BROWSERS_PATH')
+    os.environ['PLAYWRIGHT_BROWSERS_PATH'] = _MISSING_BROWSER_ROOT
+    try:
+        return chromium_env.headed_chromium_executable()
+    finally:
+        if saved is None:
+            os.environ.pop('PLAYWRIGHT_BROWSERS_PATH', None)
+        else:
+            os.environ['PLAYWRIGHT_BROWSERS_PATH'] = saved
+
+
 #: The interactive-login degradation path is only reachable when NO
 #: headed-capable browser exists. ubuntu CI runners ship google-chrome
 #: system-wide, so availability is honestly True there and the degradation
 #: branch cannot fire.
 requires_no_headed_browser = pytest.mark.skipif(
-    bool(chromium_env.headed_chromium_executable()),
+    bool(_headed_browser_without_a_registry()),
     reason='a headed-capable browser exists on this host (e.g. CI runners '
            'ship google-chrome) — the headed_unavailable degradation path '
            'this test pins is unreachable here')
@@ -606,10 +816,10 @@ def test_interactive_login_degrades_with_an_actionable_reason():
     check tested ``HAS_PLAYWRIGHT`` alone — constitutionally incapable of
     failing for the reason that actually breaks this feature.
     """
-    rc, out = _run_probe('''
+    rc, out = _run_probe(f'''
         import os
         os.environ.pop('HYPERFRAMES_BROWSER_PATH', None)
-        os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '/nonexistent-browser-root'
+        os.environ['PLAYWRIGHT_BROWSERS_PATH'] = {_MISSING_BROWSER_ROOT!r}
         from tofu_search.fetch.interactive_login import (
             is_interactive_login_available, capture_login_cookies)
         assert is_interactive_login_available() is False, (
@@ -703,12 +913,13 @@ def test_playwright_automatic_node_probe_respects_operator_and_platform(
     local.write_text('#!/bin/sh\nexit 1\n')
     local.chmod(0o755)
     monkeypatch.setattr(chromium_env.sys, 'platform', platform)
+    monkeypatch.setattr(chromium_env, 'fontconfig_paths', lambda _: (None, None))
     env = {'HOME': str(tmp_path)}
     if override:
         env['PLAYWRIGHT_NODEJS_PATH'] = override
 
     def unexpected_probe(*args, **kwargs):
-        pytest.fail('Explicit selections and other platforms must not be probed')
+        pytest.fail('Explicit Node selections and other platforms must not be probed')
 
     monkeypatch.setattr(subprocess, 'run', unexpected_probe)
     chromium_env.ensure_chromium_env(env=env)

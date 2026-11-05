@@ -36,7 +36,7 @@ pytestmark = pytest.mark.unit
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 INDEX_HTML = ROOT / 'index.html'
-MAIN_TS = ROOT / 'frontend' / 'src' / 'main.ts'
+MAIN_TS = ROOT / 'frontend' / 'src' / 'application.ts'
 
 LEGACY_WELCOME = frozenset()
 

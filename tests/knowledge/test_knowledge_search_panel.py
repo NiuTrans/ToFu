@@ -46,6 +46,7 @@ import subprocess
 import sys
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -128,6 +129,7 @@ process.exit(0);
 
 
 def _run(nc: str = '') -> str:
+    require_node_modules('jsdom')
     harness = os.path.join(HERE, f'_kb_asset_url_harness_{nc or "main"}.js')
     with open(harness, 'w') as handle:
         handle.write(_HARNESS)
@@ -153,8 +155,6 @@ def _section() -> str:
 
 # ── A. behavior under a path-prefix gateway ───────────────────────────────
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_asset_urls_follow_the_deployment_base():
     output = _run('')
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -199,8 +199,6 @@ def test_search_results_box_never_shrinks_below_its_content():
 
 # ── Neuters ───────────────────────────────────────────────────────────────
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_passthrough_helper_is_caught():
     output = _run('nc_passthrough')
     assert 'PASS nc_pattern_applied' in output, f'NC did not apply:\n{output}'

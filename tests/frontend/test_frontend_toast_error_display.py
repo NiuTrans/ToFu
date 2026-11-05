@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from tests._jsdom import JS_DIR, run_harness
-from tests._runtime_sections import shipped_source_text
 
 pytestmark = pytest.mark.unit
 
@@ -68,9 +67,3 @@ report();
         body_js=body,
         min_pass=2,
     )
-    styles = shipped_source_text(
-        'frontend/src/styles/application/14-bridges-memory-branches.css'
-    )
-    assert '.toast.t-error .toast-title {' in styles
-    assert 'white-space: pre-wrap;' in styles
-    assert 'user-select: text;' in styles

@@ -222,7 +222,7 @@ def _resolve_assets() -> tuple[str, str, str, str]:
     dbg_js = os.path.join(legacy, 'static', 'js', 'core', 'debug_panel.js')
     if not os.path.isfile(ri_js) or not os.path.isfile(dbg_js):
         raise SystemExit('legacy root did not materialize the core bundles')
-    trace_css = os.path.join(ROOT, 'static', 'request-inspector-trace.css')
+    trace_css = os.path.join(ROOT, 'frontend', 'src', 'styles', 'application', '02-inspector-trace.css')
     return main_css, trace_css, dbg_js, ri_js
 
 

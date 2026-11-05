@@ -11,7 +11,7 @@ Provides:
 import json
 from datetime import datetime
 
-from flask import jsonify, request
+from quart import jsonify, request
 
 from lib.log import get_logger
 from lib.api_response import api_bad_request, api_not_found, api_ok

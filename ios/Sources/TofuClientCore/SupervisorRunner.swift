@@ -79,7 +79,7 @@ public func executeSupervisorCall(
     plan: ProbePlan,
     signedIn: Bool,
     login: @Sendable (Profile) async -> LoginResult,
-    call: @Sendable (SupervisorAction, Profile) async -> SupervisorResult,
+    call: @Sendable (SupervisorAction, Profile) async throws -> SupervisorResult,
     isCurrent: @Sendable () -> Bool,
     pollAttempts: Int = ServerLifecycle.startPollAttempts,
     pollIntervalMs: Int64 = ServerLifecycle.startPollIntervalMs
@@ -101,7 +101,7 @@ public func executeSupervisorCall(
             }
         }
 
-        switch await call(action, profile) {
+        switch try await call(action, profile) {
         case .ok(let initialRunning):
             var running = initialRunning
             // /start returns before the port binds (by design), so poll until
@@ -110,7 +110,7 @@ public func executeSupervisorCall(
             if action == .start && !running {
                 for _ in 0..<pollAttempts {
                     try await Task.sleep(nanoseconds: UInt64(max(pollIntervalMs, 0)) * 1_000_000)
-                    if case .ok(let up) = await call(.status, profile), up {
+                    if case .ok(let up) = try await call(.status, profile), up {
                         running = true
                         break
                     }
@@ -123,8 +123,8 @@ public func executeSupervisorCall(
             )
             return RunOutcome(
                 running: running,
-                handOff: completion.handOff,
-                message: completion.showTimeout ? ServerLifecycle.startTimeoutMessage() : nil
+                message: completion.showTimeout ? ServerLifecycle.startTimeoutMessage() : nil,
+                handOff: completion.handOff
             )
         case .failed(let code, let message):
             // An AUTO probe stays silent: "couldn't reach it just now" is not

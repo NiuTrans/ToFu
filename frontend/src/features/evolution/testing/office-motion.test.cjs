@@ -6,7 +6,6 @@ const {authoredFrame,spriteGeometry}=load('office-sprite-geometry');
 const {GAME_FRAMES}=load('office-game-frames');
 const {findOfficePath,walkableSegment}=load('office-navigation');
 const {createPodMotion,targetPodMotion,stepPodMotion}=load('office-pod-motion');
-const {createOfficeCanvasSurface}=load('office-canvas');
 const walker=path=>({x:0,y:0,path,direction:0,frame:1,strideDistance:0});
 const near=(a,b)=>assert.ok(Math.abs(a-b)<1e-7,`${a} ~= ${b}`);
 test('all authored models repair the reverse-facing third side frame without mirroring costumes',()=>{
@@ -83,16 +82,4 @@ test('pod approach, turn, sit, roll and stand preserve position even on mid-beat
   finishPod(motion);near(motion.y,478);
   targetPodMotion(motion,'done');finishPod(motion);near(motion.x,675);near(motion.y,610);assert.equal(motion.seatAmount,0);
   targetPodMotion(motion,'running',false);assert.equal(motion.current,undefined);assert.equal(motion.seatAmount,1);
-});
-test('dirty canvas skips identical paints, bounds DPR/resizes and refuses late paints after disposal',()=>{
-  let clears=0,draws=0;const context={setTransform(){},clearRect(){clears++;}};
-  const canvas={width:0,height:0,getContext:()=>context};
-  const surface=createOfficeCanvasSurface(canvas);
-  assert.equal(surface.resize(960,8),true);assert.equal(surface.resize(960,8),false);
-  assert.equal(canvas.width*canvas.height,1440*1080);
-  for(let i=0;i<1000;i++)surface.paint('same',()=>draws++);
-  assert.equal(draws,1);assert.equal(clears,1);assert.equal(surface.metrics().skippedPaints,999);
-  surface.invalidate();surface.paint('same',()=>draws++);assert.equal(draws,2);
-  surface.dispose();surface.dispose();surface.paint('late',()=>draws++);surface.resize(960,2);
-  assert.equal(draws,2);assert.equal(canvas.width*canvas.height,0);
 });

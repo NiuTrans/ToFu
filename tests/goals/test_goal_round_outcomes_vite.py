@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -21,21 +22,12 @@ CORE = ROOT / "frontend/src/runtime/sections/ui/tool_rounds.js"
 RICH = ROOT / "frontend/src/runtime/sections/ui/tool_rounds_rich.js"
 
 
-def _ready() -> bool:
-    if not shutil.which("node") or not BUNDLER.is_file():
-        return False
-    return subprocess.run(
-        [shutil.which("node"), "-e", "require('jsdom')"], cwd=ROOT,
-        capture_output=True, text=True,
-    ).returncode == 0
-
-
-pytestmark = [pytest.mark.unit, pytest.mark.skipif(
-    not _ready(), reason="node + jsdom + Vite test bundler required")]
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(scope="module")
 def goal_outcome_harness(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    require_node_modules('vite')
     work = tmp_path_factory.mktemp("goal-round-outcomes")
     entry = work / "entry.ts"
     entry.write_text(f"""
@@ -114,6 +106,7 @@ const command = createToolCommandExecutionPresentation({{translate}});
 
 def test_canonical_goal_rounds_render_real_rich_outcomes_and_agent_debug_anchor(
         goal_outcome_harness: Path, tmp_path: Path):
+    require_node_modules('jsdom')
     harness = ROOT / ".tmp_goal_round_outcomes_harness.cjs"
     harness.write_text(r"""
 const fs = require('fs');

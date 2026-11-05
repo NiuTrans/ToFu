@@ -118,6 +118,10 @@ def _usage_rows_from_snapshots(snapshots):
         first = messages[0] if messages and isinstance(messages[0], dict) else {}
         first_content = first.get('content', '')
         first_content = first_content[:30] if isinstance(first_content, str) else ''
+        # A windowed snapshot holds only the suffix after the scan bound;
+        # place untimestamped messages by their absolute position in the
+        # whole transcript, which full hydration would use.
+        message_start = getattr(snapshot, 'message_start', 0)
         for index, message in enumerate(messages):
             if not isinstance(message, dict) or not isinstance(
                     message.get('usage'), dict):
@@ -130,8 +134,8 @@ def _usage_rows_from_snapshots(snapshots):
                 'conv_model': (settings.get('model') or settings.get('preset')
                                or settings.get('effort') or ''),
                 'first_content': first_content,
-                'msg_index': index,
-                'total_msgs': len(messages),
+                'msg_index': message_start + index,
+                'total_msgs': message_start + len(messages),
                 'usage': message['usage'],
                 'msg_timestamp': message.get('timestamp', 0),
                 'msg_model': (message.get('model') or message.get('preset')
@@ -163,20 +167,19 @@ def _scan_costs_in_range(
     """
     owner_id = require_user_id(
         owner_user_id, context='daily report cost scan')
-    try:
-        from lib.conversations.repository import scan_conversations_bounded
-        _candidate_count, snapshots = scan_conversations_bounded(
-            user_id=owner_id,
-            updated_at_gte=ms_start,
-            created_at_lt=ms_end,
-            limit=10_000,
-            settings_keys=['model', 'preset', 'effort'],
-        )
-        rows = _usage_rows_from_snapshots(snapshots)
-    except Exception as e:
-        logger.error('[DailyReport] Cost authority read failed range=[%d,%d): %s',
-                     ms_start, ms_end, e, exc_info=True)
-        return {}
+    from lib.conversations.repository import scan_conversations_bounded
+    _candidate_count, snapshots = scan_conversations_bounded(
+        user_id=owner_id,
+        updated_at_gte=ms_start,
+        created_at_lt=ms_end,
+        limit=10_000,
+        settings_keys=['model', 'preset', 'effort'],
+        # A transcript too large for one storage response is read back to
+        # this bound in message windows; one it still cannot read fails the
+        # scan: never persist a silently incomplete month as zeros.
+        oversized_messages_since_ms=ms_start,
+    )
+    rows = _usage_rows_from_snapshots(snapshots)
 
     days = {}   # day_num → {cost, conversations}
 

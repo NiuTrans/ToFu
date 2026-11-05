@@ -248,22 +248,18 @@ def test_preparation_timeout_reaps_compiler_group(tmp_path):
         assert proc.read_text().split()[2] == 'Z'  # Exited child awaiting its OS reaper.
 
 
-def test_build_uses_owned_source_snapshot_and_launch_capacity(project, monkeypatch, tmp_path):
-    from types import SimpleNamespace
-    import runtime_guards
+def test_build_uses_owned_source_snapshot_and_stable_profile(project, monkeypatch, tmp_path):
     monkeypatch.setattr(engines.shutil, 'which', lambda *_a, **_kw: '/toolchain/cargo')
     monkeypatch.setattr(engines, '_c_compiler_accepts_date_time', lambda _: True)
-    monkeypatch.setattr(runtime_guards, 'probe_system_resources', lambda _: SimpleNamespace(
-        effective_cpu_count=12, effective_memory_available_mb=4096))
     stage = tmp_path / 'stage'; stage.mkdir()
     def compile(command, *, cwd, environment, timeout, progress):
         expected = ['/toolchain/cargo', 'build', '--release', '--locked']
         if sys.platform == 'linux':
             expected.extend(['--features', 'embedded-mimalloc'])
         assert command == expected
-        assert environment['CARGO_BUILD_JOBS'] == '4'
-        assert environment['CARGO_PROFILE_RELEASE_CODEGEN_UNITS'] == '4'
-        assert environment['CARGO_PROFILE_RELEASE_LTO'] == 'thin'
+        assert 'CARGO_BUILD_JOBS' not in environment
+        assert environment['CARGO_PROFILE_RELEASE_CODEGEN_UNITS'] == str(engines.RELEASE_CODEGEN_UNITS)
+        assert environment['CARGO_PROFILE_RELEASE_LTO'] == 'false'
         assert environment['CARGO_PROFILE_RELEASE_INCREMENTAL'] == 'true'
         assert cwd == project / 'packages/tofu-db/target/update-source-root/packages/tofu-db'
         assert (cwd / 'src/lib.rs').read_bytes() == (project / 'packages/tofu-db/src/lib.rs').read_bytes()
@@ -408,6 +404,13 @@ def test_embedded_cache_requires_matching_library_identity(project, monkeypatch)
     cached = binary(project / 'packages/tofu-db/target/update-build/release/tofu-db', engines.source_fingerprint(project))
     (cached.parent / 'libtofu_db.so').write_bytes(b'obsolete library')
     monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    def attest_library(candidate, expected):
+        if (candidate.with_name('libtofu_db.so').read_bytes() != b'fresh library'
+                or engines.build_identity(candidate)['source_sha256'] != expected):
+            raise engines.EnginePreparationError('synthetic library source differs')
+    # The fixture supplies synthetic artifacts at both cache and publish ports;
+    # actual cdylib exports are exercised by the deployment pair tests.
+    monkeypatch.setattr(engines, '_verify_library_source', attest_library)
     built = []
     def build(root, staging, _environment):
         built.append(True)

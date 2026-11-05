@@ -69,8 +69,9 @@ BROWSER_TOOL_READ_PAGE = {
         "name": "browser_read_page",
         "description": (
             "Read logged-in content with target/coverage. auto selects useful content; "
-            "text uses DOM; data uses relevant APIs; elements lists controls; "
-            "app_state inspects frameworks/charts."
+            "text uses DOM; data uses relevant APIs and embedded page data; "
+            "elements lists controls; app_state inspects frameworks/charts; "
+            "media lists images/video/audio to stage."
         ),
         "parameters": {
             "type": "object",
@@ -80,7 +81,7 @@ BROWSER_TOOL_READ_PAGE = {
                 "mode": {
 
                     "type": "string",
-                    "enum": ["auto", "text", "data", "elements", "app_state"],
+                    "enum": ["auto", "text", "data", "elements", "app_state", "media"],
                     "description": "What representation to return (default: auto)"
                 },
                 "selector": {
@@ -245,10 +246,7 @@ BROWSER_TOOL_SCREENSHOT = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tab_id": {
-                    "type": "integer",
-                    "description": "Tab ID; omit for the active tab."
-                },
+                "tab_id": _TAB_ID_OPT,
                 "format": {
                     "type": "string",
                     "enum": ["png", "jpeg"],
@@ -631,16 +629,6 @@ BROWSER_TOOL_PREVIEW_PAGE = {
                     "description": "Settle after DOM load in ms; default 1500."
                 }
             },
-            "oneOf": [
-                {
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"]
-                },
-                {
-                    "properties": {"url": {"type": "string"}},
-                    "required": ["url"]
-                }
-            ],
             "additionalProperties": False
         }
     }

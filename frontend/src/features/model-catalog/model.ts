@@ -37,13 +37,24 @@ export function blendedModelCost(pricing: ModelPricing | null): number | null {
   return (3 * input + output) / 4;
 }
 
+/** Catalog Models carrying a published AA Intelligence Index score. */
+export function countAaScoredModels(groups: readonly VendorGroup[]): number {
+  let scored = 0;
+  for (const group of groups) {
+    for (const row of group.models) {
+      if (row.aa?.intelligence !== null && row.aa?.intelligence !== undefined) scored += 1;
+    }
+  }
+  return scored;
+}
+
 /**
  * Supply-channel and serving-variant tokens that do not change what a model
- * IS: ``Qwen3_8-27B-Meituan`` is Qwen3.8-27B rented through Meituan, a
+ * IS: ``Qwen3_8-27B-YourProvider`` is Qwen3.8-27B rented through YourProvider, a
  * ``vendor/`` namespace is a supply path, and a trailing ``instruct`` tag on
  * one twin of an otherwise identical registration is the same snapshot.
  */
-const SUPPLY_IDENTITY_TOKENS = new Set(['meituan', 'fp8', 'instruct']);
+const SUPPLY_IDENTITY_TOKENS = new Set(['yourprovider', 'fp8', 'instruct']);
 
 /**
  * Near-name twins that must never collapse: OpenAI sells
@@ -154,7 +165,7 @@ export function buildVendorGroups(
   }
 
   // One row per semantic model: provider namespaces and supply-channel
-  // variants (Meituan, Fireworks accounts, FP8 re-registrations) are the
+  // variants (YourProvider, Fireworks accounts, FP8 re-registrations) are the
   // same Model rented through different supply paths, not different Models.
   const byIdentity = new Map<string, ModelCatalogRow[]>();
   for (const row of rows) {

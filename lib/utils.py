@@ -4,14 +4,177 @@ Provides small, dependency-free helpers that multiple modules need.
 """
 
 import ast
+import copy
+import hashlib
 import json
 import re
+import sys
 
 from lib.log import get_logger
 
-__all__ = ['safe_json', 'safe_float', 'repair_json']
+__all__ = ['safe_json', 'safe_float', 'repair_json', 'fast_deepcopy',
+           'fast_deepcopy_with_retained_bytes', 'retained_graph_bytes',
+           'HASHLIB_GIL_RELEASE_BYTES', 'sha256_holding_gil', 'update_holding_gil']
 
 logger = get_logger(__name__)
+
+_DEEPCOPY_ATOMIC_TYPES = frozenset({type(None), bool, int, float, complex, str, bytes})
+# Existing task-event accounting includes one owner/callback allowance per graph.
+_DETACHED_GRAPH_OVERHEAD_BYTES = 1024
+
+
+def fast_deepcopy(value):
+    """Return the same result as ``copy.deepcopy`` with a builtin-tree fast path.
+
+    Exact ``dict``/``list`` containers are copied inline and atomic scalars are
+    shared, as ``copy.deepcopy`` does. Every other type (subclasses, tuples,
+    sets, objects with ``__deepcopy__``) is delegated to ``copy.deepcopy``
+    with the same memo, so shared and cyclic references keep their identity
+    relationships. Event snapshots and routing aggregates are almost entirely
+    builtin JSON trees, where the generic per-node dispatch dominated.
+    """
+    return _fast_deepcopy(value, {})
+
+
+def _keep_alive_during_copy(value, memo):
+    # Same guard as copy.deepcopy: a source container freed mid-copy (a live
+    # task graph mutated by another thread) must not let a new object reuse
+    # its id and alias the memoized copy.
+    try:
+        memo[id(memo)].append(value)
+    except KeyError:
+        memo[id(memo)] = [value]
+
+
+def _fast_deepcopy(value, memo):
+    kind = type(value)
+    if kind in _DEEPCOPY_ATOMIC_TYPES:
+        return value
+    if kind is dict:
+        copied = memo.get(id(value))
+        if copied is not None:
+            return copied
+        result = {}
+        memo[id(value)] = result
+        _keep_alive_during_copy(value, memo)
+        for key, child in value.items():
+            if type(key) not in _DEEPCOPY_ATOMIC_TYPES:
+                key = _fast_deepcopy(key, memo)
+            result[key] = (child if type(child) in _DEEPCOPY_ATOMIC_TYPES
+                           else _fast_deepcopy(child, memo))
+        return result
+    if kind is list:
+        copied = memo.get(id(value))
+        if copied is not None:
+            return copied
+        result = []
+        memo[id(value)] = result
+        _keep_alive_during_copy(value, memo)
+        append = result.append
+        for child in value:
+            append(child if type(child) in _DEEPCOPY_ATOMIC_TYPES
+                   else _fast_deepcopy(child, memo))
+        return result
+    return copy.deepcopy(value, memo)
+
+
+def retained_graph_bytes(*values) -> int:
+    """Charge each reachable dict/list/tuple graph object once by identity."""
+    pending = list(values)
+    seen = set()
+    total = _DETACHED_GRAPH_OVERHEAD_BYTES
+    while pending:
+        value = pending.pop()
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        total += sys.getsizeof(value)
+        if isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+    return total
+
+
+class _MeasuredGraphCopy:
+    """Fuse builtin-tree copying and identity accounting without a second walk.
+
+    The unmeasured fast path above stays unchanged. Non-builtin deepcopy hooks
+    may replace keys or return arbitrary aliases; those retain the existing
+    deepcopy implementation and measure the final reachable result instead.
+    """
+
+    def __init__(self):
+        self.memo = {}
+        self.seen = set()
+        self.retained_bytes = _DETACHED_GRAPH_OVERHEAD_BYTES
+        self.used_fallback = False
+
+    def copy(self, value):
+        kind = type(value)
+        identity = id(value)
+        seen = self.seen
+        if kind in _DEEPCOPY_ATOMIC_TYPES:
+            if identity not in seen:
+                seen.add(identity)
+                self.retained_bytes += sys.getsizeof(value)
+            return value
+        memo = self.memo
+        if identity in memo:
+            return memo[identity]
+        getsize = sys.getsizeof
+        charge = 0
+        if kind is dict:
+            result = {}
+            memo[identity] = result
+            _keep_alive_during_copy(value, memo)
+            seen.add(id(result))
+            for key, child in value.items():
+                if type(key) not in _DEEPCOPY_ATOMIC_TYPES:
+                    key = self.copy(key)
+                elif id(key) not in seen:
+                    seen.add(id(key))
+                    charge += getsize(key)
+                if type(child) not in _DEEPCOPY_ATOMIC_TYPES:
+                    child = self.copy(child)
+                elif id(child) not in seen:
+                    seen.add(id(child))
+                    charge += getsize(child)
+                result[key] = child
+            self.retained_bytes += charge + getsize(result)
+            return result
+        if kind is list:
+            result = []
+            memo[identity] = result
+            _keep_alive_during_copy(value, memo)
+            seen.add(id(result))
+            append = result.append
+            for child in value:
+                if type(child) not in _DEEPCOPY_ATOMIC_TYPES:
+                    child = self.copy(child)
+                elif id(child) not in seen:
+                    seen.add(id(child))
+                    charge += getsize(child)
+                append(child)
+            self.retained_bytes += charge + getsize(result)
+            return result
+        self.used_fallback = True
+        return copy.deepcopy(value, memo)
+
+
+def fast_deepcopy_with_retained_bytes(value):
+    """Return a detached graph and its exact existing retained-byte charge.
+
+    Shared/cyclic references use the same memo as ``fast_deepcopy``. The
+    result's allocator sizes, not source sizes or JSON lengths, own the charge.
+    """
+    owner = _MeasuredGraphCopy()
+    result = owner.copy(value)
+    retained = (retained_graph_bytes(result) if owner.used_fallback
+                else owner.retained_bytes)
+    return result, retained
 
 
 def safe_json(raw, default=None, label=''):
@@ -258,3 +421,32 @@ def safe_float(v, default=0.0):
     except (ValueError, TypeError):
         logger.debug('safe_float: cannot convert %r to float, returning default %s', v, default, exc_info=True)
         return default
+
+
+# CPython's hashlib releases the GIL for every update of at least this many
+# bytes (HASHLIB_GIL_MINSIZE in Modules/hashlib.h). Digesting many medium
+# buffers in a loop therefore hands the GIL away once per item and, beside a
+# runnable thread, waits up to a switch interval (5 ms) to take it back; in
+# round preparation that handoff, not hashing, dominated snapshot projection.
+# Slices below the threshold keep the GIL for the whole digest; the interpreter
+# still yields at its normal switch interval between slices.
+HASHLIB_GIL_RELEASE_BYTES = 2048
+_GIL_HELD_SLICE_BYTES = HASHLIB_GIL_RELEASE_BYTES - 1
+
+
+def update_holding_gil(hasher, data: bytes) -> None:
+    """Equivalent to ``hasher.update(data)``; never releases the GIL."""
+    size = len(data)
+    if size < HASHLIB_GIL_RELEASE_BYTES:
+        hasher.update(data)
+        return
+    view = memoryview(data)
+    for start in range(0, size, _GIL_HELD_SLICE_BYTES):
+        hasher.update(view[start:start + _GIL_HELD_SLICE_BYTES])
+
+
+def sha256_holding_gil(data: bytes = b''):
+    """Equivalent to ``hashlib.sha256(data)``; never releases the GIL."""
+    hasher = hashlib.sha256()
+    update_holding_gil(hasher, data)
+    return hasher

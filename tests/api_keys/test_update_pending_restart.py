@@ -186,7 +186,7 @@ class EnrichWithCodePendingTest(unittest.TestCase):
         """NEUTER needle: delete the call and the route-level test goes red."""
         import inspect
         src = inspect.getsource(self.upd.update_check)
-        self.assertIn('_enrich_with_code_pending(payload)', src)
+        self.assertIn('_enrich_with_code_pending(payload', src)
 
 
 class UpdateCheckRouteTest(unittest.TestCase):

@@ -28,12 +28,14 @@
   background: var(--bg-primary); color: var(--text-primary);
   transition: border-color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
 }
-.coordination-leader[data-coordinator-id]:not([data-coordinator-id=""]) { cursor: pointer; }
-.coordination-leader[data-coordinator-id]:not([data-coordinator-id=""]):hover,
-.coordination-leader[data-coordinator-id]:not([data-coordinator-id=""]):focus-visible {
+/* Only a card that navigates is a button: a pending or unbound project row is not. */
+.coordination-leader[role="button"] { cursor: pointer; }
+.coordination-leader[role="button"][aria-busy="true"] { cursor: progress; }
+.coordination-leader[role="button"]:hover,
+.coordination-leader[role="button"]:focus-visible {
   border-color: var(--accent); background: var(--bg-hover); outline: none;
 }
-.coordination-leader[data-coordinator-id]:not([data-coordinator-id=""])[aria-current="page"] {
+.coordination-leader[role="button"][aria-current="page"] {
   border-color: var(--accent); background: var(--accent-subtle);
 }
 .coordination-leader-mark {
@@ -57,26 +59,58 @@
 }
 .coordination-leader-actions small { color: var(--text-secondary); }
 
-.coordination-summary {
-  padding: var(--space-3); color: var(--text-secondary);
-  border: 1px solid var(--border); border-radius: var(--radius);
-  background: var(--bg-secondary); min-width: 0; max-width: 100%; box-sizing: border-box;
-}
-.coordination-summary summary {
-  cursor: pointer; color: var(--text-primary); font-weight: var(--weight-semibold);
-  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-width: 0;
-}
-.coordination-summary-title { flex: 1 1 8rem; min-width: 0; }
-.coordination-summary-tally {
-  color: var(--text-tertiary); font-size: var(--font-size-xs); font-weight: var(--weight-regular);
-  font-variant-numeric: tabular-nums; white-space: nowrap;
-}
-.coordination-summary-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); font-weight: var(--weight-normal); }
-.coordination-summary p { margin: var(--space-1) var(--space-0); white-space: pre-wrap; overflow-wrap: anywhere; }
-.coordination-summary-work { padding-block: var(--space-2); }
 
-#presenceStrip:has(.coordination-summary) { padding: var(--space-3) var(--space-4); }
-.coordination-summary summary:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
+.coordinator-conversations-host { flex-shrink: 0; margin: var(--space-0) var(--space-2) var(--space-2); }
+.coordinator-conversations { display: flex; flex-direction: column; min-height: 0; }
+.coordinator-conversations[hidden] { display: none; }
+.coordinator-conversations-toggle {
+  display: flex; width: 100%; min-width: 0; align-items: center; gap: var(--space-2);
+  padding: var(--space-2) var(--space-3); color: var(--text-secondary);
+  border: var(--control-edge-inset) solid transparent; border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm); font-weight: var(--weight-medium);
+}
+.coordinator-conversations-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+.coordinator-conversations-toggle:focus-visible { outline: var(--control-edge-inset) solid var(--accent); outline-offset: var(--control-edge-inset); }
+/* The date groups' down chevron, turned to point right while collapsed. */
+.coordinator-conversations-chevron { flex-shrink: 0; color: var(--text-tertiary); transform: rotate(-90deg); transition: transform var(--motion-fast) var(--ease-standard); }
+.coordinator-conversations-toggle.is-expanded .coordinator-conversations-chevron { transform: none; }
+.coordinator-conversations-label { flex: 1; min-width: 0; text-align: start; }
+.coordinator-conversations-count { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.coordinator-conversations-live { color: var(--accent); font-size: var(--font-size-xs); white-space: nowrap; }
+.coordinator-conversations-live:empty { display: none; }
+.coordinator-conversations-unread[hidden] { display: none; }
+.coordinator-conversations-body {
+  max-height: 40vh; overflow-y: auto; overscroll-behavior: contain;
+  margin-inline-start: var(--space-3); padding-inline-start: var(--space-2);
+  border-inline-start: var(--control-edge-inset) solid var(--border);
+}
+.coordinator-conversations-body .conv-item { padding: var(--space-2); gap: var(--space-2); font-size: var(--font-size-sm); }
+.coordinator-conversations-body .conv-date { display: flex; align-items: center; gap: var(--space-2); }
+.coordinator-conversations-time { color: var(--text-tertiary); font-size: var(--font-size-xs); white-space: nowrap; }
+.coordinator-conversations-status { color: var(--text-tertiary); font-size: var(--font-size-xs); }
+.coordinator-conversations-status.is-running { color: var(--accent); }
+.coordinator-conversations-status.is-failed { color: var(--error-text); }
+@media (max-width: 480px) {
+  .coordinator-conversations-body { max-height: 36vh; margin-inline-start: var(--space-2); padding-inline-start: var(--space-1); }
+  .coordinator-conversations-toggle { padding-inline: var(--space-2); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .coordinator-conversations-chevron { transition: none; }
+}
+
+
+#presenceStrip:has(.coordinator-progress) { padding: var(--space-3) var(--space-4); }
+/* A worker conversation's strip holds the way back to its coordinator; inset
+ * it from the pane corner instead of printing it flush under the topbar. */
+#presenceStrip:has(> .ui-btn) { padding: var(--space-2) var(--space-6) var(--space-0); }
+/* A failed coordinator read: one quiet status row with its retry. */
+.coordination-read-error {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2);
+  margin: var(--space-1) var(--space-2); padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm); background: var(--warning-bg); color: var(--warning-text);
+  font-size: var(--font-size-sm);
+}
+.coordination-read-error small { color: inherit; font-size: inherit; }
 
 /* Graph workspace: geometry uses the same --space-4 cells as the projection.
  * Container queries select wires and node positions together, including split panes. */
@@ -152,19 +186,10 @@
   .coordination-graph-edges[data-columns="2"] { display: none; }
   .coordination-graph-edges[data-columns="1"] { display: block; }
 }
-@media (max-width: 480px) { .coordination-summary { padding: var(--space-2); } }
 
 /* Coordinator attention is tied to a real assistant message, not task counts. */
 .coordination-leader-unread { margin-inline-start: var(--space-2); color: var(--accent); }
 .coordination-leader[data-unread="true"] .coordination-leader-meta { color: var(--text-primary); }
-.coordination-report { color: var(--text-primary); margin-block-end: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-primary); }
-.coordination-report[data-unread="true"] { border-inline-start: var(--space-1) solid var(--accent); }
-.coordination-report summary { cursor: pointer; overflow-wrap: anywhere; font-size: var(--font-size-sm); }
-.coordination-report-kind { color: var(--text-secondary); font-size: var(--font-size-xs); margin-inline-end: var(--space-2); }
-.coordination-report-body { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); padding-block-start: var(--space-3); max-height: min(30vh, 20rem); overflow: auto; }
-.coordination-report-body p { margin: var(--space-0); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-size-sm); }
-.coordination-report-body small { color: var(--text-secondary); font-size: var(--font-size-xs); }
-.coordination-report summary:focus-visible, .coordination-report-body:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
 .coordinator-budget-metrics,
 .coordinator-budget-fields {
   display: grid;
@@ -211,3 +236,34 @@
 .coordination-topology > summary:focus-visible,
 .coordination-reference summary:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
 .coordination-refresh-feedback:empty { display: none; }
+
+/* Session-free task board: the Coordinator's own summary of the human's tasks.
+ * One calm card; status is a quiet label, never a progress bar or a count of sessions. */
+.coordinator-progress { color: var(--text-primary); padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-secondary); min-width: 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
+.coordinator-progress-head { display: flex; flex-direction: column; gap: var(--space-1); cursor: pointer; list-style: none; min-width: 0; }
+.coordinator-progress-head::-webkit-details-marker { display: none; }
+.coordinator-progress-title-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); min-width: 0; }
+.coordinator-progress-title { font-weight: var(--weight-semibold); }
+.coordinator-progress-tally { color: var(--accent); font-size: var(--font-size-xs); font-weight: var(--weight-semibold); white-space: nowrap; }
+.coordinator-progress-updated { margin-inline-start: auto; color: var(--text-tertiary); font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.coordinator-progress-summary { color: var(--text-secondary); font-size: var(--font-size-sm); line-height: var(--leading-title); }
+.coordinator-progress:not([open]) .coordinator-progress-summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.coordinator-progress-body { display: flex; flex-direction: column; gap: var(--space-2); padding-block-start: var(--space-2); max-height: min(40vh, 26rem); overflow: auto; overscroll-behavior: contain; }
+.coordinator-progress-note { margin: var(--space-0); color: var(--text-secondary); font-size: var(--font-size-sm); }
+.coordinator-progress-tasks { display: flex; flex-direction: column; gap: var(--space-1); margin: var(--space-0); padding: var(--space-0); list-style: none; }
+.coordinator-progress-task { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-1) var(--space-0); min-width: 0; }
+.coordinator-progress-status { flex: none; padding-inline: var(--space-1); border-radius: var(--radius-sm); color: var(--text-secondary); font-size: var(--font-size-xs); line-height: var(--leading-title); text-align: center; white-space: nowrap; }
+.coordinator-progress-task[data-status="in_progress"] .coordinator-progress-status { color: var(--accent); background: var(--accent-subtle); }
+.coordinator-progress-task[data-status="completed"] .coordinator-progress-status { color: var(--success-text); }
+.coordinator-progress-task[data-status="cancelled"] .coordinator-progress-text { color: var(--text-tertiary); text-decoration: line-through; }
+.coordinator-progress-text { display: flex; flex-direction: column; gap: var(--space-0); min-width: 0; }
+.coordinator-progress-text strong { font-size: var(--font-size-sm); font-weight: var(--weight-medium); line-height: var(--leading-title); }
+.coordinator-progress-text small { color: var(--text-secondary); font-size: var(--font-size-xs); line-height: var(--leading-title); }
+.coordinator-progress-finished > summary { cursor: pointer; color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordinator-progress-finished > .coordinator-progress-tasks { padding-block-start: var(--space-1); }
+.coordinator-progress-actions { display: flex; justify-content: flex-end; }
+/* An empty board is one line under its title: the hint beside its action. */
+.coordinator-progress[data-state="empty"] .coordinator-progress-body { flex-direction: row; flex-wrap: wrap; align-items: center; }
+.coordinator-progress[data-state="empty"] .coordinator-progress-note { flex: 1 1 16rem; min-width: 0; }
+.coordinator-progress summary:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
+@media (max-width: 480px) { .coordinator-progress { padding: var(--space-2); } }

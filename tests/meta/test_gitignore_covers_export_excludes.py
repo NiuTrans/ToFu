@@ -31,8 +31,8 @@ the runtime_layout registry — together they cover both.
 Keepers (tracked on purpose, even though export excludes them)
 --------------------------------------------------------------
 A few files are export-excluded yet MUST stay tracked in the private repo:
-  * ``export.py`` / ``CLAUDE.md`` — the export infra + agent-rules doc; excluded
-    from the *published* tree but are real source in the working repo.
+  * ``export.py`` — the export infra; excluded from the *published* tree but
+    real source in the working repo.
   * ``bundles/`` — release-tiered content packs (docs/SITE_PACKS.md): company
     site packs, provider templates and intranet tests stay tracked here and
     are excluded whole from the opensource export. Registered as a PREFIX.
@@ -64,11 +64,10 @@ _EXTRA_KEEPERS = {
 
     # The internal canvas adapter is excluded publicly; keep its offline tests
     # private with that owner rather than publishing a dangling provider import.
-    'tests/evaluations/test_meituan_sandbox_submit_watch.py',
+    'tests/evaluations/test_yourprovider_sandbox_submit_watch.py',
     # Portable diagnostic dependencies are owned by the public keep-list;
     # this set contains only deliberately private source.
     'export.py',                                 # export infra (sanitization patterns)
-    'CLAUDE.md',                                 # agent-rules doc (stripped from public)
     'JOURNAL.md',                                # internal evolution journal (public history ships via CHANGELOG.md)
     'android/JOURNAL.md',                        # same internal-journal contract as the root JOURNAL.md
     # Dir-placeholder: export strips ALL of uploads/ (runtime data), but this
@@ -87,8 +86,10 @@ _EXTRA_KEEPERS = {
     # took two passes to find. So: tracked, private, and registered here.
     'scripts/cache_waste_report.py',   # cache-waste distribution; pinned by
                                        # tests/cache/test_cache_waste_report.py
-    'scripts/cache_ab_probe.py',       # second-path A/B control; names our own
-                                       # gateway + an internal report doc
+    'scripts/cache_ab_probe.py',       # single-property cache A/B probe;
+                                       # names our own gateway
+    'scripts/cache_tail_ttl_probe.py', # live 1h-vs-5m tail TTL probe;
+                                       # defaults to our own gateway
     # Maintainer-only settings panel (cost A/B experiment —
     # lib/settings_panels.MAINTAINER_ONLY_TABS). Export-excluded so the public
     # tree never carries the markup, but it MUST stay tracked here: it is the
@@ -105,8 +106,8 @@ _EXTRA_KEEPERS = {
     'scripts/release_open.sh',
     # ── Internal-only tooling: tracked on purpose, never public ─────────────
     # Syncs our template to the SSO-gated ModelPlaza catalog; exercised only by
-    # the internal bundles/meituan tier, useless to a public checkout.
-    'scripts/meituan_template_sync.py',
+    # the internal bundles/yourprovider tier, useless to a public checkout.
+    'scripts/yourprovider_template_sync.py',
 }
 
 # ── The pet's RAW MASTER ART: tracked on purpose, never published ────────────
@@ -306,7 +307,7 @@ def test_keeper_prefixes_are_live_and_narrow():
 
 
 def test_neuter_guard_has_teeth():
-    """Poison the keeper set to EMPTY → the guard must fail (export.py + CLAUDE.md
+    """Poison the keeper set to EMPTY → the guard must fail (export.py + JOURNAL.md
     are genuinely tracked-and-excluded). Proves the assertion cross-checks the
     real index against real export rules, not a tautology that always passes.
 
@@ -330,7 +331,7 @@ def test_neuter_guard_has_teeth():
         assert offenders, (
             'neuter failed: emptying the keeper set produced NO offenders — the '
             'guard is not actually reading the keeper allow-list (or export.py '
-            'no longer excludes export.py/CLAUDE.md).')
+            'no longer excludes export.py/JOURNAL.md).')
     finally:
         globals()['_EXTRA_KEEPERS'] = real_extra
         globals()['_KEEPER_PREFIXES'] = real_prefixes
@@ -361,10 +362,12 @@ def test_neuter_keeper_prefix_is_load_bearing():
         assert offenders, (
             'emptying the keeper PREFIX list produced no offenders — the prefix '
             'mechanism is not load-bearing (are the masters still tracked?)')
-        assert all(any(o.startswith(p) for p in real_prefixes) for o in offenders), (
+        stray = [o for o in offenders
+                 if not any(o.startswith(p) for p in real_prefixes)]
+        assert not stray, (
             'the prefixes should cover exactly their documented subtrees; other '
             'offenders appeared, so the exact-path keepers have drifted: '
-            f'{offenders[:5]}')
+            f'{stray[:5]}')
     finally:
         globals()['_KEEPER_PREFIXES'] = real_prefixes
     assert not _offenders(export, tracked)

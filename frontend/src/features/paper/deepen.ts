@@ -4,6 +4,7 @@ import { featureRegistry } from '../../feature-registry';
 import { escapeHtml as escape } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
 import { createButton, createIconButton, createSpinner } from '../../ui';
+import { syncReportFinishTag } from './report-article/metadata';
 import {
   paperAttachPush,
   paperDetachPush,
@@ -60,11 +61,6 @@ type PaperWindow = Window & {
   _paperParsedText?: string;
   _reportView?: (kind: string) => ReportView | null;
   _activeReportLang?: () => string;
-  _paperXpApplyMetaEvent?: (
-    stream: JsonObject,
-    event: JsonObject,
-    view: ReportView,
-  ) => void;
   _paperDeepenAfterRender?: typeof paperDeepenAfterRender;
   _deepenReportHeadings?: typeof deepenReportHeadings;
   _deepenApplyEvent?: typeof deepenApplyEvent;
@@ -223,7 +219,7 @@ function paintError(drawer: HTMLElement, message: string): void {
 async function syncReportMeta(view: ReportView | null, job: DeepenJob): Promise<void> {
   const state = globals();
   const lang = view?.langKey?.();
-  if (!view || !lang || !state._paperHash || !state._paperXpApplyMetaEvent) return;
+  if (!view || !lang || !state._paperHash) return;
   try {
     const data = await api().reportCache({
       lang,
@@ -231,11 +227,11 @@ async function syncReportMeta(view: ReportView | null, job: DeepenJob): Promise<
     });
     if (job.current?.() === false) return;
     if (data.ok === true && data.meta && typeof data.meta === 'object') {
-      state._paperXpApplyMetaEvent(
-        view.stream ?? { kind: view.kind || 'report' },
-        { type: 'report_meta', meta: data.meta },
-        view,
-      );
+      view.meta = data.meta;
+      if (view.stream) view.stream.meta = data.meta;
+      const container = typeof view.containerId === 'string'
+        ? document.getElementById(view.containerId) : null;
+      if (container) syncReportFinishTag(container, data.meta);
     }
   } catch (error: unknown) {
     console.debug('[Paper:Deepen] meta sync failed (non-fatal):', error);

@@ -4,8 +4,9 @@ from quart.utils import run_sync
 
 from lib.api_response import (api_bad_request, api_conflict, api_forbidden,
                               api_not_found, api_ok, api_payload_too_large)
+from lib.error_envelope import BadRequest
 from lib.memory.working_facts import service
-from lib.memory.working_facts.contract import contract, limit, validate
+from lib.memory.working_facts.contract import FactInputError, contract, limit, validate
 from lib.memory.working_facts.repository import FactConflict, FactsUnavailable
 from lib.openapi import api_meta, schema_definition
 from lib.request_parser import async_parse_body
@@ -47,7 +48,7 @@ async def update_working_facts_v1(conv_id):
         return api_not_found('not_found')
     except PermissionError as exc:
         return api_forbidden(str(exc))
-    except ValueError as exc:
+    except FactInputError as exc:
         return api_bad_request(str(exc))
 
 
@@ -60,9 +61,13 @@ def read_working_fact_consumers_v1(conv_id):
     from lib.memory.working_facts import consumers
     try:
         raw_limit = request.args.get('limit')
+        try:
+            page_size = int(raw_limit) if raw_limit is not None else None
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise BadRequest('limit must be an integer', field='limit') from exc
         return api_ok(consumers.query(conv_id, principal=request_principal(),
-            cursor=request.args.get('cursor', ''), page_size=int(raw_limit) if raw_limit is not None else None))
+            cursor=request.args.get('cursor', ''), page_size=page_size))
     except FactsUnavailable:
         return api_not_found('not_found')
-    except ValueError as exc:
+    except (FactInputError, BadRequest) as exc:
         return api_bad_request(str(exc))

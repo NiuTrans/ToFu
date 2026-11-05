@@ -1,5 +1,6 @@
 """Tests for lib/tasks_pkg/conv_message_builder.py — server-side message building."""
 
+from copy import deepcopy
 import json
 
 import pytest
@@ -7,6 +8,8 @@ import pytest
 from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
 from lib.tasks_pkg.conv_message_builder.api import build_branch_api_messages
 from unittest.mock import patch
+
+pytestmark = pytest.mark.unit
 
 
 class TestTransformMessages:
@@ -264,6 +267,43 @@ class TestTransformMessages:
         result = _transform_messages(raw, {})
         assert len(result) == 1
         assert result[0]['content'] == 'Hello'
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(('stored_field', 'wire_field', 'items'), [
+        ('_responsesItems', '_responses_items', [
+            {'type': 'reasoning', 'id': 'rs-synthetic',
+             'encrypted_content': 'synthetic-opaque-a', 'summary': []},
+            {'type': 'reasoning', 'id': 'rs-synthetic',
+             'encrypted_content': 'synthetic-opaque-b', 'summary': []},
+            {'type': 'reasoning', 'id': 'rs-synthetic',
+             'encrypted_content': 'synthetic-opaque-a', 'summary': []},
+        ]),
+        ('_anthropicContentBlocks', '_anthropic_content_blocks', [
+            {'type': 'redacted_thinking', 'data': 'synthetic-opaque-a'},
+            {'type': 'redacted_thinking', 'data': 'synthetic-opaque-b'},
+            {'type': 'redacted_thinking', 'data': 'synthetic-opaque-a'},
+        ]),
+    ], ids=['responses', 'anthropic'])
+    def test_trailing_opaque_only_settled_assistant_kept(
+            self, stored_field, wire_field, items):
+        """A settled opaque-only response is not the pending empty placeholder."""
+        raw = [
+            {'role': 'user', 'content': 'Hello'},
+            {'role': 'assistant', 'content': '', 'toolRounds': [],
+             '_turnStatus': 'completed', stored_field: items},
+        ]
+        original = deepcopy(raw)
+
+        result = _transform_messages(raw, {})
+
+        assert raw == original
+        assert [message['role'] for message in result] == ['user', 'assistant']
+        assert result[-1]['content'] == ''
+        assert result[-1][wire_field] == items
+        if wire_field == '_anthropic_content_blocks':
+            assert result[-1]['_reasoning_continuity'] == 'completed_turn'
+        assert _transform_messages(raw, {}, exclude_last=True) == [raw[0]]
+        assert raw == original
 
     def test_trailing_nonempty_assistant_kept(self):
         raw = [

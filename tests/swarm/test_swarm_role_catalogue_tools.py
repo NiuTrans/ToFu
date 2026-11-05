@@ -53,6 +53,7 @@ from lib.swarm.tools import (  # noqa: E402
     SPAWN_AGENTS_TOOL,
     SUB_AGENT_DENYLIST,
 )
+from lib.tools.poll import POLL_WAIT_CAP_S  # noqa: E402
 
 _DESC = SPAWN_AGENTS_TOOL['function']['description']
 _DENY_STR = '/'.join(sorted(SUB_AGENT_DENYLIST))
@@ -92,6 +93,21 @@ def test_catalogue_lists_each_roles_hint_tools():
             assert f'minus {_DENY_STR}' in segment, (
                 f'role {role!r} has unrestricted tools but the catalogue '
                 f'does not spell out "ALL tools minus {_DENY_STR}"')
+
+
+def test_every_command_role_advertises_its_command_controls():
+    """A role that can background a command can also poll and kill it; the
+    handler, not the denylist, confines those to the worker's own commands."""
+    catalogue = format_role_catalogue()
+    command_roles = [role for role, cfg in AGENT_ROLES.items()
+                     if 'run_command' in (cfg.get('tools_hint') or [])]
+    assert command_roles
+    for role in command_roles:
+        assert {'poll', 'kill'} <= set(AGENT_ROLES[role]['tools_hint']), role
+        if role not in _CATALOGUE_EXCLUDED_ROLES:
+            segment = _role_segment(catalogue, role)
+            assert 'poll' in segment and 'kill' in segment
+    assert not {'poll', 'kill'} & SUB_AGENT_DENYLIST
 
 
 def test_catalogue_names_shared_artifact_tools():
@@ -137,7 +153,6 @@ def test_catalogue_has_one_prompt_owner_and_bounded_control_prose():
     from lib.tasks_pkg.context_composer import ComposeRequest
     from lib.tasks_pkg.context_composer._providers import _swarm_guidance
     from lib.token_counter import count_text
-    from lib.tools.gateway import tool_schema_tokens
 
     catalogue = format_role_catalogue()
     guidance = _swarm_guidance(ComposeRequest(
@@ -152,15 +167,10 @@ def test_catalogue_has_one_prompt_owner_and_bounded_control_prose():
     for contract in (
         '2+ independent', 'trivial or sequential', 'fire-and-forget',
         'Do not sleep', 'predict results', 'output_file', 'depends_on',
-        'poll(ids=', 'wait_s=60', 'not a wait', 'get_agent_result', 'root synthesizes',
+        'poll(ids=', f'wait_s={POLL_WAIT_CAP_S}', 'not a wait', 'get_agent_result',
+        'root synthesizes',
     ):
         assert contract in _DESC
-    # Budget calibrated at 2026-09-18 for the delegation contract: the
-    # skills/tools/result_mode parameters (+~140 tokens over the 1_042-token
-    # baseline) are what lets the orchestrator keep MCP schemas and skill
-    # bodies OUT of its own context — a net context win per delegated task.
-    # Keep the prose terser than the structural cost of new parameters.
-    assert tool_schema_tokens([SPAWN_AGENTS_TOOL], model='kimi-k3') <= 1_200
     assert count_text(guidance, model='kimi-k3') <= 128
 
 

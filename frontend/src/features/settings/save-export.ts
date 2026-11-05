@@ -1,5 +1,8 @@
 /* ═══════════════════════════════════════════════════════════════════
-   settings/save-export.ts — close/save/export/import server config.
+   settings/save-export.ts — close/save/export/import coordination.
+   save-input.ts captures form values; save-feedback.ts owns the save latch
+   and view feedback; config-import.ts coordinates file imports through that
+   latch. Routing transactions retain their common authority.
 
    Ported from retained settings/save_export.js. Shared settings state and
    the collectors owned by still-retained sections are reached through the
@@ -9,39 +12,14 @@
 
 import { featureRegistry } from '../../feature-registry';
 import { t } from '../../i18n';
-
-interface SaveExportServerConfig {
-  hidden_models?: string[];
-  hidden_ig_models?: string[];
-  [key: string]: unknown;
-}
-
-interface SaveExportSearchPayload {
-  profile?: string;
-  llm_content_filter?: boolean;
-  fetch_top_n?: number;
-  fetch_timeout?: number;
-  max_chars_search?: number;
-  max_chars_direct?: number;
-  max_chars_pdf?: number;
-  deepen_enabled?: boolean;
-  overrides?: Record<string, unknown>;
-  max_bytes?: number;
-  skip_domains?: unknown;
-}
-
-interface SaveExportPayload {
-  presets: Record<string, unknown>;
-  search: SaveExportSearchPayload;
-  hidden_models: string[];
-  hidden_ig_models: string[];
-  model_defaults: Record<string, string>;
-  cost_experiment?: unknown;
-  proxy_pool?: unknown;
-  proxy_bypass_domains?: unknown;
-  feishu?: unknown;
-  mt_provider?: unknown;
-}
+import {retireSettingsReads} from './panel-read-session';
+import {beginSettingsSaveFeedback, retireSettingsSaveFeedback, type SettingsSaveFeedback} from './save-feedback';
+import {captureSettingsSaveInput, settingsSaveInputChanged, applyLocalSettingsInput, type SettingsSaveInput, type SettingsFeatureFlag} from './save-input';
+import {readServerConfig} from './server-config-reader';
+import {importServerConfig} from './config-import';
+import { hasPendingModelRoutingChanges, persistModelRoutingCredentialSecrets, type ModelRoutingMutationResult } from './model-routing-authority';
+import {markSearchGatewayKeySaved} from './search-gateway';
+import type {SttSaveIntent} from './speech';
 
 interface SaveExportFeatureFlags {
   trading_enabled?: boolean;
@@ -53,18 +31,13 @@ interface SaveExportFeatureFlags {
 type SaveExportGlobals = Window & {
   Api?: {
     features?: { set(flags: Record<string, boolean>): Promise<{ json(): Promise<{ ok?: boolean }> } | null> };
-    modelRouting?: {
-      putCredentialSecret(id: string, secret: string, revision: number): Promise<{ revision?: number }>;
-    };
     serverConfig?: { update(payload: unknown): Promise<{ json(): Promise<{ ok?: boolean; error?: string }> } | null> };
   };
   config?: Record<string, unknown>;
   debugLog?: (message: string, level?: string) => void;
-  refreshInputSendHint?: () => void;
   renderConversationList?: () => void;
   getActiveConv?: () => { id: string } | null;
   requestAuthoritativeConversationRender?: (id: string, options: { forceScroll: boolean }) => void;
-  _configForPersist?: () => unknown;
   _featureFlags?: SaveExportFeatureFlags;
   _registeredModels?: unknown[];
   _populateModelDropdown?: (models: unknown[]) => void;
@@ -74,52 +47,27 @@ type SaveExportGlobals = Window & {
   _applyDebugModeVisibility?: () => void;
   _loadServerConfigAndPopulate?: () => void;
   _refreshServerConfigAfterSave?: () => Promise<void>;
-  _persistSttProvider?: () => Promise<void>;
+  _captureSttSaveIntent?: () => SttSaveIntent;
+  _persistSttProvider?: (intent?: SttSaveIntent) => Promise<ModelRoutingMutationResult | void>;
+  _hasSttChanges?: () => boolean;
   _destroySkills?: () => void;
   _destroyPreferences?: () => void;
-  ChipInput?: { getValues(id: string): unknown };
   openSettings?: () => void;
   closeSettings?: () => void;
   saveSettings?: () => Promise<void>;
   exportServerConfig?: () => void;
-  importServerConfig?: (event: Event) => void;
+  importServerConfig?: (event: Event) => Promise<void>;
   // Still-retained settings owners (lazy presenters bundle).
-  _serverConfig?: SaveExportServerConfig | null;
+  _serverConfig?: Record<string, unknown> | null;
   _stgModelRouting?: unknown;
-  _stgModelRoutingRevision?: number;
   _stgModelRoutingLoadError?: string;
   _stgModelRoutingLoadPromise?: Promise<unknown> | null;
-  _stgPendingCredentialSecrets?: Record<string, string>;
-  _stgPresets?: Record<string, unknown>;
-  _searchLastPreset?: string;
   _loadModelRoutingAuthority?: () => Promise<unknown>;
   _persistModelRoutingNow?: () => Promise<unknown>;
-  _loadServerConfig?: () => Promise<unknown>;
-  _collectModelDefaults?: () => Record<string, string>;
-  _collectResponsesExperimentControls?: () => void;
-  _collectCostExperimentConfig?: () => unknown;
-  _collectProxyPool?: () => unknown;
-  _collectProxyBypassDomains?: () => unknown;
-  _collectFeishuConfig?: () => unknown;
-  _collectMtProviderConfig?: () => unknown;
 };
 
 function globals(): SaveExportGlobals {
   return featureRegistry as unknown as SaveExportGlobals;
-}
-
-function elementValue(id: string): string {
-  const element = document.getElementById(id);
-  return element instanceof HTMLInputElement
-      || element instanceof HTMLSelectElement
-      || element instanceof HTMLTextAreaElement
-    ? element.value
-    : '';
-}
-
-function elementChecked(id: string): boolean {
-  const element = document.getElementById(id);
-  return element instanceof HTMLInputElement ? element.checked : false;
 }
 
 // ══════════════════════════════════════════════════════
@@ -127,23 +75,22 @@ function elementChecked(id: string): boolean {
 // ══════════════════════════════════════════════════════
 
 function closeSettings(): void {
+  retireSettingsReads();
+  retireSettingsSaveFeedback();
   const bridge = globals() as unknown as Record<string, unknown>;
   for (const name of [
     '_destroyPrivateHosts', '_destroyBrowserAccess',
     '_destroyDevicesTab',
-    '_destroySpeechTab', '_destroyCredentialsVault', '_destroyAuthSources',
+    '_destroySpeechTab', '_destroyCatpawSettings', '_destroyCredentialsVault', '_destroyAuthSources',
+    '_destroyKnowledgeTab',
     '_destroyModelCatalogPanel',
 
     '_destroyProviderTemplatePicker',
+    '_closeProviderModelPicker',
+    '_destroyProviderCredentialViews',
   ]) {
     const cleanup = bridge[name];
     if (typeof cleanup === 'function') (cleanup as () => void)();
-  }
-  if (typeof bridge._destroySkills === 'function') {
-    (bridge._destroySkills as () => void)();
-  }
-  if (typeof bridge._destroyPreferences === 'function') {
-    (bridge._destroyPreferences as () => void)();
   }
   document.getElementById('settingsModal')?.classList.remove('open');
   // Refresh model dropdown to reflect any visibility changes
@@ -157,41 +104,30 @@ function closeSettings(): void {
   }
 }
 
-/* Save is a long awaited chain (STT persist → model-routing replace →
-   credential secrets → server config update → config reload) with no other
-   visible feedback: without a busy latch the button looks dead on a slow
-   network, and a second click races modelRouting.replace with the same
-   expected_revision (409 conflict). While busy the button is disabled and
-   the footer hint shows 保存中…; any throw anywhere in the body is surfaced
-   in that same hint instead of dying silently in the action registry. */
-let settingsSaveBusy = false;
-
-function setSettingsSaveBusy(busy: boolean): void {
-  settingsSaveBusy = busy;
-  const btn = document.getElementById('settingsSaveBtn');
-  if (btn instanceof HTMLButtonElement) btn.disabled = busy;
-  const hint = document.getElementById('settingsStatusHint');
-  if (!hint) return;
-  if (busy) hint.textContent = t('common.saving');
-  else if (hint.textContent === t('common.saving')) hint.textContent = '';
-}
-
-function settingsSaveFailed(e: unknown): void {
-  const message = (e && (e as Error).message) ? (e as Error).message : String(e);
+function settingsSaveFailed(error: unknown, feedback: SettingsSaveFeedback): void {
+  const message = error && (error as Error).message ? (error as Error).message : String(error);
   globals().debugLog?.('[Settings] Save failed: ' + message, 'error');
-  const statusHint = document.getElementById('settingsStatusHint');
-  if (statusHint) statusHint.textContent = '保存失败：' + message;
+  feedback.show('保存失败：' + message);
 }
 
 async function saveSettings(): Promise<void> {
-  if (settingsSaveBusy) return;
-  setSettingsSaveBusy(true);
+  const feedback = beginSettingsSaveFeedback();
+  if (!feedback) return;
   try {
-    await saveSettingsBody();
-  } catch (e) {
-    settingsSaveFailed(e);
+    const session = feedback.session;
+    if (session) {
+      const ready = await session.ready;
+      if (!session.isCurrent()) return;
+      if (!ready) throw new Error(t('settings.serverConfigFailed'));
+    }
+    const input = captureSettingsSaveInput();
+    const speech = input.server ? globals()._captureSttSaveIntent?.() : undefined;
+    feedback.watchSubmittedForm();
+    await saveSettingsBody(input, feedback, speech);
+  } catch (error) {
+    settingsSaveFailed(error, feedback);
   } finally {
-    setSettingsSaveBusy(false);
+    feedback.finish();
   }
 }
 
@@ -216,273 +152,81 @@ async function persistFeatureFlag(
   onApplied?.();
 }
 
-async function saveSettingsBody(): Promise<void> {
+function applyFeatureFlag(flag: SettingsFeatureFlag, value: boolean): void {
   const bridge = globals();
-  const config = bridge.config as Record<string, unknown>;
-
-  // 1. Client-side config (General tab)
-  if (typeof bridge._collectResponsesExperimentControls === 'function') {
-    bridge._collectResponsesExperimentControls();
+  if (flag === 'trading_enabled') bridge._applyTradingVisibility?.();
+  if (flag === 'debug_mode') {
+    bridge._applyDebugModeVisibility?.();
+    bridge.renderConversationList?.();
+    const conversation = bridge.getActiveConv?.();
+    if (conversation) bridge.requestAuthoritativeConversationRender?.(conversation.id, {forceScroll: true});
   }
-  config.systemPrompt = elementValue('settingSystem');
-  if (document.getElementById('settingSystemPromptMode')) {
-    config.systemPromptMode = (elementValue('settingSystemPromptMode') === 'replace') ? 'replace' : 'append';
+  if (flag === 'optimizer_enabled') {
+    const badge = document.getElementById('optimizerBadge');
+    if (badge) badge.style.display = value ? 'inline-flex' : 'none';
   }
-  if (document.getElementById('settingSystemDisabledBlocks')) {
-    let disabledIds: unknown = [];
-    try { disabledIds = JSON.parse(elementValue('settingSystemDisabledBlocks') || '[]'); } catch { disabledIds = []; }
-    if (!Array.isArray(disabledIds)) disabledIds = [];
-    config.systemPromptBlocks = { disabled: disabledIds };
-  }
-  if (document.getElementById('settingDefaultThinkingDepth')) {
-    const oldDefault = config.defaultThinkingDepth;
-    config.defaultThinkingDepth = elementValue('settingDefaultThinkingDepth') || 'off';
-    // Propagate: if current depth was the old default, update it to the new default
-    if (config.thinkingDepth === oldDefault) {
-      config.thinkingDepth = config.defaultThinkingDepth;
-    }
-  }
-  // Auto-generate conversation title toggle
-  if (document.getElementById('settingAutoGenerateTitle')) {
-    config.autoGenerateTitle = elementChecked('settingAutoGenerateTitle');
-  }
-
-  // Input send mode
-  if (document.getElementById('settingInputSendMode')) {
-    config.inputSendMode = (elementValue('settingInputSendMode') === 'ctrl_enter') ? 'ctrl_enter' : 'enter';
-    if (typeof bridge.refreshInputSendHint === 'function') bridge.refreshInputSendHint();
-  }
-
-  try { localStorage.setItem('claude_client_config', JSON.stringify(bridge._configForPersist?.())); }
-  catch (e) { bridge.debugLog?.('[saveSettings] localStorage save failed: ' + (e as Error).message, 'error'); }
-
-  // 2. Feature flags (trading toggle)
-  if (document.getElementById('settingTradingEnabled')) {
-    const newVal = elementChecked('settingTradingEnabled');
-    const curVal = !!bridge._featureFlags?.trading_enabled;
-    if (newVal !== curVal) {
-      await persistFeatureFlag('trading_enabled', newVal, () => {
-        // Show/hide the topbar entry immediately. The backend enforces the
-        // same flag per request and in its background workers, so this is
-        // presentation only — nothing here is what stops the module.
-        if (typeof bridge._applyTradingVisibility === 'function') {
-          bridge._applyTradingVisibility();
-        }
-      });
-    }
-  }
-
-  // 2b. PPTX translate toggle
-  if (document.getElementById('settingPptxTranslateEnabled')) {
-    const newPptx = elementChecked('settingPptxTranslateEnabled');
-    const curPptx = !!bridge._featureFlags?.pptx_translate_enabled;
-    if (newPptx !== curPptx) {
-      await persistFeatureFlag('pptx_translate_enabled', newPptx);
-    }
-  }
-
-  // 2c. Debug mode toggle
-  if (document.getElementById('settingDebugMode')) {
-    const newDbg = elementChecked('settingDebugMode');
-    const curDbg = !!bridge._featureFlags?.debug_mode;
-    if (newDbg !== curDbg) {
-      await persistFeatureFlag('debug_mode', newDbg, () => {
-        // Show/hide unfinished orchestration surfaces (Flow submenu, Studio /
-        // Tasks topbar + mobile-sheet items). See index.html loadFeatureFlags.
-        if (typeof bridge._applyDebugModeVisibility === 'function') {
-          bridge._applyDebugModeVisibility();
-        }
-        // Re-render sidebar and the authoritative Surface so debug
-        // presentation follows the updated setting.
-        if (typeof bridge.renderConversationList === 'function') bridge.renderConversationList();
-        if (typeof bridge.getActiveConv === 'function') {
-          const dbgConv = bridge.getActiveConv();
-          if (dbgConv) bridge.requestAuthoritativeConversationRender?.(
-            dbgConv.id, { forceScroll: true },
-          );
-        }
-      });
-    }
-  }
-
-  // 2d. Daily Optimizer toggle
-  if (document.getElementById('settingOptimizerEnabled')) {
-    const newOpt = elementChecked('settingOptimizerEnabled');
-    const curFlag = bridge._featureFlags?.optimizer_enabled;
-    const curOpt = (curFlag === undefined) ? true : !!curFlag;
-    if (newOpt !== curOpt) {
-      await persistFeatureFlag('optimizer_enabled', newOpt, () => {
-        // Show/hide the topbar badge immediately.
-        const badge = document.getElementById('optimizerBadge');
-        if (badge) badge.style.display = newOpt ? 'inline-flex' : 'none';
-      });
-    }
-  }
-
-  // 3. Server config (Providers / Presets / Search)
-  if (bridge._serverConfig) {
-    // openSettings() intentionally loads miscellaneous config and the routing
-    // authority concurrently. A fast Save must join that authority read; if
-    // the initial read failed, this also performs one fresh retry.
-    if (bridge._stgModelRoutingLoadPromise || !bridge._stgModelRouting) {
-      const readyModelRouting = await bridge._loadModelRoutingAuthority?.();
-      if (!readyModelRouting) {
-        throw new Error(
-          bridge._stgModelRoutingLoadError || 'model-routing v2 authority is unavailable');
-      }
-    }
-    if (typeof bridge._persistSttProvider === 'function') {
-      await bridge._persistSttProvider();
-    }
-    const saved = await saveServerConfig();
-    if (!saved) return;
-  }
-
-  bridge.debugLog?.('Settings saved', 'success');
-  closeSettings();
 }
 
-async function saveServerConfig(): Promise<boolean> {
+async function saveSettingsBody(
+  input: SettingsSaveInput, feedback: SettingsSaveFeedback, speechIntent?: SttSaveIntent,
+): Promise<void> {
   const bridge = globals();
-  // Strip empty preset mappings — especially 'opus' should never be pinned
-  // to a specific version; leaving it unset lets the code default (LLM_MODEL) apply.
-  const cleanPresets: Record<string, unknown> = {};
-  const stagedPresets = bridge._stgPresets || {};
-  for (const k in stagedPresets) {
-    if (stagedPresets[k]) cleanPresets[k] = stagedPresets[k];
+  applyLocalSettingsInput();
+  for (const {flag, value} of input.flags) {
+    const current = bridge._featureFlags?.[flag];
+    const previous = flag === 'optimizer_enabled' && current === undefined ? true : !!current;
+    if (value !== previous) await persistFeatureFlag(flag, value, () => applyFeatureFlag(flag, value));
   }
-
-  const serverConfig = bridge._serverConfig;
-  const payload: SaveExportPayload = {
-    presets: cleanPresets,
-    search: {},
-    hidden_models: (serverConfig && serverConfig.hidden_models) || [],
-    hidden_ig_models: (serverConfig && serverConfig.hidden_ig_models) || [],
-    model_defaults: bridge._collectModelDefaults ? bridge._collectModelDefaults() : {},
-  };
-  if (typeof bridge._collectCostExperimentConfig === 'function') {
-    const costExperimentCfg = bridge._collectCostExperimentConfig();
-    if (costExperimentCfg !== null) payload.cost_experiment = costExperimentCfg;
-  }
-  // Search tab
-  const cfCb = document.getElementById('settingLlmContentFilter');
-  const profileEl = document.getElementById('settingSearchProfile');
-  const profileVal = elementValue('settingSearchProfile') || 'balanced';
-  // 自定义 is a UI state, not a wire profile: send the last real preset as
-  // the base plus the four concrete knob values as overrides.
-  const customProfile = profileVal === 'custom';
-  payload.search.profile = customProfile
-    ? (typeof bridge._searchLastPreset !== 'undefined' ? bridge._searchLastPreset : 'balanced')
-    : profileVal;
-  payload.search.llm_content_filter = cfCb ? elementChecked('settingLlmContentFilter') : true;
-  payload.search.fetch_top_n = parseInt(elementValue('settingFetchTopN')) || 6;
-  payload.search.fetch_timeout = parseInt(elementValue('settingFetchTimeout')) || 15;
-  payload.search.max_chars_search = parseInt(elementValue('settingMaxCharsSearch')) || 60000;
-  payload.search.max_chars_direct = parseInt(elementValue('settingMaxCharsDirect')) || 200000;
-  payload.search.max_chars_pdf = parseInt(elementValue('settingMaxCharsPdf')) || 0;
-  payload.search.deepen_enabled = !!document.getElementById('settingSearchDeepen')
-    && elementChecked('settingSearchDeepen');
-  payload.search.overrides = customProfile ? {
-    fetch_top_n: payload.search.fetch_top_n,
-    max_chars_search: payload.search.max_chars_search,
-    llm_content_filter: payload.search.llm_content_filter,
-    deepen_enabled: payload.search.deepen_enabled,
-  } : {};
-  // On the new profile UI, concrete preset-owned keys are omitted unless the
-  // select sits on 自定义. Legacy/embedded surfaces have no select and keep
-  // sending the old concrete wire shape for backward compatibility.
-  if (profileEl && !customProfile) {
-    delete payload.search.fetch_top_n;
-    delete payload.search.max_chars_search;
-    delete payload.search.llm_content_filter;
-    delete payload.search.deepen_enabled;
-  }
-  // Displayed in MB, stored in bytes (the pipeline's native unit).
-  const mbVal = parseFloat(elementValue('settingMaxBytesMB'));
-  payload.search.max_bytes = (mbVal > 0) ? Math.round(mbVal * 1048576) : 20971520;
-  if (typeof bridge.ChipInput !== 'undefined') payload.search.skip_domains = bridge.ChipInput?.getValues('settingSkipDomains');
-
-  // Network — proxy pool (ordered, scoped). The pool editor owns
-  // proxying: the backend retires the legacy single-proxy slot whenever
-  // the key is present. Container absent (legacy/other surfaces) → leave
-  // the server's proxy config untouched.
-  const pool = (typeof bridge._collectProxyPool === 'function') ? bridge._collectProxyPool() : null;
-  if (pool !== null) {
-    payload.proxy_pool = pool;
-  }
-
-  // Network — directly editable bypass rows (feeds proxies_for + no_proxy).
-  const bypass = (typeof bridge._collectProxyBypassDomains === 'function')
-    ? bridge._collectProxyBypassDomains() : null;
-  if (bypass !== null) payload.proxy_bypass_domains = bypass;
-
-  // Feishu bot config
-  if (typeof bridge._collectFeishuConfig === 'function') {
-    payload.feishu = bridge._collectFeishuConfig();
-  }
-
-  // Machine translation provider config
-  if (typeof bridge._collectMtProviderConfig === 'function') {
-    payload.mt_provider = bridge._collectMtProviderConfig();
-  }
-
-  try {
-    if (!bridge._stgModelRouting) {
-      throw new Error('model-routing v2 authority is not loaded');
+  if (input.server) {
+    // Routing retains its common draft/CAS queue and credential settlement.
+    if (bridge._stgModelRoutingLoadPromise || !bridge._stgModelRouting) {
+      const ready = await bridge._loadModelRoutingAuthority?.();
+      if (!ready) throw new Error(bridge._stgModelRoutingLoadError || 'model-routing v2 authority is unavailable');
     }
-    // Join any immediate persist still in flight (model adds commit on their
-    // own), persist remaining staged edits through the same serialized chain,
-    // and skip the whole-document PUT entirely when the staged aggregate
-    // already matches the committed one — a no-op PUT still paid a full
-    // synchronous dispatcher slot rebuild server-side.
-    await bridge._persistModelRoutingNow?.();
-    const stagedSecrets = bridge._stgPendingCredentialSecrets || {};
-    const pendingCredentialIds = Object.keys(stagedSecrets);
-    for (const credentialId of pendingCredentialIds) {
-      const secretResponse = await bridge.Api?.modelRouting?.putCredentialSecret(
-        credentialId,
-        stagedSecrets[credentialId],
-        bridge._stgModelRoutingRevision ?? 0,
-      );
-      bridge._stgModelRoutingRevision = Number(secretResponse?.revision || bridge._stgModelRoutingRevision || 0);
+    const speech = await bridge._persistSttProvider?.(speechIntent);
+    if (speech && !speech.refreshed) {
+      feedback.show(t('settings.providerSavedDraftKept'));
+      return;
     }
-    if (pendingCredentialIds.length) {
-      await bridge._loadModelRoutingAuthority?.();
-    }
-    bridge._stgPendingCredentialSecrets = {};
-    const r = await bridge.Api?.serverConfig?.update(payload);
-    const data = r ? await r.json().catch(() => ({} as { ok?: boolean; error?: string })) : {};
-    if (data.ok) {
-      const msg = t('settings.configSaved');
-      bridge.debugLog?.('[Settings] ' + msg, 'success');
-      const hint = document.getElementById('settingsStatusHint');
-      if (hint) hint.textContent = t('settings.saved');
-      setTimeout(() => {
-        const lateHint = document.getElementById('settingsStatusHint');
-        if (lateHint && lateHint.textContent === t('settings.saved')) lateHint.textContent = '';
-      }, 3000);
-      // Refresh the miscellaneous config projection so the model dropdown sees
-      // hidden-model / default-model policy from this save. The routing
-      // authority was committed by the PUT above, so a full startup pass here
-      // would only re-download and re-parse the aggregate we already hold.
-      if (typeof bridge._refreshServerConfigAfterSave === 'function') {
-        void bridge._refreshServerConfigAfterSave().catch(() => { /* startup recovery owns retries */ });
-      } else if (typeof bridge._loadServerConfigAndPopulate === 'function') {
-        bridge._loadServerConfigAndPopulate();
-      }
-      return true;
-    }
-    bridge.debugLog?.('[Settings] Save failed: ' + (data.error || 'unknown'), 'error');
-    return false;
-  } catch (e) {
-    settingsSaveFailed(e);
+    if (!await saveServerConfig(input, feedback)) return;
+  } else if (!feedback.isCurrent() || feedback.wasEdited() || settingsSaveInputChanged(input)) {
+    feedback.show(`${t('settings.saved')} · ${t('context.unsaved')}`);
+    return;
+  }
+  bridge.debugLog?.('Settings saved', 'success');
+  if (feedback.isCurrent()) closeSettings();
+}
+
+async function saveServerConfig(input: SettingsSaveInput, feedback: SettingsSaveFeedback): Promise<boolean> {
+  const bridge = globals();
+  const payload = input.server;
+  if (!payload || !bridge._stgModelRouting) throw new Error('model-routing v2 authority is not loaded');
+  await bridge._persistModelRoutingNow?.();
+  const credentials = await persistModelRoutingCredentialSecrets();
+  const response = await bridge.Api?.serverConfig?.update(payload);
+  const data = response ? await response.json() : null;
+  if (!data?.ok) throw new Error(data?.error || 'server-config save returned no acknowledgement');
+
+  // Check current intent before acknowledging a submitted plaintext field.
+  const edited = !feedback.isCurrent() || feedback.wasEdited() || settingsSaveInputChanged(input);
+  if (feedback.isCurrent() && payload.search.gateway) markSearchGatewayKeySaved(payload.search.gateway);
+  bridge.debugLog?.('[Settings] ' + t('settings.configSaved'), 'success');
+  feedback.show(t('settings.saved'));
+  // This is committed application policy, independent of the editor lifetime.
+  if (typeof bridge._refreshServerConfigAfterSave === 'function') {
+    void bridge._refreshServerConfigAfterSave().catch(() => { /* startup recovery owns retries */ });
+  } else bridge._loadServerConfigAndPopulate?.();
+  if (edited || !credentials.refreshed || hasPendingModelRoutingChanges() || bridge._hasSttChanges?.()) {
+    feedback.show(credentials.refreshed
+      ? `${t('settings.saved')} · ${t('context.unsaved')}` : t('settings.providerSavedDraftKept'));
     return false;
   }
+  return true;
 }
 
 function exportServerConfig(): void {
   const bridge = globals();
-  bridge._loadServerConfig?.().then((cfg) => {
+  void readServerConfig().then((cfg) => {
     if (!cfg) return;
     const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -494,31 +238,6 @@ function exportServerConfig(): void {
   });
 }
 
-function importServerConfig(event: Event): void {
-  const target = event.target as HTMLInputElement;
-  const file = target.files?.[0];
-  if (!file) return;
-  const bridge = globals();
-  const reader = new FileReader();
-  reader.onload = async (e) => {
-    try {
-      const imported = JSON.parse(String(e.target?.result || ''));
-      const r = await bridge.Api?.serverConfig?.update(imported);
-      const data = r ? await r.json().catch(() => ({} as { ok?: boolean; error?: string })) : {};
-      if (data.ok) {
-        bridge.debugLog?.('[Settings] Config imported successfully', 'success');
-        bridge._serverConfig = null;
-        bridge.openSettings?.();
-      } else {
-        bridge.debugLog?.('[Settings] Import failed: ' + (data.error || 'unknown'), 'error');
-      }
-    } catch (err) {
-      bridge.debugLog?.('[Settings] Invalid JSON file: ' + (err as Error).message, 'error');
-    }
-  };
-  reader.readAsText(file);
-  target.value = '';
-}
 
 const bridge = globals();
 bridge.closeSettings = closeSettings;

@@ -96,6 +96,18 @@ let r2 = rowsAndOlder();
 check('mixed_older_stays_collapsed', r2.hasOlder && r2.olderCollapsed === true);
 check('mixed_only_recent_clickable', r2.rows === 1);
 
+global.conversations = window.conversations = [
+  { id: 'worker-old', title: 'Worker', _serverRev: 1, _coordinatorSource: 'coordinator-1', updatedAt: now - 40 * DAY },
+  { id: 'worker-empty', title: 'Empty worker', _serverRev: 1, _coordinatorSource: 'coordinator-1', updatedAt: now - 2 * DAY },
+  { id: 'owner-old', title: 'Owner old', _serverTurnCount: 1, updatedAt: now - 55 * DAY },
+  { id: 'owner-today', title: 'Owner today', _serverTurnCount: 1, updatedAt: now },
+];
+window._lastConvListHash = '';
+renderConversationList();
+check('coordinator_workers_never_become_date_rows', [...document.querySelectorAll('#convList .conv-item')].every(row => row.dataset.convId.startsWith('owner-')));
+check('coordinator_workers_not_in_today_count', document.querySelector('.conv-date-group[data-group="today"] .conv-date-count').textContent === '1');
+
+// ── Scenario 3: the reported bug — a group holding the ACTIVE conv ("today")
 // ── Scenario 3: the reported bug — a group holding the ACTIVE conv ("today")
 //    must still collapse when the user EXPLICITLY clicks it. The active-conv
 //    force-expand guard must not override an explicit user toggle. ──
@@ -130,7 +142,7 @@ def test_conv_list_collapse_never_hides_all_rows():
     run_harness(
         target_js=runtime_section_path('ui/conversation_list.js'),
         body_js=_BODY,
-        min_pass=6,
+        min_pass=8,
         label='conv-list collapse',
     )
 

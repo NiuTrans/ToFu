@@ -46,6 +46,32 @@ def _chat_sidecar_runtime():
         shutil.rmtree(project_root, ignore_errors=True)
 
 
+def require_authority_for_owner(request, owner: int) -> None:
+    """Keep the ready process authority only when it serves ``owner``.
+
+    Task fixtures keep an authority their module installed (for example a
+    native parameter bound to the tasks' owner). The shared test authority
+    that ``start_storage()`` opens also stays ready between modules; when it
+    is native TofuDB it is bound to the owner it started with
+    (``TOFUDB_OWNER_ID``, default ``PERSONAL_USER_ID``) and refuses every
+    owned write for another owner with ``authority_scope_mismatch``. SQL
+    authorities scope each request and serve any owner. Every other case
+    installs this module's Sidecar.
+    """
+    from lib.storage import get_storage_client, storage_status
+
+    status = storage_status()
+    if status.get('ready'):
+        if status.get('backend') != 'tofudb':
+            return
+        bound_owner = getattr(get_storage_client(), '_owner_id', None)
+        if bound_owner is None:
+            raise AssertionError('the ready native authority exposes no bound owner')
+        if bound_owner == owner:
+            return
+    request.getfixturevalue('chat_sidecar')
+
+
 @pytest.fixture
 def chat_sidecar(_chat_sidecar_runtime, monkeypatch):
     """Expose the module's Sidecar authority to one test.

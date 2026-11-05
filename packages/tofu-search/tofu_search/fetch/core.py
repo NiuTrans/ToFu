@@ -29,6 +29,7 @@ from tofu_search.fetch.http import try_playwright_fallback as _try_playwright_fa
 from tofu_search.fetch.pdf_extract import PDFExtractionError
 from tofu_search.fetch.pdf_extract import extract_pdf_text as _extract_pdf_text
 from tofu_search.fetch.readers import get_reader as _get_reader
+from tofu_search.fetch.request_budget import page_budget, page_budget_expired
 from tofu_search.fetch.utils import (
     _CACHE_EXTRACT_LIMIT,
     _HAS_LEGACY_SSL,
@@ -143,6 +144,15 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
     ``retry_after`` header. These are response facts, not replay permission.
     Passing nothing preserves the historical signature exactly.
     """
+    cfg = get_config()
+    if deadline_secs is None:
+        deadline_secs = getattr(cfg, 'fetch_url_deadline_secs', 0) or 0
+    with page_budget(deadline_secs):
+        return _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg)
+
+
+def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
+    """Run one raw page pipeline inside its caller-owned elapsed allowance."""
     if diag is not None:
         for key in ('reason', 'detail', 'truncated', 'http_status', 'retry_after'):
             diag.pop(key, None)
@@ -161,7 +171,12 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
                 diag['retry_after'] = error.retry_after
         return _diag('http_%d' % error.status_code, detail)
 
-    cfg = get_config()
+    def _page_budget_exhausted():
+        if not page_budget_expired():
+            return False
+        _diag('deadline', 'The per-URL time budget was exhausted before the next fetch path.')
+        return True
+
     if max_chars is None: max_chars = cfg.fetch_max_chars_search
     if pdf_max_chars is None: pdf_max_chars = cfg.fetch_max_chars_pdf
     if timeout is None: timeout = cfg.fetch_timeout
@@ -172,41 +187,33 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
     extraction_limit = (max(cfg.fetch_max_bytes * 2, _CACHE_EXTRACT_LIMIT)
                         if max_chars == 0 else _CACHE_EXTRACT_LIMIT)
 
-    # ── Per-URL total-time cap (0 = disabled) ──
-    # Bounds the WHOLE fallback chain for one URL — the primary HTTP
-    # body-download (via deadline_ts below) PLUS the browser and Playwright
-    # fallbacks — so a single dead/slow host can't stack per-hop timeouts
-    # (body ≈ timeout*3, +browser ≈ 15-25s, +Playwright ≈ 15s) into 60s+.
-    # Once the budget is blown we skip any REMAINING fallback hop rather than
-    # hard-killing an in-flight one, so worst case ≈ deadline + one hop.
-    if deadline_secs is None:
-        deadline_secs = getattr(cfg, 'fetch_url_deadline_secs', 0) or 0
-    _url_t0 = time.time()
-    _url_deadline_ts = (_url_t0 + deadline_secs) if deadline_secs > 0 else None
-
-    def _url_budget_blown():
-        return _url_deadline_ts is not None and time.time() >= _url_deadline_ts
-
-    # Shadow the two expensive fallback helpers with deadline-aware wrappers.
-    # A local assignment makes each name local for the ENTIRE function body, so
-    # every call site below is gated by the per-URL budget without editing each
-    # one individually. When the budget is blown the hop is skipped (returns
-    # None → the caller falls through to its own "give up" path).
-    _try_browser_fetch = _mk_deadline_browser(_url_budget_blown)
-    _try_playwright_fallback = _mk_deadline_playwright(_url_budget_blown)
+    # Page admission is cooperative; active providers keep their own lifetimes.
+    _try_browser_fetch = _mk_deadline_browser(_page_budget_exhausted)
+    _try_playwright_fallback = _mk_deadline_playwright(_page_budget_exhausted)
 
     # Rewrite code-hosting blob URLs to raw-content URLs (GitHub, GitLab, Bitbucket)
     url = _normalize_code_hosting_url(url)
-    url_is_pdf = url.lower().rstrip('/').endswith('.pdf')
+    # PDF limits differ from ordinary page previews. Include the effective
+    # budget in their cache identity; Content-Type/magic may identify a PDF
+    # even when the URL has no .pdf suffix.
+    pdf_lim = min(pdf_max_chars, extraction_limit) if pdf_max_chars > 0 else extraction_limit
+    pdf_cache_key = (url, 'pdf', pdf_lim)
+    cached_pdf = _fetch_cache.get(pdf_cache_key) if max_chars else None
+    if cached_pdf is not None:
+        if diag is not None and re.search(r'\[\.\.\.truncated at [^\]]+\]\s*$', cached_pdf):
+            diag['truncated'] = True
+        return cached_pdf
     # The small shared cache may hold a search-sized excerpt. A direct full
     # fetch cannot mistake that excerpt for complete source evidence.
     cached = _fetch_cache.get(url) if max_chars else None
     if cached is not None:
         logger.debug('Cache hit (%s chars) — %s', f'{len(cached):,}', url[:80])
-        if max_chars and not url_is_pdf and len(cached) > max_chars:
+        if max_chars and len(cached) > max_chars:
             return cached[:max_chars] + '\n[…truncated]'
         return cached
 
+    if _page_budget_exhausted():
+        return None
     domain = urlparse(url).netloc.lower()
 
     # ── Reader tier (public no-login data endpoints) ──
@@ -236,6 +243,8 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
     # connected this domain (cookies), replay their logged-in session via
     # Playwright. Runs BEFORE the skip-domain gate too: a connected domain must
     # bypass the block (the anonymous paths only ever return the login wall).
+    if _page_budget_exhausted():
+        return None
     _auth_src = None
     _auth_provider = get_auth_source_provider()
     if _auth_provider is not None:
@@ -280,6 +289,8 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
             # here reported the replay as a success and made the browser
             # escalation UNREACHABLE. Judge the CONTENT.
             nonlocal _auth_wall
+            if _page_budget_exhausted():
+                return None
             if not (_auth_src.get('cookies') or []):
                 # A browser_first row matches with ZERO stored cookies (the
                 # live browser session IS the credential). Replaying nothing
@@ -326,6 +337,9 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
                 'Connect the Tofu browser extension so the fetch runs inside your '
                 'own logged-in session, or use the site\'s API with a long-lived token.')
 
+    if _page_budget_exhausted():
+        return None
+
     # ── Skip-domain / SSRF / binary-media / circuit gate ──
     # After the reader + auth-source bypasses so a connected or reader-handled
     # URL is not blunt-blocked, but before any anonymous network request.
@@ -368,7 +382,7 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
     html_scope = {}
 
     try:
-        resp, raw = _do_request(url, timeout, verify=True, deadline_ts=_url_deadline_ts)
+        resp, raw = _do_request(url, timeout, verify=True)
     except _HttpError as e:
         # 401/403/404/410/413 = URL-specific (auth/permission/missing/oversize),
         # not a domain fault → don't trip the circuit breaker.
@@ -396,7 +410,7 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
         if is_legacy_renegotiation and _HAS_LEGACY_SSL:
             logger.warning('SSL legacy renegotiation error, retrying with legacy adapter — %s', domain, exc_info=True)
             try:
-                resp, raw = _do_request(url, timeout, legacy_ssl=True, deadline_ts=_url_deadline_ts)
+                resp, raw = _do_request(url, timeout, legacy_ssl=True)
             except _HttpError as e2:
                 if e2.status_code not in (401, 403, 404, 406, 410, 413):
                     _circuit.record_failure(url)
@@ -414,7 +428,7 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
             logger.warning('SSL failed, retrying WITHOUT certificate verification (insecure) — %s: %s',
                            domain, e, exc_info=True)
             try:
-                resp, raw = _do_request(url, timeout, verify=False, deadline_ts=_url_deadline_ts)
+                resp, raw = _do_request(url, timeout, verify=False)
             except _HttpError as e2:
                 if e2.status_code not in (401, 403, 404, 406, 410, 413):
                     _circuit.record_failure(url)
@@ -478,7 +492,6 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
         is_pdf = ('application/pdf' in ct or url.lower().rstrip('/').endswith('.pdf')
                   or raw[:5] == b'%PDF-')
         if is_pdf:
-            pdf_lim = min(pdf_max_chars, extraction_limit) if pdf_max_chars > 0 else extraction_limit
             result = _extract_pdf_text(raw, pdf_lim, url)
         elif 'text/plain' in ct:
             text = _decode_bytes(raw, resp.encoding).strip()
@@ -566,8 +579,8 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
                      'readable text, and JS rendering plus the browser fallback both '
                      'yielded nothing (often a login-walled single-page app).')
 
-    if result and (len(result) > 50 or selected_fragment):
-        if max_chars: _fetch_cache.put(url, result)
+    if result and (len(result) > 50 or selected_fragment or is_pdf):
+        if max_chars: _fetch_cache.put(pdf_cache_key if is_pdf else url, result)
         logger.debug('OK (%s chars%s) — %s', f'{len(result):,}', ', PDF' if is_pdf else '', url[:80])
         if max_chars and not is_pdf and len(result) > max_chars:
             return result[:max_chars] + '\n[…truncated]'
@@ -703,15 +716,15 @@ def fetch_contents_for_results(results, max_fetch=None, max_chars=None, target_o
     to_fetch = results[:max_fetch]
     logger.info('[Fetch] fetch_contents: starting %d URLs, target_ok=%d, max_chars=%s',
                 len(to_fetch), target_ok, max_chars)
-    t0 = time.time()
+    t0 = time.monotonic()
     ok_count = 0
     url_timings = []
     pdf_max = cfg.fetch_max_chars_pdf
     def _do(r):
         url = r['url']
-        fetch_t0 = time.time()
+        fetch_t0 = time.monotonic()
         content = fetch_page_content(url, max_chars=max_chars, pdf_max_chars=pdf_max)
-        fetch_elapsed = time.time() - fetch_t0
+        fetch_elapsed = time.monotonic() - fetch_t0
         return r, content, fetch_elapsed
     # NOTE: we DRAIN, not cancel — abandoning a streaming response mid
     # iter_content() while sibling threads GC C extensions has been
@@ -738,7 +751,7 @@ def fetch_contents_for_results(results, max_fetch=None, max_chars=None, target_o
                 except Exception as e:
                     logger.warning('[Fetch] fetch_contents thread error: %s', e, exc_info=True)
                 if ok_count >= target_ok and target_reached_at is None:
-                    target_reached_at = time.time()
+                    target_reached_at = time.monotonic()
                     elapsed_so_far = target_reached_at - t0
                     in_flight = sum(1 for f in futs if not f.done())
                     logger.info('[Fetch] Race-to-N: got %d/%d pages in %.1fs, '
@@ -746,7 +759,7 @@ def fetch_contents_for_results(results, max_fetch=None, max_chars=None, target_o
                                 ok_count, len(to_fetch), elapsed_so_far, in_flight)
         except TimeoutError:
             logger.warning('[Fetch] fetch_contents: as_completed timeout (90s)', exc_info=True)
-    elapsed = time.time() - t0
+    elapsed = time.monotonic() - t0
 
     if url_timings:
         url_timings.sort(key=lambda x: -x[1])
@@ -768,7 +781,7 @@ def fetch_urls(urls, max_chars=None, pdf_max_chars=None, timeout=None):
     if pdf_max_chars is None: pdf_max_chars = cfg.fetch_max_chars_pdf
     if timeout is None: timeout = cfg.fetch_timeout
     logger.debug('fetch_urls: starting %d URL(s), max_chars=%s', len(urls), max_chars)
-    t0 = time.time()
+    t0 = time.monotonic()
     results = {}
     failed_urls = []
     def _do(u):
@@ -792,7 +805,7 @@ def fetch_urls(urls, max_chars=None, pdf_max_chars=None, timeout=None):
                 done_count += 1
         except TimeoutError:
             logger.warning('as_completed timeout: %d/%d done after %ss', done_count, len(futs), deadline, exc_info=True)
-    elapsed = time.time() - t0
+    elapsed = time.monotonic() - t0
     logger.debug('fetch_urls done: %d/%d succeeded in %.1fs', len(results), len(urls), elapsed)
     if failed_urls:
         failed_summary = ', '.join(u[:60] for u in failed_urls[:5])

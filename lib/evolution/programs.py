@@ -68,6 +68,11 @@ def get_program(program_id, *, user_id):
     return _read(program_id, user_id)[0]
 
 
+def read_versioned_program(program_id, *, user_id):
+    """One authoritative programme and CAS version for explicit Chat controls."""
+    return _read(program_id, user_id)
+
+
 def list_programs(*, user_id, limit=50):
     programs = records.list_records(PROGRAMS, user_id, kind='program', limit=limit)
     summaries = []
@@ -332,10 +337,11 @@ def _external_steps(steps):
 
 def _research_source_payload(reference, *, user_id):
     from lib.research import records as research_records
+    from lib.turn_lifecycle import LifecycleNotFound
     try:
         source = research_records.load_completed_idea_source(reference['task_id'],
             user_id=user_id,idea_id=reference['idea_id'])
-    except ValueError as error:
+    except (ValueError, LifecycleNotFound) as error:
         raise EvolutionStateError('owned research source unavailable') from error
     artifacts = source['result']
     selected = next(idea for idea in artifacts['accepted']
@@ -365,13 +371,15 @@ def read_research_source(program, *, user_id, source_digest=None, offset=0):
         'evidence_status':'Original discovery proposal and grounding; scientific validity remains unverified.'}
 
 
-def create_program(payload, *, user_id, idempotency_key):
+def create_program(payload, *, user_id, idempotency_key, chat_source=None):
     uid = require_user_id(user_id, context='exploration program owner')
     _validate(payload, 'request')
     runs.validate_review_reserve(payload)
     if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 160:
         raise EvolutionContractError('Idempotency-Key is required (1–160 characters)')
     request = deepcopy(payload)
+    if chat_source is not None:
+        _validate(chat_source, 'chat_source')
     request['objective'] = request['objective'].strip()
     if request.get('project_path'):
         request['project_path'] = runs.resolve_project_path(request['project_path'])
@@ -384,6 +392,8 @@ def create_program(payload, *, user_id, idempotency_key):
     _check_frontier(steps)
     _external_steps(steps)
     identity = {**request, **({'research_source_identity':research_source} if research_source is not None else {})}
+    if chat_source is not None:
+        identity['chat_conversation_id'] = chat_source['conversation_id']
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
         ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
     program_id = 'program-' + hashlib.sha256(idempotency_key.encode()).hexdigest()[:32]
@@ -393,9 +403,15 @@ def create_program(payload, *, user_id, idempotency_key):
         if existing['request_digest'] != digest:
             raise EvolutionStateError('Idempotency-Key belongs to another exploration request')
         return existing
+    from .execution_capabilities import bind_selection, validate_research_context
+    bindings = bind_selection(request, user_id=uid)
+    validate_research_context(request.get('research_context'), user_id=uid)
+    if bindings:
+        request['skill_bindings'] = bindings
     from .review_evidence import VERSION as evidence_version
     now = int(time.time())
     value = {'schema_version': 1, 'program_id': program_id,
+             **({'chat_source': deepcopy(chat_source)} if chat_source is not None else {}),
              **({'research_source':research_source} if research_source is not None else {}),
              'objective': request['objective'],
              **({'final_evidence_version':1} if evidence_version >= 3 else {}),
@@ -405,7 +421,7 @@ def create_program(payload, *, user_id, idempotency_key):
              'advance_mode': request.get('advance_mode', 'continuous'),
              'started_at': None,
              'execution_options': {key: request[key] for key in
-                 ('executor_plugins', 'executor_schema_budget_tokens', 'budget', 'review_reserve', 'model', 'role_models', 'project_path', 'max_attempts', 'max_review_recoveries', 'max_review_format_retries') if key in request},
+                 ('skill_selection', 'skill_bindings', 'research_context', 'executor_restrictions', 'executor_plugins', 'executor_schema_budget_tokens', 'budget', 'review_reserve', 'model', 'role_models', 'project_path', 'max_attempts', 'max_review_recoveries', 'max_review_format_retries') if key in request},
              'status': 'ready', 'queue': steps, 'current': None,
              'settled_through': 0, 'tool_calls_complete': True, 'actuals': {key: 0 for key in
                  ('tokens', 'wall_clock_seconds', 'tool_calls')},
@@ -607,6 +623,10 @@ def _launch_intent(program, user_id):
 
 def _archive(program, run, user_id):
     intent = program['current']
+    if run['status'] == 'completed':
+        for field in ('skill_selection', 'skill_bindings', 'research_context'):
+            if intent['payload'].get(field) and run.get(field) != intent['payload'][field]:
+                raise EvolutionStateError('execution capability requirements changed; completion was not archived')
     if intent['step'].get('required_observation_format') and run['status'] == 'completed':
         expected = intent['step'].get('scientific_protocol') or {}
         requirements = _step_requirements(program, intent['step'])
@@ -833,12 +853,16 @@ def advance_program(program_id, *, user_id):
     return program
 
 
-def command_program(program_id, payload, *, user_id):
+def command_program(program_id, payload, *, user_id, expected_version=None):
     _validate(payload, 'command')
     action = payload['action']
+    if expected_version is not None and (type(expected_version) is not int or expected_version < 1 or action == 'advance'):
+        raise EvolutionContractError('versioned controls require an explicit command and positive state version')
     if action == 'advance':
         return advance_program(program_id, user_id=user_id)
     program, version = _read(program_id, user_id)
+    if expected_version is not None and version != expected_version:
+        raise EvolutionStateError('exploration changed; read its current state before issuing another command')
     legacy_activation_ambiguous = ('started_at' not in program and (
         program['status'] != 'ready' or program['current'] is not None
         or program['settled_through'] > 0))

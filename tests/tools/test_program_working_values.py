@@ -45,7 +45,9 @@ def test_working_value_survives_observation_and_fresh_vm_without_source_call(wor
         'return {total:x.rows.reduce((s,r)=>s+r.amount,0),cursor:x.cursor};')
     assert value=={'total':45,'cursor':'next'} and stats['result_reads']==1
     assert stats['tool_calls']==0 and not effects
-    assert saved['ref'] not in json.dumps(task)
+    # A live task holds runtime-only objects (its program-result RLock); repr
+    # keeps them inside the probe instead of aborting serialization.
+    assert saved['ref'] not in json.dumps(task, default=repr)
 
 
 def test_program_values_have_no_fake_tool_binding_or_source_claim(working):

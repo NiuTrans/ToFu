@@ -74,7 +74,9 @@
         "conversationId": {"type": "string", "minLength": 1, "maxLength": 256},
         "title": {"type": "string", "maxLength": 200},
         "turnCount": {"type": "integer", "minimum": 0},
-        "coordinatorId": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 256}, {"type": "null"}]}
+        "coordinatorId": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 256}, {"type": "null"}]},
+        "createdAt": {"type": "integer", "minimum": 0},
+        "updatedAt": {"type": "integer", "minimum": 0}
       }
     },
     "createRequest": {
@@ -384,6 +386,58 @@
           "maxLength": 256
         }
       }
+    },
+    "progressTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One task the human cares about, in the human's terms. Never a session, worker or question for the human.",
+      "required": ["title", "status"],
+      "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*$"},
+        "status": {"enum": ["pending", "in_progress", "completed", "cancelled"]},
+        "progress": {"type": "string", "minLength": 1, "maxLength": 280, "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*$"}
+      }
+    },
+    "progressRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The Coordinator's complete current task board; every update replaces the previous board.",
+      "required": ["summary", "tasks"],
+      "properties": {
+        "summary": {"type": "string", "minLength": 1, "maxLength": 280, "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*$"},
+        "tasks": {"type": "array", "maxItems": 24, "items": {"$ref": "#/$defs/progressTask"}}
+      }
+    },
+    "progressBoard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "updatedAt", "summary", "tasks"],
+      "properties": {
+        "revision": {"type": "integer", "minimum": 1},
+        "updatedAt": {"type": "integer", "minimum": 0},
+        "summary": {"$ref": "#/$defs/progressRequest/properties/summary"},
+        "tasks": {"$ref": "#/$defs/progressRequest/properties/tasks"}
+      }
+    },
+    "progressHead": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "board"],
+      "properties": {
+        "scope": {"$ref": "#/$defs/reportScope"},
+        "board": {"$ref": "#/$defs/progressBoard"}
+      }
+    },
+    "progressState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectPath", "conversationId", "bindingRevision", "board"],
+      "properties": {
+        "projectPath": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "conversationId": {"type": "string", "maxLength": 256},
+        "bindingRevision": {"type": "integer", "minimum": 0},
+        "board": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/progressBoard"}]}
+      }
     }
   },
   "reporting": {
@@ -391,5 +445,9 @@
     "pendingNamespace": "project.coordinator.reports.pending.v1",
     "casAttempts": 8,
     "recoveryPageSize": 32
+  },
+  "taskProgress": {
+    "namespace": "project.coordinator.progress.v1",
+    "casAttempts": 8
   }
 }

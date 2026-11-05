@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.unit
@@ -12,6 +13,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(scope='module')
 def round_bundle(tmp_path_factory):
+    require_node_modules('vite')
     built = tmp_path_factory.mktemp('round-outline') / 'round.cjs'
     result = subprocess.run([
         str(ROOT / 'scripts/vite_test_bundle.mjs'),
@@ -26,7 +28,7 @@ def run_js(round_bundle, body):
     source = f'''
 const {{JSDOM}}=require('jsdom');
 const dom=new JSDOM('<!doctype html><body></body>');
-global.document=dom.window.document; global.window=dom.window;
+global.document=dom.window.document; global.window=dom.window; global.Element=dom.window.Element;
 Object.assign(global,require({json.dumps(str(round_bundle))}));
 console.log((function(){{ {body} }})());
 '''
@@ -73,11 +75,14 @@ def test_activity_surface_follows_adjacency_without_reparenting_or_losing_focus(
       const joined=edges();surface.dispose();
       return JSON.stringify({initial,split,retained,joined});
     ''')
-    expected = [['thought', 'start'], ['read', 'end'], ['narration', None],
-                ['check', 'single'], ['answer', None]]
+    # Grouped reply: reasoning, the open live tool panel (its header interrupts
+    # the surface), then prose. Narration never splits the run of calls.
+    expected = [['thought', 'single'], ['layout:tool-panel', None], ['read', 'start'],
+                ['check', 'end'], ['narration', None], ['answer', None]]
     assert result['initial'] == result['joined'] == expected
-    assert result['split'] == [['thought', 'single'], ['interlude', None], ['read', 'single'],
-                               ['narration', None], ['check', 'single'], ['answer', None]]
+    assert result['split'] == [['thought', 'single'], ['layout:tool-panel', None], ['read', 'start'],
+                               ['check', 'end'], ['interlude', None], ['narration', None],
+                               ['answer', None]]
     assert result['retained']
 
 
@@ -170,7 +175,7 @@ def test_outline_controls_preserve_nodes_focus_reader_choice_and_answer(round_bu
         'noHeaders': True, 'allVisible': True,
         'states': ['returned', 'active'],
         'toolbarHidden': True,
-        'retained': True, 'order': ['done', 'live', 'answer'],
+        'retained': True, 'order': ['layout:tool-panel', 'done', 'live', 'answer'],
         'same': True, 'removed': True,
     }
 
@@ -183,6 +188,8 @@ def test_live_to_terminal_defaults_change_without_overriding_reader(round_bundle
       const blocks=[block('thinking',0,'a','tool',{round:{toolName:'read_files',status:'running'}})];
       surface.render(vm(turn(blocks,'running')));
       const node=root.querySelector('[data-block-id="thinking"]');
+      // The reader engages with the live call, so settlement keeps it mounted.
+      node.click();
       const liveState=node.dataset.actionState;
       // The minimal test renderer replaces children; check the dataset that
       // drives the state indicator in the real renderer.
@@ -251,7 +258,7 @@ def test_collapsed_rounds_render_on_reveal_with_latest_projection(round_bundle):
       }});
       let blocks=[block('history',0,'a','tool',{round:{toolName:'read_files',status:'done'}}),block('answer',1,'a','text',{deliverable:true})];
       surface.render(vm(turn(blocks)));
-      for (const process of root.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new window.Event('toggle')); }
+      for (const toggle of root.querySelectorAll('.conversation-tool-panel__toggle[aria-expanded="false"]')) toggle.click();
       const shell=root.querySelector('[data-block-id="history"]');
       const initial={calls:[...calls],visible:!shell.hidden};
       // Replay with identical data: nodes retained, no re-render needed.
@@ -261,7 +268,7 @@ def test_collapsed_rounds_render_on_reveal_with_latest_projection(round_bundle):
       // New data triggers re-render.
       blocks[0]={...blocks[0],round:{...blocks[0].round,status:'running'}};
       surface.render(vm(turn(blocks)));
-      for (const process of root.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new window.Event('toggle')); }
+      for (const toggle of root.querySelectorAll('.conversation-tool-panel__toggle[aria-expanded="false"]')) toggle.click();
       const reRendered=calls.length>2;
       surface.dispose();
       return JSON.stringify({initial,retained,stable,reRendered});
@@ -283,7 +290,9 @@ def test_content_is_visible_before_details_and_short_turn_has_no_false_history(r
         block('prose-2',1,'a','text'),block('tool-2',1,'a','tool',{round:{toolName:'read_files',status:'done'}})];
       surface.render(vm(turn(blocks)));
       const prose=root.querySelector('[data-block-id="prose"]');
-      const result={proseVisible:!prose.hidden,
+      // A reply without its own answer keeps its calls in view: they are its content.
+      const panel=root.querySelector('.conversation-tool-panel__toggle').getAttribute('aria-expanded');
+      const result={panel,proseVisible:!prose.hidden,
         toolVisible:!root.querySelector('[data-block-id="tool"]').hidden,
         prose2Visible:!root.querySelector('[data-block-id="prose-2"]').hidden,
         tool2Visible:!root.querySelector('[data-block-id="tool-2"]').hidden,
@@ -292,7 +301,8 @@ def test_content_is_visible_before_details_and_short_turn_has_no_false_history(r
         toolbarHidden:!root.querySelector('.conversation-round-toolbar')};
       surface.dispose();return JSON.stringify(result);
     ''')
-    assert result == {'proseVisible': True, 'toolVisible': True,
+    assert result == {'panel': 'true',
+                      'proseVisible': True, 'toolVisible': True,
                       'prose2Visible': True, 'tool2Visible': True,
                       'noRoundHeaders': True, 'history': False,
                       'toolbarHidden': True}
@@ -310,7 +320,7 @@ def test_program_summary_remains_visible_while_child_details_are_deferred(round_
         block('child',0,'a','tool',{round:{toolName:'web_search',status:'done'}}),
         block('answer',1,'a','text',{deliverable:true})];
       surface.render(vm(turn(blocks)));
-      for (const process of root.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new window.Event('toggle')); }
+      for (const toggle of root.querySelectorAll('.conversation-tool-panel__toggle[aria-expanded="false"]')) toggle.click();
       const program=root.querySelector('[data-block-id="program"]');
       const child=root.querySelector('[data-block-id="child"]');
       const result={programVisible:!program.hidden,childVisible:!child.hidden,
@@ -357,7 +367,7 @@ def test_self_contained_tool_cards_never_join_a_round_disclosure(round_bundle):
       ];
       const before=JSON.stringify(blocks);
       surface.render(vm(turn(blocks)));
-      for (const process of root.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new window.Event('toggle')); }
+      for (const toggle of root.querySelectorAll('.conversation-tool-panel__toggle[aria-expanded="false"]')) toggle.click();
       const cards=[...root.querySelectorAll('[data-tool-summary="self-contained"]')];
       const counts={noHeaders:root.querySelectorAll('.conversation-round-header').length===0,
         cards:cards.length,allVisible:cards.every(n=>!n.hidden),
@@ -383,8 +393,8 @@ def test_self_contained_tool_cards_never_join_a_round_disclosure(round_bundle):
             ['mixed-read', 'returned'],
         ],
         'retained': True,
-        'authoredOrder': ['intent', 'checklist', 'terminal', 'browser', 'python',
-                         'legacy', 'mixed-terminal', 'mixed-read', 'answer'],
+        'authoredOrder': ['layout:tool-panel', 'checklist', 'terminal', 'browser', 'python',
+                         'legacy', 'mixed-terminal', 'mixed-read', 'intent', 'answer'],
     }
 
 
@@ -437,7 +447,7 @@ def test_swarm_internal_disclosures_are_not_generic_action_evidence(round_bundle
         generic:root.querySelector('.generic-evidence').open};
       // Per-card reader choices survive unrelated settlement.
       const generic=[...root.querySelectorAll('.generic-evidence')];
-      generic[0].open=false;
+      generic[0].querySelector('summary').click();generic[0].open=false;
       const readerChoice={first:generic[0].open,second:generic[1].open};
       task.open=true;actions.forEach(b=>b.round.status='done');
       surface.render(vm(turn(actions)));
@@ -507,3 +517,52 @@ def test_viewport_anchors_visible_block_with_scoped_identity_and_turn_fallback(r
         'suspended': True, 'tailHasNoAnchor': True,
         'cancelled': True, 'stillSuspended': True,
     }
+
+
+def test_large_round_overview_never_folds_calls_inside_the_tool_panel(round_bundle):
+    """The tool panel is the calls' one disclosure: an opened panel shows every
+    mounted call, with no second "show N returned calls" fold in its middle."""
+    result = run_js(round_bundle, HELPERS + r'''
+      const root=document.createElement('main');document.body.append(root);
+      const surface=createConversationSurface(root);
+      const blocks=Array.from({length:24},(_,i)=>block('call-'+i,5,'attempt','tool',{
+        round:{toolName:'read_files',status:'done',toolArgs:{path:'file-'+i},attentionKind:'routine'}}));
+      surface.render(vm(turn(blocks,'running')));
+      const visible=()=>[...root.querySelectorAll('[data-block-kind="tool"]')].filter(n=>!n.hidden).map(n=>n.dataset.blockId);
+      const first=visible();
+      blocks.push(block('new-call',5,'attempt','tool',{round:{toolName:'read_files',status:'done'}}));
+      surface.render(vm(turn(blocks,'running')));
+      const grown=visible().length;
+      const header=Boolean(root.querySelector('.conversation-round-header'));
+      const fold=root.querySelectorAll('.conversation-round-fold').length;
+      surface.dispose();return JSON.stringify({first,grown,header,fold});
+    ''')
+    assert result == {'first': [f'call-{i}' for i in range(24)], 'grown': 25, 'header': True, 'fold': 0}
+
+
+def test_round_search_reveals_unmounted_call_without_unbounded_dom(round_bundle):
+    result = run_js(round_bundle, HELPERS + r'''
+      const root=document.createElement('main');document.body.append(root);
+      const surface=createConversationSurface(root,{windowing:{maxBlocksPerTurn:20,blockBatchSize:10}});
+      const blocks=Array.from({length:300},(_,i)=>block('call-'+i,3,'attempt','tool',{
+        round:{toolName:'read_files',status:'done',toolArgs:{path:i===7?'needle.ts':'file-'+i}}}));
+      surface.render(vm(turn(blocks,'running')));
+      const before=Boolean(root.querySelector('[data-block-id="call-7"]'));
+      const input=root.querySelector('.conversation-round-search');input.value='needle.ts';
+      input.dispatchEvent(new window.Event('input',{bubbles:true}));
+      const hit=root.querySelector('.conversation-round-matches button');
+      const found=Boolean(hit);hit?.click();
+      const target=root.querySelector('[data-block-id="call-7"]');
+      const after=Boolean(target && !target.hidden && document.activeElement===target);
+      // The calls window stays within its 20-entry budget; only the panel
+      // header is mounted outside it.
+      const bounded=root.querySelectorAll('[data-block-region="process"]').length<=20
+        && root.querySelectorAll('[data-block-id]:not([data-block-region])').length===1;
+      input.value='read_files';input.dispatchEvent(new window.Event('input',{bubbles:true}));
+      const firstPage=root.querySelector('.conversation-round-matches button').textContent;
+      [...root.querySelectorAll('.conversation-round-matches button')].at(-1).click();
+      const nextPage=root.querySelector('.conversation-round-matches button').textContent;
+      const paged=root.querySelectorAll('.conversation-round-matches button').length<=22 && firstPage!==nextPage;
+      surface.dispose();return JSON.stringify({before,found,after,bounded,paged});
+    ''')
+    assert result == {'before': False, 'found': True, 'after': True, 'bounded': True, 'paged': True}

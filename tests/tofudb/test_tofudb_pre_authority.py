@@ -316,9 +316,15 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         "maximumPinIdBytes": 128,
         "maximumRangesPerCapsule": 64,
     }
+    # docs/TOFUDB_ROTATION_WINDOW.md "Foreground append independent of
+    # maintenance": online appends carry no aggregate byte quota.
     assert document["activeWalRotation"] == {
-        "maximumBytes": 67108864,
+        "synchronousCheckpointBytes": 67108864,
         "softThresholdBytes": 62914560,
+        "recoveryReadBufferBytes": 131072,
+        "appendAdmission": "checked-u64-offset-without-maintenance-byte-quota",
+        "foregroundMaintenancePolicy": "notify-existing-rotation-driver;never-wait-for-history-encoding-or-publication",
+        "recoveryPolicy": "buffered-frame-scan;validate-record-size-before-allocation;preserve-exact-durable-prefix-and-tail-truncation",
         "maximumRecoveryPackedLocations": 65536,
         "foregroundMaterializeTargetBytes": 8388608,
         "historyPreparationTargetBytes": 262144,
@@ -326,13 +332,13 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         "historyPreparationPolicy": "one-partial-or-pending-segment;whole-record-steps-may-exceed-target;finish-before-checkpoint;worker-absence-is-synchronous",
         "backgroundWaitRoundMilliseconds": 250,
         "maximumBackgroundWaitRounds": 240,
-        "softPolicy": "incremental-materialize;let-partial-history-encoding-and-its-live-packer-finish;defer-checkpoint-while-any-staged-payload-including-background-reservations-remains",
-        "hardPolicy": "complete-materialization-and-checkpoint-before-single-or-group-append-would-exceed-maximum",
+        "softPolicy": "existing-driver-prepares-and-publishes-checkpoint;successor-writes-continue-while-maintenance-is-delayed",
+        "synchronousPolicy": "without-driver-incrementally-materialize;complete-checkpoint-at-synchronous-threshold",
         "waitPolicy": "recheck-background-creating-under-condition-mutex-before-wait;bounded-synchronous-fallback",
         "maximumPendingRetiredWals": 1,
-        "maximumPendingRetiredWalBytes": 67108864,
+        "retiredWalBytes": "durable-backlog-without-byte-quota;reclaim-only-after-checkpoint-publication",
         "retirementPolicy": "publish-checkpoint-before-queue;existing-background-packer-removes-and-syncs-parent-outside-authority;worker-absence-is-synchronous",
-        "retirementBackpressure": "drain-previous-retirement-before-next-checkpoint;retain-slot-on-delete-or-sync-error",
+        "retirementBackpressure": "defer-next-checkpoint-only;retain-slot-on-delete-or-sync-error;never-refuse-new-appends",
         "retirementRecovery": "reconstruct-only-immediate-predecessor-from-current-control-generation;no-startup-directory-scan",
         "retirementShutdown": "finish-pending-retirement-before-worker-registration-release;surface-cleanup-error"
     }
@@ -443,21 +449,20 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         },
     }
     assert document["blockPayloadReadCache"] == {
-        "maximumResidentEntries": 65536,
-        "maximumRecencyRecords": 131072,
-        "residentBytesPolicy": "existing-launch-derived-byte-cap-charges-vector-capacity;entry-and-recency-caps-also-apply;zero-disables-all-population",
-        "evictionPolicy": "bounded-access-history-with-exact-lru;disable-releases-payload-and-metadata-allocations"
+        "entryOverheadBytes": 256,
+        "residentBytesPolicy": "existing-launch-derived-byte-cap-charges-vector-capacity-plus-fixed-entry-overhead;no-independent-entry-or-recency-cap;zero-disables-all-population",
+        "evictionPolicy": "exact-lru-intrusive-list-constant-time-access-and-eviction;disable-releases-payload-and-metadata-allocations",
+        "catalogInvalidation": "when-a-replacement-catalog-drops-a-previously-referenced-segment-evict-its-verified-index-ids-absent-from-every-added-segment;clear-on-any-uncertainty;pure-additions-keep-verified-payloads",
     }
     assert document["payloadSegmentReadCache"] == {
         "maximumResidentIndexAndFilterBytes": 67108864,
-        "independentMembershipBudgetDivisor": 4,
         "maximumResidentSegments": 4096,
         "maximumRecencyRecords": 8192,
         "membershipFilterBitsPerBlock": 16,
         "membershipFilterMinimumBits": 64,
-        "membershipFilterHashRounds": 2,
+        "membershipFilterHashRounds": 4,
         "maximumFilterBytesPerSegment": 131072,
-        "membershipPolicy": "verified-index-derived-negative-filter;positive-requires-exact-id;payload-crc-and-hash-on-every-read",
+        "membershipPolicy": "verified-index-derived-negative-filter-retained-for-every-catalogued-segment-outside-the-index-byte-budget;forget-when-an-installed-catalog-drops-the-segment;positive-requires-exact-id;payload-crc-and-hash-on-every-read",
         "evictionPolicy": "bounded-access-history-with-exact-lru;forget-on-segment-removal"
     }
     assert document["authorityGarbageCollection"] == {
@@ -473,7 +478,6 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         "temporaryFreeSpacePercent": 2,
         "leanTemporaryBytes": 67108864,
         "maximumBlocksPerRound": 65536,
-        "maximumPhysicalBlocks": 20000000,
         "rpcMaximumPhysicalBlocksPerRequestedMillisecond": 256,
         "maximumTemporaryBlockFilesRemovedPerRound": 1,
         "maximumPayloadSegmentFilesScannedPerRound": 4163,
@@ -724,6 +728,7 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         == 2_147_483_647
     )
     assert tables["conversation_turns"]["projectionHeadNamespace"] == "turn_projection_heads"
+    assert tables["conversation_turns"]["metadataSummaryNamespace"] == "turn_metadata_summaries"
     assert (
         tables["conversation_turns"]["maximumTurnProjectionInlineLiveBytes"]
         == 64 * 1024

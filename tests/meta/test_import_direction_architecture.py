@@ -11,6 +11,7 @@ assert the real tree stays clean.
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -38,7 +39,7 @@ def test_sidecar_cannot_import_execution_or_delivery(tmp_path):
     violations = architecture.import_direction_violations(
         [bad], lib_root=tmp_path / "lib", routes_root=tmp_path / "routes",
         sidecar_root=sidecar, composition_roots=frozenset(),
-        lib_routes_debt=frozenset(), shared_modules=frozenset(),
+        shared_modules=frozenset(),
         shared_paths=frozenset(),
     )
     assert len(violations) == 2
@@ -55,7 +56,6 @@ def test_sidecar_may_import_shared_contract_modules(tmp_path):
     assert architecture.import_direction_violations(
         [good], lib_root=tmp_path / "lib", routes_root=tmp_path / "routes",
         sidecar_root=sidecar, composition_roots=frozenset(),
-        lib_routes_debt=frozenset(),
         shared_modules=frozenset({"lib.orchestration.run_status"}),
         shared_paths=frozenset(),
     ) == []
@@ -70,7 +70,6 @@ def test_shared_module_closure_cannot_grow_heavy(tmp_path):
     assert architecture.import_direction_violations(
         [shared], lib_root=lib, routes_root=tmp_path / "routes",
         sidecar_root=lib / "storage_authority_sql", composition_roots=frozenset(),
-        lib_routes_debt=frozenset(),
         shared_modules=frozenset({"lib.orchestration.run_status"}),
         shared_paths=frozenset({shared.resolve()}),
     ) != []
@@ -81,7 +80,6 @@ def test_shared_module_closure_cannot_grow_heavy(tmp_path):
     assert architecture.import_direction_violations(
         [ok], lib_root=lib, routes_root=tmp_path / "routes",
         sidecar_root=lib / "storage_authority_sql", composition_roots=frozenset(),
-        lib_routes_debt=frozenset(),
         shared_modules=frozenset({"lib.orchestration.wire_formats"}),
         shared_paths=frozenset({ok.resolve()}),
     ) == []
@@ -95,11 +93,22 @@ def test_lib_cannot_import_routes_outside_composition_root(tmp_path):
         [bad, root], lib_root=lib, routes_root=tmp_path / "routes",
         sidecar_root=lib / "storage_authority_sql",
         composition_roots=frozenset({root.resolve()}),
-        lib_routes_debt=frozenset(), shared_modules=frozenset(),
+        shared_modules=frozenset(),
         shared_paths=frozenset(),
     )
     assert len(violations) == 1
     assert "never import routes" in violations[0]
+
+
+def test_process_lifecycle_has_no_http_delivery_dependencies():
+    """Headless startup, shutdown and restart use the same library owners."""
+    owners = [
+        ROOT / "lib" / "auto_restart.py",
+        *sorted((ROOT / "lib" / "server").glob("*.py")),
+    ]
+    assert architecture.import_direction_violations(
+        owners,
+    ) == []
 
 
 def test_routes_cannot_import_sidecar_internals(tmp_path):
@@ -111,7 +120,7 @@ def test_routes_cannot_import_sidecar_internals(tmp_path):
     violations = architecture.import_direction_violations(
         [bad], lib_root=tmp_path / "lib", routes_root=routes,
         sidecar_root=tmp_path / "lib" / "storage_authority_sql",
-        composition_roots=frozenset(), lib_routes_debt=frozenset(),
+        composition_roots=frozenset(),
         shared_modules=frozenset(), shared_paths=frozenset(),
     )
     assert len(violations) == 1
@@ -172,3 +181,39 @@ def test_lib_toplevel_ratchet_counts_only_loose_modules():
     assert architecture.lib_toplevel_ratchet_violations(maximum=10**9) != []
     assert architecture.lib_toplevel_ratchet_violations(maximum=0) != []
     assert architecture.lib_toplevel_ratchet_violations() == []
+
+
+@pytest.mark.parametrize('change, expected', [
+    ('unstaged_delete', 'SHRANK 1 -> 0'),
+    ('untracked_add', 'grew 1 -> 2'),
+    ('staged_add', 'grew 1 -> 2'),
+    ('ignored_add', None),
+    ('nested_add', None),
+])
+def test_lib_toplevel_ratchet_reads_current_worktree(monkeypatch, tmp_path, change, expected):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True, capture_output=True)
+    original = _write(tmp_path / 'lib' / 'owner.py', 'VALUE = 1\n')
+    ignored = tmp_path / 'lib' / 'ignored.py'
+    _write(tmp_path / '.gitignore', ignored.relative_to(tmp_path).as_posix() + '\n')
+    subprocess.run(['git', 'add', str(original.relative_to(tmp_path)), '.gitignore'],
+                   cwd=tmp_path, check=True, capture_output=True)
+    if change == 'unstaged_delete':
+        original.unlink()
+    elif change == 'ignored_add':
+        _write(ignored, 'VALUE = 2\n')
+    elif change == 'nested_add':
+        _write(tmp_path / 'lib' / 'domain' / 'owner.py', 'VALUE = 2\n')
+    else:
+        added = _write(tmp_path / 'lib' / 'new owner.py', 'VALUE = 2\n')
+        if change == 'staged_add':
+            subprocess.run(['git', 'add', str(added.relative_to(tmp_path))],
+                           cwd=tmp_path, check=True, capture_output=True)
+    monkeypatch.setattr(architecture, 'ROOT', tmp_path)
+
+    violations = architecture.lib_toplevel_ratchet_violations(maximum=1)
+
+    if expected is None:
+        assert violations == []
+    else:
+        assert len(violations) == 1
+        assert expected in violations[0]

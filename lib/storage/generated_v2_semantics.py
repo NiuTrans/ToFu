@@ -4,3 +4,6 @@ BOUNDED_PROGRESS_OPERATIONS = {'turn.cleanup': {'requestLimitField': 'limit', 'd
 NOTIFICATION_TOPICS = {'conversation': {'contract': 'storage.conversation-commit/v1', 'keyField': 'conversationId', 'sequenceField': 'syncSeq'}}
 MIN_NATIVE_FASTPATH_SYNC_INTERVAL_MS = 1000
 MAX_NATIVE_FASTPATH_SYNC_INTERVAL_MS = 3600000
+MIN_NATIVE_FASTPATH_FSYNC_SPEEDUP = 3
+MIN_NATIVE_FASTPATH_METADATA_SPEEDUP = 3
+MAX_NATIVE_FASTPATH_FSYNC_REGRESSION = 2

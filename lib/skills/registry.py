@@ -29,9 +29,12 @@ Settings UI already renders (``eligible`` / ``ineligible_reasons`` /
 
 from __future__ import annotations
 
+import hashlib
 import os
+import stat
 import threading
 
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -53,9 +56,13 @@ def _skill_scan_dirs(project_path, extra_paths, owner_user_id=None):
         project_path, extra_paths, owner_user_id=owner_user_id)
 
 
-def _skill_package_entries(dirpath: str, scope: str) -> list[tuple[str, str]]:
-    """Return a bounded, deterministic ``(id, SKILL.md)`` root snapshot."""
-    packages: list[tuple[str, str]] = []
+def _skill_package_entries(dirpath: str, scope: str) -> list[tuple[str, str, int]]:
+    """Snapshot ``(id, SKILL.md, mtime_ns)`` with one no-follow file stat.
+
+    Regular-file admission and fingerprint freshness use the same observation;
+    no instruction content or metadata is cached across root scans here.
+    """
+    packages: list[tuple[str, str, int]] = []
     if not os.path.isdir(dirpath):
         return packages
     scanned = 0
@@ -81,9 +88,13 @@ def _skill_package_entries(dirpath: str, scope: str) -> list[tuple[str, str]]:
             except OSError:
                 continue
             skill_md = os.path.join(entry.path, 'SKILL.md')
-            if os.path.islink(skill_md) or not os.path.isfile(skill_md):
+            try:
+                metadata = os.stat(skill_md, follow_symlinks=False)
+            except OSError:
                 continue
-            packages.append((entry.name, skill_md))
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
+            packages.append((entry.name, skill_md, metadata.st_mtime_ns))
             if len(packages) >= _SKILL_ROOT_MAX_PACKAGES:
                 logger.warning('[Skills] skill root package cap reached: %s',
                                dirpath)
@@ -96,11 +107,7 @@ def _skill_scan_fingerprint(dirs):
     fp = []
     for dirpath, scope in dirs:
         entries = []
-        for entry, skill_md in _skill_package_entries(dirpath, scope):
-            try:
-                mtime = os.stat(skill_md).st_mtime_ns
-            except OSError:
-                mtime = -1
+        for entry, _skill_md, mtime in _skill_package_entries(dirpath, scope):
             entries.append((entry, mtime))
         fp.append((dirpath, scope, tuple(entries)))
     return tuple(fp)
@@ -127,59 +134,66 @@ def _invalidate_skills_cache():
 
 def list_skills(project_path: str | None = None,
                 extra_paths: list[str] | None = None,
-                owner_user_id: int | None = None) -> list[dict]:
+                owner_user_id: int | None = None,
+                *, include_shadowed: bool = False) -> list[dict]:
     """List every installed skill package across the global store + roots.
 
-    De-duplicated by id with the primary project winning, then each extra
-    workspace root, then the server-side global store. A project-local skill
-    can therefore intentionally override a general global workflow. Each
-    surviving dict carries a ``shadowed`` count of same-id packages it
-    masked in lower-precedence roots.
+    De-duplicated by id with the owner-global store winning, then the
+    primary project, then each extra workspace root (owner decision
+    2026-10-31: skills are global; a project copy can no longer replace the
+    global package for one project, which let edits land in a copy that other
+    conversations never saw). Each surviving dict carries a ``shadowed`` count
+    of same-id packages it masked in lower-precedence roots.
+
+    Settings may request ``include_shadowed`` to retain each source separately;
+    runtime callers keep precedence selection. ``skill_ref`` binds a canonical
+    source location and never grants access outside the supplied owner/roots.
 
     Returns a list of skill dicts (memory-shaped, ``is_package=True``).
     """
-    from lib.memory.storage import (
-        _memory_from_file,
-        _lock,
-        run_storage_migrations,
-    )
+    from lib.memory.storage import _memory_from_file, run_storage_migrations
 
     dirs = _skill_scan_dirs(project_path, extra_paths, owner_user_id)
-    cache_key = tuple(dirs)
+    cache_key = (tuple(dirs), include_shadowed)
     fp = _skill_scan_fingerprint(dirs)
     with _skills_cache_lock:
         cached = _skills_cache.get(cache_key)
     if cached is not None and cached[0] == fp:
         return _refresh_eligibility(cached[1], owner_user_id)
 
+    # Ensure the post-split layout before scanning (idempotent; lock-free
+    # once these roots are migrated, so concurrent scans run in parallel).
+    run_storage_migrations(project_path, extra_paths)
+    # Fingerprint the post-migration state BEFORE reading packages: a package
+    # that changes during the unlocked scan then misses on the next lookup
+    # instead of pinning rows read before the change.
+    fp = _skill_scan_fingerprint(dirs)
     skills: list[dict] = []
     seen_ids: dict = {}
-    with _lock:
-        # Ensure the post-split layout before scanning (idempotent).
-        run_storage_migrations(project_path, extra_paths)
-
-        for directory, scope in dirs:
-            for entry, skill_md in _skill_package_entries(directory, scope):
-                mem = _memory_from_file(
-                    skill_md, scope=scope,
-                    package_dir=os.path.dirname(skill_md),
-                    memory_id_override=entry,
-                    owner_user_id=owner_user_id)
-                if not mem:
+    for directory, scope in dirs:
+        for entry, skill_md, _mtime in _skill_package_entries(directory, scope):
+            mem = _memory_from_file(
+                skill_md, scope=scope,
+                package_dir=os.path.dirname(skill_md),
+                memory_id_override=entry,
+                owner_user_id=owner_user_id)
+            if not mem:
+                continue
+            mem['skill_ref'] = hashlib.sha256(
+                os.path.realpath(mem['package_dir']).encode()).hexdigest()
+            winner = seen_ids.get(mem['id'])
+            if winner is not None:
+                # A same-id package in a lower-precedence root is
+                # shadowed, not merged. Count it on the survivor so the
+                # index/API can name the masking instead of hiding it.
+                winner['shadowed'] = int(winner.get('shadowed') or 0) + 1
+                if not include_shadowed:
                     continue
-                winner = seen_ids.get(mem['id'])
-                if winner is not None:
-                    # A same-id package in a lower-precedence root is
-                    # shadowed, not merged. Count it on the survivor so the
-                    # index/API can name the masking instead of hiding it.
-                    winner['shadowed'] = int(winner.get('shadowed') or 0) + 1
-                    continue
+                mem['shadowed_by'] = winner['skill_ref']
+            else:
                 seen_ids[mem['id']] = mem
-                skills.append(mem)
+            skills.append(mem)
 
-    # Recompute the fingerprint AFTER migrations so the stored identity
-    # matches the post-migration directory state.
-    fp = _skill_scan_fingerprint(dirs)
     with _skills_cache_lock:
         if len(_skills_cache) >= _SKILLS_CACHE_MAX:
             _skills_cache.clear()
@@ -190,12 +204,13 @@ def list_skills(project_path: str | None = None,
 def get_skill(skill_id: str,
               project_path: str | None = None,
               extra_paths: list[str] | None = None,
-              owner_user_id: int | None = None) -> dict | None:
+              owner_user_id: int | None = None,
+              *, skill_ref: str | None = None) -> dict | None:
     """Get one installed skill package by id. Returns the dict or None."""
     for s in list_skills(
             project_path, extra_paths=extra_paths,
-            owner_user_id=owner_user_id):
-        if s['id'] == skill_id:
+            owner_user_id=owner_user_id, include_shadowed=bool(skill_ref)):
+        if s['id'] == skill_id and (not skill_ref or s['skill_ref'] == skill_ref):
             return s
     return None
 
@@ -203,7 +218,8 @@ def get_skill(skill_id: str,
 def uninstall_skill(skill_id: str,
                     project_path: str | None = None,
                     extra_paths: list[str] | None = None,
-                    owner_user_id: int | None = None) -> bool:
+                    owner_user_id: int | None = None,
+                    *, skill_ref: str | None = None) -> bool:
     """Uninstall a skill package (remove its directory). USER action.
 
     This is the Skills-tab uninstall path — deliberately NOT routed
@@ -218,7 +234,7 @@ def uninstall_skill(skill_id: str,
 
     skill = get_skill(
         skill_id, project_path, extra_paths=extra_paths,
-        owner_user_id=owner_user_id)
+        owner_user_id=owner_user_id, skill_ref=skill_ref)
     if not skill:
         return False
     pkg = skill.get('package_dir')
@@ -255,7 +271,9 @@ def uninstall_skill(skill_id: str,
 def set_skill_scope(skill_id: str, scope: str,
                     project_path: str | None = None,
                     extra_paths: list[str] | None = None,
-                    owner_user_id: int | None = None) -> dict | None:
+                    owner_user_id: int | None = None,
+                    *, skill_ref: str | None = None,
+                    target_project_path: str | None = None) -> dict | None:
     """Move an installed skill package between project and global scope.
 
     Skill packages are external capability packs — the right home for most
@@ -264,35 +282,42 @@ def set_skill_scope(skill_id: str, scope: str,
     bindings (``skill.<id>.*``) are scope-independent and need no move.
 
     Returns the updated skill dict, or None when the skill was not found.
-    Raises ValueError on an invalid scope or a destination collision.
+    Raises BadRequest on an invalid scope or destination, or a collision.
     """
     import shutil
 
+    from lib.skills.installer import _install_root_lock
     from lib.memory.storage import _memory_from_file
     from lib.skills.paths import resolve_skill_install_dir
 
     if scope not in ('project', 'global'):
-        raise ValueError(f'Invalid scope: {scope!r}')
+        raise BadRequest(f'Invalid scope: {scope!r}', field='scope')
     skill = get_skill(
         skill_id, project_path, extra_paths=extra_paths,
-        owner_user_id=owner_user_id)
+        owner_user_id=owner_user_id, skill_ref=skill_ref)
     if not skill:
         return None
-    if skill.get('scope') == scope:
-        return skill
 
     src = skill.get('package_dir')
     if not src or not os.path.isdir(src):
         raise ValueError(f'package dir missing for {skill_id}')
 
     dst_root = resolve_skill_install_dir(
-        scope, project_path, owner_user_id=owner_user_id)
+        scope, target_project_path or project_path, owner_user_id=owner_user_id)
+    if scope == 'project':
+        project_real = os.path.realpath(target_project_path or project_path)
+        if os.path.commonpath((project_real, os.path.realpath(dst_root))) != project_real:
+            raise BadRequest('Skill destination escapes the selected project',
+                             field='target_project_path')
     os.makedirs(dst_root, exist_ok=True)
     dst = os.path.join(dst_root, skill_id)
-    if os.path.exists(dst):
-        raise ValueError(f'{skill_id} already exists in {scope} scope')
-
-    shutil.move(src, dst)
+    if os.path.realpath(src) == os.path.realpath(dst):
+        return skill
+    with _install_root_lock(dst_root):
+        if os.path.lexists(dst):
+            raise BadRequest(f'{skill_id} already exists in {scope} scope',
+                             field='scope')
+        shutil.move(src, dst)
     _invalidate_skills_cache()
     logger.info('[Skills] moved %s: %s → %s scope', skill_id,
                 skill.get('scope'), scope)
@@ -308,6 +333,7 @@ def set_skill_enabled(
     project_path: str | None = None,
     extra_paths: list[str] | None = None,
     owner_user_id: int | None = None,
+    *, skill_ref: str | None = None,
 ) -> dict | None:
     """Persist a user-driven enable toggle for one installed skill.
 
@@ -319,7 +345,7 @@ def set_skill_enabled(
 
     skill = get_skill(
         skill_id, project_path, extra_paths=extra_paths,
-        owner_user_id=owner_user_id)
+        owner_user_id=owner_user_id, skill_ref=skill_ref)
     if not skill:
         return None
     next_enabled = (

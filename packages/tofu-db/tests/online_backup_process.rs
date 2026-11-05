@@ -389,16 +389,19 @@ fn assert_backup_receipt(payload: &Value, backup_dir: &Path) {
     );
 
     // `manifest` points at the published snapshot file inside the backup
-    // directory layout, and every reported byte count matches the disk.
+    // directory layout. The receipt counts writes during this epoch: reusing
+    // an identical manifest writes zero bytes, while a fresh publication
+    // writes the entire file. Either case must authenticate the actual file.
     let manifest = PathBuf::from(payload["manifest"].as_str().unwrap());
     assert!(manifest.is_file(), "receipt manifest must exist on disk");
     assert_eq!(manifest.parent().unwrap(), backup_dir.join("snapshots"));
     let name = manifest.file_name().unwrap().to_str().unwrap();
     assert!(name.starts_with("snapshot-") && name.ends_with(".manifest"));
     assert_eq!(sha256, sha256_file(&manifest));
-    assert_eq!(
-        payload["manifest_bytes"].as_u64().unwrap(),
-        std::fs::metadata(&manifest).unwrap().len()
+    let manifest_bytes = payload["manifest_bytes"].as_u64().unwrap();
+    assert!(
+        manifest_bytes == 0 || manifest_bytes == std::fs::metadata(&manifest).unwrap().len(),
+        "manifest bytes must describe reuse or one complete publication"
     );
     assert!(payload["estimated_bytes"].as_u64().unwrap() >= payload["bytes"].as_u64().unwrap());
 }
@@ -430,6 +433,33 @@ fn wait_for_boot_epoch(client: &mut WireClient) -> u64 {
         section["last_error"]
     );
     0
+}
+
+#[test]
+fn repeated_epoch_reuses_manifest_without_reporting_new_manifest_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let data_dir = root.path().join("data");
+    let backup_dir = root.path().join("backup");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&backup_dir).unwrap();
+    AuthorityDatabase::initialize(&data_dir).unwrap();
+    let daemon = spawn_daemon(&data_dir, &backup_dir);
+    let mut client = WireClient::connect(daemon.port);
+    upsert_document(&mut client, "2026-01-01", "unchanged snapshot");
+
+    let first = client.backup();
+    assert_backup_receipt(&first, &backup_dir);
+    assert!(first["manifest_bytes"].as_u64().unwrap() > 0);
+    let repeated = client.backup();
+    assert_eq!(repeated["manifest"], first["manifest"]);
+    assert_eq!(repeated["sha256"], first["sha256"]);
+    assert_eq!(repeated["durable_sequence"], first["durable_sequence"]);
+    for field in ["bytes", "copied_blocks", "copied_block_bytes", "manifest_bytes"] {
+        assert_eq!(repeated[field], json!(0), "unchanged epoch must not copy {field}");
+    }
+    assert_backup_receipt(&repeated, &backup_dir);
+    assert_eq!(snapshot_manifests(&backup_dir).len(), 1);
+    daemon.stop_gracefully();
 }
 
 #[test]

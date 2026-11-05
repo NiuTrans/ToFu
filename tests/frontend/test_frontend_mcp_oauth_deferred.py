@@ -34,7 +34,7 @@ pytestmark = pytest.mark.unit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-FEATURE_LOADER = ROOT / 'frontend' / 'src' / 'main.ts'
+FEATURE_LOADER = ROOT / 'frontend' / 'src' / 'application.ts'
 INDEX_HTML = ROOT / 'index.html'
 MAIN_JS = pathlib.Path(runtime_section_path('main.js'))
 PRELUDE = ROOT / 'frontend/src/runtime/sections/_prelude.js'

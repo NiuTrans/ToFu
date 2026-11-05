@@ -37,12 +37,15 @@ from tofu_agent.models import (
 )
 
 logger = get_logger(__name__)
+# Retained terminal executions are reconstructible transport state; this is
+# an evict-only bound, independent of hardware and of run concurrency.
+_DEFAULT_MAX_RETAINED_RUNS = 1024
 _TERMINAL_STATES = frozenset({'done', 'error', 'aborted'})
 _TERMINAL_EVENTS = frozenset({'done', 'error', 'aborted'})
 
 
 class _CapacityGate:
-    """Small process-local admission gate with no external state backend."""
+    """Process-local run counter; ``capacity=0`` never refuses a run."""
 
     def __init__(self, capacity: int) -> None:
         self.capacity = max(0, int(capacity))
@@ -371,6 +374,7 @@ class AgentRuntime:
         harness_profile: str = 'auto',
         native_execution=None,
         native_repository=None,
+        remote_principal: bool = True,
     ) -> None:
         if not isinstance(principal, PrincipalContext):
             raise TypeError('AgentRuntime principal must be PrincipalContext')
@@ -390,6 +394,10 @@ class AgentRuntime:
                 raise AgentConfigurationError('native_repository requires NativeRepositoryConfiguration')
             self._repository_runtime = native_repository.create_runtime()
         self.principal = principal
+        # Runs from a remote caller (the HTTP sidecar, an embedder serving other
+        # users) keep the agent-run workspace confinement. Only a trusted
+        # composition submitting for the local operator, like `run`, opts out.
+        self.remote_principal = bool(remote_principal)
 
         from tofu_agent.harness_profile import validate_harness_profile
         self.harness_profile = validate_harness_profile(harness_profile)
@@ -397,7 +405,7 @@ class AgentRuntime:
         self.model_routing_source = str(model_routing_source or 'runtime')
         self.default_model = (
             dict(model_routing.model) if model_routing is not None else None)
-        from runtime_guards import resolve_resource_budget
+        from runtime_guards import UNLIMITED, resolve_resource_budget
         from lib.agent_core.worker_executor import RecoverableAgentExecutor
         configured_capacity = max_inflight
         if configured_capacity is None:
@@ -408,21 +416,19 @@ class AgentRuntime:
         if isinstance(configured_capacity, bool) or not isinstance(configured_capacity, int) \
                 or configured_capacity < 0:
             raise AgentConfigurationError('max_inflight must be a nonnegative integer or None')
-        capacity = configured_capacity or resolve_resource_budget(
-            'TOFU_AGENT_WORKERS', minimum=1, maximum=512)
-        self._gate = _CapacityGate(capacity)
+        # Only an explicit caller limit gates runs; omitted or zero is
+        # unlimited. TOFU_AGENT_WORKERS sizes idle thread reuse only.
+        self._gate = _CapacityGate(configured_capacity)
+        idle_workers = resolve_resource_budget(
+            'TOFU_AGENT_WORKERS', minimum=1, maximum=UNLIMITED)
         self._executor = RecoverableAgentExecutor(
-            max_workers=capacity, queue_capacity=capacity,
+            max_workers=idle_workers, queue_capacity=0,
             max_abandoned_workers=1, thread_name_prefix='tofu-embedded-agent',
             metric_pool='embedded-agent')
-        # Retained terminal executions are reconstructible transport state,
-        # not durable user data; the bound scales with the same launch-time
-        # task-parallelism probe as the worker pool, and an explicit
-        # ``max_retained_runs`` always wins.
         self._max_retained_runs = (
             max(16, int(max_retained_runs))
             if max_retained_runs is not None else
-            max(16, min(4096, capacity * 64)))
+            _DEFAULT_MAX_RETAINED_RUNS)
         self._executions: dict[str, AgentExecution] = {}
         self._active: set[str] = set()
         self._lock = threading.RLock()
@@ -440,6 +446,7 @@ class AgentRuntime:
         harness_profile: str = 'auto',
         native_execution=None,
         native_repository=None,
+        remote_principal: bool = True,
     ) -> 'AgentRuntime':
         """Compose a personal runtime, loading only the complete v2 envelope."""
         if model_routing is None:
@@ -458,6 +465,7 @@ class AgentRuntime:
             harness_profile=harness_profile,
             native_execution=native_execution,
             native_repository=native_repository,
+            remote_principal=remote_principal,
         )
 
     @property
@@ -651,7 +659,8 @@ class AgentRuntime:
         if not self._gate.try_acquire():
             self._dispose_resources(route_group, tool_env)
             raise AgentOverloadedError(
-                f'AgentRuntime is at capacity ({self.capacity} in flight)')
+                f'AgentRuntime max_inflight={self.capacity} runs are already '
+                'in flight')
 
         from lib.tasks_pkg.manager import create_task
         conversation = request.conversation_id or f'agent-{uuid.uuid4().hex[:12]}'
@@ -670,7 +679,8 @@ class AgentRuntime:
             raise
 
         task['_api_v1'] = True
-        task['_via_agent_run'] = True
+        if self.remote_principal:
+            task['_via_agent_run'] = True
         task['_publicAgentRuntime'] = True
         if self._repository_runtime is not None:
             task['_repository_runtime'] = self._repository_runtime

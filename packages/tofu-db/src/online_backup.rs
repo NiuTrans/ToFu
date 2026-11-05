@@ -58,6 +58,9 @@ pub struct BackupAnchorProjection {
     pub root: Option<BlockId>,
     pub history_manifest_block_id: Option<BlockId>,
     pub history_segments: Vec<HistorySegmentReference>,
+    /// Frozen manifest descendants and payload-index metadata for this exact
+    /// anchor, retained even after the current history root is replaced.
+    pub history_payload_metadata_ids: Vec<BlockId>,
 }
 
 /// One completed epoch's receipt; the `system.backup` response derives
@@ -97,8 +100,10 @@ pub struct OnlineBackupMetrics {
 struct SharedState {
     metrics: RwLock<OnlineBackupMetrics>,
     doorbell: AtomicU64,
-    served: AtomicU64,
-    completed: Mutex<Option<Result<OnlineBackupEpochReport, String>>>,
+    /// Finished-epoch count and the latest receipt, updated together so a
+    /// waiter never observes a count without its result. Waiters clone the
+    /// receipt: every request waiting on one epoch receives it.
+    completed: Mutex<(u64, Option<Result<OnlineBackupEpochReport, String>>)>,
     completion_signal: Condvar,
 }
 
@@ -131,13 +136,13 @@ impl SharedState {
     }
 
     fn finish(&self, result: Result<OnlineBackupEpochReport, String>) {
-        self.served.fetch_add(1, Ordering::AcqRel);
         {
             let mut completed = self
                 .completed
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *completed = Some(result);
+            completed.0 += 1;
+            completed.1 = Some(result);
         }
         self.completion_signal.notify_all();
     }
@@ -173,19 +178,17 @@ impl OnlineBackupObserver {
     /// the epoch) or the epoch's own failure text.
     pub fn run_and_wait(&self, deadline_unix_ms: u64) -> io::Result<OnlineBackupEpochReport> {
         self.shared.doorbell.fetch_add(1, Ordering::AcqRel);
-        let served_at_request = self.shared.served.load(Ordering::Acquire);
         let mut completed = self
             .shared
             .completed
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let served_at_request = completed.0;
         loop {
-            if self.shared.served.load(Ordering::Acquire) > served_at_request {
-                return match completed.take() {
-                    Some(Ok(report)) => Ok(report),
-                    Some(Err(error)) => Err(io::Error::other(error)),
-                    None => Err(io::Error::other("backup epoch finished without a receipt")),
-                };
+            if let (served, Some(result)) = &*completed {
+                if *served > served_at_request {
+                    return result.clone().map_err(io::Error::other);
+                }
             }
             let now_unix_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -290,8 +293,7 @@ impl OnlineBackupDriver {
                 ..OnlineBackupMetrics::default()
             }),
             doorbell: AtomicU64::new(0),
-            served: AtomicU64::new(0),
-            completed: Mutex::new(None),
+            completed: Mutex::new((0, None)),
             completion_signal: Condvar::new(),
         });
         let stop = Arc::new(AtomicBool::new(false));
@@ -305,6 +307,7 @@ impl OnlineBackupDriver {
                 let stopped = Arc::clone(&stopped);
                 let database = Arc::clone(database);
                 move || {
+                    crate::fsync_stats::set_current_component(crate::fsync_stats::COMPONENT_ONLINE_BACKUP);
                     // Boot grace: startup is the latency-sensitive phase;
                     // treat boot as a fresh success for fallback purposes.
                     let mut last_attempt = Instant::now();

@@ -34,7 +34,7 @@ identical to what ranking and passage selection use — no second,
 divergent notion of "query terms".
 """
 
-from tofu_search.lexical import query_subject
+from tofu_search.lexical import subject_terms
 from tofu_search.lexical import tokenize as _tokenize
 from tofu_search.log import get_logger
 
@@ -45,7 +45,7 @@ __all__ = ['should_fetch_result', 'partition_fetchable']
 
 def query_terms(query: str) -> set[str]:
     """Meaningful subject terms in the shared BM25 token space (no operators)."""
-    return set(_tokenize(query_subject(query)))
+    return subject_terms(query)
 
 
 def result_terms(result: dict) -> set[str]:

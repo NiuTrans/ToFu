@@ -7,8 +7,6 @@ Triggered when the upstream API returns either:
   * HTTP 413 "Request Entity Too Large" — raw body bytes exceed the
     gateway's ``client_max_body_size`` regardless of token count
     (almost always large base64 image_url blocks).
-  * Local request-memory admission — the body is valid, but its temporary
-    serialisation copies do not fit the currently available cgroup headroom.
 
 This package is a FACADE: the import path
 ``lib.tasks_pkg.compaction._reactive`` is unchanged and every symbol that
@@ -33,8 +31,8 @@ Public surface:
 Live/transient tasks archive the original request, then attempt atomic L2 only.
 They never strip images, clip messages, micro-compact, or head-truncate here.
 A failed/declined summary closes the pre-archive without a summary or post
-snapshot. Local-memory rejection refuses without allocating a summary request.
-The explicit non-live utility path retains deterministic reduction below.
+snapshot. The explicit non-live utility path retains deterministic reduction
+below.
 
 Utility ordering invariant (memory: ``compaction-viewer-architecture``):
 
@@ -45,8 +43,7 @@ Utility ordering invariant (memory: ``compaction-viewer-architecture``):
      overflow that whole-message dropping cannot.
   4. Phase 1 aggressive ``micro_compact``.
   5. Phase 2 cooldown reset.
-  6. Phase 3 ``force_compact_if_needed(_compaction_skip_archive=True)`` for
-     provider size rejections; local-memory recovery skips the summary LLM.
+  6. Phase 3 ``force_compact_if_needed(_compaction_skip_archive=True)``.
   7. Phase 4 wire-byte head truncate (defence-in-depth).
 
 Steps 1+2 must come BEFORE step 5, and step 5 MUST carry the skip flag.
@@ -105,8 +102,7 @@ logger = get_logger(__name__)
 
 
 def reactive_compact(messages: list, task: dict | None = None,
-                     *, error_text: str | None = None,
-                     byte_target: int | None = None) -> bool:
+                     *, error_text: str | None = None) -> bool:
     """Emergency compaction when a request cannot be sent safely.
 
     Handles two orthogonal failure modes:
@@ -115,8 +111,6 @@ def reactive_compact(messages: list, task: dict | None = None,
       2. Gateway HTTP 413 "Request Entity Too Large" — raw body bytes
          exceed openresty's ``client_max_body_size`` regardless of token
          count.  Almost always caused by large base64 image_url blocks.
-      3. Local memory headroom — live/transient tasks refuse unchanged;
-         explicit utility callers may request LLM-free byte reduction.
 
     Returns True if compaction was performed, False otherwise.
     """
@@ -146,17 +140,14 @@ def reactive_compact(messages: list, task: dict | None = None,
     truncated_chars = 0
     dropped_messages = 0
     logger.warning('%s [ReactiveCompact] Emergency compaction triggered for conv=%s '
-                   '(request rejected or locally unsafe; '
+                   '(request rejected; '
                    'reported_tokens=%s wire_bytes=%.1fMB)',
                    pfx, conv_id[:8] if conv_id else '?',
                    f'{reported_tokens:,}' if reported_tokens else '?',
                    wire_before / 1048576)
 
     # ── Proactive archival of the RAW pre-reactive context ──
-    if byte_target is not None:
-        _pre_reason = (
-            f'local memory pressure: target {byte_target / 1048576:.1f} MB')
-    elif reported_tokens:
+    if reported_tokens:
         _pre_reason = f'prompt too long: {reported_tokens:,} tokens'
     elif wire_before > _WIRE_BYTE_SOFT_LIMIT:
         _pre_reason = f'request body too large: {wire_before / 1048576:.1f} MB'
@@ -256,38 +247,25 @@ def reactive_compact(messages: list, task: dict | None = None,
     with _cooldown_lock:
         _summary_cooldowns.pop(conv_id, None)
 
-    # Phase 3: force compact with a tighter preservation budget. A local
-    # memory recovery must not allocate another summary request under the same
-    # pressure. Live/transient tasks refuse unchanged; utilities may trim below.
+    # Phase 3: force compact with a tighter preservation budget.
     context_limit = _get_context_limit(task)
     usable = _usable_context(context_limit)
     tight_budget = max(1, int(usable * 0.10))
-    if byte_target is not None:
-        _r_reason = (
-            f'local memory pressure: target {byte_target / 1048576:.1f} MB')
-    elif reported_tokens:
-        _r_reason = f'prompt too long: {reported_tokens:,} tokens'
-    elif wire_before > _WIRE_BYTE_SOFT_LIMIT:
-        _r_reason = f'request body too large: {wire_before / 1048576:.1f} MB'
-    else:
-        _r_reason = 'API rejected request as too long'
-    compacted = False
-    if byte_target is None:
-        compacted = force_compact_if_needed(
-            messages, task=task,
-            preserve_budget_tokens=tight_budget,
-            keep_recent_pairs=2,
-            force=True,
-            _compaction_trigger='reactive',
-            _compaction_reason=_r_reason,
-            _compaction_skip_archive=True,  # already archived above
-            # …so hand that pre-snapshot row's id down: the inner post-summary
-            # UPDATE (update_archive_summary + compaction_done) back-fills THIS
-            # row's tokens_after/msgs_after instead of leaving them at 0.
-            _compaction_archive_id=archive_id,
-            _compaction_round=round_num,
-            _result_meta=summary_meta,
-        )
+    compacted = force_compact_if_needed(
+        messages, task=task,
+        preserve_budget_tokens=tight_budget,
+        keep_recent_pairs=2,
+        force=True,
+        _compaction_trigger='reactive',
+        _compaction_reason=_pre_reason,
+        _compaction_skip_archive=True,  # already archived above
+        # …so hand that pre-snapshot row's id down: the inner post-summary
+        # UPDATE (update_archive_summary + compaction_done) back-fills THIS
+        # row's tokens_after/msgs_after instead of leaving them at 0.
+        _compaction_archive_id=archive_id,
+        _compaction_round=round_num,
+        _result_meta=summary_meta,
+    )
     if cancelled(adopted=compacted):
         return False
     # Phase 3's success tail already back-filled + closed out the adopted
@@ -305,15 +283,11 @@ def reactive_compact(messages: list, task: dict | None = None,
 
     # Phase 4: wire-byte guard.
     wire_after_phases = _estimate_wire_bytes(messages)
-    effective_byte_target = (
-        min(_WIRE_BYTE_SOFT_LIMIT, byte_target)
-        if byte_target is not None else _WIRE_BYTE_SOFT_LIMIT)
     need_byte_trim = (
-        not preserve_source and (over_wire or byte_target is not None)
-        and wire_after_phases > effective_byte_target)
+        not preserve_source and over_wire
+        and wire_after_phases > _WIRE_BYTE_SOFT_LIMIT)
 
-    if (not preserve_source and byte_target is None
-            and not compacted and not need_byte_trim):
+    if not preserve_source and not compacted and not need_byte_trim:
         logger.warning('%s [ReactiveCompact] Force compact did not trigger — '
                        'attempting head truncation (reported=%s)',
                        pfx, f'{reported_tokens:,}' if reported_tokens else '?')
@@ -325,9 +299,9 @@ def reactive_compact(messages: list, task: dict | None = None,
         logger.warning('%s [ReactiveCompact] Wire bytes still over limit '
                        '(%.1fMB > %.1fMB) — running byte-aware head truncate',
                        pfx, wire_after_phases / 1048576,
-                       effective_byte_target / 1048576)
+                       _WIRE_BYTE_SOFT_LIMIT / 1048576)
         dropped_messages += max(0, int(_head_truncate(
-            messages, task, byte_target=effective_byte_target) or 0))
+            messages, task, byte_target=_WIRE_BYTE_SOFT_LIMIT) or 0))
         compacted = compacted or dropped_messages > 0
 
     tokens_after = _estimate_total_tokens(messages)
@@ -354,8 +328,7 @@ def reactive_compact(messages: list, task: dict | None = None,
                       else 'deterministic_recovery'),
             implementation=('atomic_summary_recovery' if preserve_source
                             else 'bounded_recovery_pipeline'),
-            mode=('local_memory' if byte_target is not None
-                  else 'provider_rejection'),
+            mode='provider_rejection',
             continuation_format='none',
             summary_generated=False,
             summary_usage=summary_meta.get('summary_usage'),
@@ -368,8 +341,7 @@ def reactive_compact(messages: list, task: dict | None = None,
             wire_bytes_before=wire_before,
             wire_bytes_after=wire_after,
             outcome_reason=(
-                ('local_memory_pressure' if byte_target is not None else
-                 summary_meta.get('summaryFailureReason')
+                (summary_meta.get('summaryFailureReason')
                  or summary_meta.get('reason') or 'summary_not_adopted')
                 if preserve_source else _pre_reason),
         )

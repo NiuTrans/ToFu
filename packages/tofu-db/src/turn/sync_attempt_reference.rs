@@ -6,7 +6,7 @@
 //! older readers reject this physical representation rather than publish it.
 
 use super::{attempt_event_key, attempt_sync_reference_key, conversation_sync_event_key, invalid_data,
-    invalid_input, AuthorityDatabase, AuthorityTransaction, EntityKey,
+    AuthorityDatabase, AuthorityTransaction, EntityKey,
     ATTEMPT_EVENT_DOCUMENT_IDENTITY, SYNC_DOCUMENT_IDENTITY};
 use crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES;
 use serde_json::{Map, Value};
@@ -45,7 +45,8 @@ pub(super) fn encode(envelope: &Value, canonical_event_bytes: usize) -> io::Resu
     // Keep the former full-envelope put admission and its classified error.
     // A smaller physical locator must not admit an unreadable larger event.
     if expanded_bytes > MAX_LEGACY_DOCUMENT_BYTES {
-        return Err(invalid_input("invalid versioned document mutation"));
+        return Err(crate::semantic_executor::validation_fence(
+            "attempt event exceeds the conversation-sync document bound"));
     }
     Ok(raw)
 }
@@ -126,7 +127,7 @@ pub(super) fn materialize(database: &AuthorityDatabase, tx: &mut AuthorityTransa
     }
     output.push(b'}');
     if output.len() > maximum_bytes {
-        return Err(io::Error::new(io::ErrorKind::OutOfMemory, "attempt sync event exceeds its bound"));
+        return Err(crate::resource_exhaustion::domain_bound("attempt sync event exceeds its bound"));
     }
     Ok((logical_key, output))
 }

@@ -1,0 +1,13 @@
+/* Router Watchdog (docs/ROUTER.md R7), shown as health checks: the body of
+ * the settings disclosure the main coordinator's header hosts (turn on, the
+ * periodic review controls, open the Watchdog conversation) and the one-line
+ * header on the Watchdog conversation. Tokens only; shared controls keep their
+ * ui-kit styling. */
+.router-watchdog-off,.router-watchdog-on{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1) var(--space-3);padding-top:var(--space-2)}
+.router-watchdog-off[hidden],.router-watchdog-on[hidden]{display:none}
+.router-watchdog-off>p{flex:1 1 20em;min-width:0;margin:0;overflow-wrap:anywhere}
+.router-watchdog-schedule{flex-direction:row;flex-wrap:wrap;align-items:center;gap:var(--space-1) var(--space-2)}
+.router-watchdog-schedule input{width:12em;max-width:100%}
+.router-watchdog-header{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1) var(--space-3);padding:var(--space-2) var(--space-4);border-bottom:var(--control-edge-inset) solid var(--border);color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui)}
+.router-watchdog-header[hidden]{display:none}
+.router-watchdog-header-subtitle{flex:1 1 16em;min-width:0;overflow-wrap:anywhere}

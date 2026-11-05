@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/site_knowledge_v1.schema.json",
+  "title": "Owned learned site extraction rule",
+  "description": "A verified rule belongs to one owner, tenant, browser and profile. The record CAS version fences publication; a null entry retires the rule without erasing that fence. Identity is not browser or model authorization.",
+  "x-storage": {"namespace": "site_knowledge.v1"},
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scope", "domain", "operation", "entry"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "scope": {"$ref": "#/$defs/scope"},
+    "domain": {"type": "string", "minLength": 1},
+    "operation": {"type": "string", "minLength": 1},
+    "entry": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/entry"}]}
+  },
+  "$defs": {
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner_user_id", "tenant_id", "client_id", "profile"],
+      "properties": {
+        "owner_user_id": {"type": "integer", "minimum": 1},
+        "tenant_id": {"type": ["string", "null"]},
+        "client_id": {"type": "string", "minLength": 1},
+        "profile": {"type": "string"}
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["extractor_js", "wait_selector", "scrolls", "verified_at", "verified_by", "evidence", "notes", "access"],
+      "properties": {
+        "extractor_js": {"type": "string", "pattern": "\\S", "maxLength": 6000},
+        "wait_selector": {"type": "string"},
+        "scrolls": {"type": "integer", "minimum": 0},
+        "verified_at": {"type": "number", "minimum": 0},
+        "verified_by": {"type": "string", "minLength": 1},
+        "evidence": {"type": "object"},
+        "notes": {"type": "string"},
+        "access": {"const": "read"}
+      }
+    }
+  }
+}

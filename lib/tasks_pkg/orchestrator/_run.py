@@ -19,12 +19,6 @@ from functools import wraps
 from lib.tasks_pkg.invocation import InvocationPolicy, ROOT_INVOCATION_POLICY
 from lib.tasks_pkg.cache_tracking._state import with_cache_tracking_scope
 
-# NOTE: ``import threading`` was removed 2026-07-23 ( slice 2).
-# The only usage inside run_task was the daemon-thread spawn of the
-# external-edit probe, which now lives in
-# lib.tasks_pkg.orchestrator._vu_startup.start_external_edit_probe.
-# NOTE: ``import time`` was removed 2026-08-01 ( slice 35).
-# The queue-wait timing moved to _task_open.log_task_open.
 from typing import Any
 
 from lib.log import clear_log_context, get_logger, set_log_context, set_req_id
@@ -32,21 +26,11 @@ from lib.log import clear_log_context, get_logger, set_log_context, set_req_id
 logger = get_logger(__name__)
 
 
-from lib.agent_core.events import (
-    Phase,
-    emit_phase,
-)
-
-# Startup helpers extracted 2026-07-23 ( slice 2) — the first
-# real source movement out of run_task's 1813-line body. The VU closure
-# adapter moved to make_vu_phase (slice 37); call sites keep the
-# closure-style single-arg call.
-from lib.tasks_pkg.orchestrator._vu_startup import (
-    _probe_external_edits,  # noqa: F401  (imported for wire-parity guard + back-compat)
-    make_vu_phase,
+from lib.tasks_pkg.orchestrator._startup import (
+    emit_startup_phase as _emit_startup_phase,
     setup_project_context,
-    start_external_edit_probe,  # noqa: F401  (also invoked indirectly via setup_project_context)
 )
+from lib.tasks_pkg.orchestrator._vu_startup import make_vu_phase
 from lib.tasks_pkg.orchestrator._prefetch import (
     start_prefetches,
     stop_prefetches,
@@ -93,36 +77,7 @@ from lib.tasks_pkg.orchestrator._task_open import (
     log_task_open,
     snapshot_turn_input,
 )
-
-
-_STARTUP_PHASES = {
-    'config': (
-        'Resolving model and workspace settings…',
-        'stream.phase.startupConfig',
-    ),
-    'tools': (
-        'Preparing tools and workspace…',
-        'stream.phase.startupTools',
-    ),
-    'context': (
-        'Loading project context and relevant memory…',
-        'stream.phase.startupContext',
-    ),
-}
-
-
-def _emit_startup_phase(task: dict[str, Any], stage: str) -> None:
-    detail, detail_key = _STARTUP_PHASES[stage]
-    try:
-        emit_phase(
-            task,
-            Phase.WORKING,
-            detail=detail,
-            detailKey=detail_key,
-        )
-    except Exception as exc:
-        logger.debug('[Task %s] startup phase emit failed stage=%s: %s',
-                     (task.get('id') or '')[:8], stage, exc)
+from lib.observability import measure_task_startup
 
 
 # ══════════════════════════════════════════════════════════
@@ -190,21 +145,27 @@ def _execute_task_invocation(
         _vu_phase = make_vu_phase(task)
         _emit_startup_phase(task, 'config')
         cfg = task['config']
+        startup_identity = {
+            'task_id': task.get('id'), 'conversation_id': task.get('convId'),
+            'turn_id': task.get('_turnId'), 'attempt_id': task.get('_attemptId'),
+            'user_id': task.get('_userId'),
+        }
 
         conversation_presentation = not callable(task.get('_invocationEventSink'))
 
-        # ── Turn prelude (slice 33 → _turn_prelude; returns the rebound cfg).
-        if conversation_presentation:
-            cfg = run_turn_prelude(task, cfg, tid)
+        with measure_task_startup('startup_config', identity=startup_identity):
+            # ── Turn prelude (slice 33 → _turn_prelude; returns the rebound cfg).
+            if conversation_presentation:
+                cfg = run_turn_prelude(task, cfg, tid)
 
-        # ── Provider binding: hard pin + conv affinity
-        #    (slice 31 → _provider_binding; cleared in finally).
-        bind_provider_and_affinity(task, tid)
+            # ── Provider binding: hard pin + conv affinity
+            #    (slice 31 → _provider_binding; cleared in finally).
+            bind_provider_and_affinity(task, tid)
 
-        # ── Section 1: Config & Model Resolution
-        #    (slice 30 → _config_resolution; the 17-field unpack below
-        #    stays inline as local binding).
-        mcfg = resolve_and_seed_model_config(cfg, task)
+            # ── Section 1: Config & Model Resolution
+            #    (slice 30 → _config_resolution; the 17-field unpack below
+            #    stays inline as local binding).
+            mcfg = resolve_and_seed_model_config(cfg, task)
         model           = mcfg['model']
         thinking_enabled = mcfg['thinking_enabled']
         thinking_depth  = mcfg['thinking_depth']
@@ -248,16 +209,18 @@ def _execute_task_invocation(
         prepared_resume_state = None
         prepared_tool_history = None
         if not _prep_aborted:
-            prepared_resume_state = prepare_resume_state(cfg)
-            prepared_tool_history = prepare_continue_tool_history(
-                task=task, cfg=cfg, model=model)
+            with measure_task_startup('startup_resume', identity=startup_identity):
+                prepared_resume_state = prepare_resume_state(cfg)
+                prepared_tool_history = prepare_continue_tool_history(
+                    task=task, cfg=cfg, model=model)
 
         if not _prep_aborted:
             # ── One-shot project-scope startup (slice 4 →
             #    setup_project_context). This may touch FUSE-backed state, so
             #    never enter it for a task already cancelled in the queue.
             if conversation_presentation:
-                setup_project_context(task, cfg, project_path, project_enabled)
+                with measure_task_startup('startup_project', identity=startup_identity):
+                    setup_project_context(task, cfg, project_path, project_enabled)
             _prep_aborted = handle_abort_during_prep(
                 task, rs, stage='project_setup', tid=tid)
 
@@ -273,7 +236,8 @@ def _execute_task_invocation(
             # ── Section 2: Tool Assembly (slice 29 →
             #    _tool_assembly_prep; force-enable guard + schema stash).
             _emit_startup_phase(task, 'tools')
-            tool_list, has_real_tools = assemble_round_tools(cfg, task, mcfg)
+            with measure_task_startup('startup_tools', identity=startup_identity):
+                tool_list, has_real_tools = assemble_round_tools(cfg, task, mcfg)
             _prep_aborted = handle_abort_during_prep(task, rs,
                                                      stage='tool_setup',
                                                      tid=tid)
@@ -288,27 +252,29 @@ def _execute_task_invocation(
             #    completes synchronously before Composer and never mutates
             #    messages.
             _emit_startup_phase(task, 'context')
-            maybe_run_memory_prefetch(
-                task=task, cfg=cfg, messages=messages, tool_list=tool_list,
-                project_path=project_path, project_enabled=project_enabled,
-                memory_enabled=memory_enabled,
-                has_real_tools=has_real_tools,
-                injected_tool_calls=prepared_tool_history.injected_calls,
-            )
+            with measure_task_startup('startup_memory', identity=startup_identity):
+                maybe_run_memory_prefetch(
+                    task=task, cfg=cfg, messages=messages, tool_list=tool_list,
+                    project_path=project_path, project_enabled=project_enabled,
+                    memory_enabled=memory_enabled,
+                    has_real_tools=has_real_tools,
+                    injected_tool_calls=prepared_tool_history.injected_calls,
+                )
 
             # ── Section 3: Context Injection → _t_prep_done
             #    (slice 7 → _context_inject).
-            inject_context_and_emit_chips(
-                task=task, messages=messages, cfg=cfg,
-                project_path=project_path, project_enabled=project_enabled,
-                memory_enabled=memory_enabled,
-                search_enabled=search_enabled,
-                has_real_tools=has_real_tools,
-                model=model, tool_list=tool_list,
-                prefetch_executor=_prefetch_executor,
-                tid=tid, t_run_start=_t_run_start,
-                vu_phase=_vu_phase,
-            )
+            with measure_task_startup('startup_context', identity=startup_identity):
+                inject_context_and_emit_chips(
+                    task=task, messages=messages, cfg=cfg,
+                    project_path=project_path, project_enabled=project_enabled,
+                    memory_enabled=memory_enabled,
+                    search_enabled=search_enabled,
+                    has_real_tools=has_real_tools,
+                    model=model, tool_list=tool_list,
+                    prefetch_executor=_prefetch_executor,
+                    tid=tid, t_run_start=_t_run_start,
+                    vu_phase=_vu_phase,
+                )
             _prep_aborted = handle_abort_during_prep(task, rs,
                                                      stage='context_inject',
                                                      tid=tid)
@@ -333,18 +299,19 @@ def _execute_task_invocation(
             # Tool history is already reconstructed from the owner-scoped,
             # turn-native transcript before task creation. There is
             # deliberately no second in-process message authority here.
-            _injected_tool_calls = inject_continue_tool_history(
-                task=task, rs=rs, messages=messages, cfg=cfg, model=model,
-                tid=tid, prepared_history=prepared_tool_history)
-            if _injected_tool_calls != prepared_tool_history.injected_calls:
-                raise RuntimeError(
-                    'Prepared Continue tool-history count changed at injection')
+            with measure_task_startup('startup_history', identity=startup_identity):
+                _injected_tool_calls = inject_continue_tool_history(
+                    task=task, rs=rs, messages=messages, cfg=cfg, model=model,
+                    tid=tid, prepared_history=prepared_tool_history)
+                if _injected_tool_calls != prepared_tool_history.injected_calls:
+                    raise RuntimeError(
+                        'Prepared Continue tool-history count changed at injection')
 
-            # ── Resume-state hydration (slice 10 → _resume_state).
-            apply_resume_state(task=task, cfg=cfg, messages=messages,
-                               model=model, tid=tid,
-                               prepared_state=prepared_resume_state,
-                               round_state=rs, original_messages=original_messages)
+                # ── Resume-state hydration (slice 10 → _resume_state).
+                apply_resume_state(task=task, cfg=cfg, messages=messages,
+                                   tid=tid,
+                                   prepared_state=prepared_resume_state,
+                                   round_state=rs, original_messages=original_messages)
 
             _prep_aborted = handle_abort_during_prep(task, rs, stage='prefinal',
                                                      tid=tid)

@@ -33,7 +33,7 @@ def projected_error(text):
 
 
 def run_batch(outcomes, mode="v2", *, url_prefix="https://example.test",
-              error_prefix="source", through_pipeline=False):
+              error_prefix="source", through_pipeline=False, typed_object=False):
     executed = []
 
     def handler(task, tc, name, call_id, arguments, number, row, *rest):
@@ -46,12 +46,13 @@ def run_batch(outcomes, mode="v2", *, url_prefix="https://example.test",
             _finalize_tool_round(task, number, row, [{"content": "opaque failure"}],
                                  status="error")
             return call_id, "opaque failure", False
-        return call_id, typed_tool_error(
+        error = typed_tool_error(
             f"{error_prefix}_{index}_unavailable",
             retryable=outcome == "retryable",
             message=f"original failure {index}",
             next_action=f"Inspect alternative source {index}.",
-        ).to_envelope_text(), False
+        )
+        return call_id, error if typed_object else error.to_envelope_text(), False
 
     task = task_for(handler, mode)
     task.update(convId="", _transientRuntime=True, _suppressEvents=True, toolRounds=[])
@@ -130,6 +131,27 @@ def test_outer_pipeline_retains_batch_failure_without_reexecuting_children(mode,
     assert len(content.canonical.children) == 2
     assert [row["status"] for row in task["toolRounds"]] == ["error", "error", "error"]
     assert len(observations[1]) == 3
+
+
+@pytest.mark.parametrize("mode", ["legacy", "v2"])
+def test_child_typed_error_object_reports_its_own_code(mode, observations):
+    _, _, _, expected, _ = run_batch(["retryable", "permanent"], mode)
+    task, _, model_text, content, executed = run_batch(
+        ["retryable", "permanent"], mode, typed_object=True)
+    assert sorted(executed) == [0, 1]
+    children = [child.canonical for child in content.canonical.children]
+    expected_children = [child.canonical for child in expected.canonical.children]
+    assert [child.text() for child in children] == [
+        child.text() for child in expected_children]
+    assert [child.execution_status for child in children] == ["error", "error"]
+    errors = [tool_result_error(child.text()) for child in children]
+    assert [(error.code, error.retryable) for error in errors] == [
+        ("source_0_unavailable", True), ("source_1_unavailable", False)]
+    for index in range(2):
+        assert f"source_{index}_unavailable" in model_text
+        assert f"Inspect alternative source {index}." in model_text
+    assert "tool_effect_unknown" not in model_text and "TypeError" not in model_text
+    assert [row["status"] for row in task["toolRounds"]] == ["error", "error", "error"]
 
 
 @pytest.mark.parametrize("outcomes", [

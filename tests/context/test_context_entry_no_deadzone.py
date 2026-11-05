@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -207,7 +208,7 @@ global.requestAnimationFrame = win.requestAnimationFrame = (fn) => setTimeout(fn
 // i18n stub that interpolates {pct} so the usage label test is meaningful.
 win.t = global.t = (k, vars) => {
   if (k === 'mobile.compactUsage' && vars) return String(vars.pct) + '% used';
-  if (k === 'compactNow.busy') return 'busy';
+  if (k === 'compactNow.schedule') return 'schedule';
   if (k === 'mobile.compactDesc') return 'compact';
   return k;
 };
@@ -224,6 +225,9 @@ global.getActiveConv = win.getActiveConv = () => CONV;
 global.activeStreams = win.activeStreams = new Map();
 global.convIsBusy = win.convIsBusy = () => TURN_BUSY;
 global.getCompactionHistory = win.getCompactionHistory = () => COMPACTION_HISTORY;
+global.CompactionHistoryState = win.CompactionHistoryState = {
+  count: () => COMPACTION_HISTORY.length,
+};
 global.ConversationTurnRead = win.ConversationTurnRead = {
   ordered() {
     return TURN_PROJECTIONS.map((projection, index) => ({
@@ -261,6 +265,10 @@ global._scheduleReflow = win._scheduleReflow = () => {};
 // closeMobileSheet delegates to the composer-options sheet owner in _prelude.js;
 // stub that cross-section global the way the composed bundle provides it.
 global.composerOptionsSheet = win.composerOptionsSheet = { toggle(){}, close(){}, destroy(){} };
+// The scheduled-compaction acknowledgment owner is also a _prelude.js import;
+// an inert one (nothing scheduled) is the state these checks assume.
+global.createScheduledCompactions = win.createScheduledCompactions = () => ({ accept: () => null, pending: () => false });
+global.scheduledCompactionNotice = win.scheduledCompactionNotice = () => '';
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // context-bar.js (exports contextUsageSummary + runManualCompaction)
 eval(fs.readFileSync(process.argv[4], 'utf8'));  // main_folders_mobile.js (updateMobileContext + _mobileCompactNow)
@@ -286,12 +294,13 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
   check('not_disabled_when_idle',
         !document.getElementById('mobileCompactNow').classList.contains('disabled'));
 
-  // ── (b) busy guard: a live task disables "compact now" ──
+  // ── (b) a live task keeps "compact now" usable: the server schedules it
+  //    for the running reply's next model call ──
   TURN_BUSY = true;
   updateMobileContext();
-  check('disabled_when_busy',
-        document.getElementById('mobileCompactNow').classList.contains('disabled'));
-  check('desc_shows_busy', desc.textContent === 'busy');
+  check('enabled_when_busy',
+        !document.getElementById('mobileCompactNow').classList.contains('disabled'));
+  check('desc_shows_schedule', desc.textContent === 'schedule');
   TURN_BUSY = false;
 
   // ── (c) history item hidden without snapshots, shown with them ──
@@ -329,6 +338,7 @@ def _run(ctx_source: str, mobile_source: str) -> subprocess.CompletedProcess:
     # for different xdist workers.  A fixed tests/_ctx_deadzone_harness.js let
     # one worker overwrite/unlink the file while the other's Node process was
     # loading it, producing suite-only hangs/timeouts on FUSE.
+    require_node_modules('jsdom')
     fd, harness = tempfile.mkstemp(
         prefix='_ctx_deadzone_harness_', suffix='.js', dir=HERE)
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -353,8 +363,6 @@ def _run(ctx_source: str, mobile_source: str) -> subprocess.CompletedProcess:
                 pass
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_mobile_context_section_renders_and_wires():
     proc = _run(_runtime_section('context-bar.js'),
                 _runtime_section('main/main_folders_mobile.js'))
@@ -365,8 +373,6 @@ def test_mobile_context_section_renders_and_wires():
     assert out.count('PASS') >= 12, f'expected >=12 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_neuter_delegation_is_load_bearing():
     """Drop the runManualCompaction delegation in _mobileCompactNow → the
     'compact_delegates' check must FAIL, proving the wiring assertion has teeth."""

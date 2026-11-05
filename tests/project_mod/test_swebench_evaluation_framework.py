@@ -47,16 +47,21 @@ pytestmark = pytest.mark.unit
 def test_runtime_resource_recording_excludes_secrets_and_survives_ambient_changes(monkeypatch):
     from evaluations.swebench.process import capture_resource_environment, recorded_resource_environment
     monkeypatch.setenv('GLM_API_KEY', 'sentinel-secret-never-record')
+    # A retired profile switch left in the environment is ignored, never frozen.
     monkeypatch.setenv('TOFU_RESOURCE_PROFILE', 'throughput')
     monkeypatch.setenv('TOFU_AGENT_WORKERS', '60')
+    monkeypatch.delenv('TOFU_MAX_INFLIGHT_TASKS', raising=False)
     recorded = capture_resource_environment()
     assert recorded['TOFU_AGENT_WORKERS'] == '60'
-    assert recorded['TOFU_RESOURCE_PROFILE'] == 'throughput'
+    assert 'TOFU_RESOURCE_PROFILE' not in recorded
+    # Unlimited settings are never materialized, so no run freezes sys.maxsize.
+    assert 'TOFU_MAX_INFLIGHT_TASKS' not in recorded
     assert 'sentinel-secret-never-record' not in repr(recorded)
     monkeypatch.setenv('TOFU_AGENT_WORKERS', '1')
     assert recorded_resource_environment({'runtime_resource_environment': recorded}) == recorded
-    with pytest.raises(ValueError, match='unknown key'):
-        recorded_resource_environment({'runtime_resource_environment': {'GLM_API_KEY': 'x'}})
+    for foreign in ({'GLM_API_KEY': 'x'}, {'TOFU_RESOURCE_PROFILE': 'throughput'}):
+        with pytest.raises(ValueError, match='unknown key'):
+            recorded_resource_environment({'runtime_resource_environment': foreign})
 
 
 def test_artifact_root_is_private_and_self_ignoring(host_tmp_path):
@@ -276,7 +281,7 @@ def test_rootless_qemu_config_uses_custom_vm_environment_and_host_agent(host_tmp
     )
     spec = HarborRunSpec(
         agent="rootless_vm.harbor_tofu_agent:TofuHostAgent",
-        models=("deepseek-v4-flash-meituan",),
+        models=("deepseek-v4-flash-yourprovider",),
         backend="rootless-qemu",
         output_root=host_tmp_path / "evals",
         task_ids=("swe-bench/django__django-11099",),
@@ -352,7 +357,7 @@ def test_rootless_qemu_verifier_timeout_multiplier_scales_phase_and_guest(host_t
     )
     spec = HarborRunSpec(
         agent="rootless_vm.harbor_tofu_agent:TofuHostAgent",
-        models=("deepseek-v4-flash-meituan",),
+        models=("deepseek-v4-flash-yourprovider",),
         backend="rootless-qemu",
         output_root=tmp_path / "evals",
         task_ids=("swe-bench/django__django-11099",),
@@ -370,7 +375,7 @@ def test_rootless_qemu_verifier_timeout_multiplier_scales_phase_and_guest(host_t
     default_config = build_job_config(
         HarborRunSpec(
             agent="rootless_vm.harbor_tofu_agent:TofuHostAgent",
-            models=("deepseek-v4-flash-meituan",),
+            models=("deepseek-v4-flash-yourprovider",),
             backend="rootless-qemu",
             output_root=tmp_path / "evals",
             task_ids=("swe-bench/django__django-11099",),

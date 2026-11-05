@@ -21,7 +21,7 @@ from lib.llm_sanitize import (
     _strip_non_api_fields,
 )
 from lib.log import get_logger
-from lib.model_info import _clamp_max_tokens, is_claude, model_supports_vision
+from lib.model_info import _clamp_route_max_tokens, is_claude, model_supports_vision
 
 from lib.llm.body._clamp import _clamp_completion_to_context_window
 from lib.llm.body._images import (
@@ -46,7 +46,7 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
                provider_id='', precomputed_input_tokens=None,
                vision_fallback_from='', image_reuse=None, image_user_id=None,
                inference_profile=None, reasoning_intent=None, defer_reasoning=False,
-               context_window=0):
+               context_window=0, knowledge_model=''):
     """Build a model-aware request body for /chat/completions.
 
     Reasoning and sampling use the selected route's ``inference_profile``
@@ -59,15 +59,24 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     compatibility module. Image, context and message normalization remain owned
     by their respective helpers, independently of reasoning controls.
 
+    ``model`` is the request spelling written to ``body['model']``.
+    ``knowledge_model`` (default: ``model``) is the logical identity that every
+    model-knowledge lookup uses: output/context clamps, vision, family message
+    tweaks and reasoning compilation.
+
     Raises:
         ValueError: if ``messages`` is empty or None.
     """
     if not messages:
         raise ValueError('build_body() requires a non-empty messages list')
 
-    max_tokens = _clamp_max_tokens(model, max_tokens)
+    knowledge_model = knowledge_model or model
+    # Limits learned from provider errors are keyed by the request spelling.
+    max_tokens = _clamp_route_max_tokens(
+        knowledge_model, max_tokens,
+        wire_model=model if model != knowledge_model else '')
     max_tokens = _clamp_completion_to_context_window(
-        model,
+        knowledge_model,
         messages,
         max_tokens,
         provider_id=provider_id,
@@ -117,10 +126,12 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     clean_messages = _drop_empty_assistant_messages(clean_messages)
     clean_messages = _merge_consecutive_same_role(clean_messages)
 
-    if model_supports_vision(model):
-        _validate_image_blocks(clean_messages, user_id=image_user_id)
-        _downscale_oversized_images(
-            clean_messages, model, image_reuse=image_reuse, user_id=image_user_id)
+    if model_supports_vision(knowledge_model):
+        clean_messages = _validate_image_blocks(
+            clean_messages, user_id=image_user_id)
+        clean_messages = _downscale_oversized_images(
+            clean_messages, knowledge_model, image_reuse=image_reuse,
+            user_id=image_user_id)
     else:
         # Projection runs before validation/resolution so a text-only request
         # never reads local image files, expands them to base64, or pays image
@@ -129,7 +140,7 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
         # multimodal transcript for a later switch back to a VLM.
         _projected_image_count = _project_images_for_text_model(
             clean_messages,
-            model,
+            knowledge_model,
             fallback_from=vision_fallback_from,
         )
         if _projected_image_count:
@@ -141,8 +152,9 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
                 vision_fallback_from or 'none')
 
     _fix_empty_user_messages(clean_messages)
-    _inject_gemini_thought_signatures(clean_messages, model)
-    _inject_claude_reasoning_details(clean_messages, model)
+    clean_messages = _inject_gemini_thought_signatures(
+        clean_messages, knowledge_model)
+    _inject_claude_reasoning_details(clean_messages, knowledge_model)
 
     body = {
         'model': model,
@@ -164,6 +176,14 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     if extra:
         body.update(copy.deepcopy(extra))
 
+    if knowledge_model != model:
+        # The final protocol adapter also needs model knowledge: a Messages
+        # deployment may require unsigned reasoning (DeepSeek) rather than
+        # Claude signatures. Preserve the existing private logical identity
+        # through both streaming and nonstreaming preparation; never infer it
+        # from an opaque deployment alias.
+        body['_admission_logical_model'] = knowledge_model
+
     from lib.llm.reasoning import capture_intent, compile_reasoning
     body['_reasoning_intent'] = (
         copy.deepcopy(reasoning_intent) if reasoning_intent is not None else
@@ -173,11 +193,12 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
         from lib.llm.reasoning import defer_reasoning_compilation
         defer_reasoning_compilation(body)
     else:
-        compile_reasoning(body, model, inference_profile=inference_profile,
+        compile_reasoning(body, knowledge_model, inference_profile=inference_profile,
                           thinking_format=thinking_format)
 
-    if is_claude(model):
-        _strip_trailing_assistant_for_claude(body['messages'], model)
+    if is_claude(knowledge_model):
+        body['messages'] = _strip_trailing_assistant_for_claude(
+            body['messages'], knowledge_model)
 
     # ── Canonical wire-order normalization (class-③ prefix-cache root fix) ──
     # LAST message transform: rewrite every message dict with keys in ONE

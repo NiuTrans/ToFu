@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import pytest
 
-from lib.billing.cost import transfer_native_child_fees
+from lib.billing.native_cost import transfer_native_child_fees
 from lib.billing.native_actor_fees import capture, decode
 from tests.billing.test_recovered_actor_fee_transfer import root, child, spend
 

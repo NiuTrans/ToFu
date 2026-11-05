@@ -1,5 +1,6 @@
 """Native-command discovery is automatic, bounded and account preserving."""
 import base64
+from collections import OrderedDict
 import json
 import os
 from pathlib import Path
@@ -55,6 +56,7 @@ for line in __import__('sys').stdin:
 
     if mode == 'hang-' + str(method): time.sleep(60)
     if method == 'initialize' and mode == 'cold': time.sleep(0.25)
+    if method == 'initialize' and mode.startswith('slow-initialize:'): time.sleep(float(mode.split(':')[1]))
     if mode == 'flood': print('x'*70000, flush=True); continue
     if mode == 'exit': __import__('sys').exit(3)
     if method == 'initialize': result = {'codexHome': str(root)}
@@ -80,7 +82,12 @@ for line in __import__('sys').stdin:
     program.chmod(0o700)
     env = {'HOME': str(home), 'SHELL': '/bin/bash', 'PATH': '/usr/bin:/bin'}
     command.clear_command_context()
-    monkeypatch.setattr(command, '_DEADLINE_SECONDS', 5.0)
+    monkeypatch.setattr(command, '_EXCHANGE_SECONDS', 5.0)
+    # Learned startup timing is process-wide; isolate it like the cache.
+    monkeypatch.setattr(command, '_startup_budgets', OrderedDict())
+    monkeypatch.setattr(command, '_startup_exhausted', OrderedDict())
+    monkeypatch.setattr(command, '_startup_ceiling_rejected', '')
+    monkeypatch.delenv('TOFU_CODEX_NATIVE_STARTUP_MAX_SECONDS', raising=False)
     original = command.subprocess
     processes = []
     def launch(*args, **kwargs):
@@ -170,7 +177,7 @@ def test_only_native_codex_renews_expired_access(native):
     ('keyring','credential_store_unsupported'),('restricted','login_method_restricted')])
 def test_native_failure_is_bounded_and_does_not_borrow_stale_default(native, monkeypatch, mode, issue):
     native['mode'].write_text(mode)
-    if mode == 'hang': monkeypatch.setattr(command, '_DEADLINE_SECONDS', 1.0)
+    if mode == 'hang': monkeypatch.setattr(command, '_EXCHANGE_SECONDS', 1.0)
     before=time.monotonic();snapshot = _read(native)
     assert snapshot == {'shared_login_issue': issue}
     assert time.monotonic()-before < 8
@@ -386,7 +393,7 @@ def test_timeout_diagnostics_name_native_phase_without_secret(native, monkeypatc
     assert _read(native, refresh=True)['access_token']
     _expire_metadata(monkeypatch)
     native['mode'].write_text('hang')
-    monkeypatch.setattr(command, '_DEADLINE_SECONDS', 0.2)
+    monkeypatch.setattr(command, '_EXCHANGE_SECONDS', 0.2)
     assert _read(native, refresh=True)['access_token']
     assert 'phase=config' in caplog.text
     assert 'never-copy-refresh' not in caplog.text
@@ -396,7 +403,7 @@ def test_timeout_diagnostics_name_native_phase_without_secret(native, monkeypatc
 def test_expired_metadata_can_survive_lock_contention_within_absolute_age(native, monkeypatch):
     assert _read(native, refresh=True)['access_token']
     _expire_metadata(monkeypatch)
-    monkeypatch.setattr(command, '_DEADLINE_SECONDS', 0.02)
+    monkeypatch.setattr(command, '_EXCHANGE_SECONDS', 0.02)
     assert command._lock.acquire(timeout=1)
     try:
         assert _read(native)['access_token']

@@ -2123,6 +2123,222 @@
       "handler": "capabilities"
     },
     {
+      "method": "GET",
+      "path": "/api/v4/channels/dx",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read the 大象 channel account configuration and status",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "get_dx_account_v1"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v4/channels/dx",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Enable/disable the 大象 account or choose its command chat",
+      "tags": [
+        "channels"
+      ],
+      "scope": "admin",
+      "public": false,
+      "requiredScopes": [
+        "admin"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "update_dx_account_v1"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/channels/dx/command-chat",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Create the owner's single-member 'Tofu Router' command chat group",
+      "tags": [
+        "channels"
+      ],
+      "scope": "admin",
+      "public": false,
+      "requiredScopes": [
+        "admin"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "create_dx_command_chat_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/channels/dx/threads",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "List 大象 threads with their ingress mode and reply policy",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "list_dx_threads_v1"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v4/channels/dx/threads/<thread_key>",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Set a 大象 thread's ingress mode or reply policy (null restores the default)",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "update_dx_thread_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/channels/github",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read the GitHub channel account configuration, status and poll schedule",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "get_github_account_v1"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v4/channels/github",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Enable/disable the GitHub account, set its token or credential vault entry, or its API base URL",
+      "tags": [
+        "channels"
+      ],
+      "scope": "admin",
+      "public": false,
+      "requiredScopes": [
+        "admin"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "update_github_account_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/channels/github/threads",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "List GitHub issue and pull request threads with their mode and reply policy",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "list_github_threads_v1"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v4/channels/github/threads/<path:thread_key>",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Set a GitHub thread's ingress mode or reply policy (null restores the default)",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "update_github_thread_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/channels/outbox",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "List active channel outbox items (drafts, queue, unknown, failed)",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "list_channel_outbox_v1"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/channels/outbox/<item_id>/approve",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Approve a draft outbox item (owner decision)",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "approve_channel_outbox_v1"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/channels/outbox/<item_id>/discard",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Discard a draft, queued or failed outbox item",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "discard_channel_outbox_v1"
+    },
+    {
       "method": "POST",
       "path": "/api/v4/chat/abort-conv/<conv_id>",
       "transport": "http",
@@ -2498,6 +2714,22 @@
     },
     {
       "method": "GET",
+      "path": "/api/v4/conversation-events",
+      "transport": "http",
+      "responseContract": "tofu.conversation-sync/v3",
+      "summary": "",
+      "tags": [],
+      "scope": null,
+      "public": null,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": false,
+      "owner": "routes/conversation_sync_v3.py",
+      "handler": "conversation_sync_multiplexed_events"
+    },
+    {
+      "method": "GET",
       "path": "/api/v4/conversations",
       "transport": "http",
       "responseContract": "tofu.api/v4",
@@ -2571,16 +2803,36 @@
       "path": "/api/v4/conversations/<conv_id>/compact",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "",
-      "tags": [],
-      "scope": null,
-      "public": null,
+      "summary": "Compact a conversation's context",
+      "tags": [
+        "conversations"
+      ],
+      "scope": "conversations",
+      "public": false,
       "requiredScopes": [
         "conversations"
       ],
-      "documented": false,
+      "documented": true,
       "owner": "routes/conversations_compaction.py",
       "handler": "compact_conversation"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v4/conversations/<conv_id>/compact/scheduled/<request_id>",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Cancel a scheduled working-view compaction",
+      "tags": [
+        "conversations"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/conversations_compaction.py",
+      "handler": "cancel_scheduled_compaction"
     },
     {
       "method": "GET",
@@ -2653,14 +2905,17 @@
       "path": "/api/v4/conversations/<conv_id>/export",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "",
-      "tags": [],
-      "scope": null,
-      "public": null,
+      "rawSuccess": true,
+      "summary": "Export one conversation as a complete Markdown transcript",
+      "tags": [
+        "conversations"
+      ],
+      "scope": "conversations",
+      "public": false,
       "requiredScopes": [
         "conversations"
       ],
-      "documented": false,
+      "documented": true,
       "owner": "routes/conversations.py",
       "handler": "export_conv"
     },
@@ -3839,6 +4094,42 @@
       "documented": true,
       "owner": "routes/api_v1/desktop.py",
       "handler": "desktop_client_diag_submit"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/desktop/device-waits",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Conversations waiting for one of the caller's devices to reconnect",
+      "tags": [
+        "capabilities"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/desktop.py",
+      "handler": "desktop_device_waits"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/desktop/device-waits/<wait_id>/cancel",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Cancel one of the caller's device waits",
+      "tags": [
+        "capabilities"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/desktop.py",
+      "handler": "desktop_device_wait_cancel"
     },
     {
       "method": "GET",
@@ -5789,10 +6080,10 @@
     },
     {
       "method": "POST",
-      "path": "/api/v4/media/attachments/expand-archive",
+      "path": "/api/v4/media/attachments/archive",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "Extract a dropped chat archive into a managed workspace",
+      "summary": "Store a dropped chat archive verbatim in a managed workspace",
       "tags": [
         "media"
       ],
@@ -5801,7 +6092,7 @@
       "requiredScopes": null,
       "documented": true,
       "owner": "routes/api_v1/media.py",
-      "handler": "expand_archive_attachment_v1"
+      "handler": "store_archive_attachment_v1"
     },
     {
       "method": "GET",
@@ -8903,7 +9194,7 @@
       "path": "/api/v4/project/coordination/budget",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "Read Coordinator request consumption and future request allowances",
+      "summary": "Read combined Coordinator and Worker usage for the current request (no spending limit)",
       "tags": [
         "project"
       ],
@@ -8915,24 +9206,6 @@
       "documented": true,
       "owner": "routes/api_v1/project_brain.py",
       "handler": "project_coordinator_budget_read"
-    },
-    {
-      "method": "POST",
-      "path": "/api/v4/project/coordination/budget",
-      "transport": "http",
-      "responseContract": "tofu.api/v4",
-      "summary": "Set finite allowances for future human Coordinator requests",
-      "tags": [
-        "project"
-      ],
-      "scope": "conversations",
-      "public": false,
-      "requiredScopes": [
-        "conversations"
-      ],
-      "documented": true,
-      "owner": "routes/api_v1/project_brain.py",
-      "handler": "project_coordinator_budget_update"
     },
     {
       "method": "GET",
@@ -8987,6 +9260,24 @@
       "documented": true,
       "owner": "routes/api_v1/project_brain.py",
       "handler": "project_message_receipts"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/project/coordination/progress",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read the Coordinator's task board for the current binding",
+      "tags": [
+        "project"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_coordinator_progress_read"
     },
     {
       "method": "GET",
@@ -9880,6 +10171,24 @@
     },
     {
       "method": "POST",
+      "path": "/api/v4/providers/<provider_id>/listed-models/import",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Add every model the provider's authenticated /models lists",
+      "tags": [
+        "providers"
+      ],
+      "scope": "providers",
+      "public": false,
+      "requiredScopes": [
+        "providers"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/providers.py",
+      "handler": "import_listed_provider_models_route"
+    },
+    {
+      "method": "POST",
       "path": "/api/v4/providers/<provider_id>/probe-cells/start",
       "transport": "http",
       "responseContract": "tofu.api/v4",
@@ -10314,6 +10623,204 @@
     },
     {
       "method": "GET",
+      "path": "/api/v4/router",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read the owner's Global Router binding without creating it",
+      "tags": [
+        "router"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_read"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/router",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Ensure the owner's Global Router home and conversation exist",
+      "tags": [
+        "router"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_ensure"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/router/instructions",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read a page of standing instructions, or one with its applications",
+      "tags": [
+        "router"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_instructions"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/router/instructions/cancel",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Cancel a standing instruction; already forwarded work keeps its authority",
+      "tags": [
+        "router"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_instruction_cancel"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/router/instructions/pause",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Pause a standing instruction; it applies again only after resume",
+      "tags": [
+        "router"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_instruction_pause"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/router/instructions/resume",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Resume a paused standing instruction; a cancelled one stays cancelled",
+      "tags": [
+        "router"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_instruction_resume"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/router/watchdog",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read the owner's Router Watchdog binding and review without creating it",
+      "tags": [
+        "router"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_watchdog_read"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/router/watchdog",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Ensure the owner's Router Watchdog conversation exists",
+      "tags": [
+        "router"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_watchdog_ensure"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/router/watchdog/review",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Enable or disable the Router Watchdog's periodic review and set its cadence",
+      "tags": [
+        "router"
+      ],
+      "scope": "agents:scheduler",
+      "public": false,
+      "requiredScopes": [
+        "agents:scheduler"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_watchdog_review"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/router/worker-model",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read the Worker model of a bound Router (Global or Project) without changing it",
+      "tags": [
+        "router"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_worker_model_read"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/router/worker-model",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Set or clear the Worker model of a bound Router (Global or Project)",
+      "tags": [
+        "router"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/router.py",
+      "handler": "router_worker_model"
+    },
+    {
+      "method": "GET",
       "path": "/api/v4/scheduler/proactive/status",
       "transport": "http",
       "responseContract": "tofu.api/v4",
@@ -10641,7 +11148,7 @@
       "path": "/api/v4/skills/<skill_id>/scope",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "Move a skill between project and global scope",
+      "summary": "Move skill files to an explicit destination",
       "tags": [
         "skills"
       ],
@@ -10851,6 +11358,24 @@
       "documented": true,
       "owner": "routes/api_v1/swarm.py",
       "handler": "swarm_config"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/swarm/runs/<swarm_id>/agents/<agent_id>/stop",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Stop one running sub-agent of a live swarm run",
+      "tags": [
+        "agents"
+      ],
+      "scope": "agents:swarm",
+      "public": false,
+      "requiredScopes": [
+        "agents:swarm"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/swarm.py",
+      "handler": "swarm_agent_stop"
     },
     {
       "method": "GET",
@@ -11208,6 +11733,24 @@
       "handler": "timer_cancel"
     },
     {
+      "method": "POST",
+      "path": "/api/v4/timer/<timer_id>/check",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Check a timer now; deliver its continuation only when ready",
+      "tags": [
+        "scheduler"
+      ],
+      "scope": "admin",
+      "public": false,
+      "requiredScopes": [
+        "admin"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/scheduler.py",
+      "handler": "timer_check"
+    },
+    {
       "method": "GET",
       "path": "/api/v4/timer/<timer_id>/status",
       "transport": "http",
@@ -11352,6 +11895,22 @@
       "documented": true,
       "owner": "routes/api_v1/translate.py",
       "handler": "translate_poll_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/translate/previews/<conv_id>",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read completed live translation previews of a conversation's running turns",
+      "tags": [
+        "translate"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/translate.py",
+      "handler": "translate_previews_v1"
     },
     {
       "method": "POST",

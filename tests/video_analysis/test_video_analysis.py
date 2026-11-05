@@ -110,6 +110,16 @@ def test_frame_sampling_scales_with_complete_duration():
     assert frame_target_for_duration(7200) == 720
 
 
+@pytest.mark.parametrize('raw,expected', [
+    ('', 0.3), ('0', 0.0), ('0.5', 0.5), ('-1', 0.3), ('nan', 0.3),
+    ('inf', 0.3), ('abc', 0.3),
+])
+def test_scene_threshold_zero_disables_the_scene_pass(monkeypatch, raw, expected):
+    from lib.video_analysis import scene_score_threshold
+    monkeypatch.setenv('TOFU_VIDEO_SCENE_THRESHOLD', raw)
+    assert scene_score_threshold() == expected
+
+
 def test_large_model_context_is_not_clamped_to_old_extraction_count(monkeypatch):
     import lib.model_info._video as video
     monkeypatch.setattr(video, 'model_supports_vision', lambda model: True)
@@ -201,12 +211,45 @@ def test_aggregate_image_cap():
 
 
 def test_sniff_video_container():
-    from routes.api_v1.videos import _sniff_video_container
-    assert _sniff_video_container(b'\x00\x00\x00\x18ftypisom' + b'\x00' * 8) == 'mp4'
-    assert _sniff_video_container(b'\x1a\x45\xdf\xa3' + b'\x00' * 16) == 'webm'
-    assert _sniff_video_container(b'RIFF\x10\x00\x00\x00AVI ' + b'\x00' * 4) == 'avi'
-    assert _sniff_video_container(b'\x89PNG\r\n\x1a\n' + b'\x00' * 8) is None
-    assert _sniff_video_container(b'') is None
+    from lib.video_analysis import sniff_video_container
+    assert sniff_video_container(b'\x00\x00\x00\x18ftypisom' + b'\x00' * 8) == 'mp4'
+    assert sniff_video_container(b'\x1a\x45\xdf\xa3' + b'\x00' * 16) == 'webm'
+    assert sniff_video_container(b'RIFF\x10\x00\x00\x00AVI ' + b'\x00' * 4) == 'avi'
+    assert sniff_video_container(b'\x89PNG\r\n\x1a\n' + b'\x00' * 8) is None
+    assert sniff_video_container(b'') is None
+
+
+def test_sniff_audio_container_names_unambiguous_audio_magic():
+    from lib.video_analysis import (
+        AUDIO_EXTS, VIDEO_EXTS, sniff_audio_container, sniff_video_container,
+    )
+    pad = b'\x00' * 8
+    assert sniff_audio_container(b'ID3\x04\x00\x00\x00\x00\x00\x22' + pad) == 'mpeg'
+    assert sniff_audio_container(b'\xff\xfb\x90\x64' + pad) == 'mpeg'  # MP3 frame
+    assert sniff_audio_container(b'\xff\xf1\x50\x40' + pad) == 'mpeg'  # ADTS AAC
+    assert sniff_audio_container(b'RIFF\xde\x09\x04\x00WAVEfmt ' + pad) == 'wav'
+    assert sniff_audio_container(b'OggS\x00\x02' + pad) == 'ogg'
+    assert sniff_audio_container(b'fLaC\x00\x00\x00\x22' + pad) == 'flac'
+    for head in (
+        b'\xff\xd8\xff\xe0' + pad,                        # JPEG
+        b'\xff\xfe' + 'utf-16 text'.encode('utf-16-le'),  # UTF-16LE BOM
+        b'RIFF\x10\x00\x00\x00AVI ' + pad,
+        b'RIFF\x10\x00\x00\x00WEBPVP8 ' + pad,
+        b'\x00\x00\x00\x1cftypM4A ' + pad,               # ISO-BMFF: the video sniff
+        b'\x89PNG\r\n\x1a\n' + pad,
+        b'plain text',
+        b'\xff',
+        b'',
+    ):
+        assert sniff_audio_container(head) is None, head
+    # ftyp stays 'mp4' (audio or video), and the upload route's video sniff
+    # never accepts audio-only magic.
+    assert sniff_video_container(b'\x00\x00\x00\x1cftypM4A ' + pad) == 'mp4'
+    for head in (b'ID3\x04\x00' + pad, b'OggS\x00\x02' + pad, b'fLaC' + pad,
+                 b'RIFF\xde\x09\x04\x00WAVE' + pad, b'\xff\xfb\x90\x64' + pad):
+        assert sniff_video_container(head) is None, head
+    assert {'.mp3', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.flac'} <= AUDIO_EXTS
+    assert not AUDIO_EXTS & VIDEO_EXTS
 
 
 def test_thin_frames():
@@ -413,6 +456,56 @@ def test_transcribe_track_degrades_without_slot(tmp_path, monkeypatch):
     assert res['status'] == 'unavailable' and res['text'] == ''
 
 
+def test_transcribe_track_degrades_when_availability_check_raises(monkeypatch):
+    """A routing-store outage is a transcript status, never a raise: the
+    transcript is enrichment and must not discard frames or fail an upload."""
+    import lib.transcription as stt
+    import lib.video_analysis._audio as audio
+    from lib.model_routing import ModelRoutingError
+
+    def _routing_outage(**_kwargs):
+        raise ModelRoutingError(
+            'model-routing authority is temporarily unavailable')
+
+    monkeypatch.setattr(stt, 'transcription_available', _routing_outage)
+    monkeypatch.setattr(audio, '_extract_audio', lambda *_args: pytest.fail(
+        'no audio extraction after a failed availability check'))
+
+    result = audio.transcribe_track('/video.mp4', '/scratch', 2.0,
+                                    owner_user_id=7)
+
+    assert result['status'] == 'unavailable'
+    assert result['text'] == '' and result['model'] == ''
+    assert 'temporarily unavailable' in result['detail']
+
+
+def test_frame_target_never_exceeds_source_frames_in_the_span():
+    """Uniform sampling is bounded by the frames that physically exist, so a
+    short span never yields duplicated frames."""
+    from lib.video_analysis import frame_target_for_duration
+
+    assert frame_target_for_duration(0.53, source_fps=25.0) == 13
+    assert frame_target_for_duration(1.5, source_fps=10.0) == 15
+    assert frame_target_for_duration(3.0, source_fps=10.0) == 16
+    assert frame_target_for_duration(1000.0, source_fps=30.0) == 100
+    assert frame_target_for_duration(0.01, source_fps=25.0) == 1
+    # Unknown frame rate keeps the duration cadence unchanged.
+    assert frame_target_for_duration(0.53) == 16
+
+
+def test_extract_frames_bounds_uniform_layer_by_source_frames(tmp_path):
+    from lib.video_analysis import extract_frames
+    video = _make_video(tmp_path / 'short.mp4', seconds=0.5, with_audio=False)
+    out = tmp_path / 'frames'
+    out.mkdir()
+
+    frames = extract_frames(video, 0.5, str(out), source_fps=10.0)
+
+    assert len(frames) == 5  # the clip holds 5 frames; 16 would duplicate
+    times = [frame['t'] for frame in frames]
+    assert times == sorted(times) and len(set(times)) == len(times)
+
+
 def test_transcribe_track_happy(tmp_path, monkeypatch):
     import lib.transcription as stt
     from lib.transcription import TranscriptionResult
@@ -534,7 +627,7 @@ def test_pipeline_accepts_long_video_and_preserves_complete_text(tmp_path, monke
     frames = [{'url': '/api/images/frame.jpg', 'ts': 7100.0}]
     transcript = 'spoken evidence ' * 5000 + 'TRANSCRIPT_END'
     storyboard = 'visual evidence ' * 5000 + 'STORYBOARD_END'
-    monkeypatch.setattr(pipe, 'extract_frames', lambda *args: frames)
+    monkeypatch.setattr(pipe, 'extract_frames', lambda *args, **kwargs: frames)
     monkeypatch.setattr(cap, 'storyboard_for_frames', lambda *args, **kwargs: {
         'text': storyboard, 'status': 'ok', 'model': 'vision'})
     monkeypatch.setattr(pipe, 'transcribe_track', lambda *args, **kwargs: {
@@ -673,6 +766,34 @@ def test_upload_route_reports_actual_worker_start_failure(client, monkeypatch):
         payload = await v1_get_json(response)
         assert payload['ok'] is False
     _run_async(go())
+
+
+def test_upload_route_storage_outage_keeps_the_storage_taxonomy(
+        client, tmp_path, monkeypatch):
+    """A transient storage outage while recording the source is a retryable
+    503, not an internal 500, and the scratch upload is still reclaimed."""
+    import lib.media_attachments as media
+    import lib.video_analysis as va
+    from lib.storage.errors import StorageError
+
+    scratch = tmp_path / 'scratch'
+    scratch.mkdir()
+    monkeypatch.setattr(va, 'scratch_root', lambda: str(scratch))
+
+    def outage(*_args, **_kwargs):
+        raise StorageError('database_unavailable', 'storage down',
+                           retryable=True, retry_after_ms=1000)
+
+    monkeypatch.setattr(media, 'create_video', outage)
+
+    async def go():
+        form, files = _multipart_video(_fake_mp4_bytes())
+        response = await client.post('/api/v4/videos/upload', form=form, files=files)
+        assert response.status_code == 503
+        payload = await v1_get_json(response)
+        assert payload['ok'] is False
+    _run_async(go())
+    assert list(scratch.iterdir()) == []
 
 
 @pytest.mark.auth_mode('private')

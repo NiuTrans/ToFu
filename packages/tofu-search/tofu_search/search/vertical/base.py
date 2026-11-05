@@ -1,8 +1,18 @@
 """Shared infrastructure for vertical-search handlers.
 
-Every per-vertical module imports this module (``from ... import base``) and
-calls ``base.http_get`` / ``base._fetch_json`` / ``base._post_json`` so the HTTP
-seam stays in one place and is uniformly patchable in tests.
+Every per-vertical module binds this module and calls ``base.http_get`` /
+``base._fetch_json`` / ``base._post_json`` so the HTTP seam stays in one place
+and is uniformly patchable in tests.
+
+Package modules bind a sibling module with
+``import_module('tofu_search.search.vertical.<name>')`` and import names only
+from concrete modules, never ``from tofu_search.search.vertical import base``.
+That statement, like a dotted import or one that first loads an absent parent
+package, waits for the ``tofu_search`` facade to finish initializing, and the
+facade eagerly imports these handlers. A thread entering a handler while another
+thread imports the facade would close a lock cycle, and CPython then hands one
+of them a partially initialized module. ``tests/test_import_graph.py`` checks
+the whole package.
 """
 
 import json

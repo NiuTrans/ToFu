@@ -85,7 +85,8 @@ def compact_cold_assistant(ctx: CompactionContext) -> int:
                 assistant_compacted += 1
 
     if assistant_compacted > 0:
-        logger.info('[L1-asst] conv=%s  compacted %d cold assistant messages '
-                    '(~%d tokens saved)',
-                    _log_id(ctx.conv_id), assistant_compacted, assistant_tokens_saved)
+        log = logger.debug if ctx.dry_run else logger.info
+        log('[L1-asst] conv=%s  compacted %d cold assistant messages '
+            '(~%d tokens saved)',
+            _log_id(ctx.conv_id), assistant_compacted, assistant_tokens_saved)
     return assistant_tokens_saved

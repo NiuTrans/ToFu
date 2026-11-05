@@ -6,6 +6,14 @@ logger = get_logger(__name__)
 
 _VERTICAL_PURPOSE_MAX_CHARS = 96
 
+#: Longest web_search query, in characters without surrounding whitespace. The
+#: handler refuses each longer query on its own, so a batch's other queries
+#: still run. It is deliberately not a schema ``maxLength``: admission would
+#: reject the whole batch, and the Kimi MFJS projection drops the keyword.
+#: tofu-search's entry guard uses the same limit; the host cannot import it
+#: while it supports the published tofu-search 0.12.25.
+WEB_SEARCH_MAX_QUERY_CHARS = 400
+
 
 def _vertical_domains() -> list[dict]:
     """Capability metadata for every currently-usable vertical domain.
@@ -152,11 +160,8 @@ def build_fetch_url_tool() -> dict:
         "binaries return server-staging paths. If HTTP lacks login, "
         "the selected browser streams bytes to staging, never browser Downloads. "
         "Use an authorized filesystem tool to copy/move and verify receipt. "
-        "Large HTML relevance GATE: reason keeps/drops the whole "
-        "page (Failed to fetch); it does not select passages. Use a broad "
-        "accurate reason (ignored when the gate is disabled). PDFs, short pages "
-        "and batches bypass the gate. Concurrent batch urls:[{url}]: url ignored; "
-        "reason/extract: single mode. extract returns quote-backed findings "
+        "Concurrent batch urls:[{url}]: url ignored; "
+        "extract: single mode. extract returns quote-backed findings "
         "and unresolved requests from bounded windows; gaps do not prove absence. "
         "Raw source stays artifact-readable; failure returns raw."
     )
@@ -168,12 +173,6 @@ def build_fetch_url_tool() -> dict:
                 "Single HTTP(S) URL; omit with urls."
             ),
         },
-    }
-    properties["reason"] = {
-        "type": "string",
-        "description": (
-            "Whole-page relevance goal."
-        ),
     }
     properties["extract"] = {
         "type": "string",
@@ -224,8 +223,8 @@ def build_browser_download_url_to_server_tool() -> dict:
             "description": (
                 "Stage one remote file ON THE TOFU SERVER for download/save/install/"
                 "unzip/export/copy. Supply its exact HTTP(S) url. text/selector "
-                "(+ optional tab_id) instead names an <a href> or "
-                "data-download-url element whose full signed link is recovered; "
+                "(+ optional tab_id) instead names an <a href>, data-download-url "
+                "or <img>/<video>/<audio> element whose full signed link is recovered; "
                 "action buttons have no link — use browser_click. It tries "
                 "bounded server HTTP first, then the selected logged-in browser; "
                 "cookies stay in Chrome—never use browser_get_cookies, curl/wget, "
@@ -258,23 +257,9 @@ def build_browser_download_url_to_server_tool() -> dict:
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 2048,
-                        "description": "Exact link CSS selector; wins over text.",
+                        "description": "Exact link/media CSS selector; wins over text.",
                     },
                 },
-                "anyOf": [
-                    {
-                        "properties": {"url": {"type": "string"}},
-                        "required": ["url"],
-                    },
-                    {
-                        "properties": {"text": {"type": "string"}},
-                        "required": ["text"],
-                    },
-                    {
-                        "properties": {"selector": {"type": "string"}},
-                        "required": ["selector"],
-                    },
-                ],
                 "additionalProperties": False,
             },
         },
@@ -300,63 +285,31 @@ def build_update_search_settings_tool() -> dict:
     STATIC description (prompt-cache contract): current values are NOT baked
     in — the model reads them by calling the tool with no arguments, which is
     a pure read. Writes go through lib.search.search_settings.apply_updates
-    (validate → clamp → persist → hot-reload → audit), never through raw
-    file edits.
+    (validate → persist → hot-reload → audit), never through raw file edits.
     """
     return {
         "type": "function",
         "function": {
             "name": "update_search_settings",
             "description": (
-                "SERVER-WIDE search/fetch settings. No arguments: PURE READ; always inspect "
-                "effective values first. Writes persist across restarts, hot-reload "
-                "immediately, affect every conversation. Write only when the user asks or repeated "
-                "results prove current values harmful. Integers clamp to safe ranges.\n"
-                "Profiles: fast=3 pages/30k chars/no LLM filter; balanced=6/60k/filter; "
-                "deep=10/100k/filter+link deepening. overrides customize a profile; "
-                "legacy concrete knobs become overrides.\n"
-                "fetch_top_n trades coverage, latency, and tokens; "
-                "fetch_timeout is seconds; max_download_mb is MB, not bytes; "
-                "llm_content_filter=true uses a slower selective LLM gate, false uses "
-                "faster/cheaper lexical ranking. block_domain/unblock_domain edit the "
-                "normalized fetch blocklist.\n"
-                "Returns applied and rejected values with reasons, env overrides "
-                "shadowing saved values, and new effective state. Explain the outcome."
+                "SERVER-WIDE fetch blocklist: domains web_search and fetch_url never "
+                "visit. No arguments: PURE READ of the current list. block_domain/"
+                "unblock_domain add or remove one normalized host; changes persist, "
+                "hot-reload and affect every conversation. Block only when the user "
+                "asks or a domain repeatedly returns junk. Search limits are fixed "
+                "defaults, not settings. Returns applied and rejected values and the "
+                "new list; explain the outcome."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "profile": {
-                        "type": "string", "enum": ["fast", "balanced", "deep"]
-                    },
-                    "overrides": {
-                        "type": "object",
-                        "properties": {
-                            "fetch_top_n": {"type": "integer"},
-                            "llm_content_filter": {"type": "boolean"},
-                            "deepen_enabled": {"type": "boolean"}
-                        }
-                    },
-                    "fetch_top_n": {
-                        "type": "integer",
-                        "description": "Pages/search: 1-20."
-                    },
-                    "fetch_timeout": {
-                        "type": "integer",
-                        "description": "Seconds/page: 5-120."
-                    },
-                    "max_download_mb": {
-                        "type": "integer",
-                        "description": "MB/download: >0, max 500."
-                    },
-                    "llm_content_filter": {
-                        "type": "boolean"
-                    },
                     "block_domain": {
-                        "type": "string"
+                        "type": "string",
+                        "description": "Host to stop fetching, e.g. example.com."
                     },
                     "unblock_domain": {
-                        "type": "string"
+                        "type": "string",
+                        "description": "Blocked host to allow again."
                     }
                 }
             }

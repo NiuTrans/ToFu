@@ -70,7 +70,7 @@ def test_timer_poll_aliases_webfetch_to_fetch_url(monkeypatch):
 
 @pytest.mark.parametrize('wrong,canonical', [
     ('Read', 'read_files'),
-    ('Grep', 'grep_search'),
+    ('Grep', 'search_files'),
     ('Bash', 'run_command'),
 ])
 def test_timer_poll_aliases_common_claude_code_names(monkeypatch, wrong, canonical):

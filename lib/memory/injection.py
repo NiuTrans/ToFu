@@ -11,7 +11,7 @@ Memory injection strategy (tool-based, on-demand):
 """
 
 
-from lib.memory.storage import get_eligible_memories
+from lib.memory.storage import has_eligible_memories
 
 __all__ = [
     'MEMORY_ACCUMULATION_INSTRUCTIONS',
@@ -112,19 +112,15 @@ def build_memory_context(
         extra_paths: Additional workspace roots (multi-root session) whose
             memories are unioned in alongside the primary root's.
         known_available: Reuse the current turn's completed prefetch evidence
-            when present. ``None`` performs the metadata lookup; a boolean
-            avoids rebuilding a corpus the caller already inspected.
+            when present. ``None`` checks availability, reading metadata only
+            up to the first eligible memory; a boolean skips even that.
 
     Returns None if no eligible memories exist, otherwise a short hint string.
     """
     available = known_available
     if available is None:
-        available = bool(get_eligible_memories(
-            project_path,
-            extra_paths=extra_paths,
-            include_body=False,
-            record_view='retrieval',
-        ))
+        available = has_eligible_memories(
+            project_path, extra_paths=extra_paths)
     if not available:
         return None
 

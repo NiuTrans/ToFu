@@ -52,8 +52,10 @@ def prepare_swarm_turn_end(
         task.pop('_waiting_on', None)
         return
     status = session.get_status()
+    presented = task.get('_swarm_inject_pending') or []
     unread = {str(item.get('agent_id') or '')
-              for item in agent_inbox.pending_items(key, modes=['swarm-update'])}
+              for item in [*agent_inbox.pending_items(key, modes=['swarm-update']), *presented]
+              if not item.get('swarm_run_id') or item['swarm_run_id'] == session.task_id}
     dependencies = []
     for agent_id, info in status.items():
         if not isinstance(info, dict) or info.get('required_for_completion', True) is False:

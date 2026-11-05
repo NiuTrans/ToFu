@@ -43,6 +43,7 @@ const messages = {
   'project.hgWaitingReply': 'reply-local',
   'toolHumanGuidance.defaultQuestion': 'default-question-local',
   'toolHumanGuidance.optionFallback': 'option-local:{index}',
+  'toolHumanGuidance.replyDrafted': 'reply-drafted-local',
   'toolHumanGuidance.responseLimit': 'response-limit:{n}',
 };
 function translate(key, params) {
@@ -67,9 +68,11 @@ let active = { conversationId: 'conv-a', autoTranslate: false };
 let translateBehavior = async (source) => source;
 let submitBehavior = async () => ({ ok: true });
 let lateBehavior = async () => ({ ok: true });
+let replyBehavior = async () => 'sent';
 const translations = [];
 const requests = [];
 const lateRequests = [];
+const replyRequests = [];
 const marks = [];
 const renders = [];
 const listRenders = [];
@@ -90,6 +93,10 @@ const actions = createHumanGuidanceActions({
   submitLateAnswer: async (request) => {
     lateRequests.push(request);
     return lateBehavior(request);
+  },
+  replyInChat: async (request) => {
+    replyRequests.push(request);
+    return replyBehavior(request);
   },
   markSubmitted: (...args) => marks.push(args),
   requestExpiredRender: (conversationId) => renders.push(conversationId),
@@ -140,6 +147,9 @@ function freeRound(guidanceId) {
     guidanceId: guidanceId || 'free-id',
     guidanceQuestion: 'Explain', guidanceType: 'free_text',
   };
+}
+function chatRound(round) {
+  return { ...round, status: 'done', guidanceBlocking: false };
 }
 
 (async () => {
@@ -469,6 +479,105 @@ function freeRound(guidanceId) {
   deferredResolve({ ok: true });
   await flush();
 
+  // ── Non-blocking cards answer through the chat composer port ──
+  check('blocking_cards_never_route_to_chat_reply', replyRequests.length === 0);
+
+  active = { conversationId: 'conv-chat', autoTranslate: true };
+  translateBehavior = async () => 'translated';
+  submitBehavior = async () => ({ ok: true });
+  replyBehavior = async () => 'sent';
+  const beforeChatRequests = requests.length;
+  const beforeChatLate = lateRequests.length;
+  const beforeChatTranslations = translations.length;
+  const beforeChatLists = listRenders.length;
+  card = mount({
+    ...chatRound(choiceRound('chat-choice', 'Choice A')),
+    guidanceQuestion: '  Pick one \n',
+  });
+  card.querySelector('textarea.hg-option-note-input').value = '  中文备注  ';
+  card.querySelector('button.hg-option-card').click();
+  await flush();
+  check('chat_choice_reply_routes_original_answer_with_card_quote',
+    JSON.stringify(replyRequests.at(-1)) === JSON.stringify({
+      conversationId: 'conv-chat', guidanceId: 'chat-choice',
+      quote: 'Pick one', responseText: 'Choice A\nuser_note: 中文备注',
+    })
+    && requests.length === beforeChatRequests
+    && lateRequests.length === beforeChatLate
+    && translations.length === beforeChatTranslations);
+  check('sent_chat_reply_marks_submitted_and_refreshes_list',
+    JSON.stringify(marks.at(-1)) === JSON.stringify([
+      'conv-chat', 'chat-choice', 'Choice A\nuser_note: 中文备注',
+    ])
+    && listRenders.length === beforeChatLists + 1
+    && card.classList.contains('hg-submitting'));
+
+  replyBehavior = async () => 'drafted';
+  const marksBeforeDraft = marks.length;
+  card = mount(chatRound(freeRound('chat-free')));
+  const chatTextarea = card.querySelector('textarea');
+  const chatSubmit = card.querySelector('button.hg-submit-btn');
+  const chatButtonHtml = chatSubmit.innerHTML;
+  chatTextarea.value = '  中文回答  ';
+  chatSubmit.click();
+  await flush();
+  check('drafted_chat_reply_shows_info_toast_without_marking',
+    JSON.stringify(replyRequests.at(-1)) === JSON.stringify({
+      conversationId: 'conv-chat', guidanceId: 'chat-free',
+      quote: 'Explain', responseText: '中文回答',
+    })
+    && translations.length === beforeChatTranslations
+    && marks.length === marksBeforeDraft
+    && toasts.at(-1)[0] === 'reply-drafted-local'
+    && toasts.at(-1)[1] === 'info'
+    && !card.classList.contains('hg-submitting')
+    && !chatSubmit.disabled && chatSubmit.innerHTML === chatButtonHtml
+    && chatTextarea.value.trim() === '中文回答');
+
+  replyBehavior = async () => { throw new Error('Conversation is not active.'); };
+  card = mount(chatRound(choiceRound('chat-reject')));
+  const rejectedChatButtons = [...card.querySelectorAll('button.hg-option-card')];
+  rejectedChatButtons[1].click();
+  await flush();
+  check('rejected_chat_reply_uses_network_toast_and_restores_card',
+    replyRequests.at(-1).guidanceId === 'chat-reject'
+    && replyRequests.at(-1).responseText === 'Choice B'
+    && toasts.at(-1)[0] === 'network-local' && toasts.at(-1)[1] === 'error'
+    && marks.length === marksBeforeDraft
+    && !card.classList.contains('hg-submitting')
+    && rejectedChatButtons.every((button) => (
+      !button.disabled && !button.classList.contains('hg-selected'))));
+
+  replyBehavior = async () => 'sent';
+  card = mount(chatRound({ ...batchRound, guidanceId: 'chat-batch' }));
+  card.querySelectorAll('.hg-batch-choice')[0].click();
+  card.querySelector('.hg-batch-input').value = 'why';
+  card.querySelector('.hg-submit-btn').click();
+  await flush();
+  check('chat_batch_reply_quotes_questions_and_sends_indexed_answers',
+    replyRequests.at(-1).guidanceId === 'chat-batch'
+    && replyRequests.at(-1).quote === '1. Pick\n\n2. Explain'
+    && replyRequests.at(-1).responseText === '1. A\n2. why'
+    && marks.at(-1)[1] === 'chat-batch');
+
+  let chatResolve;
+  replyBehavior = () => new Promise((resolve) => { chatResolve = resolve; });
+  card = mount(chatRound(freeRound('chat-flight')));
+  card.dataset.hgQuote = 'Q'.repeat(5000);
+  card.querySelector('textarea').value = 'answer';
+  const beforeChatFlight = replyRequests.length;
+  card.querySelector('button.hg-submit-btn').click();
+  card.querySelector('button.hg-submit-btn').click();
+  await flush();
+  check('chat_reply_is_single_flight_with_bounded_dataset_quote',
+    limits.replyQuoteUnits === 4096
+    && replyRequests.length === beforeChatFlight + 1
+    && replyRequests.at(-1).quote === 'Q'.repeat(4096)
+    && card.classList.contains('hg-submitting'));
+  chatResolve('sent');
+  await flush();
+  active = { conversationId: 'conv-a', autoTranslate: false };
+
   actions.destroy();
   const beforeDestroy = requests.length;
   card = mount(choiceRound('destroyed'));
@@ -502,6 +611,6 @@ def test_human_guidance_actions_contract():
         target_js=str(ACTIONS_JS),
         extra_targets=[str(PRESENTER_JS), str(REGISTRY_JS)],
         body_js=_HARNESS,
-        expect_pass=36,
+        expect_pass=43,
         label='Human Guidance actions',
     )

@@ -1,23 +1,29 @@
 {
   "responsibility": "Single source of truth for files and source suffixes that invalidate a published Vite graph.",
+  "startupDynamicImports": [
+    "frontend/src/main.ts"
+  ],
   "configPaths": [
     "frontend/authoring-inputs.json",
     "package.json",
     "package-lock.json",
     "tsconfig.json",
-    "tsconfig.vite.json",
     "vite.config.mjs",
     "scripts/build_frontend.mjs",
+    "scripts/vite_asset_manifest.mjs",
+    "scripts/vite_asset_publication.mjs",
+    "scripts/gen_system_note_presentation.mjs",
+    "scripts/check_note_presentation_parity.mjs",
+    "lib/tasks_pkg/context_composer/registry.py",
     "scripts/check_frontend_tdz.mjs",
     "scripts/frontend_bundle_canary.py",
     "scripts/compose_frontend_runtime.mjs",
     "scripts/compose_frontend_styles.mjs",
-
     "scripts/compose_settings_panels.mjs",
-    "scripts/gen_i18n_contract.mjs"
-,
+    "scripts/gen_i18n_contract.mjs",
     "contracts/rich_response_v1.schema.json",
-    "frontend/scripts/generate-rich-response.mjs"
+    "frontend/scripts/generate-rich-response.mjs",
+    "scripts/frontend_vendor_assets.mjs"
   ],
   "sourceSuffixes": [
     ".css",
@@ -28,5 +34,10 @@
     ".ttf",
     ".woff",
     ".woff2"
-  ]
+  ],
+  "entries": {
+    "main": "frontend/src/main.ts",
+    "admin": "frontend/src/admin.ts",
+    "plugin": "frontend/src/plugin.ts"
+  }
 }

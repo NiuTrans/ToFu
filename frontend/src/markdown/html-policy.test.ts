@@ -28,3 +28,27 @@ describe('HTML admission dependency failure', () => {
     expect(host.querySelector('script')).toBeNull();
   });
 });
+
+describe('post-sanitizer image admission', () => {
+  const project = (source: string) => {
+    const host = document.createElement('div');
+    host.innerHTML = projectMarkdownHtml(source, { ...environment, sanitizer: DOMPurify });
+    return host;
+  };
+  it('keeps markup inside a sanitized attribute value inert', () => {
+    const alt = "x><img src='https://unreachable.invalid/p.png' onerror='alert(1)'><svg onload='alert(2)'>";
+    const host = project(`<p><img alt="${alt}" src="https://example.com/a.png"></p>`);
+    expect(host.querySelector('svg')).toBeNull();
+    expect([...host.querySelectorAll('*')].flatMap(element => element.getAttributeNames())
+      .filter(name => name.startsWith('on'))).toEqual([]);
+    expect(host.querySelectorAll('img')).toHaveLength(1);
+    expect(host.querySelector('img')!.getAttribute('src')).toBe('https://example.com/a.png');
+    expect(host.querySelector('img')!.alt).toBe(alt);
+  });
+  it('admits by the actual src attribute, not text inside another attribute', () => {
+    const host = project(`<img alt="A &amp; B src='https://example.com/ok.png'" src="/workspace/secret.png">`);
+    expect(host.querySelector('img')).toBeNull();
+    expect(host.querySelector('.md-inaccessible-attachment')?.textContent)
+      .toContain("Inaccessible attachment: A & B src='https://example.com/ok.png'.");
+  });
+});

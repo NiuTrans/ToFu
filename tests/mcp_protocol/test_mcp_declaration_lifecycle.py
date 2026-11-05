@@ -155,11 +155,11 @@ def test_complete_resident_observations_and_durable_wire_footprint(monkeypatch, 
         tool_search.select_active_mcp_tools(rows, task_id='', selection_scope_id=scope, query='hope', limit=4)
     assert len(tool_search._SELECTION_STATE) == 100
     assert all('wire' not in state for state in tool_search._SELECTION_STATE.values())
-    sizes = [len(settings[SETTING_KEY]['wireJson'].encode('utf-8'))
+    sizes = [len(json.dumps(settings[SETTING_KEY], separators=(',', ':')).encode('utf-8'))
              for settings in declaration_authority.settings.values()]
     assert len(sizes) == 100 and max(sizes) <= MAX_DECLARATION_BYTES
     print(f'footprint conversations=100 resident_states=100 resident_wires=0 '
-          f'wire_bytes_each={max(sizes)} total_wire_bytes={sum(sizes)}')
+          f'slot_bytes_each={max(sizes)} total_slot_bytes={sum(sizes)}')
 
 
 @pytest.mark.parametrize('body', [None, {'version': 0}, {'version': 1, 'policy': 'obsolete'}])

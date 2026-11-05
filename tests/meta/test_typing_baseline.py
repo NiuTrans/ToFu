@@ -25,6 +25,8 @@ def _document(entries: list[tuple[str, str]]) -> dict:
 def test_scoped_counts_attribute_and_ignore_outside_files(monkeypatch, tmp_path):
     monkeypatch.setattr(typing_gate, "ROOT", str(tmp_path))
     document = _document([
+        (str(tmp_path / "lib" / "storage_authority_sql" / "config.py"), "error"),
+        (str(tmp_path / "lib" / "storage_authority_sql" / "migrate.py"), "error"),
         (str(tmp_path / "routes" / "chat.py"), "error"),
         (str(tmp_path / "lib" / "storage_authority_sql" / "schema.py"), "warning"),
         (str(tmp_path / "lib" / "agent_core" / "events.py"), "error"),
@@ -35,7 +37,7 @@ def test_scoped_counts_attribute_and_ignore_outside_files(monkeypatch, tmp_path)
     counts = typing_gate.scoped_counts(document)
     assert counts == {
         "routes": 1,
-        "lib/storage_authority_sql": 1,
+        "lib/storage_authority_sql": 3,
         "lib/agent_core": 1,
         "lib-strict-files": 1,
     }

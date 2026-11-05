@@ -23,18 +23,63 @@ circuit breaker:
 
 Both steps are control-flow-free — the helper mutates
 ``rs.last_checkpoint_ts`` in place and returns nothing.
+
+Before either step, the round's finished tool rows settle
+(``settle_finished_tool_rounds``): their executors are done with them, so the
+Turn projection shares them by reference from then on.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
+from lib.conversation_sync.settled_rows import settle_or_none
 from lib.log import get_logger
 from lib.agent_core.events import EventType, build_event
 from lib.tasks_pkg.manager import append_event, checkpoint_task_partial
+from lib.tasks_pkg.tool_runtime.context import LATE_WORKER_ROWS_KEY
+from lib.tool_results.tool_round_status import TERMINAL_TOOL_ROUND_STATUSES
 
 logger = get_logger(__name__)
+
+# The swarm driver keeps stamping a spawn round's live roster from its own
+# thread after the round finishes, so that row stays live.
+_LIVE_AFTER_FINISH_TOOLS = frozenset({'spawn_agents'})
+
+
+def settle_finished_tool_rounds(task: dict[str, Any]) -> int:
+    """Replace each finished tool row by its settled twin; return the count.
+
+    A row settles only once its verdict is terminal and nothing can still
+    write it: no tool worker is registered for it, its worker did not outlive
+    result publication (``LATE_WORKER_ROWS_KEY``), no background owner holds
+    its handed-off command (``backgroundCommandId``) and it is not a swarm
+    spawn row. Settled rows refuse in-place edits; later writers replace them.
+    """
+    rounds = task.get('toolRounds')
+    if not isinstance(rounds, list):
+        return 0
+    settled_count = 0
+    lock = task.setdefault('_toolRuntimeLock', threading.RLock())
+    with lock:
+        active = task.get('_activeToolContexts')
+        live_rows = ({key[2] for key in active}
+                     if isinstance(active, dict) else set())
+        live_rows.update(task.get(LATE_WORKER_ROWS_KEY) or ())
+        for index, row in enumerate(rounds):
+            if (type(row) is not dict
+                    or row.get('status') not in TERMINAL_TOOL_ROUND_STATUSES
+                    or row.get('toolName') in _LIVE_AFTER_FINISH_TOOLS
+                    or row.get('backgroundCommandId')
+                    or id(row) in live_rows):
+                continue
+            settled = settle_or_none(row)
+            if settled is not None:
+                rounds[index] = settled
+                settled_count += 1
+    return settled_count
 
 
 def run_round_checkpoint_and_close(
@@ -63,6 +108,7 @@ def run_round_checkpoint_and_close(
     # After each tool execution round, save current content/thinking
     # to task_results + conversation so data survives a server crash.
     # Throttled to at most once every 5 seconds to avoid DB pressure.
+    settle_finished_tool_rounds(task)
     _now = time.time()
     if _now - rs.last_checkpoint_ts >= 5:
         try:

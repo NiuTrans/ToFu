@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 from lib.agent_core.events import Phase, build_phase
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -140,10 +141,15 @@ def resume_interrupted_reports() -> int:
 def start_report_job(topic: str, *, lang: str = 'zh', depth: str = 'standard',
                      conv_id: str = '', user_id: int) -> dict:
     """Create + spawn a report job; returns {task_id, deduped}."""
+    from lib.longform.recipe import _DEPTHS
     from lib.longform.runtime import (
         _claim_longform_task, _cleanup_stale_longform_tasks,
         _longform_runtime, _longform_task_id)
 
+    if not isinstance(lang, str):
+        raise BadRequest('lang must be a string', field='lang')
+    if not isinstance(depth, str) or depth not in _DEPTHS:
+        raise BadRequest(f'depth must be one of {sorted(_DEPTHS)}', field='depth')
     _cleanup_stale_longform_tasks()
     normalized_topic = topic.strip()
     key = (user_id, normalized_topic, lang, depth)

@@ -13,6 +13,7 @@ import tomllib
 import pytest
 import yaml
 
+from scripts.check_monorepo import check_release_identity
 from scripts.check_developer_runtime_artifacts import (
     FORBIDDEN_MEMBERS,
     FORBIDDEN_PREFIXES,
@@ -49,12 +50,9 @@ def _write_test_sdist(path: Path, relative_members: set[str]) -> None:
 
 
 def test_public_artifacts_share_one_release_version():
-    version = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
-    assert _toml('pyproject.toml')['project']['version'] == version
-    assert _toml('clients/python/pyproject.toml')['project']['version'] == version
+    assert check_release_identity(ROOT) == []
     typescript = json.loads(
         (ROOT / 'clients/typescript/package.json').read_text(encoding='utf-8'))
-    assert typescript['version'] == version
     assert typescript['devDependencies']['typescript']
     assert (ROOT / 'clients/typescript/package-lock.json').is_file()
 

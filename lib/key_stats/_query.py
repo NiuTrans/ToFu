@@ -14,11 +14,11 @@ from lib.key_stats._state import (
     MIN_ATTEMPTS,
     MIN_SUCCESS_RATE,
     _cache,
+    _commit_decision,
     _ensure_fresh_unlocked,
     _list_siblings,
     _lock,
     _pair_key,
-    _update_store_unlocked,
 )
 from lib.key_stats._enable import _credential_auto_disabled, _is_last_resort_unlocked
 
@@ -176,10 +176,11 @@ def get_all_stats() -> dict:
 def set_key_override(provider_id: str, key_name: str, enabled: bool) -> dict:
     """Explicit, PERSISTENT user override. Returns the updated stats row.
 
-    The override is written to ``data/config/key_stats.json`` and survives
-    day rollovers and process restarts — a key manually disabled today
-    stays disabled until the user explicitly clears the override via
-    :func:`clear_key_override`.
+    The override is committed to ``data/config/key_stats.json`` before this
+    returns (on a storage failure it stays applied in memory and pending, and
+    the flush worker retries it) and survives day rollovers and process
+    restarts — a key manually disabled today stays disabled until the user
+    explicitly clears the override via :func:`clear_key_override`.
 
     When a user explicitly re-enables a key (enabled=True), we also clear
     the exhausted flag, any PER-MODEL billing-stops, and reset
@@ -198,8 +199,8 @@ def set_key_override(provider_id: str, key_name: str, enabled: bool) -> dict:
                 entry['exhausted_models'] = {}
                 entry['consecutive_429'] = 0
 
+    _commit_decision(_mutate, day_scoped=False)
     with _lock:
-        _update_store_unlocked(_mutate)
         day = _cache['day']
     logger.info('[KeyStats] User override %s=%s (day=%s)',
                 pk, bool(enabled), day)
@@ -215,8 +216,9 @@ def clear_key_override(provider_id: str, key_name: str) -> dict:
 
     with _lock:
         had_override = pk in _cache['overrides']
-        _update_store_unlocked(_mutate)
-        if had_override:
-            logger.info('[KeyStats] Cleared override for %s (day=%s)',
-                        pk, _cache['day'])
+    _commit_decision(_mutate, day_scoped=False)
+    if had_override:
+        with _lock:
+            day = _cache['day']
+        logger.info('[KeyStats] Cleared override for %s (day=%s)', pk, day)
     return get_today_stats(provider_id, key_name)

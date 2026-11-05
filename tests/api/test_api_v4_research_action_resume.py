@@ -4,7 +4,9 @@ from quart import Quart,g,request
 import pytest
 from lib.api_keys import local_admin_context
 from lib.api_v4 import attach_v4_envelope,copy_blueprint_to_v4
+from lib.error_envelope import BadRequest
 from lib.storage.errors import StorageError
+from lib.turn_lifecycle import LifecycleNotFound
 
 pytestmark=pytest.mark.unit
 
@@ -14,7 +16,7 @@ def test_resume_owned_empty_body_and_typed_failures(monkeypatch):
     calls=[]
     def resume(task_id,*,user_id):
         calls.append((task_id,user_id))
-        if task_id=='missing':raise LookupError()
+        if task_id=='missing':raise LifecycleNotFound('Research action not found')
         if task_id=='conflict':raise StorageError('database_conflict','original frontier changed')
         return {'task_id':task_id,'resumed':True,'deduped':False}
     monkeypatch.setattr('lib.research.action_continuation.resume_action',resume)
@@ -45,7 +47,7 @@ def test_unfinished_discovery_passes_only_authenticated_workspace_scope(monkeypa
     calls=[]
     def discover(direction,*,lang,user_id):
         calls.append((direction,lang,user_id))
-        if not direction:raise ValueError('direction required')
+        if not direction:raise BadRequest('direction must be non-empty and at most 2000 characters',field='direction')
         return {'tasks':[],'complete':True}
     monkeypatch.setattr('lib.research.action_discovery.discover_unfinished_actions',discover)
     app=Quart(__name__);app.config['TESTING']=True

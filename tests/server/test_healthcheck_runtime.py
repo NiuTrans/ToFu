@@ -41,6 +41,16 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 HC = os.path.join(ROOT, 'healthcheck.py')
 INSTALL_SH = os.path.join(ROOT, 'install.sh')
 
+
+def test_source_import_and_vendor_audits_pass():
+    result = subprocess.run(
+        [sys.executable, HC], cwd=ROOT, capture_output=True, text=True,
+        timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'lib — 3 exports verified' in result.stdout
+    assert 'DOMPurify imported as ESM' in result.stdout
+    assert 'PDF.js remains a lazy import' in result.stdout
+
 _HEALTH_OK = {
     'ok': True,
     'version': '0.0.0-test',

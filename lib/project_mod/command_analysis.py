@@ -5,9 +5,10 @@ side-effect-free analysis layer from the subprocess-execution machinery. Every
 function here is PURE: it inspects a command string or captured output text and
 returns a verdict (dangerous? destructive? which files does it write? which
 top-level delete is catastrophic?) or a cleaned/compressed copy of output. None
-of them spawn a process, read process state, or mutate the filesystem — the one
-filesystem touch is the read-only ``os.path.realpath`` workspace-containment
-check inside :func:`_is_catastrophic_delete`.
+of them spawn a process, read process state, or mutate the filesystem — the
+filesystem touches are read-only: the ``os.path.realpath`` workspace-containment
+check and the ``.git`` marker discovery of the repository-metadata anchor inside
+:func:`_is_catastrophic_delete`.
 
 ``run_command.py`` re-imports every public symbol from here, so both existing
 import paths keep working unchanged::
@@ -25,6 +26,12 @@ import shlex
 from collections import Counter, namedtuple
 
 from lib.log import get_logger
+from lib.project_mod.command_structure import (
+    ShellStructureUnknown,
+    SimpleCommand,
+    Subshell,
+    parse_shell_structure,
+)
 from lib.project_mod.config import DANGEROUS_PATTERNS
 
 logger = get_logger(__name__)
@@ -49,27 +56,18 @@ _PROGRESS_RE = re.compile(
 
 # Pre-compiled regex for run_command
 _FS_HEAVY_RE = re.compile(r'\b(du|find|locate|tree|wc\s+-|cloc|sloccount|ncdu|fd)\b')
-_DANGEROUS_RE = re.compile('|'.join(f'(?:{p})' for p in DANGEROUS_PATTERNS))
 
 
 def _mask_quoted_literals(command):
     """Return *command* with the CONTENTS of quoted spans blanked to spaces.
 
-    The dangerous-pattern guard is meant to catch command STRUCTURE — an
-    actual ``shutdown`` command word, ``rm -rf /``, a ``> /dev/sd`` redirect —
-    not a word that merely appears inside a quoted argument. Several patterns
-    in ``DANGEROUS_PATTERNS`` are bare words (``\\bshutdown\\b``, ``\\breboot\\b``,
-    ``\\bmkfs\\b``, ``\\bdiskpart\\b``), so a benign diagnostic like
-    ``grep -E "graceful shutdown|shutting down" app.log`` false-positives and is
-    blocked — breaking log debugging. Blanking quoted contents (delimiters
-    included, so token boundaries survive) neutralises those in-string words
-    while leaving unquoted command structure — and thus every structural
-    pattern — intact.
-
-    Known limitation: a dangerous word passed UNQUOTED as a search argument
-    (``grep shutdown file``) is still matched; only quoted literals are masked.
-    Real command isolation is enforced by the catastrophic-delete guard and the
-    portable sandbox — this guard is a best-effort net over the raw string.
+    Delimiters are blanked too, so token boundaries and the length survive;
+    unquoted text, backslash escapes included, is kept verbatim. Shape checks
+    use it to find unquoted operators (``<``, ``(``, ``;`` …) without tripping
+    over quoted arguments. It is not a command parser: it knows nothing of
+    heredoc bodies, substitutions inside double quotes or text a shell
+    executes (``sh -c '…'``); :mod:`lib.project_mod.command_structure` owns
+    that structure.
     """
     out = []
     in_single = in_double = False
@@ -95,16 +93,6 @@ def _mask_quoted_literals(command):
             out.append(ch)
         i += 1
     return ''.join(out)
-
-
-def _is_dangerous_command(command):
-    """True when *command* trips a hard-blocked dangerous pattern.
-
-    Scans the command with quoted-literal contents masked (see
-    :func:`_mask_quoted_literals`) so words inside a search pattern or echo
-    string cannot false-positive.
-    """
-    return bool(_DANGEROUS_RE.search(_mask_quoted_literals(command)))
 
 
 def _extract_progress_label(line):
@@ -487,116 +475,375 @@ def _independent_runtime_command(command):
     return bool(segments)
 
 
-def _literal_sed_substitution(program):
-    """Prove a bounded substitution cannot execute or name another output.
+# GNU sed's own script grammar (sed/compile.c: snarf_char_class, match_slash,
+# compile_address, mark_subst_opts, compile_program), restricted to the
+# commands admission proves.
+_SED_SAFE_SUBSTITUTION_FLAGS = frozenset('gpiImM0123456789')
+# GNU sed writes the first two names to its own streams; none is a workspace file.
+_SED_NON_FILE_OUTPUTS = frozenset({'/dev/stdout', '/dev/stderr', '/dev/null'})
 
-    Delimiters are literal ASCII punctuation. Escapes, addresses and compound
-    programs remain opaque; w/e flags must never borrow file-only evidence.
+
+def _sed_bracket_end(program, index):
+    """Index after the bracket expression whose ``[`` precedes ``index``.
+
+    Mirrors GNU sed's ``snarf_char_class``: inside a bracket the delimiter and
+    backslash are literal, a leading ``]`` (after an optional ``^``) is a member
+    and ``[:...:]``, ``[.....]`` and ``[=...=]`` may contain ``]``. None when
+    the bracket is unterminated.
     """
-    if (not 4 <= len(program) <= 4096 or not program.startswith('s')
-            or any(char in program for char in '\\\r\n\0')):
-        return False
-    delimiter = program[1]
-    if not '!' <= delimiter <= '~' or delimiter.isalnum():
-        return False
-    parts = program.split(delimiter)
-    return len(parts) == 4 and re.fullmatch(r'[gpIMim0-9]*', parts[3]) is not None
+    end = len(program)
+    if index < end and program[index] == '^':
+        index += 1
+    if index < end and program[index] == ']':
+        index += 1
+    state, opener = 0, None
+    while index < end:
+        char = program[index]
+        index += 1
+        if char in '.:=':
+            if state == 1:
+                state, opener = 2, char
+                continue
+            if state == 2 and char == opener:
+                state = 3
+                continue
+        elif char == '[':
+            if state == 0:
+                state = 1
+            continue
+        elif char == ']':
+            if state < 2:
+                return index
+            if state == 3:
+                state = 0
+        state &= ~1
+    return None
 
 
-def _literal_sed_read_program(program):
-    """Prove a `p`/`d`-only program prints or discards, never writes.
+def _sed_field_end(program, index, delimiter, *, regex):
+    """Index after the unescaped ``delimiter`` closing the field at ``index``.
 
-    Literal line numbers, ``$`` and ``/regex/`` addresses are data; the only
-    command is one ``p`` or ``d``. Compound programs, escapes and every other
-    command (including ``w``/``e``/``r``) stay unresolved, so this proof never
-    borrows write evidence for an unparsed script.
+    Mirrors GNU sed's ``match_slash``: a backslash escapes the next character
+    and, in a regex, ``[`` opens a bracket expression that may hold the
+    delimiter. A replacement has no brackets. None when unterminated.
     """
-    if not 1 <= len(program) <= 4096:
-        return False
-    if any(char in program for char in '\\;\r\n\0&'):
-        return False
-    address = r'(?:\d+|\$|/[^/]*/)'
-    return re.fullmatch(r'(?:' + address + r'(?:,' + address + r')?)?[pd]', program) is not None
+    end = len(program)
+    while index < end:
+        char = program[index]
+        index += 1
+        if char == delimiter:
+            return index
+        if char == '\\':
+            index += 1
+        elif char == '[' and regex:
+            index = _sed_bracket_end(program, index)
+            if index is None:
+                return None
+    return None
 
 
-def literal_sed_effects(arguments):
-    """Return (inplace, input paths) only for proven bounded sed programs.
+def _sed_address_end(program, index):
+    """Index after a line number, ``$`` or ``/regex/[IM]`` address at ``index``.
 
-    A program either substitutes under the maintained substitution grammar or
-    only prints/discards under the read grammar. This is the shared evidence
-    for filters, target discovery and FILE leases. Options precede operands;
-    -e/--expression may supply multiple individually proven programs. Suffix
-    backups, script files, unknown flags, escapes and option permutation remain
-    unresolved. Resolution still verifies each leaf.
+    ``index`` itself when none starts there (other GNU address forms are outside
+    the proof); None for an unterminated regex.
     """
-    programs, operands = [], []
-    inplace, options = False, True
+    end = len(program)
+    if index < end and program[index] == '$':
+        return index + 1
+    if index < end and program[index] == '/':
+        index = _sed_field_end(program, index + 1, '/', regex=True)
+        while index is not None and index < end and program[index] in 'IM':
+            index += 1
+        return index
+    while index < end and program[index] in '0123456789':
+        index += 1
+    return index
+
+
+def _sed_script_commands(program):
+    """``(command, output file or None)`` for each command of a one-line script.
+
+    The grammar is the subset admission proves: optional data addresses (line
+    numbers, ``$``, ``/regex/``, one range, ``!``) on ``s`` (punctuation
+    delimiter; flags ``gpiImM`` and digits, or a final ``w FILE``), ``p``,
+    ``d``, ``q [EXIT]`` and a final ``w``/``W FILE``, separated by ``;`` and
+    blanks. As in GNU sed a filename runs to the end of the script, and fields
+    split exactly where sed splits them, so a bracketed ``;`` or delimiter stays
+    data. Anything else (newlines, blocks, labels, branches, comments, ``e``,
+    ``r``, ``R``, other commands or address forms) returns None.
+
+    Non-ASCII text is data in UTF-8 and single-byte locales, where no ASCII
+    byte belongs to a multibyte character; a legacy double-byte locale (GBK,
+    Big5) is outside this proof.
+    """
+    if not 1 <= len(program) <= 4096 or any(char in program for char in '\n\r\v\f\0'):
+        return None
+    end, index, commands = len(program), 0, []
+
+    def blanks(position):
+        while position < end and program[position] in ' \t':
+            position += 1
+        return position
+
+    while True:
+        while index < end and program[index] in '; \t':
+            index += 1
+        if index == end:
+            return tuple(commands) or None
+        after = _sed_address_end(program, index)
+        if after is None:
+            return None
+        if after > index:
+            index = blanks(after)
+            if index < end and program[index] == ',':
+                start = blanks(index + 1)
+                after = _sed_address_end(program, start)
+                if after is None or after == start:
+                    return None
+                index = blanks(after)
+        if index < end and program[index] == '!':
+            index = blanks(index + 1)
+        if index == end:
+            return None
+        command, output = program[index], None
+        index += 1
+        if command == 's':
+            delimiter = program[index:index + 1]
+            if not '!' <= delimiter <= '~' or delimiter.isalnum() or delimiter == '\\':
+                return None
+            index = _sed_field_end(program, index + 1, delimiter, regex=True)
+            if index is not None:
+                index = _sed_field_end(program, index, delimiter, regex=False)
+            if index is None:
+                return None
+            while True:
+                index = blanks(index)
+                if index == end or program[index] == ';':
+                    break
+                if program[index] == 'w':
+                    output, index = program[blanks(index + 1):], end
+                    break
+                if program[index] not in _SED_SAFE_SUBSTITUTION_FLAGS:
+                    return None
+                index += 1
+        elif command in 'wW':
+            output, index = program[blanks(index):], end
+        elif command in 'pdq':
+            index = blanks(index)
+            if command == 'q':
+                while index < end and program[index] in '0123456789':
+                    index += 1
+                index = blanks(index)
+            if index < end and program[index] != ';':
+                return None
+        else:
+            return None
+        if output == '':
+            return None
+        commands.append((command, output))
+
+
+def _literal_sed_script(program):
+    """Prove a script only substitutes, prints, deletes or quits."""
+    commands = _sed_script_commands(program)
+    return commands is not None and all(output is None for _command, output in commands)
+
+
+_SedInvocation = namedtuple('_SedInvocation', (
+    'programs program_words script_files operands inplace backup follows_links scanned'))
+# GNU sed options that change neither the script, the operands nor the files written.
+_SED_INERT_LONG_OPTIONS = frozenset({
+    '--quiet', '--silent', '--regexp-extended', '--separate', '--unbuffered',
+    '--null-data', '--zero-terminated', '--posix', '--debug', '--sandbox', '--binary',
+})
+
+
+def _sed_invocation(arguments):
+    """Split GNU sed argv into its roles; None when a word's role is unknown.
+
+    Options precede operands and ``--`` ends them. ``-e``/``--expression`` add
+    programs and ``-f``/``--file`` script files, attached or separate; without
+    either the first operand is the program. ``program_words`` indexes the
+    argument each program came from. A first ``--help``/``--version`` prints and
+    exits before sed reads another word, so it has no program or operand; a
+    later one does not, since ``-e``/``-f`` compile their program (opening its
+    w files) as they are read. Unknown or abbreviated long options, a missing
+    value and an option-like word after the first operand (GNU option
+    permutation would re-read it) return None. Permutation also means getopt
+    reads every word before ``--`` as a possible option, operands included;
+    ``scanned`` counts those leading words. A ``--`` after the first operand
+    ends GNU's scan but is a file under POSIXLY_CORRECT, which stops at the
+    first operand, so it stays an operand.
+    """
+    if arguments and arguments[0] in {'--help', '--version'}:
+        return _SedInvocation((), (), (), (), False, False, False, 0)
+    programs, program_words, script_files = [], [], []
+    inplace = backup = follows_links = terminated = False
     index = 0
     while index < len(arguments):
         arg = arguments[index]
+        if arg == '-' or not arg.startswith('-'):
+            break
         index += 1
         if arg == '--':
-            options = False
+            terminated = True
             break
-        if arg in {'--quiet', '--silent', '--regexp-extended', '--separate',
-                   '--unbuffered', '--null-data', '--posix'}:
+        if arg in _SED_INERT_LONG_OPTIONS:
             continue
-        if arg in {'--in-place', '--in-place='}:
-            inplace = True
+        if arg == '--follow-symlinks':
+            follows_links = True
             continue
-        if arg == '--expression':
-            if index == len(arguments):
-                return None
-            programs.append(arguments[index])
-            index += 1
+        name, separator, value = arg.partition('=')
+        if name == '--in-place':
+            inplace, backup = True, backup or bool(value)
             continue
-        if arg.startswith('--expression='):
-            programs.append(arg.partition('=')[2])
+        if name in {'--expression', '--file', '--line-length'}:
+            word = index - 1
+            if not separator:
+                if index == len(arguments):
+                    return None
+                value, word = arguments[index], index
+                index += 1
+            if name == '--expression':
+                programs.append(value)
+                program_words.append(word)
+            elif name == '--file':
+                script_files.append(value)
             continue
         if arg.startswith('--'):
             return None
-        if arg.startswith('-') and arg != '-':
-            position = 1
-            while position < len(arg):
-                flag = arg[position]
-                position += 1
+        position = 1
+        while position < len(arg):
+            flag = arg[position]
+            position += 1
+            if flag in 'efl':
+                value, word = arg[position:], index - 1
+                if not value:
+                    if index == len(arguments):
+                        return None
+                    value, word = arguments[index], index
+                    index += 1
                 if flag == 'e':
-                    program = arg[position:]
-                    if not program:
-                        if index == len(arguments):
-                            return None
-                        program = arguments[index]
-                        index += 1
-                    programs.append(program)
-                    break
-                if flag == 'i':
-                    if position != len(arg):
-                        return None  # -iSUFFIX (including -iE) creates a backup.
-                    inplace = True
-                elif flag not in 'nErsuz':
-                    return None
-            continue
-        operands.append(arg)
-        break
-    operands.extend(arguments[index:])
-    if options and any(operand.startswith('-') for operand in operands):
-        return None  # Do not depend on GNU option permutation or its environment.
-    if not programs:
+                    programs.append(value)
+                    program_words.append(word)
+                elif flag == 'f':
+                    script_files.append(value)
+                break
+            if flag == 'i':
+                inplace, backup = True, backup or position < len(arg)  # -iSUFFIX, -iE
+                break
+            if flag not in 'nrsuzEb':
+                return None
+    scanned = index - 1 if terminated else len(arguments)
+    operands = list(arguments[index:])
+    if not terminated:
+        end = operands.index('--', 1) if '--' in operands[1:] else len(operands)
+        if any(word.startswith('-') and word != '-' for word in operands[1:end]):
+            return None
+        scanned = index + end
+    if not programs and not script_files:
         if not operands:
             return None
         programs.append(operands.pop(0))
-    if not all(_literal_sed_substitution(program) or _literal_sed_read_program(program)
-               for program in programs):
-        return None
-    if inplace and not operands:
-        return None
-    return inplace, tuple(operands)
+        program_words.append(index)
+    return _SedInvocation(tuple(programs), tuple(program_words), tuple(script_files),
+                          tuple(operands), inplace, backup, follows_links, scanned)
 
 
-def is_literal_sed_filter(arguments):
-    """Prove the maintained sed grammar has no file write effect."""
-    effects = literal_sed_effects(arguments)
-    return effects is not None and not effects[0]
+def literal_sed_effects(arguments, *, shapes=()):
+    """Return (inplace, input paths) only for proven bounded sed programs.
+
+    Every program must pass ``_literal_sed_script``. This is the shared evidence
+    for filters, target discovery and FILE leases. Script files, suffix
+    backups, ``--follow-symlinks``, an in-place edit without operands and a
+    program the shell computes stay unresolved. ``shapes`` holds the
+    ``_WordShape`` of each argument: a computed program is not the text proven
+    here, and a word sed may read as an option its text does not show,
+    anywhere before option scanning ends, voids the proof (``*.py`` matching
+    ``-i.py`` makes ``sed -n 1p *.py`` an in-place edit). Resolution still
+    verifies each leaf.
+    """
+    invocation = _sed_invocation(arguments)
+    if (invocation is None or invocation.script_files or invocation.backup
+            or invocation.follows_links or (invocation.inplace and not invocation.operands)
+            or any(word < len(shapes) and shapes[word].computed
+                   for word in invocation.program_words)
+            or any(shape.hidden for shape in shapes[:invocation.scanned])
+            or not all(_literal_sed_script(program) for program in invocation.programs)):
+        return None
+    return invocation.inplace, invocation.operands
+
+
+def _sed_written_paths(invocation):
+    """In-place operands and the files w commands and ``s///w`` flags name.
+
+    The program text itself is never a path. A program outside the script
+    grammar, or one in a script file, names no literal output here.
+    """
+    paths = list(invocation.operands) if invocation.inplace else []
+    for program in invocation.programs:
+        paths.extend(output for _command, output in _sed_script_commands(program) or ()
+                     if output is not None and output not in _SED_NON_FILE_OUTPUTS)
+    return paths
+
+
+# perl switches that take no value.
+_PERL_FLAG_SWITCHES = frozenset('acfnpsStTuUwWX')
+
+
+def _perl_one_liner(args):
+    """``(in-place, operands, code)`` for perl argv whose switches are all known.
+
+    ``-e``/``-E`` code is program text, never a path. ``-i[EXT]``, ``-M``,
+    ``-m``, ``-F`` and ``-0xHEX`` take the rest of their cluster, so ``-pie``
+    edits in place with backup extension ``e``; ``-I`` takes the rest or the
+    next word, and ``-l``/``-0`` octal digits. Without code the first operand
+    is a program file. Any other switch returns None.
+    """
+    inplace, code, index = False, [], 0
+    while index < len(args) and args[index].startswith('-') and args[index] != '-':
+        arg = args[index]
+        index += 1
+        if arg == '--':
+            break
+        position = 1
+        while position < len(arg):
+            switch = arg[position]
+            position += 1
+            if switch in 'eE':
+                if position < len(arg):
+                    code.append(arg[position:])
+                elif index < len(args):
+                    code.append(args[index])
+                    index += 1
+                else:
+                    return None
+                break
+            if switch in 'MmFi' or (switch == '0' and arg[position:position + 1] == 'x'
+                                    and position + 1 < len(arg)):
+                if (switch in 'MmF' and position == len(arg)
+                        or switch in 'Fi' and any(char.isspace() for char in arg[position:])):
+                    return None
+                inplace = inplace or switch == 'i'
+                break
+            if switch == 'I':
+                if position == len(arg):
+                    if index == len(args):
+                        return None
+                    index += 1
+                break
+            if switch in 'l0':
+                while position < len(arg) and arg[position] in '01234567':
+                    position += 1
+            elif switch not in _PERL_FLAG_SWITCHES:
+                return None
+    operands = args[index:]
+    if not code:
+        if not operands:
+            return None
+        operands = operands[1:]
+    return inplace, tuple(operands), tuple(code)
 
 
 def command_segment_formatter_writes(source):
@@ -644,11 +891,8 @@ def _command_checkout_mutation(command, cwd=''):
 
     Resolved write targets, in-place utilities and mutating Git count as known
     mutations. Opaque interpreters/test/build commands do not prove mutation,
-    but False is not a readonly or stable-checkout guarantee. Selective writer
-    admission belongs to run_command.command_write_lease_paths, whose literal
-    parser also covers uncertain shell/utility shapes; it must not use this
-    snapshot classifier as its sole exemption. Opaque commands receive no
-    automatic reader lease. Stable cooperative reads are an explicit API.
+    but False is not a readonly or stable-checkout guarantee. Commands take no
+    workspace lease either way (docs/runbooks/GIT_WORKSPACE_GUARD.md).
     """
     if not command or not command.strip():
         return False
@@ -664,7 +908,7 @@ def _command_checkout_mutation(command, cwd=''):
         index = 0
         while index < len(words) and _ENV_ASSIGNMENT_GUARD_RE.match(words[index]):
             index += 1
-        words = _unwrap_command_parts(words[index:])
+        words = git_command_words(words[index:]) or unwrap_process_wrappers(words[index:])
         if not words:
             continue
         base = os.path.basename(words[0])
@@ -686,6 +930,15 @@ def _command_checkout_mutation(command, cwd=''):
         # Opaque non-Git command (interpreter, build/test runner, …): not a
         # proven checkout mutation; no automatic reader lease is inferred.
     return False
+
+
+# ``-c`` settings that only pin presentation or switch behaviour off. The last
+# two disable post-command housekeeping, which no inspection triggers and which
+# agents pass on every git invocation.
+_HARMLESS_GIT_CONFIG = frozenset({
+    'core.fsmonitor=false', 'log.showSignature=false', 'format.pretty=medium',
+    'gc.auto=0', 'maintenance.auto=false',
+})
 
 
 def _lease_free_git_segment(command):
@@ -714,16 +967,13 @@ def _lease_free_git_segment(command):
     if not words or words[0] not in {'git', '/usr/bin/git', '/bin/git'}:
         return None
 
-    safe_config = {
-        'core.fsmonitor=false', 'log.showSignature=false', 'format.pretty=medium',
-    }
     directory_args = []
     index = 1
     while index < len(words):
         word = words[index]
         if word in {'--no-pager', '--no-optional-locks'}:
             index += 1
-        elif word == '-c' and index + 1 < len(words) and words[index + 1] in safe_config:
+        elif word == '-c' and index + 1 < len(words) and words[index + 1] in _HARMLESS_GIT_CONFIG:
             index += 2
         elif word == '-C' and index + 1 < len(words):
             directory_args.extend(words[index:index + 2])
@@ -737,6 +987,13 @@ def _lease_free_git_segment(command):
     original_args = list(args)
     if _classify_git_invocation(words[1:], require_known_options=True) != 'readonly':
         return None
+    if verb in {'--version', 'version'}:
+        # The version builtin discovers no repository, reads no pager or
+        # helper configuration, and no alias can shadow a builtin.
+        if args not in ([], ['--build-options']):
+            return None
+        return shlex.join([words[0], '--no-pager', '--no-optional-locks',
+                           *directory_args, verb, *args])
 
     if verb == 'clean':
         # Reuse the SAME value/bundle parser: proven noninteractive preview.
@@ -753,13 +1010,21 @@ def _lease_free_git_segment(command):
             return None
         return shlex.join([words[0], '--no-pager', '--no-optional-locks',
                            *directory_args, verb, *args])
+    if verb == 'hash-object':
+        # A path input runs configured clean/process filter drivers (git-lfs
+        # clean stores the object it hashes); no hardening flag disables them.
+        if _git_hash_object_runs_filters(args) is not False:
+            return None
+        return shlex.join([words[0], '--no-pager', '--no-optional-locks',
+                           *directory_args, verb, *args])
     flags = {
         'status': {'-s', '--short', '-b', '--branch', '-z', '--null', '--porcelain',
                    '--porcelain=1', '--porcelain=2', '--porcelain=v1', '--porcelain=v2',
                    '--long', '--show-stash', '--ahead-behind', '--no-ahead-behind',
                    '-u', '-uno', '-unormal', '-uall', '--untracked-files=no',
                    '--untracked-files=normal', '--untracked-files=all'},
-        'branch': {'--show-current', '--list', '-a', '--all', '-r', '--remotes', '-v', '-vv'},
+        'branch': {'--show-current', '--list', '-l', '-a', '--all', '-r', '--remotes', '-v', '-vv',
+                   '--verbose'},
         'tag': {'--list', '-l', '-n'},
         'worktree': {'list', '--porcelain', '-z'},
 
@@ -775,6 +1040,8 @@ def _lease_free_git_segment(command):
         'ls-tree': {'-r', '-t', '-d', '-l', '-z', '--long', '--name-only', '--name-status',
                     '--full-name', '--full-tree'},
         'merge-base': {'-a', '--all', '--is-ancestor', '--octopus', '--independent', '--fork-point'},
+        'symbolic-ref': {'-q', '--quiet', '--short'},
+        'cherry': {'-v', '--verbose', '--abbrev'},
         'cat-file': {'-p', '-t', '-s', '-e', '--batch', '--batch-check', '--batch-all-objects', '--unordered'},
         'for-each-ref': set(),
         'config': {'--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l',
@@ -784,6 +1051,7 @@ def _lease_free_git_segment(command):
         'name-rev': {'--name-only', '--tags', '--all', '--no-undefined', '--always'},
         'blame': {'--no-textconv', '-n', '-s', '-p', '--porcelain', '--line-porcelain'},
         'shortlog': {'-n', '-s', '-e', '--numbered', '--summary', '--email', '--all'},
+        'count-objects': {'-v', '--verbose', '-H', '--human-readable', '-vH', '-Hv'},
         # git grep has no mutable output; its pager option is refused above.
         'grep': _GIT_GREP_FLAGS,
     }
@@ -796,7 +1064,10 @@ def _lease_free_git_segment(command):
     log_flags = {'--oneline', '--graph', '--all', '--decorate', '--decorate=short',
                  '--decorate=full', '--decorate=auto', '--decorate=no', '--no-decorate',
                  '--no-show-signature', '--reverse', '--date-order', '--topo-order',
-                 '--first-parent', '--no-merges', '--merges'} | diff_flags
+                 '--first-parent', '--no-merges', '--merges',
+                 '-i', '--regexp-ignore-case', '--all-match', '--invert-grep',
+                 '--basic-regexp', '--extended-regexp', '--fixed-strings',
+                 '--perl-regexp', '-E', '-F', '-P'} | diff_flags
     flags.update({'log': log_flags, 'show': log_flags, 'diff': diff_flags,
                   'rev-list': {'--count', '--left-right', '--boundary', '--objects'} | log_flags,
                   'reflog': log_flags, 'stash': log_flags})
@@ -806,15 +1077,22 @@ def _lease_free_git_segment(command):
         'diff': {'--diff-filter', '--relative'},
         'ls-files': {'--exclude', '--exclude-from'},
         'for-each-ref': {'--format', '--sort', '--count', '--points-at', '--contains', '--merged'},
-        'branch': {'--format', '--sort', '--contains', '--merged', '--no-merged', '--points-at'},
+        'branch': {'--format', '--sort', '--contains', '--no-contains', '--merged', '--no-merged',
+                   '--points-at'},
         'tag': {'--format', '--sort', '--contains', '--merged', '--no-merged', '--points-at'},
         'describe': {'--abbrev', '--match', '--exclude', '--dirty', '--broken'},
         'blame': {'-L', '--contents'},
         'shortlog': {'--format', '--group'},
+        'cherry': {'--abbrev'},
     }
     values['rev-list'] = values['log']
     values['reflog'] = values['log']
     values['stash'] = values['log']
+
+    # Pickaxe searches the same diffs as -p; log/show run them under the
+    # --no-ext-diff/--no-textconv hardening below. rev-list gets no hardening.
+    values['log'] = values['log'] | {'-S', '-G'}
+    flags['log'] = flags['log'] | {'--pickaxe-regex', '--pickaxe-all'}
     if verb not in flags:
         return None
     if verb == 'worktree' and args[:1] != ['list']:
@@ -840,16 +1118,23 @@ def _lease_free_git_segment(command):
             elif index + 1 < len(args):
                 value = args[index + 1]
                 index += 2
+            elif verb == 'branch' and option in _GIT_OPTIONAL_COMMIT_OPTIONS:
+                index += 1  # Last on the command line, the commit defaults to HEAD.
+                continue
             else:
                 return None
-            if option in {'--format', '--pretty'}:
+            if option in {'--format', '--pretty', '--group'}:  # --group=format:<format>
                 if '%G' in value or re.search(r'%\(\*?signature(?::|\))', value):
                     return None  # Verification atoms can run signature helpers.
         elif verb in {'log', 'show', 'rev-list', 'reflog', 'stash'} and re.fullmatch(
                 r'(?:-[0-9]+|-n[0-9]+|-U[0-9]+)', word):
             index += 1
+        elif verb == 'branch' and re.fullmatch(r'-[arv]+', word):
+            index += 1  # Bundled listing flags: -av, -rv.
         elif verb == 'diff' and re.fullmatch(r'-U[0-9]+', word):
             index += 1
+        elif verb == 'log' and word[:2] in ('-S', '-G') and len(word) > 2:
+            index += 1  # attached pickaxe value: -S'needle'
         else:
             return None  # Unknown/helper/output flags retain writer admission.
     # Keep parameter-sensitive listing commands from borrowing operand support
@@ -869,6 +1154,60 @@ def _lease_free_git_segment(command):
         words[0], '--no-pager', '--no-optional-locks',
         *configuration, *directory_args, verb, *hardened_args,
     ])
+
+
+# Read verbs whose operands only select revisions, paths or patterns: no
+# operand, whatever it expands to, switches them into a writing mode.
+_EXPANSION_INERT_GIT_VERBS = frozenset({
+    'log', 'show', 'diff', 'rev-list', 'ls-files', 'ls-tree', 'grep', 'blame',
+    'shortlog', 'status', 'cat-file', 'rev-parse', 'merge-base', 'name-rev',
+    'cherry', 'check-ignore', 'describe', 'for-each-ref',
+})
+_SIMPLE_PARAMETER = re.compile(r'\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})')
+# A plain value, and a signature-verification atom that a format value may not hold.
+_EXPANSION_PROBES = ('x', '%G?')
+
+
+def git_read_expansion_inert(source):
+    """Whether a Git read stays inside the hardened grammar whatever it expands to.
+
+    Every expanded word must follow a literal read verb whose operands cannot
+    select a mode, start with a literal character so that no word it produces
+    is an option (``lib/*.py``, ``HEAD.."$b"``, ``--grep="$s"``), and hold
+    only plain ``$NAME`` parameters or pathname patterns. The grammar must
+    accept the command with each parameter replaced by a plain value and by a
+    signature atom, which keeps an expanded ``--format`` value conservative.
+    Global options, the verb, redirects, command substitutions and words
+    that may split or begin with ``-`` (``$x``, ``"$x"``, ``*.py``) are never
+    proven.
+    """
+    if re.search(r'[<>`]', _mask_quoted_literals(source)) or '$(' in source:
+        return False
+    try:
+        tokens = _shell_words(source, strict=True, redirects=True)
+        shapes = command_segment_word_shapes(source)
+    except ValueError:
+        return False
+    texts = [token.text for token in tokens]
+    index = 1
+    while index < len(texts) and texts[index] in {'--no-pager', '--no-optional-locks', '-c', '-C'}:
+        index += 2 if texts[index] in {'-c', '-C'} else 1
+    if (not texts or os.path.basename(texts[0]) != 'git' or index >= len(texts)
+            or texts[index] not in _EXPANSION_INERT_GIT_VERBS
+            or any(shape.computed for shape in shapes[:index + 1])):
+        return False
+    expanded = [position for position, shape in enumerate(shapes) if shape.computed]
+    if not expanded or any(shapes[position].hidden for position in expanded):
+        return False
+    for probe in _EXPANSION_PROBES:
+        words = list(texts)
+        for position in expanded:
+            words[position] = _SIMPLE_PARAMETER.sub(probe, texts[position])
+            if '$' in words[position]:
+                return False  # positional, special or operator expansions
+        if _lease_free_git_segment(shlex.join(words)) is None:
+            return False
+    return True
 
 
 def _lease_free_git_command(command):
@@ -916,29 +1255,75 @@ def _lease_free_git_command(command):
     return command.strip()
 
 
+def command_requires_workspace_runtime(command):
+    """Only proven Git inspection chains can skip dependency preparation.
+
+    Lease-free scheduling alone includes interpreters/builds. Require the
+    shared guard's complete readonly classification as well, so an adjacent
+    Python/Node consumer still gets its workspace dependencies.
+    """
+    return not (_git_guard_classify(command, require_known_segments=True) == 'readonly'
+                and _lease_free_git_command(command) is not None)
+
+
+def _harden_substitution_bodies(command):
+    """Harden Git reads inside ``$(…)``/backtick bodies, which the shell runs too.
+
+    Without this a ``echo "HEAD $(git rev-parse HEAD)"`` prefix kept the whole
+    command (often a long test run) under a checkout fence, because the body
+    ran unhardened and an index read may invoke a configured fsmonitor hook.
+    Admission judges each body by its executed text, so both sides agree.
+    Commands with heredocs keep exact bytes, as do backtick bodies containing
+    backslashes (re-escaping a rewritten body is not attempted).
+    """
+    if 'heredoc' in command_segment_dynamic_kinds(command):
+        return command
+    bodies = command_substitution_bodies(command)
+    for start, end, body in reversed(bodies or ()):
+        raw = command[start:end]
+        if raw.startswith('`'):
+            if '\\' not in raw:
+                command = f'{command[:start]}`{harden_git_inspections(body)}`{command[end:]}'
+        else:
+            command = f'{command[:start]}$({harden_git_inspections(body)}){command[end:]}'
+    return command
+
+
 def harden_git_inspections(command):
     """Harden literal read segments even when another segment needs a lease.
 
-    Authorization remains bound to the original tool arguments. Recorded
-    background wrappers never use this transformation: their typed binding
-    must preserve exact bytes. Rewriting changes no shell separators/cwd.
+    Authorization remains bound to the original tool arguments. A recorded
+    background wrapper is never rewritten after binding (its typed binding
+    preserves exact bytes); the adapter binds this function's output instead
+    (``run_command.command_execution_source``). Rewriting changes no shell
+    separators/cwd.
+    Literal heredoc bodies are data: spans come from
+    :func:`_literal_heredoc_body_view` and splice the original at its offsets.
+    Command-substitution bodies are hardened first, as commands of their own.
     """
-    if re.search(r'[(){}#]', _mask_quoted_literals(command)):
-        return command  # Unknown shell grouping/comments retain ordinary admission.
+    command = _harden_substitution_bodies(command)
+    from .command_structure import ShellStructureUnknown, shell_command_ranges
+    try:
+        ranges = shell_command_ranges(command)
+    except ShellStructureUnknown:
+        return command
     replacements = []
-    for start, end in _split_pipeline_spans(command):
-        hardened = _lease_free_git_segment(command[start:end].strip())
+    for start, end in ranges:
+        segment = command[start:end].strip()
+        # A shell wrapper keeps its own admission: the hardened read grammar
+        # owns a literal `git` head only, and an `env git …` query still
+        # refreshes the index.
+        hardened = _lease_free_git_segment(segment)
         if hardened is None:
             # A trailing ``2>/dev/null`` is not shell write syntax; harden the
             # residual inspection and keep the original redirect bytes.
-            split = command_segment_discardable_redirect_split(
-                command[start:end].strip())
+            split = command_segment_discardable_redirect_split(segment)
             if split is not None:
                 core, suffix = split
                 core_hardened = _lease_free_git_segment(core)
                 hardened = (None if core_hardened is None
                             else core_hardened + ' ' + suffix)
-        if hardened is not None:
+        if hardened is not None and hardened != segment:
             replacements.append((start, end, hardened))
     for start, end, hardened in reversed(replacements):
         command = command[:start] + ' ' + hardened + ' ' + command[end:]
@@ -987,9 +1372,17 @@ _GIT_READONLY_SUBCOMMANDS = frozenset({
     'status', 'log', 'diff', 'show', 'branch', 'tag',
     'remote', 'describe', 'rev-parse', 'rev-list',
     'ls-files', 'ls-tree', 'ls-remote', 'merge-base', 'cat-file', 'for-each-ref', 'name-rev',
-    'check-ignore',
+    'check-ignore', 'version', 'cherry',
     'blame', 'shortlog', 'reflog',
     'config', 'stash',  # Parameter-sensitive forms are checked before this set.
+    'count-objects',
+})
+
+# ``git branch``/``git tag`` filters whose commit defaults to HEAD when last.
+_GIT_OPTIONAL_COMMIT_OPTIONS = frozenset({'--contains', '--no-contains', '--merged', '--no-merged'})
+# ``git config`` subcommands (Git 2.46+); a lone one is never a key read.
+_GIT_CONFIG_ACTIONS = frozenset({
+    'get', 'list', 'set', 'unset', 'rename-section', 'remove-section', 'edit',
 })
 
 _GIT_DESTRUCTIVE_SUBCOMMANDS = frozenset({
@@ -1020,6 +1413,45 @@ _AWK_INPLACE = _re.compile(r'\b\w*awk\b.*?\s(?:-i|--include)[\s=]*\S*inplace')
 
 _ShellWord = namedtuple(
     '_ShellWord', ['text', 'start', 'end', 'squote', 'dquote'])
+
+
+def _removed_quotes(raw):
+    """The text POSIX quote removal makes of one unsplit shell word.
+
+    Inside double quotes a backslash quotes only ``$``, a backtick, ``"``,
+    a backslash or a newline; ``shlex`` kept it before ``$`` and the backtick,
+    so ``sh -c "touch \\$x"`` read as a write of a file named ``$x`` while the
+    shell runs ``touch $x``. A backslash-newline is a line continuation.
+    """
+    out, index, quote = [], 0, None
+    while index < len(raw):
+        char = raw[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            else:
+                out.append(char)
+        elif char == '\\':
+            if index + 1 == len(raw):
+                raise ValueError('No escaped character')
+            following = raw[index + 1]
+            if quote == '"' and following not in '$`"\\\n':
+                out.append(char)
+            elif following != '\n':
+                out.append(following)
+                index += 1
+            else:
+                index += 1
+        elif char == '"':
+            quote = None if quote else '"'
+        elif char == "'" and quote is None:
+            quote = "'"
+        else:
+            out.append(char)
+        index += 1
+    if quote is not None:
+        raise ValueError('No closing quotation')
+    return ''.join(out)
 
 
 def _shell_words(s, *, strict=False, redirects=False):
@@ -1063,10 +1495,7 @@ def _shell_words(s, *, strict=False, redirects=False):
             i += 1
         raw = s[start:i]
         try:
-            decoded = shlex.split(raw, comments=False, posix=True)
-            if len(decoded) != 1:
-                raise ValueError('Invalid shell word')
-            text = decoded[0]
+            text = _removed_quotes(raw)
         except ValueError:
             if strict:
                 raise
@@ -1094,18 +1523,27 @@ def _split_pipeline(cmd):
     return [cmd[s:e].strip() for s, e in _split_pipeline_spans(cmd)]
 
 
-def _split_pipeline_spans(cmd):
+def _split_pipeline_spans(cmd, *, keep_substitutions=False):
     """Span-returning twin of :func:`_split_pipeline`: list of (start, end)
     offsets into *cmd* for each non-empty segment (separators excluded,
     surrounding whitespace included). The grep-redirect splicer rewrites
     segments in place through these spans."""
     spans = []
+    # Admission recursively judges each substitution in its actual cwd. Keep
+    # its enclosing word intact instead of inventing an executable `n=$`.
+    # Existing source-splicing consumers retain their historical span view.
+    substitutions = (dict((start, end) for start, end, _ in
+                          command_substitution_bodies(cmd) or ())
+                     if keep_substitutions else {})
     start = 0
     in_single = False
     in_double = False
     i = 0
     n = len(cmd)
     while i < n:
+        if i in substitutions:
+            i = substitutions[i]
+            continue
         c = cmd[i]
         if c == "'" and not in_double:
             in_single = not in_single
@@ -1138,6 +1576,80 @@ def _split_pipeline_spans(cmd):
             i += 1
     spans.append((start, n))
     return [(s, e) for s, e in spans if cmd[s:e].strip()]
+
+
+def pipeline_span_separator(raw):
+    """Control meaning of the raw text between two :func:`_split_pipeline_spans` spans.
+
+    Returns ``(operator, closes, opens)``. ``operator`` joins the two
+    commands, parentheses aside: ``'&&'``, ``'||'``, ``'|'``, ``';'`` (a
+    newline separates exactly like ``;``), ``';;'`` in a case clause, or ``''``.
+    ``closes``: a subshell or substitution ended there, so any cwd it entered
+    is gone and the next command may run in every earlier cwd. ``opens``: the
+    next command starts a new command list (a subshell or substitution), so
+    it runs first there whatever ``operator`` the group itself follows.
+    """
+    operator = raw.replace('(', ' ').replace(')', ' ').strip()
+    if not operator and '\n' in raw:
+        operator = ';'
+    return operator, ')' in raw, raw.rfind('(') > raw.rfind(')')
+
+
+def _literal_heredoc_body_view(command):
+    """Return *command* with literal heredoc body lines blanked in place.
+
+    Complete quoted ``cat``/``python``/``node`` heredoc bodies are file content
+    or interpreter source, never shell segments: span rewriters analyse this
+    offset-preserving view and splice the ORIGINAL command at the same offsets.
+    ``command_heredoc`` owns the grammar. Any shape its admission view does not
+    accept, and any body its stdin-intent view reports as executable or
+    expanded (``cat <<'EOF' | sh``), keeps the whole command visible. The
+    admission view keeps header newlines and blanks body/delimiter newlines, so
+    exactly those lines are hidden; header bytes (marker, descriptor
+    duplications) stay as written.
+    """
+    from lib.project_mod.command_heredoc import (  # it imports this module
+        command_admission_view, command_stdin_intent_view)
+    view = command_admission_view(command)
+    if view == command or len(view) != len(command):
+        return command
+    intent_view, executable_bodies = command_stdin_intent_view(command)
+    if executable_bodies or intent_view != view:
+        return command
+    lines = []
+    start = 0
+    while start < len(command):
+        newline = command.find('\n', start)
+        end = len(command) if newline < 0 else newline + 1
+        hidden = (view[newline] != '\n' if newline >= 0
+                  else view[start:end] != command[start:end])
+        lines.append(' ' * (end - start) if hidden else command[start:end])
+        start = end
+    return ''.join(lines)
+
+
+def literal_rewrite_view(command):
+    """Offset-preserving view for span rewriters, or None to keep *command* intact.
+
+    Rewriters (cp splice, scanner bounds, Git hardening) only touch spans of
+    this view. A heredoc whose body the literal view could not prove to be data
+    (``<<-``, an unquoted delimiter, ``-<<``, an unknown runtime) may carry
+    interpreter source: a ``cp = 1`` line in a Python body was rewritten into a
+    copy-engine call. Bodies a shell executes (``bash <<'EOF'``, ``cat <<'EOF'
+    | sh``) are shell source and keep their rewrites. Rewriting is an
+    optimisation, so declining it keeps the executed bytes exactly as written.
+    """
+    view = _literal_heredoc_body_view(command)
+    if 'heredoc' not in command_segment_dynamic_kinds(command):
+        return view
+    from lib.project_mod.command_heredoc import command_stdin_intent_view
+    intent_view, children = command_stdin_intent_view(command)
+    if 'heredoc' in command_segment_dynamic_kinds(intent_view):
+        return None  # the intent view blanks every marker it could classify
+    shell_bodies = {body for body, expanded in children if not expanded}
+    if any(expanded and body not in shell_bodies for body, expanded in children):
+        return None  # an expanded runtime body is interpreter source, not shell
+    return view
 
 
 # ── Commands whose file arguments are WRITE targets ──────────────────
@@ -1179,6 +1691,56 @@ _AWK_VALUE_OPTS = frozenset('FvfieElW')
 # awk options whose presence means the PROGRAM came from an option, so
 # every operand is a VAR=val assignment or a file (never program text).
 _AWK_PROGRAM_OPTS = frozenset('feE')
+
+
+_SdInvocation = namedtuple('_SdInvocation', ['program', 'files', 'writes'])
+
+
+def _sd_invocation(args):
+    """Parse ``sd [OPTIONS] FIND REPLACE [FILES]...`` (sd 1.x, clap grammar).
+
+    sd rewrites every FILES operand in place unless ``-p/--preview`` (or
+    ``--help``/``--version``) is given; with no FILES it is a stdin filter.
+    Options may follow positionals until ``--``. Returns None for an option
+    outside the documented grammar so the caller keeps every word a candidate.
+    """
+    positionals, writes, options, index = [], True, True, 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if options and arg == '--':
+            options = False
+        elif options and arg.startswith('--'):
+            option, separator, _value = arg.partition('=')
+            if option in {'--max-replacements', '--flags'}:
+                if not separator:
+                    if index >= len(args):
+                        return None
+                    index += 1
+            elif option in {'--preview', '--help', '--version'} and not separator:
+                writes = False
+            elif option != '--fixed-strings' or separator:
+                return None
+        elif options and arg.startswith('-') and arg != '-':
+            position = 1
+            while position < len(arg):
+                flag = arg[position]
+                position += 1
+                if flag in 'nf':
+                    if position == len(arg):
+                        if index >= len(args):
+                            return None
+                        index += 1
+                    break
+                if flag in 'phV':
+                    writes = False
+                elif flag != 'F':
+                    return None
+        else:
+            positionals.append(arg)
+    if len(positionals) < 2:
+        writes = False
+    return _SdInvocation(tuple(positionals[:2]), tuple(positionals[2:]), writes)
 
 
 def _awk_inplace_operands(args):
@@ -1239,8 +1801,24 @@ def _awk_inplace_operands(args):
     return [w for w in operands if not _re.match(r'^\w+=', w)]
 
 
-def _shell_expansion_prefix(source, *, pathname=True):
-    """Decode the literal prefix before a real shell expansion, if any."""
+# After ``$`` these start a parameter, arithmetic or command expansion; before
+# anything else (``/``, a blank, the end of the word) the shell keeps ``$``.
+_SHELL_EXPANSION_STARTS = frozenset(
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_@*#?$!-{([')
+
+
+def _shell_dollar_is_literal(source, index, quote):
+    following = source[index + 1:index + 2]
+    return following not in _SHELL_EXPANSION_STARTS and not (
+        quote is None and following in ('"', "'"))  # bash $'...' and $"..."
+
+
+def _shell_expansion_prefix(source, *, pathname=True, literal_dollars=False):
+    """Decode the literal prefix before a real shell expansion, if any.
+
+    ``literal_dollars`` keeps a ``$`` that starts no expansion as text instead
+    of conservatively counting every ``$`` as one.
+    """
     quote = None
     prefix = []
     index = 0
@@ -1264,7 +1842,9 @@ def _shell_expansion_prefix(source, *, pathname=True):
         # Tilde in HEAD~1 is literal, unlike a token/assignment prefix ~.
         # Keep assignment/colon cases conservative across supported shells.
         tilde_prefix = char == '~' and (index == 0 or source[index - 1] in ' \t\r\n=:')
-        if (quote != "'" and char in '$`'
+        dollar = char == '$' and not (
+            literal_dollars and _shell_dollar_is_literal(source, index, quote))
+        if (quote != "'" and (char == '`' or dollar)
                 or pathname and quote is None and (char in '*?[]{}' or tilde_prefix)):
             return ''.join(prefix), True
         prefix.append(char)
@@ -1286,7 +1866,528 @@ def command_segment_words(source):
     return tuple(word.text for word in _shell_words(source, strict=True, redirects=True))
 
 
-_CommandTargets = namedtuple('_CommandTargets', 'words targets complete')
+# What the shell may make of one source word before its program sees it.
+# computed: the text is unknown before execution. hidden: some resulting word
+# may begin with ``-``, so a program can read it as an option the source does
+# not show. multiple: it may become zero or several words.
+_WordShape = namedtuple('_WordShape', 'computed hidden multiple')
+
+
+def _brace_expands(raw, start):
+    """Whether the unquoted ``{`` at *start* opens a brace expansion.
+
+    Only a comma or a ``..`` sequence before the closing brace expands;
+    ``{}`` and ``{x}`` stay literal words.
+    """
+    quote, index, depth = None, start + 1, 1
+    while index < len(raw):
+        char = raw[index]
+        if char == '\\' and quote != "'":
+            index += 2
+            continue
+        if char in "'\"" and quote in (None, char):
+            quote = None if quote else char
+        elif quote is None:
+            if char == ',' or raw.startswith('..', index):
+                return True
+            depth += char == '{'
+            depth -= char == '}'
+            if not depth:
+                return False
+        index += 1
+    return False
+
+
+def _expansion_end(raw, index):
+    """Index after the ``$(…)``, ``$((…))``, ``${…}`` or backtick body at *index*.
+
+    None when the body is not tracked (unterminated, or a construct the
+    substitution scanner declines); the caller then assumes the worst.
+    """
+    if raw[index] == '`':
+        close = index + 1
+        while close < len(raw) and raw[close] != '`':
+            close += 2 if raw[close] == '\\' else 1
+        return close + 1 if close < len(raw) else None
+    if raw.startswith('$((', index):
+        return _arithmetic_end(raw, index + 3)
+    if raw.startswith('$(', index):
+        close = _substitution_end(raw, index + 2)
+        return None if close is None else close + 1
+    close = raw.find('}', index)
+    return None if close < 0 else close + 1
+
+
+def _shell_word_shape(raw, *, ends_segment=False):
+    """``_WordShape`` of one raw shell word.
+
+    Every word that a pathname or brace pattern, a quoted expansion or a
+    tilde prefix produces starts with the source word's first produced
+    character, so ``src/*.py``, ``"logs/$f"`` and ``~/x`` never become an
+    option while ``*.py`` (``-i.py``) and ``"$f"`` may. An unquoted parameter,
+    command or arithmetic expansion is field-split, and ``"$@"`` yields one
+    word per element: a new word may begin inside either. At the end of a
+    segment an unquoted ``$`` is the remnant of a ``$(…)`` that the pipeline
+    splitter cut at its parenthesis.
+    """
+    computed = _shell_expansion_prefix(raw, literal_dollars=True)[1]
+    quote, index, first, splits, multiple = None, 0, None, False, False
+    while index < len(raw):
+        char, end, expansion = raw[index], index + 1, False
+        following = raw[index + 1:index + 2]
+        if char == '\\' and quote != "'":
+            end = index + 2
+        elif char in "'\"" and quote in (None, char):
+            quote = None if quote else char
+            index = end
+            continue
+        elif quote != "'" and (char == '`' or char == '$' and following in '({'
+                               and following):
+            expansion, close = True, _expansion_end(raw, index)
+            splits = splits or quote is None or (
+                following == '{' and '@' in raw[index:close or len(raw)])  # "${a[@]}"
+            if close is None:
+                multiple = splits = True
+            end = close or len(raw)
+        elif quote != "'" and char == '$':
+            if quote is None and following in ('"', "'"):
+                expansion = True  # $'…' and $"…" quote one word
+            elif following in _SHELL_EXPANSION_STARTS:
+                expansion = True
+                splits = splits or quote is None or following == '@'
+            elif quote is None and ends_segment and not following:
+                expansion = splits = True
+        elif quote is None and (char in '*?[' or char == '{' and _brace_expands(raw, index)):
+            expansion = multiple = True
+        if first is None:
+            first = expansion
+        index = end
+    return _WordShape(computed or splits, bool(first) or splits, multiple or splits)
+
+
+def command_segment_word_shapes(source):
+    """``_WordShape`` of each ``command_segment_words`` word.
+
+    Redirect operators and their targets never reach the program, so they
+    are neither hidden options nor extra operands.
+    """
+    words = _shell_words(source, strict=True, redirects=True)
+    end, shapes, target = len(source.rstrip()), [], False
+    for word in words:
+        raw = source[word.start:word.end]
+        shape = _shell_word_shape(raw, ends_segment=word.end >= end)
+        operator = raw == word.text and raw.startswith(('<', '>'))
+        if operator or target:
+            shape = shape._replace(hidden=False, multiple=False)
+        shapes.append(shape)
+        target = operator
+    return tuple(shapes)
+
+
+# Transparent program wrappers. They change the child's environment or its
+# argv[0]; they never change which files the child may write, so admission has
+# to judge the wrapped program. Treating the wrapper as an opaque runtime made
+# `env -u VAR python3 check.py` a whole-checkout writer for its entire
+# supervised lifetime: measured 2026-10-22, one such background command held
+# the canonical `tree:` root for 479 s and 2852 of 3948 recorded waits were
+# 60 s or longer, blocking every other conversation's Edit and write_file in
+# the same checkout.
+# `env` options that consume the next word as their value.
+_ENV_VALUE_OPTIONS = frozenset({'-u', '--unset', '-C', '--chdir'})
+
+
+def _env_operand(words, index):
+    """Index of the program ``env`` at ``words[index]`` runs, else None."""
+    index += 1
+    while index < len(words):
+        word = words[index]
+        if word == '--':
+            index += 1
+            break
+        if word in ('-i', '--ignore-environment', '-0', '--null'):
+            index += 1
+            continue
+        if word in _ENV_VALUE_OPTIONS:
+            index += 2
+            continue
+        if word.startswith('--unset=') or word.startswith('--chdir='):
+            index += 1
+            continue
+        if word in ('-S', '--split-string'):
+            return None  # the program is inside a quoted string
+        if word.startswith('-'):
+            return None  # unknown env option: keep the wrapper opaque
+        if _ENV_ASSIGNMENT_GUARD_RE.match(word):
+            index += 1
+            continue
+        break
+    return index if index < len(words) else None  # `env` alone runs nothing
+
+
+# Reserved words that introduce a command: the command after one decides the
+# segment's effect, the keyword itself has none. Closing words have no effect
+# alone or with input redirects.
+_PREFIX_KEYWORDS = frozenset({'do', 'then', 'else', 'elif', 'if', 'while', 'until', '!', '{'})
+_CLOSING_KEYWORDS = frozenset({'done', 'fi', 'esac', '}'})
+_SHELL_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\Z')
+
+
+def control_flow_view(segment):
+    """Peel shell control syntax so admission judges the commands that run.
+
+    Returns None for an ordinary command, '' for an effect-free header
+    (``for NAME [in WORDS]``, ``select``, ``case WORD in``, or ``done``/``fi``/
+    ``esac``/``}`` with at most input redirects), or the source of the command
+    a prefix keyword introduces (``do wc -l "$f"`` -> ``wc -l "$f"``).
+    Exclusion follows effects, not syntax: fencing a whole checkout because a
+    reader sat inside a loop serialized every other conversation behind it. A
+    header that runs a substitution or writes output keeps the ordinary verdict.
+    """
+    try:
+        tokens = _shell_words(segment, strict=True, redirects=True)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    keyword = tokens[0].text
+    if segment[tokens[0].start:tokens[0].end] != keyword:
+        return None  # a quoted word is an ordinary command name
+    if keyword in _PREFIX_KEYWORDS:
+        return segment[tokens[1].start:].strip() if len(tokens) > 1 else ''
+    if keyword not in _CLOSING_KEYWORDS | {'for', 'select', 'case'}:
+        return None
+    if command_segment_executes_substitution(segment):
+        return None
+    outputs = command_segment_output_targets(segment)
+    words = list(outputs.words)
+    if not outputs.complete or outputs.targets:
+        return None
+    if keyword in _CLOSING_KEYWORDS:
+        return '' if words == [keyword] else None
+    if keyword == 'case':
+        return '' if len(words) >= 3 and words[-1] == 'in' else None
+    if (len(words) >= 2 and _SHELL_NAME.match(words[1])
+            and (len(words) == 2 or words[2] == 'in')):
+        return ''
+    return None
+
+
+def peeled_command(segment):
+    """The command that control syntax introduces; '' for an effect-free header.
+
+    Every judge of a segment reads this view, so a reserved word in front
+    (``then git reset --hard``, ``{ cd wt``) cannot hide what runs.
+    """
+    for _ in range(16):
+        body = control_flow_view(segment)
+        if body is None:
+            return segment
+        if not body:
+            return ''
+        segment = body
+    return segment
+
+
+def command_segment_wrapper_view(source):
+    """Return the segment text with its transparent program wrappers removed.
+
+    ``env`` and the process wrappers of :func:`process_wrapper_operand` only
+    adjust the child's environment, deadline, priority or invocation, so the
+    workspace effect of ``env -u VAR timeout 60 prog args`` is the effect of
+    ``prog args``. The
+    returned view keeps every other byte of the segment, so quoting, operands
+    and redirects stay intact.
+
+    Returns *source* unchanged when no wrapper applies, when the wrapper's
+    own options are not fully understood (``env -S``), or when the wrapper
+    executes nothing (``env`` alone, ``command -v``). An unproven wrapper
+    stays visible to the caller, which keeps the conservative verdict.
+    """
+    if not source:
+        return source
+    try:
+        words = _shell_words(source, strict=True, redirects=True)
+    except ValueError:
+        return source
+    texts = [word.text for word in words]
+    index = 0
+    while index < len(texts) and _ENV_ASSIGNMENT_GUARD_RE.match(texts[index]):
+        index += 1
+    unwrapped = False
+    for _ in range(_MAX_WRAPPER_DEPTH):
+        if index >= len(texts):
+            break
+        # Privilege wrappers stay visible: `sudo -i` changes the program's cwd.
+        if os.path.basename(texts[index]) == 'env':
+            operand = _env_operand(texts, index)
+        else:
+            operand = process_wrapper_operand(texts, index)
+        if operand is None:
+            break
+        index, unwrapped = operand, True
+    if not unwrapped or index >= len(words):
+        return source
+    return source[words[index].start:]
+
+
+def command_segment_dynamic_kinds(source):
+    """Classify the shell-dynamic tokens of one segment.
+
+    The coarse "dynamic syntax" signal cannot tell a command substitution
+    (which can execute anything) from an input redirect (which only reads)
+    or an unquoted glob (which only produces more words). Admission needs
+    that difference: an input redirect and a glob cannot create a file, so
+    they must not escalate a proven reader into a whole-checkout writer.
+
+    Returns a frozenset drawn from ``substitution``, ``control``,
+    ``redirect_in``, ``redirect_out``, ``heredoc``, ``glob``, ``brace`` and
+    ``comment``.
+    """
+    kinds = set()
+    in_single = False
+    in_double = False
+    index = 0
+    length = len(source)
+    while index < length:
+        char = source[index]
+        if char == '\\' and not in_single and index + 1 < length:
+            index += 2
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+            index += 1
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            index += 1
+            continue
+        if not in_single:
+            if char in '$`':
+                # The shell expands ``$VAR`` and ``$(…)`` inside double quotes
+                # too; only single quotes make them literal.
+                kinds.add('substitution')
+            elif not in_double:
+                if char in '*?[':
+                    kinds.add('glob')
+                elif char in '{}':
+                    kinds.add('brace')
+                elif char == '<':
+                    # ``<<``/``<<<`` carry an inline body, not a file to read.
+                    if source[index + 1:index + 2] == '<':
+                        kinds.add('heredoc')
+                        index += 2
+                        continue
+                    kinds.add('redirect_in')
+                elif char == '>':
+                    kinds.add('redirect_out')
+                elif char in ';&|()\n\r':
+                    kinds.add('control')
+                elif char == '#':
+                    kinds.add('comment')
+        index += 1
+    return frozenset(kinds)
+
+
+_SUBSTITUTION_UNTRACKED = re.compile(r'(?:^|[\s;&|(])(?:case|esac)(?=[\s;&|)]|$)|<<|(?:^|\s)#')
+
+
+def _substitution_end(source, start):
+    """Index of the ``)`` closing a ``$(`` whose body starts at ``start``."""
+    depth, in_single, in_double, index = 1, False, False, start
+    while index < len(source):
+        char = source[index]
+        if char == '\\' and not in_single:
+            index += 2
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif not in_single and not in_double:
+            if char == '`':
+                close = source.find('`', index + 1)
+                if close < 0:
+                    return None
+                index = close
+            elif char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    body = source[start:index]
+                    return None if _SUBSTITUTION_UNTRACKED.search(body) else index
+        index += 1
+    return None
+
+
+def _arithmetic_end(source, start):
+    """Index after the ``))`` closing a ``$((`` whose expression starts at ``start``."""
+    depth, index = 2, start
+    while index < len(source):
+        char = source[index]
+        if char in '`\'"\\' or source.startswith('$(', index):
+            return None  # a quoted or nested construct inside arithmetic
+        if char == '(':
+            depth += 1
+        elif char == ')':
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return None
+
+
+# What an arithmetic expression may hold without hiding a command: names,
+# numbers, operators and blanks; `$` must start a plain variable reference.
+_ARITHMETIC_OPERATOR_CHARACTERS = frozenset(' \t+-*/%<>=!~^&|?:,')
+_ARITHMETIC_WORD = re.compile(r'[A-Za-z0-9_]+')
+_ARITHMETIC_REFERENCE = re.compile(r'\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]|\{[A-Za-z_][A-Za-z0-9_]*\})')
+
+
+def shell_arithmetic_is_flat(interpreter='/bin/sh'):
+    """Whether *interpreter* reads a variable in arithmetic only as a number.
+
+    bash (also as ``sh`` and with ``--posix``), ksh and zsh evaluate a
+    variable's value as an arithmetic expression, and a subscript there runs
+    command substitutions: with ``x='a[$(touch r)]'``, ``: $((x))`` creates
+    ``r``. dash rejects a value that is not a number ("Illegal number").
+    """
+    import shutil
+    path = interpreter if os.path.isabs(interpreter) else shutil.which(interpreter)
+    return bool(path) and os.path.basename(os.path.realpath(path)) == 'dash'
+
+
+def _inert_arithmetic_end(source, index):
+    """Index after the arithmetic expansion ``$((`` at *index* opens, or None.
+
+    Numbers, operators and balanced parentheses yield a number and run
+    nothing, and so do variables (bare names, ``$name``, ``${name}``, ``$1``)
+    in a shell that reads them as numbers (``shell_arithmetic_is_flat``).
+    ``$((cmd) )`` closes with ``) )``, which bash reads as a command
+    substitution of a subshell, so it does not qualify; neither do quotes,
+    subscripts, ``#`` bases, special parameters or nested expansions.
+    """
+    index, depth, variables = index + 3, 0, False
+    while index < len(source):
+        char = source[index]
+        word = _ARITHMETIC_WORD.match(source, index)
+        if char == '$' or (word and not char.isdigit()):
+            reference = word or _ARITHMETIC_REFERENCE.match(source, index)
+            if reference is None:
+                return None
+            index, variables = reference.end(), True
+            continue
+        if word:
+            index = word.end()  # a number; `0x1f` is not a name
+            continue
+        if char == '(':
+            depth += 1
+        elif char == ')':
+            if not depth:
+                if not source.startswith('))', index):
+                    return None
+                return None if variables and not shell_arithmetic_is_flat() else index + 2
+            depth -= 1
+        elif char not in _ARITHMETIC_OPERATOR_CHARACTERS:
+            return None
+        index += 1
+    return None
+
+
+def command_substitution_bodies(source, *, quoted_only=False):
+    """``[(start, end, body)]`` for each top-level command substitution, or None.
+
+    ``source[start:end]`` spans the whole substitution, delimiters included, and
+    ``body`` is the command text the substituting shell runs (backtick escapes
+    removed). With ``quoted_only`` only the bodies the pipeline splitter keeps
+    inside one segment are returned: ``$(…)`` inside double quotes and every
+    backtick body (an unquoted ``$(`` is already split at its parentheses).
+    None means a construct this scanner does not track (an unterminated body,
+    ``case``/heredoc/comment syntax inside one, a substitution inside
+    arithmetic); callers keep their conservative verdict.
+    """
+    bodies, in_single, in_double, index, length = [], False, False, 0, len(source)
+    while index < length:
+        char = source[index]
+        if char == '\\' and not in_single:
+            index += 2
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif not in_single and char == '`':
+            end = index + 1
+            while end < length and source[end] != '`':
+                end += 2 if source[end] == '\\' else 1
+            raw = source[index + 1:end]
+            if end >= length or (in_double and '\\"' in raw) or _SUBSTITUTION_UNTRACKED.search(raw):
+                return None
+            bodies.append((index, end + 1, re.sub(r'\\([\\`$])', r'\1', raw)))
+            index = end + 1
+            continue
+        elif not in_single and source.startswith('$(', index):
+            if source.startswith('$((', index):
+                end = _arithmetic_end(source, index + 3)
+                if end is None:
+                    return None
+                index = end
+                continue
+            end = _substitution_end(source, index + 2)
+            if end is None:
+                return None
+            if in_double or not quoted_only:
+                bodies.append((index, end + 1, source[index + 2:end]))
+            index = end + 1
+            continue
+        index += 1
+    return None if in_single or in_double else bodies
+
+
+def command_segment_executes_substitution(source):
+    """Whether the segment runs a command while the shell expands it.
+
+    ``command_segment_dynamic_kinds`` reports every unquoted ``$`` as a
+    substitution. Only ``$(…)``, backticks, process substitution
+    ``<(…)``/``>(…)`` and an arithmetic expansion that may hide one execute
+    anything; ``$VAR``/``${VAR}`` and an inert ``$((…))`` only produce words,
+    exactly like a glob. Single quotes make all of them literal.
+    """
+    in_single = in_double = False
+    index, length = 0, len(source)
+    while index < length:
+        char = source[index]
+        if char == '\\' and not in_single and index + 1 < length:
+            index += 2
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif not in_single:
+            following = source[index + 1:index + 2]
+            if char == '$' and source.startswith('$((', index):
+                end = _inert_arithmetic_end(source, index)
+                if end is None:
+                    return True
+                index = end
+                continue
+            if char == '`' or (char == '$' and following == '('):
+                return True
+            if not in_double and char in '<>' and following == '(':
+                return True
+        index += 1
+    return False
+
+
+# ``program_text`` holds the words that are inline program source (a sed script,
+# perl -e code): never a path, though a sed script may name its own output
+# files as a suffix (``w FILE`` runs to the end of the program).
+# ``word_indices`` (set by command_segment_output_targets only) gives the
+# position of each word among the segment's shell words, redirects included,
+# so word shapes can be aligned with ``words``.
+_CommandTargets = namedtuple('_CommandTargets', 'words targets complete program_text word_indices',
+                             defaults=((), ()))
 
 
 def _static_writer_operands(args, flags):
@@ -1393,43 +2494,13 @@ def _find_write_rows(expression):
     return rows, follows_links
 
 
-def command_segment_write_scope_refusal(source):
-    """Refuse identified writes whose runtime traversal escapes literal scope.
-
-    This is not a ban on opaque runtimes: it fences explicit find mutations
-    without scanning a live tree or guessing each execdir working directory.
-    """
-    words = list(command_segment_words(source))
-    while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
-        words.pop(0)
-    words = _unwrap_command_parts(words)
-    if not words or os.path.basename(words[0]) != 'find':
-        return None
-    parsed = _find_parts(words[1:])
-    if parsed is None:
-        return None  # Existing uncertain-option admission remains conservative.
-    _roots, expression, follows_links = parsed
-    rows, expression_follows_links = _find_write_rows(expression)
-    if not rows:
-        return None
-    if follows_links or expression_follows_links:
-        return 'workspace-write-scope-unsupported: find -L/-follow mutations may cross checkout symlinks; use concrete targets or non-following traversal'
-    for index, end in rows:
-        if expression[index] not in {'-execdir', '-okdir'}:
-            continue
-        nested = command_segment_targets(shlex.join(expression[index + 1:end]))
-        if any(not os.path.isabs(target) and '..' in target.split('/') for target in nested.targets):
-            return 'workspace-write-scope-unsupported: relative parent traversal in find -execdir/-okdir changes the write checkout; use an absolute destination'
-    return None
-
-
 def command_segment_output_targets(source):
     """Shell output effects independent of the invoked utility's own write set."""
     try:
         tokens = _shell_words(source, strict=True, redirects=True)
     except ValueError:
         return _CommandTargets((), (), False)
-    words, redirects = [], []
+    words, redirects, kept = [], [], []
     complete, index = True, 0
     while index < len(tokens):
         word = tokens[index]
@@ -1440,8 +2511,9 @@ def command_segment_output_targets(source):
                     and tokens[index - 1].end == word.start
                     and source[tokens[index - 1].start:word.start].isdigit()):
                 words.pop()  # Only an adjacent, unquoted number is an IO descriptor.
+                kept.pop()
             if index + 1 >= len(tokens):
-                return _CommandTargets(tuple(words), tuple(redirects), False)
+                return _CommandTargets(tuple(words), tuple(redirects), False, (), tuple(kept))
             value_word = tokens[index + 1]
             value = value_word.text
             value_source = source[value_word.start:value_word.end]
@@ -1457,11 +2529,12 @@ def command_segment_output_targets(source):
                         complete = False
             index += 2
         elif raw == token and token.startswith(('>', '<')):
-            return _CommandTargets(tuple(words), tuple(redirects), False)
+            return _CommandTargets(tuple(words), tuple(redirects), False, (), tuple(kept))
         else:
             words.append(token)
+            kept.append(index)
             index += 1
-    return _CommandTargets(tuple(words), tuple(redirects), complete)
+    return _CommandTargets(tuple(words), tuple(redirects), complete, (), tuple(kept))
 
 
 def command_segment_discardable_redirect_split(source):
@@ -1506,6 +2579,7 @@ def command_segment_targets(source):
     `complete` is snapshot precision, not authorization or lease exemption.
     Unknown mutating options retain every literal candidate rather than guessing
     an option's arity. Opaque runtimes remain the caller's scheduling policy.
+    Inline program text (``program_text``) is never a candidate path.
     """
     outputs = command_segment_output_targets(source)
     words, redirects = list(outputs.words), list(outputs.targets)
@@ -1645,13 +2719,34 @@ def command_segment_targets(source):
             targets.extend(operands)
         return _CommandTargets(tuple(words), tuple(targets), complete)
     if base == 'sed':
-        effects = literal_sed_effects(args)
-        if effects is None:
+        invocation = _sed_invocation(args)
+        if invocation is None:
             return uncertain()
-        inplace, operands = effects
-        if inplace:
-            targets.extend(operands)
-        return _CommandTargets(tuple(words), tuple(targets), complete)
+        # Program text is never a path; the files its w commands name are.
+        targets.extend(_sed_written_paths(invocation))
+        # A hidden option may switch on an in-place edit of every operand.
+        shapes = command_segment_word_shapes(source)
+        shapes = [shapes[index] for index in outputs.word_indices][len(outputs.words) - len(args):]
+        proven = literal_sed_effects(args, shapes=shapes) is not None
+        if not proven:
+            # As for any unproven utility, every file the invocation names stays a candidate.
+            targets.extend((*invocation.operands, *invocation.script_files))
+        return _CommandTargets(tuple(words), tuple(dict.fromkeys(targets)), complete and proven,
+                               invocation.programs)
+    if base == 'perl':
+        one_liner = _perl_one_liner(args)
+        if one_liner is not None:
+            inplace, operands, code = one_liner
+            if inplace:
+                targets.extend(operands)
+            return _CommandTargets(tuple(words), tuple(targets), False, code)
+    if base == 'sd':
+        invocation = _sd_invocation(args)
+        if invocation is None:
+            return uncertain()
+        if invocation.writes:
+            targets.extend(invocation.files)
+        return _CommandTargets(tuple(words), tuple(targets), complete, invocation.program)
     if base.endswith('awk'):
         files = _awk_inplace_operands(args)
         if files is not None:
@@ -1668,6 +2763,7 @@ def command_segment_targets(source):
         rows, _expression_follows_links = _find_write_rows(expression)
         if rows:
             targets.extend(roots)
+            program_text = []
             for index, end in rows:
                 arg = expression[index]
                 if arg in {'-fprint', '-fprint0', '-fprintf', '-fls'} and index + 1 < len(expression):
@@ -1675,10 +2771,13 @@ def command_segment_targets(source):
                 if arg in {'-exec', '-execdir', '-ok', '-okdir'}:
                     nested = command_segment_targets(shlex.join(expression[index + 1:end]))
                     targets.extend(path for path in nested.targets if '{}' not in path)
+                    program_text.extend(nested.program_text)
                     if not nested.complete:
                         targets.extend(path for path in expression[index + 2:end]
-                                       if not path.startswith('-') and '{}' not in path)
-            return _CommandTargets(tuple(words), tuple(dict.fromkeys(targets)), complete)
+                                       if not path.startswith('-') and '{}' not in path
+                                       and path not in nested.program_text)
+            return _CommandTargets(tuple(words), tuple(dict.fromkeys(targets)), complete,
+                                   tuple(program_text))
         return _CommandTargets(tuple(words), tuple(targets), complete)
     mode = _WRITE_TARGET_COMMANDS.get(base)
     if mode == 'all_args':
@@ -1691,40 +2790,57 @@ def command_segment_targets(source):
     return _CommandTargets(tuple(words), tuple(targets), complete)
 
 
-def command_segment_literal_targets(source):
+def command_segment_literal_targets(source, *, shell_outputs_only=False):
     """Derive literal targets or bounded expansion parents from source words.
 
     A dynamic source operand must not erase a literal destination in another
     checkout. Single-quoted/escaped dollar signs are filenames, not expansion.
     Fully dynamic names remain covered by the caller's conservative cwd claim;
     this cooperative parser is not a sandbox for arbitrary runtime expansion.
+
+    ``shell_outputs_only`` keeps a path only when every word producing it is
+    the operand of an output redirect (``>``, ``>>``, ``<>``). The shell opens
+    one file there and never removes or replaces a directory, so a TREE claim
+    on such a path is scheduling scope. A path any other word also produces
+    (a utility operand, even with the same text) is excluded.
     """
     parsed = command_segment_targets(source)
     try:
         words = _shell_words(source, strict=True, redirects=True)
     except ValueError:
         return ()
-    result = set()
+    redirected = {index + 1 for index, word in enumerate(words)
+                  if word.text in {'>', '>>', '<>'} and source[word.start:word.end] == word.text}
+    # A sed ``w FILE`` runs to the end of its program, so it is a suffix of the
+    # program's word, exactly as an attached option value (``-ofile``) is.
+    embedding = set(parsed.program_text)
+    result, operand_paths = set(), set()
     for target in parsed.targets:
-        origins = [word for word in words if word.text == target
-                   or (word.text.startswith('-') and word.text.endswith(target))]
+        origins = [index for index, word in enumerate(words) if word.text == target
+                   or ((word.text.startswith('-') or word.text in embedding)
+                       and word.text.endswith(target))]
+        produced = set()
         if not origins:
             if target == '.':
-                result.add(target)  # find's implicit search root
-            continue
-        if any(not shell_source_has_expansion(source[word.start:word.end]) for word in origins):
-            result.add(target)
-            continue
-        # Use source provenance, not the decoded target's first dollar: a
-        # quoted checkout name may itself contain literal expansion markers.
-        for word in origins:
-            prefix, expanded = _shell_expansion_prefix(source[word.start:word.end])
-            if expanded:
-                target_prefix = prefix[len(word.text) - len(target):]
-                parent = os.path.dirname(target_prefix)
-                if parent:
-                    result.add(parent)
-    return tuple(sorted(result))
+                produced.add(target)  # find's implicit search root
+        elif any(not shell_source_has_expansion(source[words[index].start:words[index].end])
+                 for index in origins):
+            produced.add(target)
+        else:
+            # Use source provenance, not the decoded target's first dollar: a
+            # quoted checkout name may itself contain literal expansion markers.
+            for index in origins:
+                word = words[index]
+                prefix, expanded = _shell_expansion_prefix(source[word.start:word.end])
+                if expanded:
+                    target_prefix = prefix[len(word.text) - len(target):]
+                    parent = os.path.dirname(target_prefix)
+                    if parent:
+                        produced.add(parent)
+        result |= produced
+        if not origins or not redirected.issuperset(origins):
+            operand_paths |= produced
+    return tuple(sorted(result - operand_paths if shell_outputs_only else result))
 
 
 def _extract_write_targets(command, cwd=''):
@@ -1887,6 +3003,13 @@ def _is_destructive_command(command):
             # and unknown future ones) → destructive
             return True
 
+        # sd is a stdin filter unless it names FILES, which it rewrites in place.
+        if base == 'sd':
+            parsed = command_segment_targets(seg)
+            if parsed.targets or not parsed.complete:
+                return True
+            continue
+
         # ── Check readonly whitelist ──
         if base in _READONLY_COMMANDS:
             continue  # this segment is safe
@@ -1918,66 +3041,970 @@ _MIN_DELETE_DEPTH = max(1, int(os.environ.get('TOFU_MIN_DELETE_DEPTH', '2')))
 # argument-level guard. (The retired substring guard ``\brm\s+-rf\s+/``
 # caught this shape precisely because it never parsed; when the regex was
 # removed in favour of this parser, seeing through sudo/doas is what keeps
-# coverage neutral-or-better.)
+# coverage neutral-or-better.) Their options follow each program's documented
+# grammar (``_PRIVILEGE_GRAMMARS``), so an option value (``sudo -D /tmp rm …``,
+# ``sudo --user root rm …``) is never mistaken for the command word.
 _PRIV_WRAPPERS = frozenset({'sudo', 'doas'})
-# Wrapper flags that consume the NEXT token as their argument
-# (``sudo -u root rm …``) — skip them together or the argument is mistaken
-# for the command word.
-_PRIV_WRAPPER_ARG_FLAGS = frozenset(
-    {'-u', '-g', '-h', '-p', '-C', '-U', '-r', '-t'})
 
 
 def _unwrap_command_parts(parts):
-    """Strip a leading privilege wrapper (``sudo``/``doas`` + its flags).
+    """Strip a leading privilege wrapper (``sudo``/``doas`` + its options).
 
     Returns the token list of the wrapped command, or *parts* unchanged when
-    no wrapper is present. Only ONE wrapper level is unwrapped; anything more
-    exotic (``xargs rm``, ``find -exec rm``, ``timeout 5 rm``) is out of
-    scope for this best-effort net — the same blind spots the retired
-    substring guard also had.
+    no wrapper is present. sudo's shell-assignment ``VAR=value`` words
+    directly before the command stay in front of it. An option outside the
+    wrapper's grammar counts as a flag in this best-effort view; the guards'
+    :func:`_program_views` treats it as not understood instead. Only ONE
+    wrapper level is unwrapped; anything more exotic (``xargs rm``,
+    ``find -exec rm``) is out of scope for this best-effort net. Effect
+    analysis that must also see through process wrappers (``timeout 5 rm``)
+    uses :func:`unwrap_process_wrappers`.
     """
     if not parts or parts[0].split('/')[-1] not in _PRIV_WRAPPERS:
         return parts
-    i = 1
-    while i < len(parts):
-        tok = parts[i]
-        if tok in _PRIV_WRAPPER_ARG_FLAGS:
-            i += 2
+    return parts[_privilege_wrapper_parse(parts, strict=False)[0]:]
+
+
+# Process wrappers run their operand with the caller's cwd, environment and
+# descriptors, adding only a deadline (timeout), a scheduling priority (nice),
+# a hang-up disposition (nohup), stream buffering (stdbuf), a resource report
+# on stderr (time) or a lookup rule (command, exec). The operand decides the
+# workspace effect: `timeout 900 git switch` transforms the checkout like
+# `git switch`, and `nice git reset --hard` destroys what `git reset --hard`
+# destroys. Judging the wrapper word instead admitted both with no lease and
+# past the shared-checkout guard (observed 2026-10-25).
+_PROCESS_WRAPPERS = frozenset({'command', 'exec', 'nice', 'nohup', 'stdbuf', 'time', 'timeout'})
+_WRAPPER_DURATION_RE = re.compile(r'(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[smhd]?\Z|inf(?:inity)?\Z')
+_NICE_ADJUSTMENT_RE = re.compile(r'-n-?[0-9]+\Z|--adjustment=-?[0-9]+\Z|--?[0-9]+\Z')
+_STDBUF_MODE_RE = re.compile(r'-[ioe].+\Z|--(?:input|output|error)=.+\Z')
+_TIMEOUT_OPTION_RE = re.compile(r'-[sk].+\Z|--(?:signal|kill-after)=.+\Z')
+_MAX_WRAPPER_DEPTH = 8
+
+
+def process_wrapper_operand(words, index=0):
+    """Index of the program run by the process wrapper at ``words[index]``.
+
+    ``None`` when that word is no process wrapper, when its options are not
+    fully understood, or when it runs nothing (``command -v``, ``nice``
+    alone, ``timeout`` without a duration); the caller then keeps judging the
+    wrapper word. ``exec -c`` (empty environment) and GNU ``time -o FILE``
+    (writes a report) are never transparent.
+    """
+    if index >= len(words):
+        return None
+    name = os.path.basename(words[index])
+    if name not in _PROCESS_WRAPPERS:
+        return None
+    position = index + 1
+
+    def options():
+        return position < len(words) and words[position].startswith('-') and words[position] != '-'
+
+    if name == 'timeout':
+        while options():
+            word = words[position]
+            if word == '--':
+                position += 1
+                break
+            if word in ('-s', '--signal', '-k', '--kill-after'):
+                position += 2
+            elif (word in ('--preserve-status', '--foreground', '-v', '--verbose')
+                  or _TIMEOUT_OPTION_RE.match(word)):
+                position += 1
+            else:
+                return None
+        if position >= len(words) or not _WRAPPER_DURATION_RE.match(words[position]):
+            return None
+        position += 1
+    elif name == 'nice':
+        while options():
+            word = words[position]
+            if word == '--':
+                position += 1
+                break
+            if word in ('-n', '--adjustment'):
+                position += 2
+            elif _NICE_ADJUSTMENT_RE.match(word):
+                position += 1
+            else:
+                return None
+    elif name == 'stdbuf':
+        modes = 0
+        while options():
+            word = words[position]
+            if word == '--':
+                position += 1
+                break
+            if word in ('-i', '-o', '-e', '--input', '--output', '--error'):
+                position += 2
+            elif _STDBUF_MODE_RE.match(word):
+                position += 1
+            else:
+                return None
+            modes += 1
+        if not modes:
+            return None  # stdbuf refuses to run without a buffering mode
+    elif name == 'time':
+        while options():
+            word = words[position]
+            if word == '--':
+                position += 1
+                break
+            if word in ('-p', '--portability', '-v', '--verbose', '-q', '--quiet'):
+                position += 1
+            elif word in ('-f', '--format'):
+                position += 2
+            elif word.startswith('--format='):
+                position += 1
+            else:
+                return None
+    elif name == 'nohup':
+        if options():
+            if words[position] != '--':
+                return None
+            position += 1
+    elif name == 'command':
+        while options():
+            word = words[position]
+            if word == '--':
+                position += 1
+                break
+            if set(word[1:]) - {'p'}:
+                return None  # -v/-V describe the command instead of running it
+            position += 1
+    else:  # exec
+        while options():
+            word = words[position]
+            if word == '--':
+                position += 1
+                break
+            if word == '-a':
+                position += 2
+            elif word == '-l':
+                position += 1
+            else:
+                return None
+    return position if position < len(words) else None
+
+
+def unwrap_process_wrappers(words):
+    """Words of the program that actually runs, privilege and process
+    wrappers removed (at most ``_MAX_WRAPPER_DEPTH`` levels).
+
+    ``env`` stays: callers that track the child's environment interpret it.
+    """
+    words = list(words)
+    for _ in range(_MAX_WRAPPER_DEPTH):
+        words = _unwrap_command_parts(words)
+        operand = process_wrapper_operand(words)
+        if operand is None:
+            break
+        words = words[operand:]
+    return words
+
+
+# Reserved words in front of a delete-guard segment. The program the segment
+# runs is read through :func:`_program_views`, shared with the
+# dangerous-command guard (``time`` is its process wrapper there).
+_DELETE_PREFIX_KEYWORDS = _PREFIX_KEYWORDS | {'}'}
+
+
+# ── Literal shell-state tracking for delete-target resolution ──────
+#
+# The second-generation guard expanded ``$VAR`` with ``os.path.expandvars``
+# against the SERVER process environment, so a variable assigned earlier in
+# the same command (``D=/tmp/x; rm -rf $D``) was invisible, stayed a literal
+# ``$D`` and tripped the "unresolved -> root-ish" refusal — a false positive
+# measured in conv mvl6adj1bcd1r1 (2026-10-24). The same naive tokenization
+# (``str.split``, no dequoting) let a quoted target (``rm -rf "/mnt"``) or a
+# ``..`` hop (``rm -rf /tmp/../mnt``) skip the rule entirely.
+#
+# The rules below track what the shell will ACTUALLY expand:
+#
+#   * ``NAME=value`` / ``export`` / ``readonly`` segments bind literals —
+#     including ``$(pwd)`` (the command's cwd) and ``$(mktemp -d)`` (a fresh
+#     deep path) — while any other ``$(…)`` makes the value DYNAMIC;
+#   * a dynamic/unset variable is judged as possibly EMPTY (the Steam
+#     ``$STEAMROOT/`` bug class): ``rm -rf "$D/"`` with ``D`` empty deletes
+#     ``/``; a suffix deep enough to survive the collapse (``$D/build/out``)
+#     is allowed, as is a bare ``"$D"`` (an empty operand deletes nothing);
+#   * literal ``cd`` hops update the tracked cwd set (with the failure
+#     fallback kept across ``;``/``||``) so ``cd / && rm -rf mnt`` is judged
+#     as a delete of ``/mnt``;
+#   * relative operands are judged against the tracked cwd (``rm -rf ../../..``
+#     from a deep workspace climbs to a shallow path and is refused);
+#   * deleting the home directory, the tracked cwd, or an ancestor of it is
+#     refused even when the numeric depth rule would pass.
+#
+# A value set is a tuple of candidate strings; None marks "no provable
+# literal value" (dynamic or unset). Sets stay bounded; when they overflow
+# the name simply loses its proven value.
+_DELETE_BINDING_CAP = 8
+_CWD_CAP = 8
+_MKSTEMP_VALUE = '/tmp/.tofu-delete-guard-mktemp'  # depth-2 placeholder
+_DELETE_ASSIGN_HEADS = frozenset({'export', 'readonly', 'declare', 'local'})
+_DELETE_STATE_RESET_HEADS = frozenset({
+    'eval', 'source', '.', 'read', 'set', 'unset', 'typeset', 'let', 'exec',
+})
+
+
+def _mkstemp_value(source):
+    """A bounded proof that ``$(mktemp …)`` yields a fresh deep path, or None."""
+    body = source.strip()
+    if body.startswith('mktemp'):
+        body = body[len('mktemp'):]
+    elif body.startswith('command mktemp'):
+        body = body[len('command mktemp'):]
+    else:
+        return None
+    try:
+        words = [w.text for w in _shell_words(body, strict=True)]
+    except ValueError:
+        return None
+    tmpdir = None
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word in ('-d', '-u', '-t', '-q', '--directory', '--dry-run',
+                    '--quiet', '--suffix'):
+            index += 1
             continue
-        if tok.startswith('-'):
-            i += 1
+        if word in ('-p', '--tmpdir'):
+            if index + 1 >= len(words):
+                return None
+            tmpdir = words[index + 1]
+            index += 2
             continue
-        return parts[i:]
-    return []
+        if word.startswith('--tmpdir='):
+            tmpdir = word.split('=', 1)[1]
+            index += 1
+            continue
+        if word.startswith('-'):
+            return None  # unknown option: stay conservative
+        index += 1  # a TEMPLATE operand; its exact text never shallowens
+    if tmpdir and tmpdir.count('/') < 1:
+        return None
+    if tmpdir and not tmpdir.startswith('/'):
+        return None
+    return os.path.join(tmpdir.rstrip('/') if tmpdir else '/tmp',
+                        '.tofu-delete-guard-mktemp')
 
 
-def _is_catastrophic_delete(command, cwd=None):
-    """Return the offending path if *command* deletes a forbidden abs target.
+def _resolve_delete_value(raw, get_value, cwd_candidates, home):
+    """Resolve one assignment VALUE text to a bounded candidate tuple.
 
-    Two independent rules; either one rejects:
+    ``raw`` is the RAW text after ``NAME=`` (quotes intact — an assignment
+    word is never word-split, so ``D=\"a b\"`` binds ``a b``). Returns None
+    when the value is not provably literal (any substitution other than a
+    tracked ``pwd``/``mktemp`` producer, an unproven variable, a glob).
+    Values may themselves reference earlier bindings (``BAD=$R/frontend``).
+    """
+    if not raw or raw.endswith('\\'):
+        return None
+    expanded = _expand_delete_operand(raw, get_value, cwd_candidates, home,
+                                      for_binding=True)
+    return expanded[0] if expanded else None
 
-      1. **Depth rule (always on).** A delete (``rm``/``rmdir``/``unlink``)
-         whose resolved absolute target has fewer than ``_MIN_DELETE_DEPTH``
-         path components (``/``, ``/mnt``, ``/home``, ``~`` → home root) is
-         catastrophic and refused for every caller — this is never legitimate.
 
-      2. **Workspace-containment rule (restricted callers only).** When the
-         current task runs in a *restricted* context — i.e. a remote /
-         ``agent/run`` principal, the same flag ``abs_path_guard`` uses to
-         sandbox absolute read/write — any absolute delete whose realpath
-         falls OUTSIDE the active workspace ``cwd`` is refused, even if it is
-         "deep enough" to pass rule 1. This is what stops an agent from
-         deleting another user's path (``/mnt/.../INS/<other>/…``) or a home
-         dir (``/home/<someone>``) or escaping via ``..``. Local desktop / CLI
-         callers are NOT restricted, so their ability to delete outside the
-         project (e.g. ``rm -rf ~/old_build``) is preserved — no product
-         regression.
+def _expand_delete_operand(raw, get_value, cwd_candidates, home,
+                           *, for_binding=False):
+    """Expand one word like the shell would, without executing anything.
 
-    A leading privilege wrapper (``sudo rm -rf /``) is seen through via
-    :func:`_unwrap_command_parts` before the delete-command check.
+    Returns ``(candidates, unproven_names)``: ``candidates`` is a tuple of
+    strings (a single word, quotes stripped), ``unproven_names`` the set of
+    variable names that had no provable literal value and were substituted
+    EMPTY — the unset-collapse case (``rm -rf \"$D/\"`` with ``D`` unset or
+    dynamic deletes ``/``). A proven literal binding contributes its own
+    value(s). Command substitutions contribute only when the producer is
+    tracked (``pwd``, ``mktemp``); anything else substitutes EMPTY and names
+    no variable (an anonymous ``$(…)`` still collapses to the empty shape).
+    Glob characters in an unquoted position keep the candidate but mark the
+    path as pattern-shaped via a trailing '\x00glob' flag consumed by the
+    depth judgement.
 
-    Only absolute / ``~`` / env-var-expanded targets are evaluated: a
-    relative ``rm -rf build`` stays inside ``cwd`` and is always safe.
+    ``for_binding=True`` (assignment VALUES) is stricter: any unproven piece
+    makes the whole binding unproven (None) so its USES name the variable
+    (``D=$(some_cmd); rm -rf $D/`` refuses as "if $D expands empty", not as
+    a bare "resolves to /").
+
+    Returns None when the word cannot even be enumerated (unterminated
+    quote, arithmetic, a candidate-count blowup).
+    """
+    candidates = ['']
+    globbed = [False]
+    unproven = set()
+    quote = None
+    index = 0
+    length = len(raw)
+
+    def _push(chunk):
+        nonlocal candidates
+        candidates = [head + chunk for head in candidates]
+
+    while index < length:
+        char = raw[index]
+        if quote is None and char == '\\':
+            if index + 1 >= length:
+                return None
+            _push(raw[index + 1])
+            index += 2
+            continue
+        if char in "'\"":
+            if quote is None:
+                quote = char
+                index += 1
+                continue
+            if quote == char:
+                quote = None
+                index += 1
+                continue
+            _push(char)
+            index += 1
+            continue
+        if char == '~' and quote != "'" and index == 0:
+            if length > 1 and raw[1] not in '/':
+                return None  # ~user resolves through the OS; stay opaque
+            _push(home)
+            index += 1
+            continue
+        if char == '$' and quote != "'":
+            if quote is None and raw.startswith("$'", index):
+                return None  # bash decodes ANSI-C escapes into any path bytes
+            if quote is None and raw.startswith('$"', index):
+                index += 1  # $"…" is a plain double-quoted string in bash
+                continue
+            if raw.startswith('$(', index):
+                end = _substitution_end(raw, index + 2)
+                if end is None:
+                    return None
+                body = raw[index + 2:end]
+                stripped = body.strip()
+                if stripped in ('pwd', 'pwd -P', 'pwd -L', 'command pwd'):
+                    values = tuple(cwd_candidates)
+                    if not values:
+                        return None
+                else:
+                    mkstemp = _mkstemp_value(stripped)
+                    if mkstemp is None:
+                        if for_binding:
+                            return None
+                        values = ('',)
+                    else:
+                        values = (mkstemp,)
+                combined = [head + value for head in candidates for value in values]
+                if len(combined) > _DELETE_BINDING_CAP:
+                    return None
+                candidates = combined
+                index = end + 1
+                continue
+            reference = _re.match(
+                r'\$\{([A-Za-z_][A-Za-z0-9_]*)(:\?[^}]*)?\}|\$([A-Za-z_][A-Za-z0-9_]*)',
+                raw[index:])
+            if reference:
+                name = reference.group(1) or reference.group(3)
+                guarded = reference.group(2) is not None
+                if name == 'PWD':
+                    values = tuple(cwd_candidates)
+                    if not values:
+                        return None
+                elif name == 'HOME':
+                    values = (home,) if home else ()
+                else:
+                    values = get_value(name)
+                if values is None:
+                    if guarded:
+                        return None  # ${X:?…} aborts the shell when unset
+                    if for_binding:
+                        return None
+                    values = ('',)  # unset/dynamic: judge the empty collapse
+                    unproven.add(name)
+                combined = [head + value for head in candidates for value in values]
+                if len(combined) > _DELETE_BINDING_CAP:
+                    return None
+                candidates = combined
+                index += reference.end()
+                continue
+            # $$, $?, $1, … — special parameters, never delete-relevant paths.
+            _push('$')
+            index += 1
+            continue
+        if char == '`' and quote != "'":
+            close = raw.find('`', index + 1)
+            if close < 0:
+                return None
+            body = raw[index + 1:close].strip()
+            if body in ('pwd', 'pwd -P', 'pwd -L'):
+                values = tuple(cwd_candidates)
+                if not values:
+                    return None
+            else:
+                mkstemp = _mkstemp_value(body)
+                if mkstemp is None:
+                    if for_binding:
+                        return None
+                    values = ('',)
+                else:
+                    values = (mkstemp,)
+            candidates = [head + value for head in candidates for value in values]
+            if len(candidates) > _DELETE_BINDING_CAP:
+                return None
+            index = close + 1
+            continue
+        if quote is None and char in '*?[':
+            globbed = [True] * len(candidates)
+            _push(char)
+            index += 1
+            continue
+        _push(char)
+        index += 1
+    if quote is not None:
+        return None  # unterminated quote: stay opaque
+    if any(globbed):
+        candidates = [c + '\x00glob' if g else c
+                      for c, g in zip(candidates, globbed)]
+    return tuple(candidates), unproven
+
+
+def _could_run_delete(text):
+    """Whether shell text this guard cannot parse might run rm/rmdir/unlink.
+
+    Unparseable text refuses only when it could hide a delete command: a
+    syntax shape the parser does not model must not turn every ``echo`` or
+    ``git log`` into a "catastrophic delete".
+    """
+    return bool(text) and _DELETE_WORD_RE.search(text) is not None
+
+
+_DELETE_WORD_RE = _re.compile(r'(?<![\w.-])(?:rm|rmdir|unlink)(?![\w.-])')
+
+
+_ANSI_C_ESCAPES = {'a': '\a', 'b': '\b', 'e': '\x1b', 'E': '\x1b', 'f': '\f',
+                   'n': '\n', 'r': '\r', 't': '\t', 'v': '\v', '\\': '\\',
+                   "'": "'", '"': '"', '?': '?'}
+_ANSI_C_NUMERIC = re.compile(
+    r'x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|([0-7]{1,3})|c(.)')
+
+
+def _ansi_c_span(raw, index, out):
+    """Decode the bash ``$'…'`` span opening at ``raw[index]`` into *out*;
+    return the index after it, or None when it does not close."""
+    index += 2
+    while index < len(raw):
+        char = raw[index]
+        if char == "'":
+            return index + 1
+        if char != '\\' or index + 1 >= len(raw):
+            out.append(char)
+            index += 1
+            continue
+        escape = raw[index + 1]
+        if escape in _ANSI_C_ESCAPES:
+            out.append(_ANSI_C_ESCAPES[escape])
+            index += 2
+            continue
+        match = _ANSI_C_NUMERIC.match(raw, index + 1)
+        if match is None:
+            out.append('\\' + escape)
+            index += 2
+            continue
+        hexa, short, long, octal, control = match.groups()
+        if control is not None:
+            out.append(chr(ord(control) & 0x1f))
+        else:
+            code = int(octal, 8) if octal else int(hexa or short or long, 16)
+            if code > 0x10FFFF:
+                return None
+            out.append(chr(code & 0xff if octal else code))
+        index = match.end()
+    return None
+
+
+def _ansi_c_word(raw):
+    """Text bash makes of a word holding ``$'…'`` spans and plain quoting,
+    or None when another expansion (``$x``, ``$(…)``, backticks) is present."""
+    out = []
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if raw.startswith("$'", index):
+            index = _ansi_c_span(raw, index, out)
+            if index is None:
+                return None
+        elif char == "'":
+            end = raw.find("'", index + 1)
+            if end < 0:
+                return None
+            out.append(raw[index + 1:end])
+            index = end + 1
+        elif char == '"':
+            end = raw.find('"', index + 1)
+            body = raw[index + 1:end]
+            if end < 0 or any(c in body for c in '$`\\'):
+                return None
+            out.append(body)
+            index = end + 1
+        elif char == '\\' and index + 1 < len(raw):
+            out.append(raw[index + 1])
+            index += 2
+        elif char in '$`':
+            return None
+        else:
+            out.append(char)
+            index += 1
+    return ''.join(out)
+
+
+def _literal_command_word(raw):
+    """Dequote a word that has no expansion (``\\rm``, ``"rm"`` -> ``rm``).
+
+    The shell removes quotes before it looks a command up or an option is
+    parsed, so command words and options are compared dequoted. A word with
+    ``$``/backtick expansion keeps its raw text.
+    """
+    if "$'" in raw:
+        decoded = _ansi_c_word(raw)
+        return raw if decoded is None else decoded
+    if '$' in raw or '`' in raw or not any(char in raw for char in '\'"\\'):
+        return raw
+    try:
+        words = shlex.split(raw, comments=False, posix=True)
+    except ValueError:
+        return raw
+    return words[0] if len(words) == 1 else raw
+
+
+def _candidate_depth(path):
+    """Components of *path* after normpath; a pure-glob tail counts as its parent.
+
+    ``/mnt/*`` deletes everything /mnt holds, so it is judged as ``/mnt``
+    (depth 1). An anchored pattern keeps its literal anchor:
+    ``/tmp/build-*`` stays depth 2.
+    """
+    glob = path.endswith('\x00glob')
+    if glob:
+        path = path[:-len('\x00glob')]
+    normalized = os.path.normpath(path)
+    if glob:
+        components = [c for c in normalized.split('/') if c]
+        while components and all(ch in '*?[]' for ch in components[-1]):
+            components.pop()
+        normalized = '/' + '/'.join(components) if components else '/'
+    return normalized, len([c for c in normalized.split('/') if c])
+
+
+def _literal_loop_binding(words):
+    """For-segment words → (variable, value candidates) when fully literal."""
+    # for d in a b c  →  ('d', ('a', 'b', 'c')); anything dynamic → None.
+    if len(words) >= 4 and words[0] == 'for' and words[2] == 'in':
+        values = []
+        for raw in words[3:]:
+            if shell_source_has_expansion(raw):
+                return None
+            values.append(raw)
+        return words[1], tuple(values)
+    return None
+
+
+class _DeleteGuardState:
+    """Mutable literal shell state carried across a command's segments."""
+
+    __slots__ = ('bindings', 'cwds', 'cwd_known')
+
+    def __init__(self, cwd):
+        start = os.path.normpath(cwd) if cwd and os.path.isabs(cwd) else None
+        self.bindings = {}
+        self.cwds = [start] if start else []
+        self.cwd_known = start is not None
+
+    def fork(self, *, child_shell=False):
+        """State of a subshell; a separate *child_shell* process (``bash <<'EOF'``,
+        ``sh -c '…'``) inherits the cwd but no unexported binding."""
+        clone = _DeleteGuardState(None)
+        clone.bindings = {} if child_shell else dict(self.bindings)
+        clone.cwds = list(self.cwds)
+        clone.cwd_known = self.cwd_known
+        return clone
+
+    def get_value(self, name):
+        if name in self.bindings:
+            return self.bindings[name]
+        env = os.environ.get(name)
+        return (env,) if env else None
+
+    def change_directory(self, raw, home):
+        expanded = _expand_delete_operand(raw, self.get_value, self.cwds, home)
+        dests = expanded[0] if expanded else None
+        if dests is None:
+            self.cwd_known = False
+            self.cwds = []
+            return
+        resolved = []
+        for dest in dests:
+            if not dest:
+                continue  # `cd ''` fails; keep the previous cwd
+            if os.path.isabs(dest):
+                resolved.append(os.path.normpath(dest))
+            elif self.cwds:
+                resolved.extend(os.path.normpath(os.path.join(base, dest))
+                                for base in self.cwds)
+        if resolved:
+            # `cd` may fail: keep the previous cwd as a fallback so a
+            # `;`-chained delete is judged from BOTH cwds.
+            seen = []
+            for entry in resolved + list(self.cwds):
+                if entry and entry not in seen:
+                    seen.append(entry)
+            self.cwds = seen[:_CWD_CAP]
+            self.cwd_known = True
+
+
+# ── Delete operands come only from commands a shell would run ──────
+#
+# ``command_structure.parse_shell_structure`` delimits the command the way a
+# shell does. The walk below yields the operands of every rm/rmdir/unlink
+# simple command that may run: in the command itself, in each ( … ) group
+# (judged with the group's own bindings and cd hops), in command and process
+# substitution bodies, and in text a shell executes — a heredoc or
+# here-string read by a stdin shell (directly or later in its pipeline) and a
+# ``-c`` string. Heredoc bodies, quoted strings and Git pathspecs are data.
+# Text the parser cannot delimit refuses only when it could run a delete.
+
+def _delete_events(items, state):
+    """Yield ``('operand', raw word, state)`` for each delete operand the
+    parsed script may run, in execution order, and ``('opaque', text,
+    error)`` for shell-executed text that cannot be parsed. *state* follows
+    the script's literal bindings and ``cd`` hops; groups and substitution
+    bodies run in a fork."""
+    for index, item in enumerate(items):
+        for script in item.nested:
+            yield from _delete_events(script, state.fork())
+        for heredoc in item.heredocs:
+            for script in heredoc.nested:
+                yield from _delete_events(script, state.fork())
+        if isinstance(item, Subshell):
+            yield from _delete_events(item.body, state.fork())
+            continue
+        piped = isinstance(item, SimpleCommand) and (
+            item.separator == '|'
+            or (index + 1 < len(items) and items[index + 1].separator == '|'))
+        backgrounded = (index + 1 < len(items)
+                        and items[index + 1].separator == '&')
+        if piped or backgrounded:
+            # A pipeline stage and a `&`-backgrounded command run in their own
+            # subshells: their bindings and cd hops never reach this shell.
+            yield from _shell_input_events(items, index, state.fork())
+            yield from _simple_command_events(item, state.fork())
+        else:
+            yield from _shell_input_events(items, index, state)
+            yield from _simple_command_events(item, state)
+
+
+def _reads_shell_stdin(item):
+    if not isinstance(item, SimpleCommand):
+        return False
+    from lib.project_mod.command_heredoc import shell_input_source
+    views = _program_views(item.words)
+    return (views is not _UNKNOWN_PROGRAM
+            and any(shell_input_source(view[0]) == ('stdin', None) for view in views))
+
+
+def _shell_string_script(raw):
+    """(script text, child-only bindings) of a word a shell runs as source.
+
+    A single-quoted or expansion-free string reaches the child shell as
+    written, and the child sees none of this shell's unexported bindings;
+    a double-quoted one is expanded here first, so this shell's bindings
+    apply. None when the word is not one shell word.
+    """
+    if "$'" in raw:
+        decoded = _ansi_c_word(raw)
+        if decoded is not None:
+            return decoded, True
+    try:
+        words = shlex.split(raw, comments=False, posix=True)
+    except ValueError:
+        return None
+    if len(words) != 1:
+        return None
+    return words[0], raw.startswith("'") or not any(c in raw for c in '$`')
+
+
+def _shell_source_scripts(items, index, views):
+    """Text a shell executes as a script of its own for ``items[index]``: the
+    ``-c`` operand of a shell, and the heredocs/here-strings of a command whose
+    stdin a shell reads (``bash <<'EOF'``, ``cat <<'EOF' | sh``).
+
+    *views* are the item's ``(literal, raw)`` program views. Returns
+    ``(raw text, script)`` pairs in execution order; *script* is the
+    ``(text, child_only)`` of :func:`_shell_string_script`, or None when the
+    raw word is not one shell word.
+    """
+    from lib.project_mod.command_heredoc import shell_input_source
+    item = items[index]
+    scripts = []
+    reads_stdin = False
+    for view in views:
+        source = shell_input_source(view[0])
+        if source is not None and source[0] == 'command' and source[1]:
+            raw_source = shell_input_source(view[1])
+            raw_text = (raw_source[1] if raw_source and raw_source[0] == 'command'
+                        and raw_source[1] else source[1])
+            scripts.append((raw_text, _shell_string_script(raw_text)))
+        reads_stdin = reads_stdin or source == ('stdin', None)
+    stdin_inputs = [(heredoc.body, (heredoc.body, heredoc.quoted))
+                    for heredoc in item.heredocs]
+    stdin_inputs += [(target, _shell_string_script(target))
+                     for operator, target in item.redirects
+                     if operator.endswith('<<<')]
+    if stdin_inputs:
+        for later in items[index + 1:]:
+            if reads_stdin or later.separator != '|':
+                break
+            reads_stdin = _reads_shell_stdin(later)
+        if reads_stdin:
+            scripts.extend(stdin_inputs)
+    return scripts
+
+
+def _stdin_texts(item):
+    """Heredoc bodies and here-strings *item* feeds its program's stdin."""
+    return ([heredoc.body for heredoc in item.heredocs]
+            + [target for operator, target in item.redirects if operator.endswith('<<<')])
+
+
+def _shell_input_events(items, index, state):
+    """Judge text that a shell executes as a script of its own (see
+    :func:`_shell_source_scripts`)."""
+    views = _program_views(items[index].words)
+    if views is _UNKNOWN_PROGRAM:
+        # The hidden program may be a shell reading this stdin.
+        for text in _stdin_texts(items[index]):
+            if _could_run_delete(text):
+                yield 'opaque', text, ShellStructureUnknown(
+                    'a wrapper or runner option is not understood', 0)
+        return
+    for _raw, script in _shell_source_scripts(items, index, views):
+        if script is None or not script[0].strip():
+            continue
+        text, child_only = script
+        yield from _delete_text_events(text, state.fork(child_shell=child_only))
+
+
+def _delete_text_events(text, state):
+    """Delete events of shell source *text* run with *state*."""
+    try:
+        body = parse_shell_structure(text)
+    except ShellStructureUnknown as error:
+        if _could_run_delete(text):
+            yield 'opaque', text, error
+        return
+    yield from _delete_events(body, state)
+
+
+def _simple_command_events(item, state):
+    """Apply one simple command to *state*; yield its delete operands."""
+    texts = list(item.words)
+    leading = 0
+    while leading < len(texts) and texts[leading] in _DELETE_PREFIX_KEYWORDS:
+        leading += 1
+    texts = texts[leading:]
+    if not texts:
+        return
+    home = os.path.expanduser('~')
+    loop = _literal_loop_binding(texts)
+    if loop is not None:
+        state.bindings[loop[0]] = loop[1]
+        return
+    # Literal assignment commands bind for the rest of the command.
+    head_texts = texts[1:] if texts[0] in _DELETE_ASSIGN_HEADS else texts
+    if head_texts and all(_ENV_ASSIGNMENT_GUARD_RE.match(t) for t in head_texts):
+        for token in head_texts:
+            name, _, raw_value = token.partition('=')
+            values = _resolve_delete_value(
+                raw_value, state.get_value, state.cwds, home)
+            if item.separator == '||' and name not in state.bindings \
+                    and os.environ.get(name) is None:
+                # `false || D=/mnt` may never run: D may stay unset, and
+                # unset expands EMPTY — judge both.
+                values = tuple(values) + ('',) if values else None
+            state.bindings[name] = values
+        if len(state.bindings) > 64:
+            state.bindings.clear()
+        return
+    views = _program_views(texts)
+    if views is _UNKNOWN_PROGRAM:
+        # A wrapper or runner whose options are not understood (`timeout $T`)
+        # hides its program: refuse when the text could run a delete.
+        text = ' '.join(texts)
+        if _could_run_delete(text):
+            yield 'opaque', text, ShellStructureUnknown(
+                'a wrapper or runner option is not understood', 0)
+        return
+    for literal, raw in views:
+        yield from _program_delete_events(literal, raw, state, home)
+
+
+def _program_delete_events(literal, raw, state, home):
+    """Apply one program view to *state*; yield its delete operands."""
+    head = os.path.basename(literal[0])
+    if head == 'eval' and len(literal) > 1:
+        # eval runs its operands, joined by spaces, in this same shell.
+        yield from _delete_text_events(' '.join(literal[1:]), state)
+    if head in _DELETE_STATE_RESET_HEADS:
+        state.bindings.clear()
+        return
+    if head == 'cd':
+        args = [raw_word for literal_word, raw_word in zip(literal[1:], raw[1:])
+                if not literal_word.startswith('-')]
+        if len(args) == 1:
+            state.change_directory(args[0], home)
+        return
+    if head not in _DELETE_COMMANDS:
+        return
+    end_of_options = False
+    for literal_word, raw_word in zip(literal[1:], raw[1:]):
+        if not end_of_options:
+            if literal_word == '--':
+                end_of_options = True
+                continue
+            if literal_word.startswith('-'):
+                continue
+        yield 'operand', raw_word, state
+
+
+def _repository_metadata_anchors(cwd):
+    """Git metadata of every checkout holding *cwd*: marker, git dir, common dir.
+
+    Deleting one of these (or an ancestor) destroys the history and refs of
+    the checkout the command runs in. Discovery reads ``.git`` markers only
+    (``workspace_lease`` owns it); unreadable metadata adds no anchor, and
+    the depth/home/workspace rules still apply.
+    """
+    if not cwd:
+        return ()
+    try:
+        from lib.project_mod.workspace_lease import _checkout_chain
+        chain = _checkout_chain(cwd)
+    except Exception as error:
+        logger.debug('[RunCommand] repository metadata anchors unavailable for %s: %s',
+                     cwd, error)
+        return ()
+    anchors = []
+    for binding in chain:
+        root, common, git_dir = binding[0], str(binding[1]), binding[2]
+        for path in (os.path.join(root, '.git'), git_dir, common):
+            path = os.path.normpath(path)
+            if path not in anchors:
+                anchors.append(path)
+    return tuple(anchors)
+
+
+class _DeleteJudge:
+    """Depth, anchor and containment rules for one command's delete operands."""
+
+    def __init__(self, cwd, ws_real):
+        self.home = os.path.expanduser('~')
+        self.cwd = os.path.normpath(cwd) if cwd and os.path.isabs(cwd) else None
+        self.ws_real = ws_real
+        self.protected = []
+        if self.home and os.path.isabs(self.home):
+            self.protected.append(('home', os.path.normpath(self.home)))
+        self._repository = None
+
+    def _repository_anchors(self):
+        if self._repository is None:
+            self._repository = _repository_metadata_anchors(self.cwd)
+        return self._repository
+
+    def _anchor_reason(self, normalized, state):
+        anchors = self.protected + [('workspace', c) for c in state.cwds if c]
+        for label, anchor in anchors:
+            if normalized == anchor or anchor.startswith(normalized + os.sep):
+                return (label, f'target is the {label} directory '
+                               f'({normalized}) itself or an ancestor of it')
+        repository = self._repository_anchors()
+        if repository:
+            real = os.path.realpath(normalized)
+            for anchor in repository:
+                for target in (normalized, real):
+                    if target == anchor or anchor.startswith(target.rstrip(os.sep) + os.sep):
+                        return ('repository',
+                                f'target {normalized} is the Git metadata ({anchor}) of '
+                                'the checkout holding the working directory or an '
+                                'ancestor of it')
+        return None
+
+    def __call__(self, raw_operand, state):
+        expanded = _expand_delete_operand(
+            raw_operand, state.get_value, state.cwds, self.home)
+        if expanded is None:
+            return (raw_operand, 'unproven',
+                    'the operand mixes expansions this guard cannot prove '
+                    'statically; use a literal absolute path')
+        candidates, unproven_names = expanded
+        for candidate in candidates:
+            glob_marked = candidate.endswith('\x00glob')
+            text = candidate[:-len('\x00glob')] if glob_marked else candidate
+            if not text:
+                continue  # an empty operand deletes nothing
+            if not os.path.isabs(text) and not state.cwd_known:
+                continue  # cwd-less caller: the executor's pass judges it
+            # The glob marker rides on the joined path so _candidate_depth
+            # can still collapse a pure-glob tail to its parent.
+            marker = '\x00glob' if glob_marked else ''
+            paths = [text + marker] if os.path.isabs(text) else [
+                os.path.join(base, text) + marker for base in state.cwds]
+            for path in paths:
+                normalized, depth = _candidate_depth(path)
+                verdict_reason = None
+                if depth < _MIN_DELETE_DEPTH:
+                    verdict_reason = (
+                        'shallow',
+                        f'resolves to {normalized} (<{_MIN_DELETE_DEPTH} '
+                        'path components)')
+                if verdict_reason is None:
+                    verdict_reason = self._anchor_reason(normalized, state)
+                if verdict_reason is None and self.ws_real:
+                    tgt_real = os.path.realpath(normalized)
+                    if not (tgt_real == self.ws_real
+                            or tgt_real.startswith(self.ws_real + os.sep)):
+                        verdict_reason = ('containment',
+                                          'target resolves outside the workspace')
+                if verdict_reason is not None:
+                    reason, detail = verdict_reason
+                    if unproven_names and reason in ('shallow', 'home'):
+                        names = ', '.join(
+                            f'${n}' for n in sorted(unproven_names))
+                        return (raw_operand, 'unproven',
+                                f'if {names} expand(s) empty, the operand '
+                                f'{detail}; bind a literal path or delete a '
+                                'literal absolute path instead')
+                    return (raw_operand, reason, detail)
+        return None
+
+
+def _unparsed_excerpt(text, error):
+    start = max(0, min(error.offset, len(text)) - 20)
+    return text[start:start + 40]
+
+
+def _unparsed_delete_verdict(text, error):
+    if not _could_run_delete(text):
+        return None
+    return (_unparsed_excerpt(text, error), 'unproven',
+            'the command runs rm/rmdir/unlink but its shell structure cannot '
+            f'be parsed ({error.reason}); fix the quoting or run the delete '
+            'as its own command with a literal path')
+
+
+def _catastrophic_delete_detail(command, cwd=None):
+    """Judge *command* for catastrophic deletes; return (target, reason, detail).
+
+    *target* is the operand text as written, *reason* is one of ``shallow``,
+    ``home``, ``workspace``, ``repository``, ``containment`` or ``unproven``,
+    and *detail* is a short human-readable explanation for the refusal
+    message. Returns None when every delete target the command may touch is
+    provably scoped.
     """
     if not command or not command.strip():
         return None
@@ -1991,45 +4018,809 @@ def _is_catastrophic_delete(command, cwd=None):
     except Exception as e:
         logger.debug('[RunCommand] workspace containment resolve failed: %s', e)
         ws_real = None
-    for seg in _split_pipeline(command):
-        seg = seg.strip()
-        if not seg:
-            continue
-        while _re.match(r'^\w+=\S*\s', seg):
-            seg = _re.sub(r'^\w+=\S*\s+', '', seg, count=1)
-        parts = _unwrap_command_parts(seg.split())
-        if not parts:
-            continue
-        base_cmd = parts[0].split('/')[-1]
-        if base_cmd not in _DELETE_COMMANDS:
-            continue
-        for arg in parts[1:]:
-            if arg.startswith('-'):
-                continue
-            # Only absolute / home / env-expanded targets can escape the
-            # workspace. A bare relative path stays inside cwd.
-            if not (arg.startswith('/') or arg.startswith('~')
-                    or arg.startswith('$')):
-                continue
-            # Strip a wildcard tail (``/mnt/*`` is as bad as ``/mnt``).
-            cleaned = arg.rstrip('/*')
-            expanded = os.path.expanduser(os.path.expandvars(cleaned))
-            # Unresolved env var (``$FOO`` with FOO unset) → treat the bare
-            # prefix as root-ish and block, since we can't prove it's safe.
-            if expanded.startswith('$') or not expanded:
-                return arg
-            if not expanded.startswith('/'):
-                continue
-            depth = len([c for c in expanded.split('/') if c])
-            if depth < _MIN_DELETE_DEPTH:
-                return arg
-            # Rule 2: restricted callers may only delete inside the workspace.
-            if ws_real:
-                tgt_real = os.path.realpath(expanded)
-                if not (tgt_real == ws_real
-                        or tgt_real.startswith(ws_real + os.sep)):
-                    return arg
+    try:
+        items = parse_shell_structure(command)
+    except ShellStructureUnknown as error:
+        return _unparsed_delete_verdict(command, error)
+    judge = _DeleteJudge(cwd, ws_real)
+    for kind, payload, context in _delete_events(items, _DeleteGuardState(cwd)):
+        verdict = (_unparsed_delete_verdict(payload, context) if kind == 'opaque'
+                   else judge(payload, context))
+        if verdict is not None:
+            return verdict
     return None
+
+
+def resolve_delete_targets(command, cwd=None):
+    """Resolve every rm/rmdir/unlink operand to absolute candidate paths.
+
+    Returns a list of ``(operand_text, [absolute candidates], unproven_names)``
+    triples — one per delete operand the command may run, from the same
+    parse, in-command bindings and ``cd`` tracking as
+    :func:`_catastrophic_delete_detail`. ``unproven_names`` is non-empty when
+    a variable had no provable literal value (candidates include the empty
+    collapse); candidates are None (``{'<opaque>'}``) for an operand or
+    shell text that cannot be resolved. This is the shared operand resolver:
+    the catastrophic-depth guard and the desktop agent's share-root
+    containment judge the SAME resolved targets instead of re-parsing.
+    """
+    if not command or not command.strip():
+        return []
+    try:
+        items = parse_shell_structure(command)
+    except ShellStructureUnknown as error:
+        if not _could_run_delete(command):
+            return []
+        return [(_unparsed_excerpt(command, error), None, {'<opaque>'})]
+    home = os.path.expanduser('~')
+    resolved_targets = []
+    for kind, payload, context in _delete_events(items, _DeleteGuardState(cwd)):
+        if kind == 'opaque':
+            resolved_targets.append(
+                (_unparsed_excerpt(payload, context), None, {'<opaque>'}))
+            continue
+        state = context
+        expanded = _expand_delete_operand(
+            payload, state.get_value, state.cwds, home)
+        if expanded is None:
+            resolved_targets.append((payload, None, {'<opaque>'}))
+            continue
+        candidates, unproven = expanded
+        paths = []
+        for candidate in candidates:
+            text = candidate[:-len('\x00glob')] \
+                if candidate.endswith('\x00glob') else candidate
+            if not text:
+                continue
+            if os.path.isabs(text):
+                paths.append(os.path.normpath(text))
+            else:
+                paths.extend(os.path.normpath(os.path.join(base, text))
+                             for base in state.cwds)
+        resolved_targets.append((payload, paths, unproven))
+    return resolved_targets
+
+
+_DELETE_REFUSAL_MESSAGES = {
+    'shallow': 'refusing to delete top-level path',
+    'home': 'refusing to delete the home directory',
+    'workspace': 'refusing to delete the workspace directory',
+    'repository': 'refusing to delete the repository metadata',
+    'containment': 'refusing to delete outside the workspace',
+    'unproven': 'refusing a delete target it cannot statically prove safe',
+}
+
+
+def delete_refusal_message(detail):
+    """One model-facing sentence for a ``_catastrophic_delete_detail`` verdict.
+
+    Every enforcement point (run_command, the safety pre-hook, the desktop
+    agent) shares this so the refusal names the REAL reason — a shallow path,
+    the home/workspace anchor, or an unproven variable — never the generic
+    "scope the deletion" advice that misdiagnosed the shell-local ``$BAD``
+    case in conv mvl6adj1bcd1r1.
+    """
+    target, reason, why = detail
+    lead = _DELETE_REFUSAL_MESSAGES.get(reason, 'refusing to delete')
+    return f'Command blocked for safety: {lead} {target!r} — {why}.'
+
+
+def _is_catastrophic_delete(command, cwd=None):
+    """Return the offending path if *command* deletes a forbidden target.
+
+    Three independent rules; any one rejects:
+
+      1. **Depth rule (always on).** A delete (``rm``/``rmdir``/``unlink``)
+         whose resolved absolute target has fewer than ``_MIN_DELETE_DEPTH``
+         path components (``/``, ``/mnt``, ``/home``) is catastrophic and
+         refused for every caller — this is never legitimate.
+
+      2. **Anchor rule (always on).** Deleting the home directory, the
+         command's own cwd, the Git metadata (``.git`` marker, git dir,
+         common dir) of a checkout holding the cwd, or an ancestor of any of
+         them is refused even when deep enough to pass rule 1.
+
+      3. **Workspace-containment rule (restricted callers only).** When the
+         current task runs in a *restricted* context — i.e. a remote /
+         ``agent/run`` principal — any absolute delete whose realpath falls
+         OUTSIDE the active workspace ``cwd`` is refused, even if it is deep
+         enough to pass rule 1. Local desktop / CLI callers are NOT
+         restricted, so their ability to delete outside the project (e.g.
+         ``rm -rf ~/old_build``) is preserved — no product regression.
+
+    Delete operands come only from rm/rmdir/unlink commands a shell would
+    run (:mod:`lib.project_mod.command_structure` delimits the command):
+    heredoc bodies, quoted strings and Git pathspecs are data, while ( … )
+    groups, command/process substitutions and text a shell executes (stdin
+    heredocs of ``bash``/``| sh``, ``sh -c`` strings) are judged as commands.
+    Literal in-command bindings and ``cd`` hops are tracked per shell, and
+    an unproven variable is judged as possibly EMPTY (the
+    ``rm -rf "$UNSET/"`` collapse). The program a command runs is read
+    through :func:`_program_views`, the view the dangerous-command guard
+    reads: assignment prefixes, wrappers (``sudo``/``doas``, ``env``,
+    ``command``, ``exec``, ``nohup``, ``timeout``, ``nice``, ``xargs`` …),
+    runners (``setsid``, ``su -c``, ``ssh``, ``find -exec``, ``docker exec`` …),
+    ``eval`` operands and quoting of the command word (``\\rm``) are seen
+    through. Text the parser cannot delimit, and a wrapper or runner whose
+    options are not understood, are refused only when they could run a
+    delete command.
+    """
+    detail = _catastrophic_delete_detail(command, cwd=cwd)
+    return detail[0] if detail else None
+
+
+# ── Dangerous commands are judged by the words a shell would run ───
+#
+# The rules apply to the program word and operands of every simple command
+# the parse says a shell may run: the command itself, ( … ) groups,
+# command/process substitution bodies and text a shell executes (a ``-c``
+# string, a heredoc or here-string a shell reads, ``eval`` operands).
+# Quoted arguments, plain arguments, flags and heredoc bodies fed to other
+# programs are data. Text the parser cannot delimit, wrappers whose options
+# are not understood and program names computed by a substitution get the
+# raw ``DANGEROUS_PATTERNS`` match, so unknown structure fails closed only
+# when a pattern is present. Decision:
+# "Dangerous-command guard structure" in docs/modules/tools_execution.md.
+
+_DANGEROUS_RE = re.compile('|'.join(f'(?:{p})' for p in DANGEROUS_PATTERNS))
+# cmd.exe also resolves `shutdown.exe`/`format.com`, and its command names and
+# switches ignore case; POSIX program names do not.
+_WINDOWS_PROGRAM_SUFFIX = re.compile(r'\.(?:exe|com)\Z', re.IGNORECASE)
+_DRIVE_OPERAND = re.compile(r'[A-Za-z]:')
+_RECURSIVE_SHORT_OPTION = re.compile(r'-[A-Za-z]*R[A-Za-z]*\Z')
+# xargs options (GNU and BSD): letters taking a value (attached or the next
+# word), letters whose optional value can only be attached, and flags.
+_XARGS_VALUE_LETTERS = frozenset('adEIJLnPRsS')
+_XARGS_ATTACHED_LETTERS = frozenset('eil')
+_XARGS_FLAG_LETTERS = frozenset('0oprtx')
+_XARGS_VALUE_LONG = frozenset({
+    '--arg-file', '--delimiter', '--max-args', '--max-chars', '--max-procs',
+    '--process-slot-var'})
+_XARGS_FLAG_LONG = frozenset({
+    '--eof', '--exit', '--interactive', '--max-lines', '--no-run-if-empty',
+    '--null', '--open-tty', '--replace', '--show-limits', '--verbose'})
+# A wrapper whose options are not understood hides its program word.
+_UNKNOWN_PROGRAM = object()
+
+
+def _xargs_operand(words):
+    """Index of the program ``xargs`` at ``words[0]`` runs, else None
+    (options not understood, or no program: xargs then runs ``echo``)."""
+    position = 1
+    while position < len(words):
+        word = words[position]
+        if word == '--':
+            position += 1
+            break
+        if not word.startswith('-') or word == '-':
+            break
+        position += 1
+        if word.startswith('--'):
+            name = word.partition('=')[0]
+            if name in _XARGS_VALUE_LONG and '=' not in word:
+                position += 1
+            elif name not in _XARGS_VALUE_LONG and name not in _XARGS_FLAG_LONG:
+                return None
+            continue
+        for offset, letter in enumerate(word[1:], start=2):
+            if letter in _XARGS_FLAG_LETTERS:
+                continue
+            if letter in _XARGS_VALUE_LETTERS:
+                if offset == len(word):
+                    position += 1  # the value is the next word
+            elif letter not in _XARGS_ATTACHED_LETTERS:
+                return None
+            break  # the rest of the word is this option's value
+    return position if position < len(words) else None
+
+
+# ── Runners: programs that execute an operand as a command ──────────
+#
+# Each runner's options follow its documented getopt grammar: short letters
+# that are flags ('f'), take a value attached or as the next word ('v'), or
+# take an optional value that can only be attached ('o'); long names map to
+# (key, kind) and take ``--name=value`` (or the next word for 'v'). GNU
+# programs without a leading ``+`` in their option string permute, so their
+# options may follow operands. An option outside the table makes the runner
+# opaque, which falls back like an unknown wrapper option.
+_RunnerGrammar = namedtuple('_RunnerGrammar', 'short long permute')
+
+
+def _runner_grammar(short, long=(), permute=False):
+    letters = {}
+    for kind, chars in zip('fvo', short.split('|')):
+        letters.update(dict.fromkeys(chars, kind))
+    names = {}
+    for spec in long:
+        name, _, rest = spec.partition(':')
+        key, _, kind = rest.partition('/')
+        names[name] = (key or name, kind or 'f')
+    return _RunnerGrammar(letters, names, permute)
+
+
+def _runner_options(words, grammar, start=1):
+    """``(options, operand indices)`` of ``words[start:]``, else None."""
+    options, operands = {}, []
+    index = start
+    while index < len(words):
+        word = words[index]
+        if word == '--':
+            operands.extend(range(index + 1, len(words)))
+            break
+        if not word.startswith('-') or word == '-':
+            if not grammar.permute:
+                operands.extend(range(index, len(words)))
+                break
+            operands.append(index)
+            index += 1
+            continue
+        if word.startswith('--'):
+            name, equals, value = word[2:].partition('=')
+            if name not in grammar.long:
+                return None
+            key, kind = grammar.long[name]
+            if equals and kind == 'f':
+                return None
+            if kind == 'v' and not equals:
+                index += 1
+                if index >= len(words):
+                    return None
+                value = words[index]
+            options[key] = value
+            index += 1
+            continue
+        for offset in range(1, len(word)):
+            kind = grammar.short.get(word[offset])
+            if kind is None:
+                return None
+            if kind == 'f':
+                options[word[offset]] = ''
+                continue
+            value = word[offset + 1:]
+            if kind == 'v' and not value:
+                index += 1
+                if index >= len(words):
+                    return None
+                value = words[index]
+            options[word[offset]] = value
+            break
+        index += 1
+    return options, operands
+
+
+# Privilege wrappers end their options at the command they run. sudo(8) (the
+# getopt_long table "+Aa:BbC:c:D:Eeg:Hh::iKklnPp:R:r:SsT:t:U:u:Vv" of this
+# host's sudo 1.9.9): a word holding `=` that does not start with `/` sets the
+# command's environment, before or between options; a lone `-h` takes the next
+# word as its host unless that word is an option or such an assignment, and
+# shows help otherwise. -a (BSD auth type) and -c (BSD login class) take a
+# value; sudo built without them exits with a usage error and runs nothing.
+# doas(1): getopt "a:C:Lnsu:" (-a with BSD auth).
+_PRIVILEGE_GRAMMARS = {
+    'sudo': _runner_grammar('ABbEeHiKklnPSsVv|aCcDgpRrTtUu|h', (
+        'askpass:A', 'auth-type:a/v', 'background:b', 'bell:B',
+        'close-from:C/v', 'login-class:c/v', 'chdir:D/v', 'preserve-env:E/o',
+        'edit:e', 'group:g/v', 'set-home:H', 'help', 'host:/v', 'login:i',
+        'remove-timestamp:K', 'reset-timestamp:k', 'list:l',
+        'non-interactive:n', 'preserve-groups:P', 'prompt:p/v', 'chroot:R/v',
+        'role:r/v', 'stdin:S', 'shell:s', 'type:t/v', 'command-timeout:T/v',
+        'other-user:U/v', 'user:u/v', 'version:V', 'validate:v')),
+    'doas': _runner_grammar('Lns|aCu'),
+}
+
+
+def _privilege_wrapper_parse(words, *, strict):
+    """``(environment, command)`` indices for the sudo/doas at ``words[0]``.
+
+    *command* indexes the command word (``len(words)`` when the wrapper names
+    none); *environment* is where the shell-assignment ``VAR=value`` words
+    directly before it start (*command* when there are none). Returns None
+    when *strict* and an option is not understood or lacks its value;
+    otherwise such an option counts as a flag.
+    """
+    sudo = os.path.basename(words[0]) == 'sudo'
+    grammar = _PRIVILEGE_GRAMMARS[os.path.basename(words[0])]
+
+    def assignment(word):
+        return sudo and '=' in word and not word.startswith(('/', '-'))
+
+    environment, index = None, 1
+    while index < len(words):
+        word = words[index]
+        if word == '--':
+            return index + 1, index + 1
+        if word == '-' or not word.startswith('-'):
+            if not assignment(word):
+                break
+            if not _ENV_ASSIGNMENT_GUARD_RE.match(word):
+                environment = None  # no shell would read `./x=y` as one
+            elif environment is None:
+                environment = index
+            index += 1
+            continue
+        environment = None
+        index += 1
+        if word.startswith('--'):
+            name, equals, _value = word[2:].partition('=')
+            kind = grammar.long[name][1] if name in grammar.long else None
+            if kind is None or (equals and kind == 'f'):
+                if strict:
+                    return None
+            elif kind == 'v' and not equals:
+                if index >= len(words):
+                    return None if strict else (index, index)
+                index += 1
+            continue
+        for offset in range(1, len(word)):
+            kind = grammar.short.get(word[offset])
+            if kind is None and strict:
+                return None
+            if kind in (None, 'f'):
+                continue
+            if offset + 1 == len(word):  # no value attached
+                if kind == 'v':
+                    if index >= len(words):
+                        return None if strict else (index, index)
+                    index += 1
+                elif (word == '-h' and index < len(words)
+                      and not words[index].startswith('-')
+                      and not assignment(words[index])):
+                    index += 1  # sudo -h HOST
+            break
+    if environment is None or index == len(words):
+        return index, index
+    return environment, index
+
+
+_SU = _runner_grammar('flmpP|cgGsw|', (
+    'command:c/v', 'session-command:c/v', 'fast', 'group:g/v', 'supp-group:G/v',
+    'login', 'preserve-environment', 'pty', 'shell:s/v',
+    'whitelist-environment:w/v'), permute=True)
+_RUNUSER = _runner_grammar('flmpP|cgGswu|', (
+    'command:c/v', 'session-command:c/v', 'fast', 'group:g/v', 'supp-group:G/v',
+    'login', 'preserve-environment', 'pty', 'shell:s/v',
+    'whitelist-environment:w/v', 'user:u/v'), permute=True)
+_RUNNER_GRAMMARS = {
+    'setsid': _runner_grammar('cfw', ('ctty', 'fork', 'wait')),
+    'watch': _runner_grammar('bcCegprtwx|nq|d', (
+        'beep', 'color', 'no-color', 'differences:d/o', 'errexit', 'chgexit',
+        'interval:n/v', 'precise', 'equexit:q/v', 'no-rerun', 'no-title',
+        'no-wrap', 'exec:x')),
+    'ssh': _runner_grammar('1246afgknqstvxACGKMNTVXYy|bceilmopBDEFIJLOPQRSwW'),
+    'flock': _runner_grammar('sexnoFu|wE', (
+        'shared', 'exclusive', 'nonblock', 'nb', 'close', 'no-fork', 'unlock',
+        'verbose', 'wait:w/v', 'timeout:w/v', 'conflict-exit-code:E/v')),
+    'chroot': _runner_grammar('', ('userspec:u/v', 'groups:g/v', 'skip-chdir')),
+    'unshare': _runner_grammar('fmuinpCTUrc|RwSGl', (
+        'mount:m/o', 'uts:u/o', 'ipc:i/o', 'net:n/o', 'pid:p/o', 'user:U/o',
+        'cgroup:C/o', 'time:T/o', 'fork', 'kill-child:/o', 'mount-proc:/o',
+        'mount-binfmt:/o', 'map-user:/v', 'map-users:/v', 'map-group:/v',
+        'map-groups:/v', 'map-root-user', 'map-current-user', 'map-auto',
+        'map-subids', 'propagation:/v', 'setgroups:/v', 'keep-caps',
+        'setuid:S/v', 'setgid:G/v', 'root:R/v', 'wd:w/v', 'monotonic:/v',
+        'boottime:/v', 'load-interp:l/v')),
+    'nsenter': _runner_grammar('aeFZc|tSGW|muinpCUTrw', (
+        'all', 'target:t/v', 'mount:m/o', 'uts:u/o', 'ipc:i/o', 'net:n/o',
+        'pid:p/o', 'cgroup:C/o', 'user:U/o', 'time:T/o', 'setuid:S/v',
+        'setgid:G/v', 'preserve-credentials', 'root:r/o', 'wd:w/o',
+        'wdns:W/v', 'env', 'no-fork', 'follow-context', 'join-cgroup',
+        'user-parent', 'keep-caps')),
+    'ionice': _runner_grammar('tpPu|cn', (
+        'class:c/v', 'classdata:n/v', 'ignore:t', 'pid:p', 'pgid:P', 'uid:u')),
+    'chrt': _runner_grammar('abdfiorRmpve|TPD', (
+        'all-tasks', 'batch', 'deadline', 'fifo', 'idle', 'other', 'rr',
+        'reset-on-fork', 'max:m', 'pid:p', 'verbose', 'sched-runtime:T/v',
+        'sched-period:P/v', 'sched-deadline:D/v')),
+    'taskset': _runner_grammar('acp', ('all-tasks', 'cpu-list', 'pid:p')),
+    'script': _runner_grammar('aefqkr|cEBIOTmo|t', (
+        'append', 'command:c/v', 'echo:E/v', 'return', 'flush', 'force',
+        'log-io:B/v', 'log-in:I/v', 'log-out:O/v', 'log-timing:T/v',
+        'logging-format:m/v', 'output-limit:o/v', 'quiet', 'timing:t/o'),
+        permute=True),
+    'su': _SU,
+    'runuser': _RUNUSER,
+}
+_DOCKER_GLOBAL = _runner_grammar('D|cHl', (
+    'config:/v', 'context:c/v', 'debug:D', 'host:H/v', 'log-level:l/v', 'tls',
+    'tlscacert:/v', 'tlscert:/v', 'tlskey:/v', 'tlsverify'))
+_PODMAN_GLOBAL = _runner_grammar('r|c', (
+    'connection:c/v', 'url:/v', 'identity:/v', 'log-level:/v', 'root:/v',
+    'runroot:/v', 'remote:r'))
+_CONTAINER_EXEC = _runner_grammar('dilt|euw', (
+    'detach', 'detach-keys:/v', 'env:e/v', 'env-file:/v', 'interactive:i',
+    'privileged', 'tty:t', 'user:u/v', 'workdir:w/v', 'latest:l',
+    'preserve-fds:/v', 'preserve-fd:/v'))
+_KUBECTL_EXEC = _runner_grammar('qit|cfn', (
+    'container:c/v', 'filename:f/v', 'pod-running-timeout:/v', 'quiet:q',
+    'stdin:i', 'tty:t', 'namespace:n/v', 'context:/v', 'kubeconfig:/v'),
+    permute=True)
+_FIND_EXEC_PRIMARIES = frozenset({'-exec', '-execdir', '-ok', '-okdir'})
+
+
+def _find_launches(words):
+    """Each ``-exec``/``-execdir``/``-ok``/``-okdir`` primary runs the words
+    up to ``;`` (or ``{} +``) as a program; the rest of find is data."""
+    launches = []
+    index = 1
+    while index < len(words):
+        if words[index] not in _FIND_EXEC_PRIMARIES:
+            index += 1
+            continue
+        start = end = index + 1
+        while end < len(words) and words[end] != ';' and not (
+                words[end] == '+' and words[end - 1] == '{}'):
+            end += 1
+        if end > start:
+            launches.append(('program', start, end))
+        index = end + 1
+    return launches
+
+
+def _container_launches(words, global_grammar):
+    """``docker``/``podman`` ``[container] exec [options] CONTAINER COMMAND``."""
+    if 'exec' not in words:
+        return False
+    parsed = _runner_options(words, global_grammar)
+    if parsed is None:
+        return None
+    subcommand = parsed[1][:2]
+    if [words[i] for i in subcommand[:1]] == ['exec']:
+        start = subcommand[0] + 1
+    elif [words[i] for i in subcommand] == ['container', 'exec']:
+        start = subcommand[1] + 1
+    else:
+        return False
+    parsed = _runner_options(words, _CONTAINER_EXEC, start)
+    if parsed is None:
+        return None
+    options, operands = parsed
+    command = operands[0 if 'l' in options or 'latest' in options else 1:]
+    return [('program', command[0], len(words))] if command else []
+
+
+def _kubectl_launches(words):
+    """``kubectl … exec POD [options] [--] COMMAND``: the documented form puts
+    the command after ``--``; the deprecated one after the pod operand."""
+    dash = words.index('--') if '--' in words else len(words)
+    if 'exec' not in words[:dash]:
+        return False
+    if dash < len(words):
+        return [('program', dash + 1, len(words))] if dash + 1 < len(words) else []
+    parsed = _runner_options(words, _KUBECTL_EXEC, words.index('exec') + 1)
+    if parsed is None:
+        return None
+    command = parsed[1][1:]
+    return [('program', command[0], len(words))] if command else []
+
+
+def _ssh_launches(words):
+    """``ssh [options] destination [options] [command …]``: OpenSSH parses
+    options again after the destination, and the remote shell runs the
+    command words joined by spaces; without one it reads stdin as a script."""
+    grammar = _RUNNER_GRAMMARS['ssh']
+    parsed = _runner_options(words, grammar)
+    if parsed is None or not parsed[1]:
+        return None if parsed is None else []
+    destination = parsed[1][0]
+    parsed = _runner_options(words, grammar, destination + 1)
+    if parsed is None:
+        return None
+    command = parsed[1]
+    if not command:
+        return [('stdin',)]
+    from lib.project_mod.command_heredoc import shell_input_source
+    if shell_input_source([words[i] for i in command]) == ('stdin', None):
+        return [('stdin',)]  # the remote command is a shell reading stdin
+    return [('script', ' '.join(words[i] for i in command), command)]
+
+
+def _runner_launches(head, words):
+    """What the runner at ``words[0]`` executes, as a list of
+    ``('program', start, end)`` (an argv slice), ``('script', text, indices)``
+    (shell source) and ``('stdin',)`` (a shell reading its stdin). Returns
+    False when this invocation runs nothing as a command (``docker ps``),
+    [] when it runs no command, None when its options are not understood."""
+    if head == 'find':
+        return _find_launches(words)
+    if head == 'ssh':
+        return _ssh_launches(words)
+    if head in ('docker', 'podman'):
+        return _container_launches(
+            words, _DOCKER_GLOBAL if head == 'docker' else _PODMAN_GLOBAL)
+    if head == 'kubectl':
+        return _kubectl_launches(words)
+    parsed = _runner_options(words, _RUNNER_GRAMMARS[head])
+    if parsed is None:
+        return None
+    options, operands = parsed
+    if head in ('su', 'runuser', 'script') and 'c' in options:
+        launches = [('script', options['c'], ())]
+        return launches + ([('program', operands[1], len(words))]
+                           if head == 'script' and len(operands) > 1 else [])
+    if head in ('su', 'runuser'):
+        if head == 'runuser' and 'u' in options and operands:
+            return [('program', operands[0], len(words))]
+        return [('stdin',)]
+    if head == 'watch' and 'x' not in options:
+        return [('script', ' '.join(words[i] for i in operands), operands)] if operands else []
+    if head == 'flock' and len(operands) > 2 and words[operands[1]] in ('-c', '--command'):
+        return [('script', words[operands[2]], operands[2:3])]
+    if head in ('ionice', 'chrt', 'taskset') and options.keys() & {'p', 'P', 'u', 'm'}:
+        return []  # the operands name existing processes
+    skip = {'flock': 1, 'chroot': 1, 'taskset': 1, 'script': 1}.get(head, 0)
+    if head == 'chrt' and operands and words[operands[0]].isdigit():
+        skip = 1
+    command = operands[skip:]
+    return [('program', command[0], len(words))] if command else []
+
+
+_RUNNERS = frozenset(_RUNNER_GRAMMARS) | {'find', 'ssh', 'docker', 'podman', 'kubectl'}
+# A shell reading its stdin as a script, for runners whose command is a shell.
+_STDIN_SHELL_VIEW = (['sh'], ['sh'])
+
+
+def _script_view(text, raw_words):
+    """Program view of a shell running *text* (``sh -c TEXT``).
+
+    The raw word decides whose bindings the text sees: one word quoted or
+    expanded by this shell keeps its quoting, and joined words become a
+    single-quoted literal (the child shell parses them)."""
+    raw = raw_words[0] if len(raw_words) == 1 else shlex.quote(text)
+    if _shell_string_script(raw) is None:
+        raw = shlex.quote(text)
+    return ['sh', '-c', text], ['sh', '-c', raw]
+
+
+def _program_views(words, depth=0):
+    """(literal, raw) views of every program a simple command runs.
+
+    Reserved words, assignment prefixes (``FOO=1 cmd``), a ``function name``
+    header, ``sudo``/``doas``, ``env``, ``builtin``, the process wrappers of
+    :func:`process_wrapper_operand` and ``xargs`` are seen through, and each
+    runner of :func:`_runner_launches` contributes what it executes: an argv
+    view, or ``sh -c TEXT`` for the shell text it runs (``su -c``, ``ssh``,
+    ``watch``, ``flock -c``, ``script -c``). sudo/doas options follow
+    :data:`_PRIVILEGE_GRAMMARS`; naming no command, they are a shell reading
+    stdin (``sudo -s``/``-i``, ``doas -s``). Returns [] when the command runs
+    no program (``command -v x``) and ``_UNKNOWN_PROGRAM`` when a wrapper's
+    or runner's options are not understood (``env -S …``, ``timeout $T …``,
+    ``sudo --bogus …``).
+    """
+    raw = list(words)
+    for _ in range(_MAX_WRAPPER_DEPTH):
+        index = 0
+        while index < len(raw) and (raw[index] in _PREFIX_KEYWORDS
+                                    or _ENV_ASSIGNMENT_GUARD_RE.match(raw[index])):
+            index += 1
+        raw = raw[index:]
+        if not raw:
+            return []
+        if raw[0] == 'function':
+            raw = raw[3:] if raw[2:3] == ['()'] else raw[2:]
+            continue
+        literal = [_literal_command_word(word) for word in raw]
+        head = os.path.basename(literal[0])
+        if head in _PRIV_WRAPPERS:
+            parsed = _privilege_wrapper_parse(literal, strict=True)
+            operand = None if parsed is None else parsed[1]
+            if operand == len(raw):
+                return [_STDIN_SHELL_VIEW]
+        elif head == 'env':
+            operand = _env_operand(literal, 0)
+        elif head == 'builtin':
+            operand = 1
+        elif head == 'xargs':
+            operand = _xargs_operand(literal)
+        elif head in _PROCESS_WRAPPERS:
+            operand = process_wrapper_operand(literal)
+            if operand is None and head == 'command':
+                return []  # `command -v/-V` describes the program, runs nothing
+        elif head in _RUNNERS:
+            return _runner_views(head, literal, raw, depth)
+        else:
+            return [(literal, raw)]
+        if operand is None:
+            return _UNKNOWN_PROGRAM
+        raw = raw[operand:]
+    return _UNKNOWN_PROGRAM
+
+
+def _runner_views(head, literal, raw, depth):
+    launches = _runner_launches(head, literal)
+    if launches is False:
+        return [(literal, raw)]
+    if launches is None or depth >= _MAX_WRAPPER_DEPTH:
+        return _UNKNOWN_PROGRAM
+    views = []
+    for launch in launches:
+        if launch[0] == 'stdin':
+            views.append(_STDIN_SHELL_VIEW)
+        elif launch[0] == 'script':
+            views.append(_script_view(launch[1], [raw[i] for i in launch[2]]))
+        else:
+            inner = _program_views(raw[launch[1]:launch[2]], depth + 1)
+            if inner is _UNKNOWN_PROGRAM:
+                return inner
+            views.extend(inner)
+    return views
+
+
+def _dangerous_program_rule(literal, raw):
+    """Rule label for one program run (wrappers removed), else None."""
+    names = {_WINDOWS_PROGRAM_SUFFIX.sub('', name) for name in (
+        os.path.basename(literal[0]), re.split(r'[\\/]', raw[0])[-1].strip('\'"'))}
+    folded = {name.lower() for name in names}
+    operands = literal[1:]
+    for name in ('shutdown', 'reboot'):
+        if name in names:
+            return name
+    if any(name == 'mkfs' or name.startswith('mkfs.') for name in names):
+        return 'mkfs'
+    if 'diskpart' in folded:
+        return 'diskpart'
+    if 'init' in names and '0' in operands:
+        return 'init 0'
+    if 'dd' in names and any(operand.startswith('of=/') for operand in operands):
+        return 'dd of=/'
+    if 'format' in folded and any(_DRIVE_OPERAND.match(operand) for operand in operands):
+        return 'format X:'
+    switches = {operand.lower() for operand in operands}
+    for name in ('rd', 'del'):
+        if name in folded and {'/s', '/q'} <= switches:
+            return f'{name} /s /q'
+    if ('chmod' in names
+            and any(operand == '--recursive' or _RECURSIVE_SHORT_OPTION.match(operand)
+                    for operand in operands)
+            and any(operand.startswith('/') and not operand.strip('/.*')
+                    for operand in operands)):
+        return 'chmod -R /'
+    if 'systemctl' in names and 'reboot' in operands:
+        return 'reboot'
+    return None
+
+
+def _dangerous_redirect_rule(redirects):
+    for operator, target in redirects:
+        if '>' in operator and _literal_command_word(target).startswith('/dev/sd'):
+            return '> /dev/sd'
+    return None
+
+
+def _function_name(words):
+    """Name a ``name()`` or ``function name`` header defines, else None."""
+    index = 0
+    while index < len(words) and words[index] in _PREFIX_KEYWORDS:
+        index += 1
+    words = words[index:]
+    if len(words) >= 2 and words[0] == 'function':
+        return words[1]
+    if len(words) == 2 and words[1] == '()':
+        return words[0]
+    return None
+
+
+def _stage_word(words):
+    """First command word of a pipeline stage, after reserved words and a
+    ``function name [()]`` header."""
+    words = list(words)
+    if words[:1] == ['function']:
+        words = words[3:] if words[2:3] == ['()'] else words[2:]
+    index = 0
+    while index < len(words) and words[index] in _PREFIX_KEYWORDS:
+        index += 1
+    return words[index] if index < len(words) else None
+
+
+def _pipes_function_into_itself(items, functions):
+    """A fork bomb: a defined function piped into itself (``:(){ :|:& };:``)."""
+    for left, right in zip(items, items[1:]):
+        if (isinstance(left, SimpleCommand) and isinstance(right, SimpleCommand)
+                and right.separator == '|'):
+            word = _stage_word(left.words)
+            if word in functions and word == _stage_word(right.words):
+                return True
+    return False
+
+
+def _raw_dangerous_rule(text):
+    """Fail-closed match for text whose command structure is unknown."""
+    match = _DANGEROUS_RE.search(text)
+    return match.group(0).strip() if match else None
+
+
+def _dangerous_rule_in_text(text, functions=frozenset()):
+    try:
+        items = parse_shell_structure(text)
+    except ShellStructureUnknown:
+        return _raw_dangerous_rule(text)
+    return _dangerous_rule_in_script(items, functions)
+
+
+def _dangerous_rule_in_script(items, functions):
+    """Rule label of the first dangerous command a parsed script may run.
+
+    *functions* are the function names visible to the script; its groups and
+    substitution bodies also see the ones it defines.
+    """
+    functions = functions | {
+        name for name in (_function_name(item.words) for item in items
+                          if isinstance(item, SimpleCommand)) if name}
+    if _pipes_function_into_itself(items, functions):
+        return 'fork bomb'
+    for index, item in enumerate(items):
+        scripts = list(item.nested)
+        for heredoc in item.heredocs:
+            scripts.extend(heredoc.nested)
+        if isinstance(item, Subshell):
+            scripts.append(item.body)
+        for script in scripts:
+            rule = _dangerous_rule_in_script(script, functions)
+            if rule:
+                return rule
+        rule = _dangerous_redirect_rule(item.redirects)
+        if rule:
+            return rule
+        if isinstance(item, SimpleCommand):
+            rule = _dangerous_simple_command_rule(items, index, functions)
+            if rule:
+                return rule
+    return None
+
+
+def _dangerous_simple_command_rule(items, index, functions):
+    """Judge one simple command and the text it hands a shell to run."""
+    views = _program_views(items[index].words)
+    if views is _UNKNOWN_PROGRAM:
+        # The hidden program may be a shell reading this stdin.
+        for text in [' '.join(items[index].words)] + _stdin_texts(items[index]):
+            rule = _raw_dangerous_rule(text)
+            if rule:
+                return rule
+        views = []
+    for view in views:
+        name = re.split(r'[\\/]', view[1][0])[-1]
+        if '$(' in name or '`' in name:
+            # A substitution computes the program name: judge the text naming it.
+            rule = _raw_dangerous_rule(name)
+            if rule:
+                return rule
+        rule = _dangerous_program_rule(*view)
+        if rule:
+            return rule
+        literal = view[0]
+        if os.path.basename(literal[0]) == 'eval' and len(literal) > 1:
+            # eval runs its operands, joined by spaces, in this same shell.
+            rule = _dangerous_rule_in_text(' '.join(literal[1:]), functions)
+            if rule:
+                return rule
+    for raw, script in _shell_source_scripts(items, index, views):
+        # A child shell runs the script and sees none of this shell's functions.
+        rule = (_raw_dangerous_rule(raw) if script is None
+                else _dangerous_rule_in_text(script[0]))
+        if rule:
+            return rule
+    return None
+
+
+def dangerous_command_rule(command):
+    """Label of the dangerous-command rule *command* trips, else None.
+
+    The one judge behind run_command, the desktop agent and the run_command
+    safety pre-hook; each keeps its own refusal text. Refused, wherever a
+    shell would run them: ``shutdown``/``reboot`` (``systemctl reboot``
+    included), ``mkfs``/``mkfs.*``, ``diskpart``, ``init 0``, ``dd`` with an
+    ``of=/…`` operand, a write redirect to ``/dev/sd*``, ``format X:``,
+    ``rd``/``del /s /q``, a recursive ``chmod`` of ``/`` and a function piped
+    into itself (fork bomb).
+    """
+    if not command or not command.strip():
+        return None
+    return _dangerous_rule_in_text(command)
+
+
+def _is_dangerous_command(command):
+    """True when *command* trips a rule of :func:`dangerous_command_rule`."""
+    return dangerous_command_rule(command) is not None
 
 
 # ── Unbounded recursive-scan guard ( B2) ─────────────────
@@ -2138,13 +4929,18 @@ def _scan_binary_word_index(words):
     return i
 
 
-def _bound_scan_segments(command, timeout_binary, seconds, timeout_args=None):
+def _bound_scan_segments(command, timeout_binary, seconds, timeout_args=None,
+                         *, include_literal_heredoc_bodies=False):
     """Wrap direct recursive scanner segments with a native timeout.
 
     The rewrite is span-based and leaves the rest of the shell program
     untouched, so pipelines remain streaming and downstream backpressure
-    still works. Returns ``(rewritten, count)``. Unknown/wrapped shapes fail
-    open; the ancestor/FUSE-root refusal remains the outer safety boundary.
+    still works. Literal heredoc bodies stay byte-identical (see
+    :func:`_literal_heredoc_body_view`); ``include_literal_heredoc_bodies``
+    also wraps find-shaped body lines and serves only the resource-guard
+    verdict, never execution. Returns ``(rewritten, count)``. Unknown/wrapped
+    shapes fail open; the ancestor/FUSE-root refusal remains the outer
+    safety boundary.
     """
     try:
         seconds = max(1, int(seconds))
@@ -2161,10 +4957,13 @@ def _bound_scan_segments(command, timeout_binary, seconds, timeout_args=None):
         *(shlex.quote(str(arg)) for arg in timeout_args),
         shlex.quote(f'{seconds}s'),
     ])
+    view = (command if include_literal_heredoc_bodies
+            else literal_rewrite_view(command))
+    if view is None:
+        return command, 0
     insertions = []
-    for start, end in _split_pipeline_spans(command):
-        segment = command[start:end]
-        words = _shell_words(segment)
+    for start, end in _split_pipeline_spans(view):
+        words = _shell_words(view[start:end])
         index = _scan_binary_word_index(words)
         if index >= len(words):
             continue
@@ -2253,7 +5052,7 @@ def _unbounded_recursive_scan_target(command, cwd=None):
 
 
 # ── Filesystem-grep redirect guard (2026-08-04) ─────────────────────
-# The run_command tool description has advised grep_search-over-grep for
+# The run_command tool description has advised search_files-over-grep for
 # months, yet grep-via-run_command kept recurring — measured 2026-08-04:
 # ``grep -n 'cream\|…' static/styles.css | head -30; echo ---; grep -rn
 # 'cream' static/*.css 2>/dev/null | head -20`` sat RUNNING for 17m04s in a
@@ -2263,9 +5062,9 @@ def _unbounded_recursive_scan_target(command, cwd=None):
 # The rule: a grep-family segment (grep / egrep / fgrep, sudo seen through)
 # that reads the FILESYSTEM — explicit file/dir operands, or a recursive
 # flag (an implicit walk of the cwd) — is refused with a message that
-# translates the call to grep_search. A grep that filters a STREAM (no
+# translates the call to search_files. A grep that filters a STREAM (no
 # operands, stdin fed by a pipe: ``pytest 2>&1 | grep PASS``, ``ps aux |
-# grep python``) stays legal — grep_search cannot replace it. ``rg`` and
+# grep python``) stays legal — search_files cannot replace it. ``rg`` and
 # ``git grep`` are already the fast path and stay legal; a coreutils
 # ``timeout`` wrapper is not unwrapped (bounded scans stay legal, matching
 # the scan guard's philosophy above). Subshells, command substitution and
@@ -2366,11 +5165,12 @@ def _grep_filesystem_segment(command):
     at the FILESYSTEM (file/dir operands or a recursive walk) — else None.
 
     See the block comment above for the rule. Stream filters, ``rg`` /
-    ``git grep`` and ``timeout``-wrapped shapes all return None.
+    ``git grep``, ``timeout``-wrapped shapes and literal heredoc body lines
+    (data, see :func:`_literal_heredoc_body_view`) all return None.
     """
     if not command or not command.strip():
         return None
-    for seg in _split_pipeline(command):
+    for seg in _split_pipeline(_literal_heredoc_body_view(command)):
         seg = seg.strip()
         if not seg:
             continue
@@ -2470,10 +5270,12 @@ _ENV_ASSIGNMENT_GUARD_RE = _re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 def git_command_words(words):
     """Bounded Git wrapper projection; no env option/command interpretation."""
     words = list(words)
-    while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
-        words.pop(0)
-    words = _unwrap_command_parts(words)
-    if words and os.path.basename(words[0]) == 'env':
+    for _ in range(_MAX_WRAPPER_DEPTH):
+        while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
+            words.pop(0)
+        words = unwrap_process_wrappers(words)
+        if not words or os.path.basename(words[0]) != 'env':
+            break
         words = words[1:]
         if words[:1] == ['--']:
             words = words[1:]
@@ -2539,12 +5341,11 @@ def _git_invocation_details(args):
             if option == '--config-env' and (not separator or not setting):
                 return None
 
-            # Only bounded presentation settings prove absence of helpers.
+            # Only bounded presentation or disabling settings prove absence of helpers.
             harmless = (option == '-c' and separator and (
                 (key.lower() in {'color.ui', 'color.diff', 'color.status', 'color.branch'}
                  and setting.lower() in {'false', 'true', 'never', 'auto', 'always'})
-                or value in {'core.fsmonitor=false', 'log.showSignature=false',
-                             'format.pretty=medium'}))
+                or value in _HARMLESS_GIT_CONFIG))
             unproved |= not harmless
             autostash |= (option == '-c' and key.lower() == 'merge.autostash'
                           and setting.lower() in {'true', 'yes', 'on', '1', ''})
@@ -2601,14 +5402,14 @@ def _commit_rewrites_history(args):
     return False
 
 
-def _classify_git_apply(args, *, require_known_options=False):
-    """Parameter-sensitive apply policy; unknown shapes retain approval.
+GitApplyEvidence = namedtuple('GitApplyEvidence', 'risky_options unknown_options report_only')
 
-    Default apply preflights the patch and fails without partial application.
-    It does not move HEAD or rewrite history, but still needs writer admission.
-    Conflict/partial/outside-root modes are not in that ordinary-write class.
-    Report/check modes are read-only unless --apply requests application too.
-    Parse option values and -- before deciding: a pathname is not an option.
+
+def git_apply_option_evidence(args):
+    """Pure apply option evidence from the SAME parser used for risk.
+
+    Tuple fields contain option spellings, never consumed option values;
+    ``--`` ends options, so later words are pathspecs, not flags.
     """
     report_flags = {'--check', '--stat', '--numstat', '--summary'}
     ordinary_flags = {
@@ -2620,7 +5421,8 @@ def _classify_git_apply(args, *, require_known_options=False):
     }
     risky_flags = {'--3way', '-3', '--reject', '--unsafe-paths', '--allow-overlap'}
     value_flags = {'--exclude', '--include', '--directory', '--whitespace', '-p', '-C'}
-    report = apply = risky = unknown = False
+    report = apply = False
+    risky, unknown = [], []
     index = 0
     while index < len(args):
         token = args[index]
@@ -2632,53 +5434,96 @@ def _classify_git_apply(args, *, require_known_options=False):
         elif token in ordinary_flags:
             apply = apply or token == '--apply'
         elif token in risky_flags:
-            risky = True
+            risky.append(token)
         elif token in value_flags:
             if index >= len(args):
-                unknown = True
+                unknown.append(token)
                 continue
             value = args[index]
             index += 1
             if token in ('-p', '-C') and not value.isdigit():
-                unknown = True
+                unknown.append(token)
             elif token == '--whitespace' and value not in (
                     'nowarn', 'warn', 'fix', 'error', 'error-all'):
-                unknown = True
+                unknown.append(token)
         elif any(token.startswith(flag + '=') for flag in value_flags
                  if flag.startswith('--')):
             flag, value = token.split('=', 1)
             if flag == '--whitespace' and value not in (
                     'nowarn', 'warn', 'fix', 'error', 'error-all'):
-                unknown = True
+                unknown.append(flag)
         elif token.startswith(('-p', '-C')) and token[2:].isdigit():
             continue
         elif token.startswith('-') and token != '-':
             # Includes long-option abbreviations and --build-fake-ancestor,
             # which writes an index even in otherwise report-only invocations.
-            unknown = True
-    if require_known_options and unknown:
+            unknown.append(token.split('=', 1)[0])
+    return GitApplyEvidence(tuple(risky), tuple(unknown), report and not apply)
+
+
+def _classify_git_apply(args, *, require_known_options=False):
+    """Parameter-sensitive apply policy; unknown shapes retain approval.
+
+    Default apply preflights the patch and fails without partial application.
+    It does not move HEAD or rewrite history, but still needs writer admission.
+    Conflict/partial/outside-root modes are not in that ordinary-write class.
+    Report/check modes are read-only unless --apply requests application too.
+    Parse option values and -- before deciding: a pathname is not an option.
+    """
+    evidence = git_apply_option_evidence(args)
+    if require_known_options and evidence.unknown_options:
         return None
-    if risky:
+    if evidence.risky_options:
         return 'tree_destroying'
-    if unknown:
+    if evidence.unknown_options:
         return None
-    return 'readonly' if report and not apply else 'safe_write'
+    return 'readonly' if evidence.report_only else 'safe_write'
+
+
+# Options that change neither the destination nor what is overwritten:
+# progress output, a worktree lock, upstream tracking and checkout of the new
+# tree. ``-f``/``--force``/``-B`` and anything unknown keep the human gate.
+_GIT_WORKTREE_ADD_FLAGS = frozenset({
+    '-q', '--quiet', '--lock', '--track', '--no-track', '--checkout',
+    '--no-checkout', '--guess-remote', '--no-guess-remote',
+})
 
 
 def _git_worktree_add_destination(args):
-    """Literal additive worktree shape; never force/reset an existing ref."""
+    """Literal additive worktree shape; never force/reset an existing ref.
+
+    Exactly one of ``-b NAME`` or ``--detach``, any of the flags above, then
+    the path and an optional commit-ish. Git's option parser permutes, so the
+    options may also follow the path: ``add <path> -b <branch> HEAD`` is the
+    same creation. A ``-q`` or a trailing ``-b`` used to make an otherwise
+    identical add unclassified, so it fenced the whole checkout (and its Git
+    metadata) for the add's 30-54 s. ``--``, a repeated mode, an unknown
+    option or a third operand leave the shape unclassified.
+    """
     if not args or args[0] != 'add':
         return None
-    rest = args[1:]
-    if len(rest) >= 3 and rest[0] == '-b' and not rest[1].startswith('-'):
-        rest = rest[2:]
-    elif rest and rest[0] == '--detach':
-        rest = rest[1:]
-    else:
+    rest, branch_forms, index = args[1:], 0, 0
+    positionals = []
+    while index < len(rest):
+        word = rest[index]
+        if word in _GIT_WORKTREE_ADD_FLAGS:
+            index += 1
+        elif word == '-b':
+            if index + 1 >= len(rest) or not rest[index + 1] or rest[index + 1].startswith('-'):
+                return None
+            branch_forms += 1
+            index += 2
+        elif word == '--detach':
+            branch_forms += 1
+            index += 1
+        elif not word or word.startswith('-'):
+            return None
+        else:
+            positionals.append(word)
+            index += 1
+    if branch_forms != 1 or len(positionals) not in (1, 2):
         return None
-    if len(rest) not in (1, 2) or any(not x or x.startswith('-') for x in rest):
-        return None
-    return rest[0]
+    return positionals[0]
 
 
 GitWorktreeLifecycle = namedtuple('GitWorktreeLifecycle', 'operation paths forced')
@@ -2934,6 +5779,54 @@ def _classify_git_grep(rest):
     return 'readonly'
 
 
+def _git_symbolic_ref_reads(rest):
+    """``symbolic-ref [-q|--quiet] [--short] <name>`` only prints the target.
+
+    A second operand rewrites the ref, ``-m`` records the reason for that write
+    and ``-d`` deletes it. Bundles, abbreviations and unknown options are not
+    proved to read.
+    """
+    operands = [token for token in rest if token not in {'-q', '--quiet', '--short'}]
+    return len(operands) == 1 and not operands[0].startswith('-')
+
+
+def _git_hash_object_runs_filters(rest):
+    """Parse a ``git hash-object`` argv that cannot write the object store.
+
+    Returns None for ``-w``, ``--literally``, bundled or unknown options and a
+    missing value. Otherwise returns whether a configured clean/process filter
+    driver can run: a path input (a file operand, ``--stdin-paths`` or
+    ``--stdin --path``) is converted unless ``--no-filters`` is given.
+    """
+    files, stdin, stdin_paths, no_filters, path = [], False, False, False, None
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        index += 1
+        if token == '--':
+            files.extend(rest[index:])
+            break
+        if token in {'-t', '--path'}:
+            if index == len(rest):
+                return None
+            if token == '--path':
+                path = rest[index]
+            index += 1
+        elif token.startswith('--path='):
+            path = token.split('=', 1)[1]
+        elif token == '--stdin':
+            stdin = True
+        elif token == '--stdin-paths':
+            stdin_paths = True
+        elif token == '--no-filters':
+            no_filters = True
+        elif token.startswith('-'):
+            return None
+        else:
+            files.append(token)
+    return not no_filters and bool(files or stdin_paths or (stdin and path is not None))
+
+
 def _git_grep_short_argv(letters):
     """Prove a bundled short-flag group without expanding Git's own parsing."""
     for position, letter in enumerate(letters):
@@ -2971,6 +5864,8 @@ def _classify_git_native_invocation(sub, rest, *, require_known_options=False):
         return _classify_git_apply(rest, require_known_options=require_known_options)
     if sub == 'grep':
         return _classify_git_grep(rest)
+    if sub == 'hash-object':
+        return 'readonly' if _git_hash_object_runs_filters(rest) is not None else None
     if sub == 'stash':
         if any(tok.startswith(('--output', '--ext-diff', '--textconv')) for tok in rest):
             return None
@@ -3020,6 +5915,9 @@ def _classify_git_native_invocation(sub, rest, *, require_known_options=False):
                 break
             if token in values:
                 if index == len(rest):
+                    if sub != 'push' and token in _GIT_OPTIONAL_COMMIT_OPTIONS:
+                        filtered.append(token + '=value')  # Defaults to HEAD.
+                        continue
                     return None
                 index += 1
                 if sub != 'push':
@@ -3077,15 +5975,17 @@ def _classify_git_native_invocation(sub, rest, *, require_known_options=False):
             return 'tree_destroying'
         if not rest or all(tok in ('-a', '--all', '-r', '--remotes',
                                   '-v', '-vv', '--verbose', '--show-current')
-                           for tok in rest):
+                           or re.fullmatch(r'-[arv]+', tok) for tok in rest):
             return 'readonly'
-        if any(tok in ('--list', '-l', '--contains', '--no-contains',
-                       '--merged', '--no-merged', '--points-at', '--format', '--sort')
-               or tok.startswith(('--format=', '--sort=')) for tok in rest):
+        # Value options arrive here as ``--contains=value``.
+        if any(tok.split('=', 1)[0] in ('--list', '-l', '--contains', '--no-contains',
+                                        '--merged', '--no-merged', '--points-at', '--format',
+                                        '--sort') for tok in rest):
             # Unknown options are not proved read-only.
             allowed = ('--list', '--format', '--sort', '--contains', '--no-contains', '--merged',
                        '--no-merged', '--points-at', '--format=', '--sort=')
-            if all(not tok.startswith('-') or tok in ('-l', '-a', '-r', '-v', '-vv')
+            if all(not tok.startswith('-') or re.fullmatch(r'-[larv]+', tok)
+                   or tok in ('--all', '--remotes', '--verbose')
                    or any(tok == flag or tok.startswith(flag + '=')
                           if not flag.endswith('=') else tok.startswith(flag)
                           for flag in allowed) for tok in rest):
@@ -3100,13 +6000,21 @@ def _classify_git_native_invocation(sub, rest, *, require_known_options=False):
         if any(tok in ('--get', '--get-all', '--get-regexp', '--get-urlmatch',
                        '--list', '-l') for tok in rest):
             return 'readonly' if all(not tok.startswith('-') or tok in reads for tok in rest) else None
-        return None  # Ambiguous getter/setter forms keep the existing approval gate.
+        operands = [tok for tok in rest if not tok.startswith('-')]
+        if (len(operands) == 1 and operands[0] not in _GIT_CONFIG_ACTIONS
+                and all(tok in reads for tok in rest if tok.startswith('-'))):
+            return 'readonly'  # `git config [--scope] KEY` prints one value.
+        return None  # Setter, editor and action forms keep the existing approval gate.
     if sub == 'remote':
         return 'readonly' if not rest or rest == ['-v'] else None
     if sub == 'reflog':
-        return 'readonly' if not rest or rest[0] in ('show', 'exists') else 'tree_destroying'
+        # Only these subcommands rewrite reflogs. Any other first argument (none,
+        # a log option, show/list/exists, or a ref) runs the default `show`:
+        # git 2.34 treats `git reflog list`/`drop` as revisions of `show`; newer
+        # git adds `drop` as a rewrite, so it stays destructive on every version.
+        return 'tree_destroying' if rest[:1] and rest[0] in ('expire', 'delete', 'drop') else 'readonly'
     if sub in ('update-ref', 'symbolic-ref', 'replace'):
-        if sub == 'symbolic-ref' and rest in (['HEAD'], ['-q', 'HEAD'], ['--quiet', 'HEAD']):
+        if sub == 'symbolic-ref' and _git_symbolic_ref_reads(rest):
             return 'readonly'
         return 'tree_destroying'
     if sub == 'commit' and _commit_rewrites_history(rest):
@@ -3171,7 +6079,7 @@ def _git_guard_classify(command, *, require_known_segments=False):
     saw_tree_destroying = False
     saw_unknown = False
     for seg in _split_pipeline(command):
-        seg = seg.strip()
+        seg = peeled_command(seg.strip())
         if not seg:
             continue
         words = [w.text for w in _shell_words(seg)]

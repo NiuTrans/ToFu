@@ -7,12 +7,14 @@ from pathlib import Path
 import pytest
 
 from lib.vite_assets import VITE_MANIFEST, validate_vite_artifact
+from tests._jsdom import require_shipped_graph
 
 
 pytestmark = pytest.mark.unit
 
 
 def _current_main_asset() -> str:
+    require_shipped_graph()
     manifest = validate_vite_artifact(('main',))
     return manifest['frontend/src/main.ts']['file']
 
@@ -41,6 +43,7 @@ def test_legacy_classic_bundle_path_no_longer_self_heals(flask_client):
 
 
 def test_manifest_is_never_cached_as_an_immutable_asset(flask_client):
+    require_shipped_graph()
     response = flask_client.get('/static/vite/' + Path(VITE_MANIFEST).name)
     assert response.status_code == 200
     cache = response.headers.get('Cache-Control', '')

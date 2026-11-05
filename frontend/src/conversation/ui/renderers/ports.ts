@@ -14,6 +14,7 @@ import {
 import type { ToolEffectInspectionReference, ConversationToolEffectInspection,
   ConversationUsageRecovery, RecoverUsageRequest, TurnCommandResponse } from '../../../api/conversation-sync.generated';
 import type { LazyToolResultLoader } from '../lazy-tool-result';
+import type { ContextProvenanceFact } from '../../presentation/turn-provenance';
 
 import type { ChoicePorts } from '../../../rich-response/choices';
 
@@ -49,8 +50,10 @@ export interface ClassicConversationRendererPorts {
   /** Transitional trusted mascot markup from the retained branding module. */
   renderTurnAvatarHtml?(turn: ConversationTurnViewModel): string;
   /**
-   * Full-fidelity context fragments. The fold and rail intentionally have
-   * different DOM homes; both strings must already be sanitized.
+   * Transitional context fragments: the typed ../turn-context-rail renderer
+   * with the retained host's catalog services (model names, brand marks,
+   * live branch). The fold and rail intentionally have different DOM homes;
+   * both strings must already be sanitized.
    */
   renderTurnContextParts?(
     block: Extract<ConversationBlockViewModel, { kind: 'context' }>,
@@ -74,6 +77,9 @@ export interface ClassicConversationRendererPorts {
   ): string;
   /** Escaped acquisition metadata placed INSIDE a context note disclosure. */
   renderContextProvenanceHtml?(value: unknown): string;
+  /** Structured acquisition facts for the note that witnesses them; text
+   * fields are plain, `bodyHtml` is already escaped. */
+  contextProvenanceFacts?(value: unknown): readonly ContextProvenanceFact[];
   roleLabel?(turn: ConversationTurnViewModel): string;
   actionLabel?(
     action: ConversationTurnAction,
@@ -82,6 +88,9 @@ export interface ClassicConversationRendererPorts {
   ): string;
   formatTimestamp?(timestamp: string | number): string;
   resolveMediaUrl?(url: string): string;
+  /** Shared lightbox opener for rendered body media that is not Markdown
+   * (rich-response figure assets). */
+  previewImage?(source: string): void;
   localizedText?(
     key: string,
     fallback: string,

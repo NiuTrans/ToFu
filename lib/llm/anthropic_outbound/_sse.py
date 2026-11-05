@@ -15,6 +15,7 @@ from lib.llm.anthropic_outbound._from_anthropic import (
     _is_replay_state_block,
     _map_stop_reason,
     _replayable_content_blocks,
+    model_refusal_details,
 )
 
 logger = get_logger(__name__)
@@ -71,6 +72,9 @@ class AnthropicSSETranslator:
         self._block_stopped: set[int] = set()
         self._initial_complete_input: set[int] = set()
         self._replayed_tool_starts = 0
+        # Bounded ``stop_details`` of a ``refusal`` stop; relayed into
+        # ``usage['_model_refusal']`` when the accumulator finalizes.
+        self.model_refusal: dict | None = None
 
     def tool_call_evidence(self, call_ids: set[str]) -> dict:
         """Metadata from native starts, independent of canonical slot splitting.
@@ -404,6 +408,9 @@ class AnthropicSSETranslator:
                     'message_delta stop_reason must be text or null')
             if stop:
                 chunk['choices'][0]['finish_reason'] = _map_stop_reason(stop)
+                refusal = model_refusal_details(stop, delta.get('stop_details'))
+                if refusal is not None:
+                    self.model_refusal = refusal
             raw_usage = ev.get('usage')
             if raw_usage is not None and not isinstance(raw_usage, dict):
                 return self._protocol_error(

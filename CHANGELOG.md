@@ -1,6 +1,11 @@
 # Changelog
 
 
+## [0.18.4] - 2026-10-26
+
+### Added
+- Headless Delegate Mode for `tofu-agent run` (`--delegate-mode`).
+
 ## [0.18.3] - 2026-10-21
 
 ### Changed

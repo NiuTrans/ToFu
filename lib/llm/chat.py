@@ -1,5 +1,5 @@
 # HOT_PATH
-"""Non-streaming chat completion.
+"""Complete-text chat completion (JSON or collected subscription SSE).
 
 Public API:
   - chat(messages, model=None, ...) → (content_text, usage_dict)
@@ -27,6 +27,43 @@ def http_post(*args, **kwargs):
     return send(*args, **kwargs)
 
 
+def _attempt_headers(*, api_protocol, api_key, extra_headers, oauth, base_url,
+                     inference_profile, cache_affinity_key, trace_id, body):
+    """Headers for one physical attempt: protocol credentials, caller extras,
+    the prompt-cache affinity carrier, the trace id and the Responses
+    multi-agent beta marker."""
+    from lib.llm._transport import headers
+    from lib.llm.cache_affinity import merge_cache_affinity_headers
+    if api_protocol == 'anthropic':
+        from lib.llm.anthropic_outbound import anthropic_headers
+        from lib.llm.catpaw_gateway import catpaw_headers, is_catpaw_base_url
+        hdrs = anthropic_headers(api_key, extra_headers)
+        if oauth == 'claude':
+            hdrs.pop('Authorization', None)
+        elif is_catpaw_base_url(base_url):
+            hdrs.update(catpaw_headers())
+    else:
+        hdrs = headers()
+        if api_key:
+            hdrs['Authorization'] = f'Bearer {api_key}'
+        if extra_headers:
+            hdrs.update(extra_headers)
+    merge_cache_affinity_headers(
+        hdrs, inference_profile, protocol=api_protocol, oauth=oauth,
+        key=cache_affinity_key)
+    hdrs['M-TraceId'] = trace_id
+    if (api_protocol == 'responses' and isinstance(body.get('multi_agent'), dict)
+            and body['multi_agent'].get('enabled')):
+        beta_key = next((key for key in hdrs
+                         if key.lower() == 'openai-beta'),
+                        'OpenAI-Beta')
+        beta = str(hdrs.get(beta_key) or '')
+        marker = 'responses_multi_agent=v1'
+        if marker not in beta:
+            hdrs[beta_key] = f'{beta},{marker}' if beta else marker
+    return hdrs
+
+
 @budgeted_nonstream_chat
 @timed_stage('chat_total')
 def chat(messages, model=None, *, max_tokens=4096, temperature=0,
@@ -37,10 +74,20 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
          thinking_format='', provider_id='', api_protocol='openai', oauth='',
          adapter=None, responses_feature_profile='', owner_user_id=None,
          inference_profile=None, context_window=0, model_budget_admit=None, _budget_scope=None,
-         abort_check=None):
-    """Non-streaming chat completion.
+         abort_check=None, _repair_state=None, knowledge_model='',
+         route_output_limit_key=''):
+    """Complete-text chat completion, collecting stream-only subscriptions.
 
     Args:
+        model:        request spelling written to ``body['model']`` (the
+            Deployment's wire id under dispatch).
+        knowledge_model: logical Model id for model-knowledge lookups in
+            ``build_body`` (clamps, vision, family tweaks, reasoning) and for
+            request settlement pricing; defaults to ``model``.
+        route_output_limit_key: Deployment route identity that keys learned
+            request omissions; dispatch passes the key the stream adapter
+            stamps, so both paths share facts. '' falls back to provider +
+            wire model.
         api_key:      optional API key override (from dispatch slot).
         base_url:     optional base URL override.
         extra_headers: optional dict of additional headers.
@@ -48,7 +95,9 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
         timeout:      READ timeout in seconds. ``None`` (the default) means
             no read timeout — a slow completion is waited out rather than
             truncated. The connect phase stays bounded by CONNECT_TIMEOUT
-            so a dead host still fails over.
+            so a dead host still fails over. An explicit budget makes its
+            expiry the caller's outcome: exhaustion by read timeout logs
+            WARNING without a traceback; other exhaustion stays ERROR.
 
     Returns:
         (content_text: str, usage_dict: dict)
@@ -57,14 +106,38 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
         RateLimitError, PermissionError_, ContentFilterError,
         RetryableAPIError, PromptTooLongError, Exception
     """
+    # A complete-text API need not use a nonstream wire request. Subscription
+    # Responses endpoints require streaming; retain the selected route and let
+    # the existing stream owner verify its terminal evidence before returning.
+    if api_protocol == 'responses' and oauth == 'codex':
+        from lib.llm.chat_stream import complete_subscription_stream
+        return complete_subscription_stream(
+            messages, model=model or _lib.LLM_MODEL,
+            max_tokens=max_tokens, temperature=temperature,
+            thinking_enabled=thinking_enabled, thinking_depth=thinking_depth,
+            preset=preset, effort=effort, extra=extra,
+            thinking_format=thinking_format, inference_profile=inference_profile,
+            context_window=context_window, knowledge_model=knowledge_model,
+            provider_id=provider_id, route_output_limit_key=route_output_limit_key,
+            responses_feature_profile=responses_feature_profile,
+            model_budget_admit=model_budget_admit,
+            api_key=api_key, base_url=base_url, extra_headers=extra_headers,
+            api_protocol=api_protocol, oauth=oauth, adapter=adapter,
+            owner_user_id=owner_user_id, abort_check=abort_check,
+            timeout=timeout, max_retries=max_retries, log_prefix=log_prefix)
+
     import requests
+
+    # A repaired retry re-enters with the caller's own inputs; OAuth below
+    # rebinds these names to resolved credentials and identity messages.
+    _call_messages, _call_api_key, _call_extra_headers = (
+        messages, api_key, extra_headers)
 
     from lib.llm._transport import (
         CONNECT_TIMEOUT,
         MAX_STREAM_RETRIES,
         abortable_sleep,
         chat_url,
-        headers,
         retry_wait,
         transport_owner_scope,
     )
@@ -79,6 +152,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
         PromptTooLongError,
         RateLimitError,
         RequestTransportError,
+        REQUEST_REPAIR_ERRORS,
+        ResponseReadTimeoutError,
         StreamOnlyError,
         SubscriptionConnectionError,
         _RETRYABLE,
@@ -94,114 +169,141 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
         is_claude,
     )
     from lib.subscription_quota import USAGE_QUOTA_KEY, record_codex_quota
-    model = model or _lib.LLM_MODEL
-    _owner_scope = transport_owner_scope(owner_user_id)
-    _anthropic = (api_protocol == 'anthropic')
-    _responses = (api_protocol == 'responses')
-    if _responses:
-        from lib.llm.responses_outbound import responses_url
-        url = responses_url(base_url)
-    elif _anthropic:
-        from lib.llm.anthropic_outbound import anthropic_messages_url
-        url = anthropic_messages_url(base_url)
-        if oauth == 'claude':
-            from lib.oauth.outbound import claude_oauth_url
-            url = claude_oauth_url(url)
-    else:
-        url = f'{base_url.rstrip("/")}/chat/completions' if base_url else chat_url()
-
-    # Subscription-OAuth slot: swap in a live token + client-identity headers
-    # (+ Claude identity system block) before the body is built/translated.
-    if oauth:
-        from lib.oauth.outbound import resolve_oauth_request
-        _oauth_body_seed = {'messages': messages}
-        api_key, extra_headers, _oauth_body_seed = resolve_oauth_request(
-            oauth, _oauth_body_seed, extra_headers, user_id=_owner_scope)
-        messages = _oauth_body_seed['messages']
-
-    body = timed_call('request_build', build_body,
-        model, messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        thinking_enabled=thinking_enabled,
-        thinking_depth=thinking_depth,
-        preset=preset, effort=effort,
-        stream=False,
-        # Explicit effort is a depth, not the legacy preset named 'low'.
-        extra=extra,
-        thinking_format=thinking_format,
-        inference_profile=inference_profile,
-        provider_id=provider_id, context_window=context_window,
-    )
-    if _responses:
-        body['_responses_feature_profile'] = (
-            responses_feature_profile or 'compatible')
-
-    # The sync transport must share the exact final tool-schema preflight used
-    # by sync/async streaming. Otherwise background probes, compaction, and
-    # other non-stream callers can still send a Kimi-invalid catalog even when
-    # ordinary turns are repaired.
-    from lib.tools.gateway import preflight_wire_tool_body
-    preflight_wire_tool_body(body, log_prefix=log_prefix)
-
-    # Cache breakpoints + extended-TTL beta header
-    _task_id_for_latch = body.get('_task_id', '')
-    add_cache_breakpoints(body, log_prefix, api_protocol=api_protocol)
-    body.pop('_task_id', None)
-
-    if is_claude(body.get('model', '')):
-        if _task_id_for_latch:
-            from lib.tasks_pkg.cache_tracking._ttl import latch_extended_ttl
-            _use_ext_ttl = latch_extended_ttl(_task_id_for_latch)
+    from lib.llm.request import request_preparation
+    with request_preparation():
+        from lib.llm.request import require_wire_protocol
+        api_protocol = require_wire_protocol(api_protocol)
+        model = model or _lib.LLM_MODEL
+        _owner_scope = transport_owner_scope(owner_user_id)
+        _anthropic = (api_protocol == 'anthropic')
+        _responses = (api_protocol == 'responses')
+        if _responses:
+            from lib.llm.responses_outbound import responses_url
+            url = responses_url(base_url)
+        elif _anthropic:
+            from lib.llm.anthropic_outbound import anthropic_messages_url
+            url = anthropic_messages_url(base_url)
+            if oauth == 'claude':
+                from lib.oauth.outbound import claude_oauth_url
+                url = claude_oauth_url(url)
         else:
-            _use_ext_ttl = getattr(_lib, 'CACHE_EXTENDED_TTL', False)
-        if _use_ext_ttl:
-            if extra_headers is None:
-                extra_headers = {}
+            url = f'{base_url.rstrip("/")}/chat/completions' if base_url else chat_url()
+
+        # Subscription-OAuth slot: swap in a live token + client-identity headers
+        # (+ Claude identity system block) before the body is built/translated.
+        if oauth:
+            from lib.oauth.outbound import resolve_oauth_request
+            _oauth_body_seed = {'messages': messages}
+            api_key, extra_headers, _oauth_body_seed = resolve_oauth_request(
+                oauth, _oauth_body_seed, extra_headers, user_id=_owner_scope)
+            messages = _oauth_body_seed['messages']
+
+        body = timed_call('request_build', build_body,
+            model, messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            thinking_enabled=thinking_enabled,
+            thinking_depth=thinking_depth,
+            preset=preset, effort=effort,
+            stream=False,
+            # Explicit effort is a depth, not the legacy preset named 'low'.
+            extra=extra,
+            thinking_format=thinking_format,
+            inference_profile=inference_profile,
+            provider_id=provider_id, context_window=context_window,
+            knowledge_model=knowledge_model,
+        )
+        if _responses:
+            body['_responses_feature_profile'] = (
+                responses_feature_profile or 'compatible')
+        if route_output_limit_key:
+            body['_route_output_limit_key'] = route_output_limit_key
+
+        # The sync transport must share the exact final tool-schema preflight used
+        # by sync/async streaming. Otherwise background probes, compaction, and
+        # other non-stream callers can still send a Kimi-invalid catalog even when
+        # ordinary turns are repaired.
+        from lib.tools.gateway import preflight_wire_tool_body
+        preflight_wire_tool_body(body, log_prefix=log_prefix)
+
+        # Learned restrict-only facts shape the canonical body before protocol
+        # translation, exactly like the streaming pre-send hook.
+        from lib.llm.request_repair import (
+            RequestRepairState, apply_learned_request_facts,
+            mark_status_line_refusal, repair_rejected_request)
+        if _repair_state is None:
+            _repair_state = RequestRepairState()
+        apply_learned_request_facts(
+            body, provider_id=provider_id, repair_state=_repair_state)
+        _canonical_body = body
+        _repair_reason = ''
+
+        # Cache breakpoints + extended-TTL beta header
+        _task_id_for_latch = body.get('_task_id', '')
+        from lib.llm.cache_affinity import cache_affinity_key
+        _cache_affinity_key = cache_affinity_key(body)
+        add_cache_breakpoints(body, log_prefix, api_protocol=api_protocol)
+        body.pop('_task_id', None)
+
+        if is_claude(body.get('model', '')):
+            if _task_id_for_latch:
+                from lib.tasks_pkg.cache_tracking._ttl import latch_extended_ttl
+                _use_ext_ttl = latch_extended_ttl(_task_id_for_latch)
             else:
-                extra_headers = dict(extra_headers)
-            _existing_beta = extra_headers.get('anthropic-beta', '')
-            _ttl_beta = 'extended-cache-ttl-2025-04-11'
-            if _ttl_beta not in _existing_beta:
-                if _existing_beta:
-                    extra_headers['anthropic-beta'] = f'{_existing_beta},{_ttl_beta}'
+                _use_ext_ttl = getattr(_lib, 'CACHE_EXTENDED_TTL', False)
+            if _use_ext_ttl:
+                if extra_headers is None:
+                    extra_headers = {}
                 else:
-                    extra_headers['anthropic-beta'] = _ttl_beta
+                    extra_headers = dict(extra_headers)
+                _existing_beta = extra_headers.get('anthropic-beta', '')
+                _ttl_beta = 'extended-cache-ttl-2025-04-11'
+                if _ttl_beta not in _existing_beta:
+                    if _existing_beta:
+                        extra_headers['anthropic-beta'] = f'{_existing_beta},{_ttl_beta}'
+                    else:
+                        extra_headers['anthropic-beta'] = _ttl_beta
 
-    from lib.llm.body._admission import enforce_body_input_limit
-    from lib.llm.request import (
-        detach_input, semantic_request_id, seal_request, transport_body_arguments)
-    detach_input(body)
-    _input_tokens = timed_call('input_admission', enforce_body_input_limit,
-        body, model=model, provider_id=provider_id, context_window=context_window)
-    _semantic_id = semantic_request_id(body)
+        from lib.llm.body._admission import enforce_body_input_limit
+        from lib.llm.request import (
+            detach_input, semantic_request_id, seal_request, transport_body_arguments)
+        detach_input(body)
+        # Its encode also proves the detached input is valid JSON before counting.
+        _semantic_id = semantic_request_id(body)
+        _input_tokens = timed_call('input_admission', enforce_body_input_limit,
+            body, model=model, provider_id=provider_id, context_window=context_window)
 
-    _reasoning_resolution = dict(body.get('_reasoning_resolution') or {})
-    _cloak_reverse = None
-    _resp_reverse = None
-    if _responses:
-        from lib.llm.responses_outbound import openai_body_to_responses
-        body, _resp_reverse = openai_body_to_responses(
-            body, profile='codex' if oauth == 'codex' else 'default',
-            stream=False)
-    elif _anthropic:
-        from lib.llm.anthropic_outbound import openai_body_to_anthropic
-        from lib.llm.catpaw_gateway import apply_catpaw_shape, is_catpaw_base_url
-        body = openai_body_to_anthropic(body)
-        if oauth == 'claude':
-            from lib.oauth.outbound import apply_claude_cloak
-            body, _cloak_reverse = apply_claude_cloak(body)
-        elif is_catpaw_base_url(base_url):
-            body = apply_catpaw_shape(body)
+        _reasoning_resolution = dict(body.get('_reasoning_resolution') or {})
+        _cloak_reverse = None
+        _resp_reverse = None
+        if _responses:
+            from lib.llm.responses_outbound import openai_body_to_responses
+            body, _resp_reverse = openai_body_to_responses(
+                body, profile='codex' if oauth == 'codex' else 'default',
+                stream=False)
+        elif _anthropic:
+            from lib.llm.anthropic_outbound import openai_body_to_anthropic
+            from lib.llm.catpaw_gateway import apply_catpaw_shape, is_catpaw_base_url
+            body = openai_body_to_anthropic(body)
+            if oauth == 'claude':
+                from lib.oauth.outbound import apply_claude_cloak
+                body, _cloak_reverse = apply_claude_cloak(body)
+            elif is_catpaw_base_url(base_url):
+                body = apply_catpaw_shape(body)
 
-    if _anthropic:
-        from lib.llm.request import recount_anthropic_input
-        _input_tokens = recount_anthropic_input(
-            body, model=model, provider_id=provider_id)
+        else:
+            from lib.llm.openai_outbound import openai_body_to_chat
+            body = openai_body_to_chat(body)
 
-    body = timed_call('request_seal', seal_request,
-        body, model=model, provider_id=provider_id, protocol=api_protocol,
-        endpoint=url, input_tokens=_input_tokens, semantic_id=_semantic_id)
+        if _anthropic:
+            from lib.llm.request import recount_anthropic_input
+            _input_tokens = recount_anthropic_input(
+                body, model=model, provider_id=provider_id)
+
+        body = timed_call('request_seal', seal_request,
+            body, model=model, provider_id=provider_id, protocol=api_protocol,
+            endpoint=url, input_tokens=_input_tokens, semantic_id=_semantic_id,
+            logical_model=knowledge_model or model)
 
     if log_prefix:
         logger.debug('%s POST %s model=%s msgs=%d', log_prefix, url, model, len(messages))
@@ -242,30 +344,12 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
             body = _budget_scope.prepare(body)
         try:
             trace_id = uuid.uuid4().hex
-            if _anthropic:
-                from lib.llm.anthropic_outbound import anthropic_headers
-                from lib.llm.catpaw_gateway import catpaw_headers, is_catpaw_base_url
-                hdrs = anthropic_headers(api_key, extra_headers)
-                if oauth == 'claude':
-                    hdrs.pop('Authorization', None)
-                elif is_catpaw_base_url(base_url):
-                    hdrs.update(catpaw_headers())
-            else:
-                hdrs = headers()
-                if api_key:
-                    hdrs['Authorization'] = f'Bearer {api_key}'
-                if extra_headers:
-                    hdrs.update(extra_headers)
-            hdrs['M-TraceId'] = trace_id
-            if (_responses and isinstance(body.get('multi_agent'), dict)
-                    and body['multi_agent'].get('enabled')):
-                beta_key = next((key for key in hdrs
-                                 if key.lower() == 'openai-beta'),
-                                'OpenAI-Beta')
-                beta = str(hdrs.get(beta_key) or '')
-                marker = 'responses_multi_agent=v1'
-                if marker not in beta:
-                    hdrs[beta_key] = f'{beta},{marker}' if beta else marker
+            hdrs = _attempt_headers(
+                api_protocol=api_protocol, api_key=api_key,
+                extra_headers=extra_headers, oauth=oauth, base_url=base_url,
+                inference_profile=inference_profile,
+                cache_affinity_key=_cache_affinity_key, trace_id=trace_id,
+                body=body)
             if log_prefix:
                 logger.debug('%s M-TraceId=%s', log_prefix, trace_id)
             try:
@@ -317,7 +401,11 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                 logger.debug('%s resp M-TraceId=%s', log_prefix, resp_trace)
             if resp.status_code != 200:
                 err_msg = f'API HTTP {resp.status_code}: {decode_error_body(resp)[:_ERR_BODY_LIMIT]}'
-                if resp.status_code == 400 and not _limit_retry:
+                # Clamp and repair recursions share the stream loop's
+                # same-request restart bound.
+                _restarts_used = _repair_state.repairs + int(_limit_retry)
+                if (resp.status_code == 400 and not _limit_retry
+                        and _restarts_used < MAX_STREAM_RETRIES):
                     _detected_limit = _parse_token_limit_from_error(err_msg, model)
                     if _detected_limit:
                         _learn_model_limit(model, _detected_limit)
@@ -325,7 +413,9 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                                       'auto-learned and retrying with corrected value',
                                       log_prefix, max_tokens, model, _detected_limit)
                         if _budget_scope is not None:
-                            _budget_scope.settle()
+                            # The status line proves no prompt ran; an unknown
+                            # settlement would fence this retry under a finite budget.
+                            _budget_scope.settle(refused=True)
                         content_r, usage_r = chat(
                             messages, model, max_tokens=_detected_limit,
                             temperature=temperature,
@@ -344,7 +434,9 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                             responses_feature_profile=(
                                 responses_feature_profile or 'compatible'),
                             owner_user_id=owner_user_id, model_budget_admit=model_budget_admit,
-                            abort_check=abort_check)
+                            abort_check=abort_check, _repair_state=_repair_state,
+                            knowledge_model=knowledge_model,
+                            route_output_limit_key=route_output_limit_key)
                         usage_r['_model_limit_learned'] = {
                             'model': model,
                             'old_limit': max_tokens,
@@ -356,9 +448,17 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                                          log_prefix, max_tokens=max_tokens,
                                          credential_present=(
                                              _has_outbound_credential(hdrs)))
+                except REQUEST_REPAIR_ERRORS as error:
+                    mark_status_line_refusal(error)
+                    # The repaired retry runs after this loop so its own
+                    # failures never re-enter this loop's transport handlers.
+                    _repair_reason = repair_rejected_request(
+                        _canonical_body, error, _repair_state,
+                        provider_id=provider_id, log_prefix=log_prefix)
+                    if not _repair_reason or _restarts_used >= MAX_STREAM_RETRIES:
+                        raise
                 except BaseException as error:
-                    from lib.llm.llm_errors import mark_provider_refusal
-                    raise mark_provider_refusal(error)
+                    raise mark_status_line_refusal(error)
             break
         except (RateLimitError, PermissionError_, ContentFilterError, PromptTooLongError, StreamOnlyError, InvalidImageError, EndpointUnreachableError):
             raise
@@ -373,11 +473,35 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                 logger.warning('%s ⚠ Attempt %d/%d failed '
                       '(%s), retrying in %.1fs…', log_prefix, attempt + 1, 1 + retries, type(e).__name__, wait, exc_info=True)
                 timed_call('transport_backoff', abortable_sleep, wait, abort_check)
+            elif timeout is not None and isinstance(e, ResponseReadTimeoutError):
+                logger.warning('%s ✖ Caller read budget of %gs elapsed on all %d attempts '
+                               '(non-stream); surfacing to caller.', log_prefix, timeout, 1 + retries)
+                raise
             else:
                 logger.error('%s ✖ All %d attempts failed (non-stream).', log_prefix, 1 + retries, exc_info=True)
                 raise
 
     assert resp is not None, 'BUG: retry loop exited without assigning resp'
+
+    if _repair_reason:
+        if _budget_scope is not None:
+            _budget_scope.settle(refused=True)
+        return chat(
+            _call_messages, model, max_tokens=max_tokens,
+            temperature=temperature, thinking_enabled=thinking_enabled,
+            thinking_depth=thinking_depth, preset=preset, effort=effort,
+            extra=extra, timeout=timeout, log_prefix=log_prefix,
+            api_key=_call_api_key, base_url=base_url,
+            extra_headers=_call_extra_headers, max_retries=max_retries,
+            _limit_retry=_limit_retry, thinking_format=thinking_format,
+            inference_profile=inference_profile,
+            context_window=context_window, provider_id=provider_id,
+            api_protocol=api_protocol, oauth=oauth, adapter=adapter,
+            responses_feature_profile=responses_feature_profile,
+            owner_user_id=owner_user_id, model_budget_admit=model_budget_admit,
+            abort_check=abort_check, _repair_state=_repair_state,
+            knowledge_model=knowledge_model,
+            route_output_limit_key=route_output_limit_key)
 
     try:
         data = timed_call('response_parse', resp.json)

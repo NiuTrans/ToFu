@@ -541,8 +541,7 @@ fn project_document_with_proof(
         encode_document_projection(document, include_key, value.bytes(), maximum_bytes)?
     };
     if response.len() > maximum_bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "versioned document response exceeds 8 MiB",
         ));
     }
@@ -1047,6 +1046,57 @@ mod tests {
             value_json,
             expected_version: expected,
             updated_at_ms: 1_700_000_000_000,
+        }
+    }
+
+    #[test]
+    fn decoded_value_preserves_strict_json_identity_owner_and_byte_bounds() {
+        let mut database = authority();
+        let key = document_key("decoded");
+        let mut bodies = vec![
+            br#"{"duplicate":1,"duplicate":2,"text":"\ud83d\ude00"}"#.to_vec(),
+            br#"{"$serde_json::private::Number":"12345678901234567890"}"#.to_vec(),
+            b"null".to_vec(), b"[1,true,null]".to_vec(),
+            br#"{"bad":"\ud800"}"#.to_vec(),
+            b"\"\xff\"".to_vec(), b"1e9999".to_vec(), b"{} trailing".to_vec(),
+        ];
+        for depth in [126, 127, 128, 140] {
+            bodies.push(format!("{}null{}", "[".repeat(depth), "]".repeat(depth)).into_bytes());
+        }
+        for body in bodies {
+            let document = Document {
+                namespace: "conversations".into(), key: "decoded".into(),
+                version: 1, updated_at_ms: 1,
+                value: DocumentValue::Inline(body.into()),
+            };
+            let mut transaction = database.begin(TENANT, OWNER).unwrap();
+            database.entity_put(&mut transaction, key.clone(), document.encode().unwrap()).unwrap();
+            database.commit(transaction).unwrap();
+            let mut transaction = database.begin(TENANT, OWNER).unwrap();
+            let original = get_value_with_blob_owner_bounded(&database, &mut transaction,
+                &key, "conversations", "decoded", OWNER, usize::MAX)
+                .map(|raw| raw.map(|raw| serde_json::from_slice::<Value>(&raw).unwrap()));
+            let decoded = get_decoded_value_with_blob_owner_bounded(&database, &mut transaction,
+                &key, "conversations", "decoded", OWNER, usize::MAX);
+            assert_eq!(original.map_err(|error| (error.kind(), error.to_string())),
+                decoded.map_err(|error| (error.kind(), error.to_string())));
+            assert!(get_decoded_value_with_blob_owner_bounded(&database, &mut transaction,
+                &key, "foreign", "decoded", OWNER, usize::MAX).is_err());
+            assert!(get_decoded_value_with_blob_owner_bounded(&database, &mut transaction,
+                &key, "conversations", "foreign", OWNER, usize::MAX).is_err());
+        }
+        let large = serde_json::to_vec(&json!({"text": "owned history".repeat(32768)})).unwrap();
+        let mut transaction = database.begin(TENANT, OWNER).unwrap();
+        put(&database, &mut transaction,
+            put_request("decoded", large.clone(), Some(1))).unwrap();
+        database.commit(transaction).unwrap();
+        let mut transaction = database.begin(TENANT, OWNER).unwrap();
+        assert_eq!(get_decoded_value_with_blob_owner_bounded(&database, &mut transaction,
+            &key, "conversations", "decoded", OWNER, large.len()).unwrap(),
+            Some(serde_json::from_slice::<Value>(&large).unwrap()));
+        for (owner, bound) in [(OWNER + 1, usize::MAX), (OWNER, large.len() - 1)] {
+            assert!(get_decoded_value_with_blob_owner_bounded(&database, &mut transaction,
+                &key, "conversations", "decoded", owner, bound).is_err());
         }
     }
 
@@ -1573,6 +1623,25 @@ pub(crate) fn get_value_with_blob_owner_bounded(
     Ok(Some(value))
 }
 
+/// Scoped counterpart of the existing decoded-document reader. Check both
+/// logical identities before blob I/O and transfer its one strict JSON parse
+/// to consumers instead of materializing and parsing the same value twice.
+pub(crate) fn get_decoded_value_with_blob_owner_bounded(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    key: &EntityKey,
+    namespace: &str,
+    logical_key: &str,
+    blob_owner_user_id: u64,
+    maximum_bytes: usize,
+) -> io::Result<Option<Value>> {
+    let Some(raw) = database.entity_get(transaction, key)? else { return Ok(None); };
+    stored_document_version(&raw, namespace, logical_key)?;
+    materialize_stored_document_value_bounded(database, transaction.tenant_id(),
+        blob_owner_user_id, &raw, namespace, maximum_bytes)
+        .map(|(_, value, _)| Some(value))
+}
+
 pub(crate) fn put(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -1758,6 +1827,13 @@ pub(crate) fn put_with_blob_owner_bounded_returning_envelope(
     Ok((response, stored_envelope))
 }
 
+/// The one placement rule of every writer: values whose complete envelope fits
+/// the inline entity bound stay inline; all others become owner-bound blobs.
+pub(crate) fn stores_inline(namespace: &str, logical_key: &str, value_bytes: usize) -> bool {
+    FIXED_HEADER_BYTES + namespace.len() + logical_key.len() + value_bytes
+        <= MAX_ENTITY_INLINE_VALUE_BYTES
+}
+
 fn stage_document_value(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -1766,9 +1842,7 @@ fn stage_document_value(
     value_json: Vec<u8>,
     blob_owner_user_id: u64,
 ) -> io::Result<DocumentValue<'static>> {
-    let inline_envelope_bytes =
-        FIXED_HEADER_BYTES + namespace.len() + logical_key.len() + value_json.len();
-    if inline_envelope_bytes <= MAX_ENTITY_INLINE_VALUE_BYTES {
+    if stores_inline(namespace, logical_key, value_json.len()) {
         Ok(DocumentValue::Inline(value_json.into()))
     } else {
         let logical_bytes = value_json.len() as u64;
@@ -2085,13 +2159,12 @@ fn list_direction_bounded_with_proof(
         let next_length = output.len().checked_add(additional)
             .ok_or_else(|| invalid_input("versioned document page length overflow"))?;
         if next_length > bounds.maximum_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "versioned document page exceeds requested projection bytes",
             ));
         }
         output.try_reserve(additional)
-            .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory, "cannot allocate complete versioned document page"))?;
+            .map_err(|_| crate::resource_exhaustion::reservation_failure("cannot allocate complete versioned document page"))?;
         if index > 0 {
             output.push(b',');
         }

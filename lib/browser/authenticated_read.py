@@ -62,8 +62,8 @@ class AuthenticatedRead:
             'tokenStorage': self.token_storage, 'tokenKey': self.token_key,
             'tokenHeader': self.token_header, 'tokenPrefix': self.token_prefix,
         }, trusted_read=True)
-        from .adapters import _extract_result
-        return _extract_result(receipt)
+        from .read_pipeline import extract_result
+        return extract_result(receipt)
 
 
 _READ_JSON = r"""

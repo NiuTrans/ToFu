@@ -55,9 +55,14 @@ def put_task(monkeypatch):
     no DB — we assert the in-memory transition (status/finishReason/aborted),
     which is what ``/api/chat/active`` and ``/poll`` read from memory.
     """
-    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+    from tests.support.chat_tasks import (
+        chat_task_fixture_guard as tasks_lock,
+        chat_task_registry as tasks,
+        isolated_reaper_registry,
+    )
     from lib.tasks_pkg.manager import _maintenance
 
+    reaper_tasks = isolated_reaper_registry(monkeypatch)
     # Stub the full finalizer (terminal-floor DB write + conv sync + terminal
     # SSE + queue drain) to a no-op so these unit tests need no DB — they
     # assert the in-memory transition (status/finishReason/aborted), which is
@@ -70,6 +75,7 @@ def put_task(monkeypatch):
     def _put(task):
         with tasks_lock:
             tasks[task['id']] = task
+            reaper_tasks[task['id']] = task
         added.append(task['id'])
         return task['id']
 
@@ -213,6 +219,52 @@ def test_human_waiting_task_not_reaped(reaper_env, put_task):
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# (iv-b) LONG WAITS (owner decision 2026-10-28). A blocking poll and the
+#        run_command background handoff stay silent for their whole wait,
+#        which starts with fresh clocks. reaper_safe_wait_s keeps that wait
+#        short of the reaper at the default and at an operator threshold.
+# ─────────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize('threshold', [None, '600', '3600'])
+def test_longest_silent_tool_wait_is_never_reaped(monkeypatch, put_task, threshold):
+    from lib.tasks_pkg.handlers._background_command import AUTO_BACKGROUND_AFTER_S
+    from lib.tasks_pkg.manager import reaper_safe_wait_s
+    from lib.tools.poll import POLL_WAIT_CAP_S
+    if threshold is None:
+        monkeypatch.delenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', raising=False)
+    else:
+        monkeypatch.setenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', threshold)
+    longest = max(reaper_safe_wait_s(POLL_WAIT_CAP_S),
+                  reaper_safe_wait_s(AUTO_BACKGROUND_AFTER_S))
+    assert longest > 60
+    started = time.time() - longest
+    put_task(_mk_task('long-wait-1', events=[{'type': 'tool_start', 'seq': 0}],
+                      _t_last_event=started, _dispatch_heartbeat=started,
+                      created_at=started))
+    assert _reap() == 0, 'a wait inside its declared bound is not a wedge'
+
+    # NEUTER: the same silence one reaper threshold long IS reaped.
+    threshold_s = int(threshold or 1800)
+    expired = time.time() - threshold_s - 1
+    put_task(_mk_task('long-wait-2', events=[{'type': 'tool_start', 'seq': 0}],
+                      _t_last_event=expired, _dispatch_heartbeat=expired,
+                      created_at=expired))
+    assert _reap() == 1
+    assert _get('long-wait-1')['status'] == 'running'
+
+
+@pytest.mark.parametrize('threshold, expected', [
+    (None, 1500.0), ('3600', 1500.0), ('1200', 900.0), ('200', 60.0), ('0', 1500.0)])
+def test_reaper_safe_wait_bound(monkeypatch, threshold, expected):
+    from lib.tasks_pkg.manager import reaper_safe_wait_s
+    if threshold is None:
+        monkeypatch.delenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', raising=False)
+    else:
+        monkeypatch.setenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', threshold)
+    assert reaper_safe_wait_s(1500) == expected
+    assert reaper_safe_wait_s(0.05) == 0.05
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Guards: not-yet-stale, already-terminal, already-aborted, disabled.
 # ─────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────
@@ -253,6 +305,56 @@ def test_task_waiting_for_storage_ack_not_reaped(reaper_env, put_task):
     assert _reap() == 0
     assert _get('storage-wait-1')['status'] == 'running'
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# (vi) FLOW PARENT BLOCKED ON A CHILD — the 2026-11-01 incident
+#      (conv mvxv0vfzaimb4j). The child sat in one silent 31-minute command;
+#      child events are the only thing that advance the parent's clocks, so
+#      the parent was force-failed on the same tick the reaper correctly
+#      interrupted the child's command, killing the whole turn.
+# ─────────────────────────────────────────────────────────────────────────
+def _flow_parent_and_child(stale, **child_fields):
+    from lib.tasks_pkg.explained_wait import CHILD_INVOCATION_WAIT_KEY
+    child = _mk_task('flow-child-1', _parentTaskId='flow-parent-1',
+                     events=[{'type': 'tool_start', 'seq': 0}],
+                     _t_last_event=stale, _dispatch_heartbeat=stale,
+                     created_at=stale, **child_fields)
+    parent = _mk_task('flow-parent-1', events=[{'type': 'phase', 'seq': 0}],
+                      _t_last_event=stale, _dispatch_heartbeat=stale,
+                      created_at=stale)
+    parent[CHILD_INVOCATION_WAIT_KEY] = {child['id']: child}
+    return parent, child
+
+
+def test_flow_parent_waiting_on_silent_child_command_not_reaped(
+        reaper_env, put_task, monkeypatch):
+    from lib.project_mod import foreground_command_slots
+    stale = time.time() - 400
+    parent, child = _flow_parent_and_child(stale)
+    put_task(parent)
+    put_task(child)
+    monkeypatch.setattr(
+        foreground_command_slots, 'foreground_command_silences',
+        lambda task, now: [(64635, 400.0)] if task is child else [])
+
+    assert _reap() == 0
+    assert _get('flow-parent-1')['status'] == 'running'
+    # The child is still judged on its own: its silent command is interrupted
+    # and the turn continues with partial output.
+    assert child['_cmd_interrupt']['pid'] == 64635
+    assert child['status'] == 'running'
+
+
+def test_flow_parent_of_settled_child_is_judged_by_its_own_clocks(
+        reaper_env, put_task):
+    """NEUTER: once the child is reaped/aborted, a still-blocked parent is a wedge."""
+    stale = time.time() - 400
+    parent, child = _flow_parent_and_child(stale, status='error', aborted=True)
+    put_task(parent)
+
+    assert _reap() == 1
+    assert _get('flow-parent-1')['_abort_reason'] == 'stuck_no_progress'
+
 def test_young_task_not_reaped(reaper_env, put_task):
     now = time.time()
     put_task(_mk_task(
@@ -287,3 +389,118 @@ def test_disabled_when_threshold_zero(monkeypatch, put_task):
     ))
     assert _reap() == 0
     assert _get('wedged-but-disabled-1')['status'] == 'running'
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# (vii) ONE RULE FOR ROOT AND CHILD — the 2026-11-02 incident (conv
+#       mvxih2silbup7r). Sub-agents were judged by a private 900s beacon rule
+#       that killed the whole agent, while the root rule waited 1800s and
+#       interrupted a silent command instead; a 27-minute filesystem freeze
+#       then killed five healthy workers the moment their I/O returned.
+# ─────────────────────────────────────────────────────────────────────────
+def _child_task(task_id, stale, **fields):
+    import threading
+    from lib.tasks_pkg.invocation import InvocationPolicy
+    return _mk_task(
+        task_id, abort_event=threading.Event(), _parentTaskId='swarm-parent',
+        _invocationPolicy=InvocationPolicy.child('swarm-parent'),
+        events=[{'type': 'tool_start', 'seq': 0}],
+        _t_last_event=stale, _dispatch_heartbeat=stale, created_at=stale, **fields)
+
+
+def test_wedged_child_gets_its_own_typed_stall_not_root_finalization(
+        reaper_env, put_task, monkeypatch):
+    from lib.tasks_pkg.manager import _maintenance
+    finalized = []
+    monkeypatch.setattr(_maintenance, '_finalize_reaped_stuck_task', finalized.append)
+    child = _child_task('wedged-child-1', time.time() - 400)
+    put_task(child)
+
+    assert _reap() == 1
+    assert child['_invocationStopReason'] == 'stalled'
+    assert child['aborted'] is True and child['abort_event'].is_set()
+    assert 'stall threshold 300s' in child['error']['detail']
+    assert child['_invocationStopEvidence'] == {
+        'silentSeconds': pytest.approx(400, abs=5), 'stallTimeoutSeconds': 300.0}
+    # Its invocation owner settles it and reports to the parent; a child owns
+    # no conversation Turn to finalize from outside.
+    assert finalized == []
+    assert child['status'] == 'running'
+    assert child.get('_abort_reason') != 'stuck_no_progress'
+
+
+def test_child_silent_command_is_interrupted_like_root(reaper_env, put_task, monkeypatch):
+    from lib.project_mod import foreground_command_slots
+    child = _child_task('child-cmd-1', time.time() - 400)
+    put_task(child)
+    monkeypatch.setattr(
+        foreground_command_slots, 'foreground_command_silences',
+        lambda task, now: [(4242, 400.0)] if task is child else [])
+
+    assert _reap() == 0
+    assert child['_cmd_interrupt']['pid'] == 4242
+    assert child['aborted'] is False and '_invocationStopReason' not in child
+
+
+def test_owner_stop_wins_over_a_concurrent_stall_verdict(reaper_env, put_task):
+    child = _child_task('child-stop-1', time.time() - 400,
+                        _invocationAbortCheck=lambda: True)
+    put_task(child)
+
+    assert _reap() == 0
+    assert child['aborted'] is True
+    assert '_invocationStopReason' not in child
+
+
+def test_stale_filesystem_mount_reaps_nothing(reaper_env, put_task, monkeypatch):
+    import lib.fs_keepalive as fs_keepalive
+    from lib.tasks_pkg.liveness import EXPLAINED_AT_KEY
+    stale = time.time() - 4000
+    root = _mk_task('frozen-root', _t_last_event=stale, _dispatch_heartbeat=stale,
+                    created_at=stale)
+    child = _child_task('frozen-child', stale)
+    put_task(root)
+    put_task(child)
+    monkeypatch.setattr(fs_keepalive, 'filesystem_unresponsive', lambda: True)
+
+    assert _reap() == 0
+    assert root['status'] == child['status'] == 'running'
+    assert not root['aborted'] and not child['aborted']
+    assert root[EXPLAINED_AT_KEY] > stale and child[EXPLAINED_AT_KEY] > stale
+
+
+def test_silence_counts_only_from_filesystem_recovery(reaper_env, put_task, monkeypatch):
+    """The 2026-11-02 kills landed the moment I/O returned: silence spanning
+    the freeze must not count once the mount answers again."""
+    import lib.fs_keepalive as fs_keepalive
+    now = time.time()
+    stale = now - 4000
+    root = _mk_task('thawed-root', _t_last_event=stale, _dispatch_heartbeat=stale,
+                    created_at=stale)
+    child = _child_task('thawed-child', stale)
+    put_task(root)
+    put_task(child)
+    monkeypatch.setattr(fs_keepalive, 'filesystem_resumed_at',
+                        lambda: (time.monotonic() - 60, now - 60))
+    assert _reap() == 0
+    assert not root['aborted'] and not child['aborted']
+
+    # NEUTER: a recovery long ago forgives nothing since.
+    monkeypatch.setattr(fs_keepalive, 'filesystem_resumed_at',
+                        lambda: (time.monotonic() - 3000, now - 3000))
+    assert _reap() == 2
+    assert root['_abort_reason'] == 'stuck_no_progress'
+    assert child['_invocationStopReason'] == 'stalled'
+
+
+def test_silence_restarts_after_an_explained_wait_ends(reaper_env, put_task):
+    """A task that waited 40 minutes on storage is not wedged at the ACK."""
+    stale = time.time() - 2400
+    task = _mk_task('waited-1', _t_last_event=stale, _dispatch_heartbeat=stale,
+                    created_at=stale, _storageWaits={'append': 1})
+    put_task(task)
+
+    assert _reap() == 0
+    task['_storageWaits'] = {}
+    assert _reap() == 0, 'a just-acknowledged wait is not a wedge'
+    assert task['status'] == 'running' and task['aborted'] is False

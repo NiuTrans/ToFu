@@ -107,3 +107,46 @@ def test_fork_does_not_replay_parent_deferred_presentation(tmp_path):
                 worker.join(5)
     assert seen == ['parent']
     assert post_commit._lanes == {}
+
+
+def test_completed_publisher_does_not_borrow_later_listener_latency(tmp_path):
+    first_entered, release_first, second_entered, release_second = (
+        threading.Event() for _ in range(4))
+    seen = []
+
+    def first_callback():
+        first_entered.set()
+        assert release_first.wait(5)
+        seen.append('first')
+
+    def second_callback():
+        second_entered.set()
+        assert release_second.wait(5)
+        seen.append('second')
+
+    first = post_commit.register(str(tmp_path), 'file', first_callback)
+    second = post_commit.register(str(tmp_path), 'file', second_callback)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        earlier = pool.submit(post_commit.publish, [first])
+        later = None
+        try:
+            assert first_entered.wait(5)
+            later = pool.submit(post_commit.publish, [second])
+            with post_commit._condition:
+                assert post_commit._condition.wait_for(lambda: second.ready, timeout=5)
+            release_first.set()
+            assert second_entered.wait(5)
+            # The later notification is still synchronous for its own caller,
+            # but must not extend the completed earlier caller's lifetime.
+            earlier.result(timeout=1)
+            assert not later.done()
+            assert seen == ['first']
+        finally:
+            release_first.set()
+            release_second.set()
+            earlier.result(timeout=5)
+            if later is not None:
+                later.result(timeout=5)
+    assert seen == ['first', 'second']
+    assert first.done and second.done
+    assert post_commit._lanes == {}

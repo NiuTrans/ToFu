@@ -589,6 +589,11 @@ def live_task_replay_response_schema(*, missing: bool = False) -> dict:
             'createdAt': {'type': ['integer', 'null'], 'minimum': 0},
             'updatedAt': {'type': ['integer', 'null'], 'minimum': 0},
             'finishedAt': {'type': ['integer', 'null'], 'minimum': 0},
+            'workerActive': {
+                'type': 'boolean',
+                'description': 'An entered TaskRuntime worker is still executing; '
+                               'independent of the primary task terminal status.',
+            },
             'model': {'type': 'string'},
             'artifact_quality': {'type': 'object'},
             'result': {},

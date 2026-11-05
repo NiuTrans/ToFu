@@ -84,6 +84,7 @@ _CARGO_CANDIDATES = (
     ),
     Path(shutil.which('cargo') or '/nonexistent'),
 )
+_CARGO_BUILD_TIMEOUT_SECONDS = 1800
 
 KIB = 1024
 MIB = 1024 * 1024
@@ -284,18 +285,30 @@ def _resolve_tofudb_binary() -> Path:
         )
         env['PATH'] = f'{cargo.parent}:{env.get("PATH", "")}'
         env['CARGO_TARGET_DIR'] = str(target)
+        from lib.project_mod.process_group import retire_process_group
+
+        # cargo forks rustc, cc and the linker. subprocess.run kills only cargo
+        # on a timeout or an exception raised into the wait (pytest-timeout),
+        # leaving the toolchain running under PID 1; retire the whole session.
+        process = subprocess.Popen(
+            [str(cargo), 'build', '--manifest-path', str(manifest)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=env, start_new_session=True,
+        )
         try:
-            subprocess.run(
-                [str(cargo), 'build', '--manifest-path', str(manifest)],
-                check=True, capture_output=True, text=True, timeout=1800,
-                env=env,
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            process.communicate(timeout=_CARGO_BUILD_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
             pass
-        else:
-            built = target / 'debug/tofu-db'
-            if built.is_file():
-                return built
+        finally:
+            try:
+                retire_process_group(
+                    process.pid, wait_leader=lambda seconds: process.wait(timeout=seconds))
+            finally:
+                process.stdout.close()
+                process.stderr.close()
+        built = target / 'debug/tofu-db'
+        if process.returncode == 0 and built.is_file():
+            return built
     for candidate in (
         _PROJECT_ROOT / 'packages/tofu-db/target-bench/debug/tofu-db',
         _PROJECT_ROOT / 'packages/tofu-db/target-differential/debug/tofu-db',

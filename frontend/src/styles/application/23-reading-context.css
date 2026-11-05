@@ -1,0 +1,366 @@
+/* Context notes: the session-start stack and mid-turn context injections.
+ * Owner: system-note-blocks.ts (typed) and tool_rounds.js (retained), which
+ * share context-note-presentation.ts; tokens: 00-design-tokens.css.
+ *
+ * Owner decision 2026-11-01: the fold read as a wall of repeated labels
+ * ("injected context" / raw reason id / "context appended") over boxed
+ * monospace dumps. It is now one quiet summary that names what was injected,
+ * opening onto a single index card of rows. Each row is a soft glyph sticker
+ * tinted by the block's registry authority, its friendly label, a size and a
+ * one-line glimpse; text opens in place and keeps its exact bytes. Receipts
+ * of acquisition (memory lookups, path moves) sit apart on a dashed card. */
+
+/* ---- Authority tint ----------------------------------------------------
+ * One hue per registry authority, drawn from the theme's own status inks so
+ * every theme keeps its contrast decisions. The sticker, text rail and hover
+ * wash derive from it. */
+.sw-note-group-item,
+.sw-note-receipt {
+  --note-hue: var(--accent);
+}
+.sw-note-group-item[data-authority="platform"] { --note-hue: var(--text-tertiary); }
+.sw-note-group-item[data-authority="project"] { --note-hue: var(--success-text); }
+.sw-note-group-item[data-authority="evidence"],
+.sw-note-receipt { --note-hue: var(--info-text); }
+.sw-note-group-item:is([data-authority="user"], [data-authority="preference"]) { --note-hue: var(--error-text); }
+.sw-note-group-item[data-authority="ambient"] { --note-hue: var(--warning-text); }
+.sw-note-receipt[data-state="failed"] { --note-hue: var(--error-text); }
+.sw-note-receipt[data-state="skipped"] { --note-hue: var(--text-tertiary); }
+
+/* ---- Summary: title, what was injected, how many ---------------------- */
+:is(.sw-note-group, .sw-note-solo) > .sw-inbox-row-header {
+  min-width: 0;
+}
+.conversation-surface :is(.sw-note-group, .sw-note-solo) > .sw-inbox-row-header > .ptool-text {
+  flex: 0 0 auto;
+}
+.sw-note-group-names {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-meta);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.sw-note-group-count {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border: var(--control-edge-inset) solid var(--chip-neutral-border);
+  border-radius: var(--radius-pill);
+  background: var(--chip-neutral-bg);
+  color: var(--chip-neutral-color);
+  font-size: var(--conversation-font-size-caption);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--space-5);
+  white-space: nowrap;
+}
+
+/* The fold is a card of its own, so the generic evidence spine stays out.
+ * Bottom space is padding: a margin would collapse through the block and
+ * open a gap in the tool panel's side rules, which each row draws. */
+.conversation-surface :is(.sw-note-group, .sw-note-solo) > .sw-note-group-body,
+:is(.sw-note-group, .sw-note-solo) > .sw-note-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-1) var(--conversation-process-inset) 0;
+  padding: 0 0 var(--space-2);
+  border: 0;
+}
+:is(.sw-note-group, .sw-note-solo):not([open]) > .sw-note-group-body {
+  display: none;
+}
+
+/* ---- The index card ---------------------------------------------------- */
+.sw-note-list,
+.sw-note-receipts {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border: var(--control-edge-inset) solid var(--turn-process-line);
+  border-radius: var(--conversation-process-radius);
+  background: var(--bg-primary);
+}
+.sw-note-receipts {
+  border-style: dashed;
+  background: transparent;
+}
+.sw-note-list > .sw-note-group-item + .sw-note-group-item,
+.sw-note-receipts > .sw-note-receipt + .sw-note-receipt {
+  border-block-start: var(--control-edge-inset) solid var(--turn-rule);
+}
+
+/* ---- One row: sticker | title · meta / glimpse | caret ------------------ */
+.sw-note-group-item,
+.sw-note-receipt {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sw-note-item-head {
+  display: grid;
+  grid-template-columns: var(--space-6) minmax(0, max-content) minmax(0, 1fr) auto;
+  grid-template-areas:
+    "sticker title meta caret"
+    "sticker peek peek caret";
+  align-items: center;
+  column-gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  line-height: var(--leading-title);
+  list-style: none;
+}
+.sw-note-item-head::-webkit-details-marker {
+  display: none;
+}
+details.sw-note-group-item > .sw-note-item-head {
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+details.sw-note-group-item > .sw-note-item-head:hover {
+  background: color-mix(in srgb, var(--note-hue) 6%, var(--turn-process-hover));
+}
+details.sw-note-group-item > .sw-note-item-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.sw-note-sticker {
+  display: inline-grid;
+  grid-area: sticker;
+  align-self: start;
+  place-items: center;
+  width: var(--space-6);
+  height: var(--space-6);
+  box-sizing: border-box;
+  border: var(--control-edge-inset) solid color-mix(in srgb, var(--note-hue) 28%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--note-hue) 14%, var(--bg-primary));
+  color: color-mix(in srgb, var(--note-hue) 85%, var(--text-primary));
+  transition: transform var(--motion-base) var(--ease-spring);
+}
+.sw-note-sticker svg {
+  width: 58%;
+  height: 58%;
+}
+.sw-note-item-head:hover > .sw-note-sticker {
+  transform: rotate(-8deg) scale(1.08);
+}
+details.sw-note-group-item[open] > .sw-note-item-head > .sw-note-sticker {
+  transform: rotate(-4deg);
+}
+
+.sw-note-item-title {
+  grid-area: title;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: var(--conversation-process-font-size);
+  font-weight: var(--weight-medium);
+}
+.sw-note-item-meta {
+  grid-area: meta;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+  font-variant-numeric: tabular-nums;
+}
+.sw-note-item-peek {
+  grid-area: peek;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-meta);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* A rule file's peek is an absolute path whose tail names the file, so
+ * overflow clips its start. The leading LRM keeps the path's first slash
+ * in place inside the right-to-left box. */
+.sw-note-group-item[data-reason='project_scoped_rules'] > .sw-note-item-head > .sw-note-item-peek {
+  direction: rtl;
+  text-align: left;
+}
+.sw-note-group-item[data-reason='project_scoped_rules'] > .sw-note-item-head > .sw-note-item-peek::before {
+  content: '\200E';
+}
+details.sw-note-group-item[open] > .sw-note-item-head > .sw-note-item-peek {
+  display: none;
+}
+details.sw-note-group-item > .sw-note-item-head::after {
+  content: '';
+  grid-area: caret;
+  box-sizing: border-box;
+  width: var(--space-2);
+  height: var(--space-2);
+  margin-inline: var(--space-1);
+  border-inline-end: var(--control-edge-inset) solid currentColor;
+  border-block-end: var(--control-edge-inset) solid currentColor;
+  color: var(--text-tertiary);
+  transform: rotate(-45deg);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+details.sw-note-group-item[open] > .sw-note-item-head::after {
+  transform: rotate(45deg);
+}
+
+/* ---- Text: exact bytes on a soft tinted slip ---------------------------- */
+.sw-note-item-body {
+  min-width: 0;
+  padding: 0 var(--space-3) var(--space-3) calc(var(--space-3) + var(--space-6) + var(--space-2));
+}
+.sw-note-text {
+  box-sizing: border-box;
+  max-height: min(28rem, 60vh);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 0;
+  border-inline-start: calc(var(--control-edge-inset) * 2) solid color-mix(in srgb, var(--note-hue) 45%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--note-hue) 5%, var(--bg-secondary));
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--conversation-leading-prose, var(--leading-body));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}
+.sw-note-text-markup {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--conversation-font-size-caption);
+}
+.sw-note-text-heading {
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+/* A one-line note is its own glimpse: the whole text, under its title. */
+.sw-note-text.sw-note-text--inline {
+  grid-area: peek;
+  max-height: none;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  line-height: var(--leading-title);
+}
+
+/* ---- Acquisition facts: captions and recalled items -------------------- */
+.sw-note-caption {
+  margin: 0 0 var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+}
+.sw-note-receipt > .sw-note-item-head {
+  grid-template-areas:
+    "sticker title title caret"
+    "sticker meta meta caret";
+}
+.sw-note-receipt > .sw-note-item-head > .sw-note-item-meta {
+  white-space: normal;
+}
+.sw-note-receipt[data-state="failed"] .sw-note-item-title {
+  color: var(--error-text);
+}
+.sw-note-receipt[data-state="running"] .sw-note-sticker {
+  animation: sw-note-sticker-breathe calc(var(--motion-slow) * 5) var(--ease-standard) infinite alternate;
+}
+@keyframes sw-note-sticker-breathe {
+  from { transform: scale(0.92); opacity: 0.65; }
+  to { transform: scale(1.04); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sw-note-receipt[data-state="running"] .sw-note-sticker { animation: none; }
+  .sw-note-item-head:hover > .sw-note-sticker,
+  details.sw-note-group-item[open] > .sw-note-item-head > .sw-note-sticker { transform: none; }
+}
+
+:is(.sw-note-item-body, .sw-note-receipt) :is(.mp-mem-list, .rc-list) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+:is(.sw-note-item-body, .sw-note-receipt) .mp-mem-list > li {
+  position: relative;
+  padding: var(--space-1) 0 var(--space-1) var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--leading-title);
+}
+:is(.sw-note-item-body, .sw-note-receipt) .mp-mem-list > li::before {
+  content: '';
+  position: absolute;
+  inset-inline-start: var(--space-1);
+  top: calc(var(--space-2) + var(--control-edge-inset));
+  width: var(--space-1);
+  height: var(--space-1);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--note-hue) 60%, transparent);
+}
+.sw-note-receipt > .sw-note-item-body {
+  padding-block-start: 0;
+}
+:is(.sw-note-item-body, .sw-note-receipt) .mp-mem-name {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+}
+:is(.sw-note-item-body, .sw-note-receipt) .mp-mem-scope {
+  margin-inline-start: var(--space-1);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--chip-neutral-bg);
+  color: var(--chip-neutral-color);
+  font-size: var(--conversation-font-size-caption);
+}
+:is(.sw-note-item-body, .sw-note-receipt) .mp-mem-desc {
+  margin-block-start: var(--space-1);
+  color: var(--text-secondary);
+}
+:is(.sw-note-item-body, .sw-note-receipt) code {
+  font-family: var(--font-mono);
+  font-size: var(--conversation-font-size-caption);
+  overflow-wrap: anywhere;
+}
+:is(.sw-note-item-body, .sw-note-receipt) :is(.rc-conv-link, .pl-seg-undo) {
+  color: var(--accent);
+}
+:is(.sw-note-item-body, .sw-note-receipt) .mp-snippet {
+  max-height: min(16rem, 40vh);
+  margin: 0;
+  padding: var(--space-2);
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--conversation-font-size-caption);
+  white-space: pre-wrap;
+}
+
+/* ---- Phones: one summary line, glimpses keep their single line ---------- */
+@media (max-width: 600px) {
+  .conversation-surface :is(.sw-note-group, .sw-note-solo) > .sw-inbox-row-header {
+    flex-wrap: nowrap;
+  }
+  .conversation-surface :is(.sw-note-group, .sw-note-solo) > .sw-inbox-row-header > .ptool-text {
+    flex-basis: auto;
+  }
+  .conversation-surface :is(.sw-note-group, .sw-note-solo) > .sw-inbox-row-header > :is(.sw-note-group-names, .sw-note-group-count) {
+    order: 0;
+    margin-inline-start: 0;
+  }
+  .sw-note-item-head {
+    padding-inline: var(--space-2);
+  }
+  .sw-note-item-body {
+    padding-inline: var(--space-2);
+  }
+}

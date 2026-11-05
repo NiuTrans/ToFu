@@ -110,6 +110,31 @@ def test_relay_prices_never_become_official_list_prices(monkeypatch):
     assert bundle['offerings'][0]['actual_pricing']['output'] == 7
 
 
+def test_each_provider_price_stays_on_its_own_offering(monkeypatch):
+    """Migration normalizes Offering order, so a price binds through its
+    recipe's own wire ids, never by position: positional binding put 232 of
+    236 OpenRouter feed prices on another model's Offering."""
+    import lib.provider.provider_template_recipes as recipes
+    rows = [{'model_id': f'openai/gpt-test-price-{index}', 'capabilities': ['text'],
+             'pricing': {'input': index + 1, 'output': 10 * (index + 1), 'currency': 'USD'}}
+            for index in range(6)]
+    rows.append({'model_id': 'gpt-test-price-pool', 'request_ids': ['vendor/gpt-test-price-pool-v2'],
+                 'capabilities': ['text'],
+                 'pricing': {'input': 70, 'output': 700, 'currency': 'USD'}})
+    template = normalize_provider_template(_recipe(offering_recipes=rows))
+    monkeypatch.setattr(recipes, 'load_provider_templates', lambda: [template])
+
+    bundle = compile_provider_template_bundle('relay')
+
+    offerings = {row['offering_id']: row for row in bundle['offerings']}
+    priced = {row['wire_model_id']: (offerings[row['offering_id']]['actual_pricing']['input'],
+                                     offerings[row['offering_id']]['actual_pricing']['output'])
+              for row in bundle['deployments']}
+    assert priced == {**{f'openai/gpt-test-price-{index}': (index + 1, 10 * (index + 1))
+                         for index in range(6)},
+                      'vendor/gpt-test-price-pool-v2': (70, 700)}
+
+
 def test_official_operator_hosting_other_creators_cannot_set_their_list_prices(monkeypatch):
     import lib.provider.provider_template_recipes as recipes
     price = {'input': 2, 'output': 5, 'currency': 'USD'}
@@ -201,9 +226,9 @@ def test_bundled_json_templates_use_recipe_authority():
 
 
 def test_settings_templates_share_bootstrap_builtins():
-    """Both pickers merge the same file-backed catalog (lib/model_info/data
-    then static/provider_templates), so the bootstrap installer and the
-    Settings picker must offer identical providers with identical models."""
+    """Both pickers merge the same file-backed catalog tiers (docs/SITE_PACKS.md
+    §4), so the bootstrap installer and the Settings picker must offer
+    identical providers with identical models."""
     from bootstrap_pkg.providers import (
         _load_provider_templates as bootstrap_load,
     )
@@ -229,6 +254,43 @@ def test_settings_templates_share_bootstrap_builtins():
     assert anthropic['offering_recipes'][0]['model_id'] == 'claude-opus-5-5'
 
 
+def test_user_tier_drop_in_reaches_both_pickers(monkeypatch, tmp_path):
+    """<data>/config/provider_templates is the no-fork way to add an unbundled
+    provider (pip and desktop installs cannot edit package data), so the
+    first-run /setup picker must offer a drop-in exactly like Settings,
+    including replacing a package template of the same key."""
+    import bootstrap_pkg.providers as bootstrap_providers
+    import lib.config_dir
+    from lib.provider.provider_template_recipes import load_provider_templates
+    from runtime_path_policy import resolve_runtime_base
+
+    # Each loader resolves the tier through its own path policy.
+    monkeypatch.setenv('TOFU_DATA_DIR', str(tmp_path / 'data'))
+    config_dir = Path(resolve_runtime_base()) / 'data' / 'config'
+    monkeypatch.setattr(lib.config_dir, 'config_path',
+                        lambda *parts: str(config_dir.joinpath(*parts)))
+    user_tier = config_dir / 'provider_templates'
+    user_tier.mkdir(parents=True)
+    (user_tier / 'drop-in.json').write_text(json.dumps(_recipe(
+        key='drop-in', name='Drop-in Relay', catalog_mode='discovery',
+        offering_recipes=[])), encoding='utf-8')
+    (user_tier / 'featherless.json').write_text(json.dumps(_recipe(
+        key='featherless', name='Featherless (user tier)',
+        base_url='https://api.featherless.ai/v1')), encoding='utf-8')
+
+    settings_rows = {row['key']: row for row in load_provider_templates()}
+    bootstrap_rows = {
+        row['key']: row for row in bootstrap_providers._load_provider_templates()}
+
+    for rows in (settings_rows, bootstrap_rows):
+        assert rows['drop-in']['catalog_mode'] == 'discovery'
+        assert rows['featherless']['name'] == 'Featherless (user tier)'
+    assert bootstrap_rows['drop-in']['models'] == []
+    assert [m['model_id'] for m in bootstrap_rows['featherless']['models']] == [
+        r['model_id'] for r in settings_rows['featherless']['offering_recipes']
+    ] == ['shared-model']
+
+
 def test_static_template_overrides_builtin_recipe_list():
     from lib.provider.provider_template_recipes import load_provider_templates
 
@@ -236,8 +298,11 @@ def test_static_template_overrides_builtin_recipe_list():
     static_glm = json.loads((TEMPLATES / 'glm.json').read_text(encoding='utf-8'))
     assert len(templates['glm']['offering_recipes']) == len(
         static_glm['offering_recipes'])
-    # 20 recipes since gpt-6.1-sol joined the OpenAI template.
-    assert len(templates['openai']['offering_recipes']) == 20
+    # Without a static override the package catalog is served unchanged.
+    package_openai = json.loads(
+        (ROOT / 'lib' / 'model_info' / 'data' / 'openai.json').read_text(encoding='utf-8'))
+    assert len(templates['openai']['offering_recipes']) == len(
+        package_openai['offering_recipes'])
 
 
 def test_loader_passes_static_overrides_to_the_feed_exclusion(
@@ -290,28 +355,50 @@ def test_every_shared_builtin_compiles_an_onboarding_bundle():
         assert bundle['connections'][0]['base_url'], row['key']
 
 
-def test_meituan_v41_identity_keeps_its_v4_wire_names():
+def test_yourprovider_flash_wire_names_follow_their_deployment_checkpoint():
+    """A deployment's checkpoint, not its wire spelling, selects its Model.
+
+    The gateway's DeepSeek V4.1 Flash 1017 snapshot keeps the V4-spelled
+    YourProvider deployment confirmed for it, while the V4 cloud mirrors stay on
+    the separate V4 Flash Model (docs/MODEL_REGISTRATION.md).
+    """
     bundles = {
         'deepseek': compile_provider_template_bundle('deepseek', selected_model_ids=['deepseek-v4-flash']),
-        'meituan': compile_provider_template_bundle('meituan', selected_model_ids=['deepseek-v4.1-flash']),
+        'yourprovider_1017': compile_provider_template_bundle(
+            'yourprovider', selected_model_ids=['deepseek-v4.1-flash-1017']),
+        'yourprovider_v4': compile_provider_template_bundle(
+            'yourprovider', selected_model_ids=['deepseek-v4-flash']),
     }
     assert bundles['deepseek']['offerings'][0]['model'] == {
         'creator_id': 'deepseek', 'model_id': 'deepseek-v4-flash'}
-    assert bundles['meituan']['offerings'][0]['model'] == {
-        'creator_id': 'deepseek', 'model_id': 'deepseek-v4.1-flash'}
+    assert bundles['yourprovider_1017']['offerings'][0]['model'] == {
+        'creator_id': 'deepseek', 'model_id': 'deepseek-v4.1-flash-1017'}
+    assert bundles['yourprovider_v4']['offerings'][0]['model'] == {
+        'creator_id': 'deepseek', 'model_id': 'deepseek-v4-flash'}
 
     assert [row['wire_model_id'] for row in bundles['deepseek']['deployments']] == [
         'deepseek-v4-flash',
     ]
     assert sorted(
-        row['wire_model_id'] for row in bundles['meituan']['deployments']
+        row['wire_model_id'] for row in bundles['yourprovider_1017']['deployments']
     ) == [
         'deepseek-flash',
+        'deepseek-v4-flash-yourprovider',
+        'deepseek-v4.1-flash',
+    ]
+    assert sorted(
+        row['wire_model_id'] for row in bundles['yourprovider_v4']['deployments']
+    ) == [
         'deepseek-v4-flash',
+        'deepseek-v4-flash-azure',
+        'deepseek-v4-flash-baidu',
         'deepseek-v4-flash-huawei',
-        'deepseek-v4-flash-meituan',
         'deepseek-v4-flash-tencent',
     ]
+    # The rolling request name is a deployment, never a template Model ID.
+    with pytest.raises(ProviderTemplateRecipeError, match='deepseek-v4.1-flash'):
+        compile_provider_template_bundle(
+            'yourprovider', selected_model_ids=['deepseek-v4.1-flash'])
 
 
 def test_compiled_offerings_follow_their_model_authority():
@@ -333,7 +420,7 @@ def test_compiled_offerings_follow_their_model_authority():
 def test_bundle_model_rows_keep_the_recipe_context_window():
     # Provider context is constrained only by the resolved Model authority.
     bundle = compile_provider_template_bundle(
-        'meituan', selected_model_ids=['Doubao-Seed-1.6'])
+        'yourprovider', selected_model_ids=['Doubao-Seed-1.6'])
     model = next(
         row for row in bundle['models'] if row['model_id'] == 'Doubao-Seed-1.6')
     assert model['context_window'] == 256000
@@ -367,9 +454,10 @@ def test_template_add_survives_registry_rows_with_different_pricing_tiers():
     """
     from lib.model_routing.domain import empty_document, normalize_document
     from lib.model_routing.world_catalog import _world_catalog_rows
+    from lib.provider.provider_template_recipes import load_provider_templates
 
     bundle = compile_provider_template_bundle('tencent')
-    creators, models = _world_catalog_rows()
+    creators, models = _world_catalog_rows(load_provider_templates())
     document = empty_document()
     document['creators'] = [dict(row) for row in creators]
     document['models'] = [dict(row) for row in models]

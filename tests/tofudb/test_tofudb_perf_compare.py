@@ -10,6 +10,94 @@ from scripts.tofudb_perf_compare import LegacyEngine
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.parametrize('failed_family,failed_round', [
+    ('record.get', 2), ('task_results.recovery_pending', 1),
+])
+def test_reopen_read_failure_invalidates_measurement(failed_family, failed_round):
+    """A failed recovery must not reuse an earlier timing or masquerade as unsupported."""
+    import scripts.tofudb_perf_compare as bench
+
+    class Engine:
+        name = 'tofudb'
+        round = 0
+
+        def restart_cycle(self):
+            self.round += 1
+            return 2.0, 3.0
+
+        def execute(self, operation, payload, command):
+            if operation == failed_family and self.round == failed_round:
+                raise bench.BenchError('recovery read failed: injected I/O error')
+            return {'value': bench._record_value(0)} if operation == 'record.get' else {}
+
+    phase = next(row for row in bench._workloads(bench._SCALES['tiny'], 11)
+                 if row[0] == 'maintenance_reopen')
+    with pytest.raises(bench.BenchError, match='recovery read failed'):
+        phase[4](Engine(), None, None, 2)
+
+
+@pytest.mark.parametrize('missing_family,missing_round,valid_gap', [
+    ('credential.list', 1, True),
+    ('credential.list', 2, False),
+    ('record.get', 1, False),
+])
+def test_reopen_only_allows_explicit_stable_optional_capability_gaps(
+        missing_family, missing_round, valid_gap):
+    import scripts.tofudb_perf_compare as bench
+
+    class Engine:
+        name = 'narrow-reference'
+        round = 0
+
+        def restart_cycle(self):
+            self.round += 1
+            return 2.0, 3.0
+
+        def execute(self, operation, payload, command):
+            if operation == missing_family and self.round == missing_round:
+                raise bench.UnsupportedBenchmarkOperation(f'unsupported operation {operation}')
+            return {'value': bench._record_value(0)} if operation == 'record.get' else {}
+
+    phase = next(row for row in bench._workloads(bench._SCALES['tiny'], 11)
+                 if row[0] == 'maintenance_reopen')
+    if not valid_gap:
+        with pytest.raises(bench.UnsupportedBenchmarkOperation, match='unsupported operation'):
+            phase[4](Engine(), None, None, 2)
+        return
+    result = phase[4](Engine(), None, None, 2)
+    assert result['rounds'] == result['first_read']['iterations'] == 2
+    assert result['cold_read']['record.get']['iterations'] == 2
+    assert set(result['cold_read_unsupported']) == {missing_family}
+    assert missing_family not in result['cold_read']
+    assert missing_family not in result['warm_read']
+
+
+@pytest.mark.parametrize('read_number', [1, 2])
+@pytest.mark.parametrize('bad_value', [None, {'n': 0}])
+def test_reopen_requires_exact_data_before_accepting_read_timings(read_number, bad_value):
+    import scripts.tofudb_perf_compare as bench
+
+    class Engine:
+        name = 'tofudb'
+        reads = 0
+
+        def restart_cycle(self):
+            return 2.0, 3.0
+
+        def execute(self, operation, payload, command):
+            if operation == 'record.get':
+                self.reads += 1
+                if self.reads == read_number:
+                    return None if bad_value is None else {'value': bad_value}
+                return {'value': bench._record_value(0)}
+            return {}
+
+    phase = next(row for row in bench._workloads(bench._SCALES['tiny'], 11)
+                 if row[0] == 'maintenance_reopen')
+    with pytest.raises(bench.BenchError, match='missing or changed data'):
+        phase[4](Engine(), None, None, 1)
+
+
 def test_resource_observation_distinguishes_requested_zero_from_effective_budget(monkeypatch, tmp_path):
     import scripts.tofudb_perf_compare as bench
 
@@ -141,14 +229,20 @@ def test_report_exit_status_preserves_incomplete_comparison(
     import scripts.tofudb_perf_compare as bench
 
     stopped = []
+    retained = []
 
     class Engine:
+        log_path = str(tmp_path / 'daemon.log')
+
         def __init__(self, *args, **kwargs):
             pass
 
         def start(self):
             if failure == 'startup':
                 raise bench.BenchError('startup failed')
+
+        def retain_logs(self):
+            retained.append(True)
 
         def stop(self):
             stopped.append(True)
@@ -170,8 +264,12 @@ def test_report_exit_status_preserves_incomplete_comparison(
     report = json.loads(output.read_text())
     assert bool(report['skipped']) == (failure == 'startup')
     assert bool(stopped) == (failure != 'startup')
+    # A reported daemon log must survive the engine's stop().
+    assert bool(retained) == (failure == 'workload')
     if failure == 'workload':
-        assert 'request failed' in report['workloads']['example']['sqlite']['error']
+        error = report['workloads']['example']['sqlite']['error']
+        assert 'request failed' in error
+        assert f"daemon log: {tmp_path / 'daemon.log'}" in error
 
 
 @pytest.fixture
@@ -415,6 +513,134 @@ def test_tofudb_init_failure_cleans_disposable_directories(monkeypatch, tmp_path
     assert all(not path.exists() for path in engine._dirs)
 
 
+@pytest.fixture
+def native_backup_layout(monkeypatch, tmp_path):
+    """Model the native sibling-backup contract at the external launch boundary."""
+    import scripts.tofudb_perf_compare as bench
+    from serverctl_pkg import native_engine
+
+    temporary = tmp_path / 'temporary'
+    temporary.mkdir()
+    monkeypatch.setattr(bench.tempfile, 'tempdir', str(temporary))
+    monkeypatch.setattr(bench.TofuDbEngine, '_pin_binary', lambda self: None)
+    monkeypatch.setattr(native_engine, 'source_fingerprint', lambda root: 'a' * 64)
+    monkeypatch.setattr(native_engine, 'build_identity', lambda binary: {
+        'format': 'tofu-db-build.v1', 'source_sha256': 'a' * 64})
+    monkeypatch.setattr(bench.subprocess, 'run', lambda *args, **kwargs: None)
+    state = SimpleNamespace(bench=bench, temporary=temporary, launches=[], fail=False)
+
+    def launch(engine):
+        backup = engine._data_dir.parent / 'backups/tofudb'
+        backup.mkdir(parents=True, exist_ok=True)
+        marker = backup / 'source-authority.probe'
+        marker.write_text(str(engine._data_dir))
+        state.launches.append(marker)
+        if state.fail:
+            raise RuntimeError('launch failed after backup preparation')
+
+    monkeypatch.setattr(bench.TofuDbEngine, '_launch_serve', launch)
+    return state
+
+
+@pytest.mark.parametrize('explicit_parent', [False, True])
+def test_native_benchmark_backups_are_private_and_cleaned(native_backup_layout, tmp_path,
+                                                         explicit_parent):
+    state = native_backup_layout
+    parent = tmp_path / 'caller' if explicit_parent else state.temporary
+    parent.mkdir(exist_ok=True)
+    foreign = parent / 'backups/tofudb/foreign.probe'
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(b'other authority backup')
+    engines = [state.bench.TofuDbEngine(
+        tmp_path / 'unused-binary', authority_dir_parent=parent if explicit_parent else None)
+        for _ in range(2)]
+    try:
+        for engine in engines:
+            engine.start()
+        assert len(set(state.launches)) == 2, 'independent authorities share backup state'
+        for engine, marker in zip(engines, state.launches):
+            assert marker.read_text() == str(engine._data_dir)
+            assert any(marker.is_relative_to(path) for path in engine._dirs)
+            assert not marker.is_relative_to(foreign.parent)
+    finally:
+        for engine in reversed(engines):
+            engine.stop()
+    assert all(not path.exists() for path in state.launches)
+    assert foreign.read_bytes() == b'other authority backup'
+    assert set(parent.iterdir()) == {parent / 'backups'}
+    assert set(foreign.parent.iterdir()) == {foreign}
+
+
+def test_native_failed_launch_cleans_only_its_backup(native_backup_layout, tmp_path):
+    state = native_backup_layout
+    foreign = state.temporary / 'backups/tofudb/foreign.probe'
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(b'other authority backup')
+    state.fail = True
+    engine = state.bench.TofuDbEngine(tmp_path / 'unused-binary')
+    with pytest.raises(RuntimeError, match='launch failed after backup preparation'):
+        engine.start()
+    assert len(state.launches) == 1
+    assert not state.launches[0].exists()
+    assert foreign.read_bytes() == b'other authority backup'
+    assert set(state.temporary.iterdir()) == {state.temporary / 'backups'}
+    assert set(foreign.parent.iterdir()) == {foreign}
+
+
+_LOGGING_DAEMON = '''#!/bin/sh
+if [ "$1" = init ]; then exit 0; fi
+echo 'daemon diagnostic' >&2
+echo '{{"port": 1, "walDurability": "{durability}"}}'
+cat >/dev/null
+exit {status}
+'''
+
+
+@pytest.mark.parametrize('outcome', ['clean', 'unclean_exit', 'startup_failure', 'reported_failure'])
+def test_daemon_logs_are_removed_after_clean_runs_and_kept_after_failures(
+        monkeypatch, tmp_path, capsys, outcome):
+    from serverctl_pkg import native_engine
+    import scripts.tofudb_perf_compare as bench
+
+    monkeypatch.setattr(native_engine, 'source_fingerprint', lambda root: 'a' * 64)
+    monkeypatch.setattr(native_engine, 'build_identity', lambda binary: {
+        'format': 'tofu-db-build.v1', 'source_sha256': 'a' * 64})
+    monkeypatch.setattr(bench, 'StorageV2Session',
+                        lambda *args, **kwargs: SimpleNamespace(close=lambda: None))
+    temporary = tmp_path / 'tmp'
+    temporary.mkdir()
+    monkeypatch.setattr(bench.tempfile, 'tempdir', str(temporary))
+    # A log another session leaked under the old naming scheme is not ours.
+    foreign = temporary / 'tofudb-perf-serve-foreign.log'
+    foreign.write_text('another session')
+    binary = tmp_path / 'tofu-db'
+    binary.write_text(_LOGGING_DAEMON.format(
+        durability='normal' if outcome == 'startup_failure' else 'strict',
+        status=3 if outcome == 'unclean_exit' else 0))
+    binary.chmod(0o755)
+    engine = bench.TofuDbEngine(binary, client_mode='wire')
+    if outcome == 'startup_failure':
+        with pytest.raises(bench.BenchError, match='walDurability'):
+            engine.start()
+    else:
+        engine.start()
+        if outcome == 'reported_failure':
+            engine.retain_logs()
+        engine.stop()
+    remaining = set(temporary.iterdir())
+    report = capsys.readouterr().err
+    if outcome == 'clean':
+        assert remaining == {foreign}
+        assert engine.log_path is None
+        assert 'logs retained' not in report
+        return
+    (log_dir,) = remaining - {foreign}
+    assert f'tofu-db serve logs retained: {log_dir}' in report
+    assert Path(engine.log_path).parent == log_dir
+    assert Path(engine.log_path).read_text() == 'daemon diagnostic\n'
+    assert foreign.read_text() == 'another session'
+
+
 def test_measurement_metadata_identifies_exact_binary(tmp_path, monkeypatch):
     import hashlib
     import scripts.tofudb_perf_compare as bench
@@ -437,7 +663,7 @@ def test_measurement_metadata_identifies_exact_binary(tmp_path, monkeypatch):
 
     assert metadata['tofudb_wire_client']['source_sha256'] == hashlib.sha256(b'wire-client-build').hexdigest()
     assert metadata['tofudb_wire_client']['crc32c'] in {'compiled', 'python'}
-    assert metadata['tofudb_wire_client']['large_text_json'] in {'orjson-compatible-subset', 'stdlib'}
+    assert metadata['tofudb_wire_client']['large_text_json'] in {'orjson-exact-digit-scan', 'stdlib'}
 
 
 def test_search_measurement_includes_empty_continuations_and_rejects_stalled_cursor():
@@ -977,7 +1203,7 @@ def test_rawsqlite_engine_operation_contract_and_reopen_control(tmp_path):
         assert engine.execute('credential.list', {
             'owner_user_id': 11, 'tenant_id': ''}, False) == []
 
-        with pytest.raises(bench.BenchError, match='unsupported operation'):
+        with pytest.raises(bench.UnsupportedBenchmarkOperation, match='unsupported operation'):
             engine.execute('queue.claim', {}, True)
         with pytest.raises(bench.BenchError, match='database_conflict'):
             engine.execute('conversation.create', {

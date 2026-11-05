@@ -22,8 +22,9 @@ def context(context_fixture):
     c.fail_cancels, c.cancel_ack_lost, c.fail_mail = set(), set(), set()
     c.signal_only = False
     c.repo.attempt_get = lambda identity, *, user_id: deepcopy(c.attempts.get(identity))
-    def cancel(identity, owner):
+    def cancel(identity, owner, *, provenance):
         assert owner == 7
+        assert 'scope change' in provenance
         c.cancel_calls.append(identity)
         if identity in c.fail_cancels:
             raise RuntimeError('injected cancellation unavailable')
@@ -80,13 +81,13 @@ def test_atomic_revocation_originals_results_and_unrelated_task_untouched(contex
     assert all(n['messageEvidence']['state'] == 'submitted' and n['messageEvidence']['decision'] is None for n in view['notifications'])
     validate(view, 'view')
     mailbox = ProjectMailbox(7, '/project', 'recipient', client=c.client)
-    original = mailbox.load()[0]['messages'][0]
+    original = mailbox.read()[0]
     mailbox.confirm([original['id']], 'task', 1, turn_id='turn-a', attempt_id='attempt-a')
     mailbox.consider({'message_id': original['id'], 'expected_revision': 2, 'decision': 'accepted', 'note': 'Observed'}, 'task')
     refreshed = c.app.view(view['changeId'], principal=c.principal)
     n = next(n for n in refreshed['notifications'] if n['recipientId'] == 'recipient')
     assert n['messageEvidence'] == {'id': original['id'], 'revision': 3, 'state': 'input_confirmed', 'decision': 'accepted'}
-    assert mailbox.load()[0]['messages'][0]['content'] == original['content']
+    assert mailbox.read()[0]['content'] == original['content']
 
 def test_worker_genuine_human_source(context):
     c = context
@@ -160,7 +161,7 @@ def test_partial_cancel_failure_is_durable_and_reconcilable(context):
     assert c.app.retry(view['changeId'], principal=c.principal)['stopConfirmed']
     assert c.cancel_calls == ['attempt-a', 'attempt-b', 'attempt-b']
     assert all(r['grant']['revision'] == 2 and r['grant']['revoked'] for r in c.repo.list())
-    assert len(ProjectMailbox(7, '/project', 'recipient', client=c.client).load()[0]['messages']) == 1
+    assert len(ProjectMailbox(7, '/project', 'recipient', client=c.client).read()) == 1
 
 def test_signal_is_not_stop_and_reads_are_passive(context):
     c = context
@@ -209,7 +210,7 @@ def test_notification_failure_rebound_and_ack_replay(context):
     assert view['notifications'][0]['state'] == 'submitted'
     assert view['notifications'][0]['messageEvidence']['decision'] is None
     c.app.retry(view['changeId'], principal=c.principal)
-    assert len(ProjectMailbox(7, '/project', 'recipient', client=c.client).load()[0]['messages']) == 1
+    assert len(ProjectMailbox(7, '/project', 'recipient', client=c.client).read()) == 1
     assert not c.cancel_calls
 
 @pytest.mark.parametrize('field,value', [('user_id', True), ('turnId', 'wrong'), ('conversationId', 'coordinator'), ('status', 'unknown')])
@@ -362,7 +363,8 @@ def test_actual_cancel_owner_uses_targeted_withdrawal_not_conversation_stop(monk
     from lib.conversation_sync.runtime import conversation_turn_commands
     result = conversation_turn_commands.abort_project_attempt('exact', 7)
     assert result.value == {'attemptId': 'exact', 'status': 'abort_signaled'}
-    assert calls == [('exact', {'user_id': 7, 'withdraw_dispatch': False})]
+    assert calls == [('exact', {'user_id': 7, 'withdraw_dispatch': False,
+                                'abort_reason': 'dispatch_grant_revoked', 'abort_detail': ''})]
 
 
 def test_command_lookup_and_replay_do_not_renew_scope(context):
@@ -403,4 +405,8 @@ def test_default_application_cancel_port_uses_existing_runtime_owner(context, mo
         return {'attemptId': attempt_id, 'status': 'abort_signaled'}
     monkeypatch.setattr(command_service, 'abort_attempt', abort)
     assert create(c, request(c, a))['stopConfirmed']
-    assert calls == [('attempt-a', {'user_id': 7, 'withdraw_dispatch': False})]
+    assert len(calls) == 1 and calls[0][0] == 'attempt-a'
+    detail = calls[0][1].pop('abort_detail')
+    assert calls[0][1] == {'user_id': 7, 'withdraw_dispatch': False,
+                           'abort_reason': 'dispatch_grant_revoked'}
+    assert 'scope change' in detail and a['id'] in detail

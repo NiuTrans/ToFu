@@ -28,22 +28,30 @@ class SSELineFramer:
 
     def feed(self, chunk: bytes):
         start = 0
+        chunk_size = len(chunk)
+        view = memoryview(chunk)
         if self.skip_lf and chunk:
             start = int(chunk[0] == 10)
             self.skip_lf = False
         cr = chunk.find(b'\r', start)
         lf = chunk.find(b'\n', start)
-        while start < len(chunk):
-            positions = [position for position in (cr, lf) if position >= 0]
-            end = min(positions) if positions else len(chunk)
+        while start < chunk_size:
+            if cr < 0:
+                end = lf
+            elif lf < 0:
+                end = cr
+            else:
+                end = min(cr, lf)
+            if end < 0:
+                end = chunk_size
             additional = end - start
             if len(self.pending) + additional > SDK_SSE_MAX_LINE_BYTES:
                 raise SSELimitError('SSE line exceeded the SDK byte budget')
-            self.event_bytes += additional + int(end < len(chunk))
+            self.event_bytes += additional + int(end < chunk_size)
             if self.event_bytes > SDK_SSE_MAX_EVENT_BYTES:
                 raise SSELimitError('SSE event exceeded the SDK byte budget')
-            self.pending.extend(memoryview(chunk)[start:end])
-            if end == len(chunk):
+            self.pending.extend(view[start:end])
+            if end == chunk_size:
                 return
             empty = not self.pending
             line = self._line()
@@ -51,9 +59,9 @@ class SSELineFramer:
                 self.event_bytes = 0
             start = end + 1
             if chunk[end] == 13:
-                if start < len(chunk) and chunk[start] == 10:
+                if start < chunk_size and chunk[start] == 10:
                     start += 1
-                elif start == len(chunk):
+                elif start == chunk_size:
                     self.skip_lf = True
             if 0 <= cr < start:
                 cr = chunk.find(b'\r', start)

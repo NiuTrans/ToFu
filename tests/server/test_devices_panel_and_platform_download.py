@@ -67,6 +67,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -87,19 +88,8 @@ LC_JS = Path(runtime_section_path('local-control.js'))
 
 def _node() -> str:
     exe = shutil.which("node")
-    if not exe:
-        pytest.skip("node not available")
+    require_node_modules('jsdom', 'esbuild')
     return exe
-
-
-@functools.lru_cache(maxsize=1)
-def _has_jsdom() -> bool:
-    try:
-        subprocess.run([_node(), "-e", "require('jsdom')"], cwd=ROOT,
-                       capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
 
 
 def _strip_css_comments(css: str) -> str:
@@ -303,8 +293,7 @@ _HARNESS = textwrap.dedent("""
 
 
 def _run_devices(payload_js: str) -> dict:
-    if not _has_jsdom():
-        pytest.skip("jsdom not available")
+    require_node_modules('jsdom', 'esbuild')
     src = _HARNESS.format(
         html=DEVICES_DOM.replace("\n", ""),
         payload=payload_js,
@@ -630,8 +619,7 @@ def test_direct_urls_point_at_a_real_asset_not_the_listing_page():
 @functools.lru_cache(maxsize=1)
 def _devices_bundle() -> str:
     esbuild = ROOT / 'node_modules' / '.bin' / 'esbuild'
-    if not esbuild.is_file():
-        pytest.skip('esbuild not installed')
+    require_node_modules('esbuild')
     proc = subprocess.run(
         [str(esbuild), str(DEVICES_JS), '--bundle', '--format=iife',
          '--global-name=DevicesFeature', '--platform=browser'],
@@ -688,8 +676,7 @@ _LC_HARNESS = textwrap.dedent("""
 
 
 def _run_lc_desktop(payload_js: str, language: str | None = None) -> dict:
-    if not _has_jsdom():
-        pytest.skip("jsdom not available")
+    require_node_modules('jsdom')
     src = _LC_HARNESS.format(
         shipped=LC_JS.read_text(encoding="utf-8"), payload=payload_js,
         locale=("require(" + json.dumps(str(
@@ -719,8 +706,7 @@ def _run_settings_desktop_card(payload_js: str, language: str | None = None,
     `uad_js` stubs `navigator.userAgentData` (absent by default, as in
     Safari/jsdom) so the arch-recommendation branch is drivable.
     """
-    if not _has_jsdom():
-        pytest.skip("jsdom not available")
+    require_node_modules('jsdom')
     locale = ("require(" + json.dumps(str(
         ROOT / 'frontend/src/i18n/locales' / f'{language}.json')) + ")"
         if language else '{}')
@@ -1096,8 +1082,7 @@ _LC_PUSH_DRIVE = textwrap.dedent("""
 
 
 def _run_lc_push(status_json: str, ok: str, code: str, body_json: str) -> dict:
-    if not _has_jsdom():
-        pytest.skip("jsdom not available")
+    require_node_modules('jsdom')
     src = (_LC_PUSH_PRELUDE
            .replace('__STATUS__', status_json)
            .replace('__OK__', ok)
@@ -1209,8 +1194,7 @@ _LC_SCAN_DRIVE = textwrap.dedent("""
 
 
 def _run_lc_scan() -> dict:
-    if not _has_jsdom():
-        pytest.skip("jsdom not available")
+    require_node_modules('jsdom')
     src = (_LC_SCAN_PRELUDE + LC_JS.read_text(encoding="utf-8")
            + _LC_SCAN_DRIVE)
     proc = subprocess.run([_node(), "-e", src], cwd=ROOT,

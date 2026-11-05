@@ -246,11 +246,11 @@ def test_saved_tool_output_summary_and_requested_evidence_remain_readable(
       replay();
     }''', {'fixtures': fixtures, 'language': language, 'replaySuffix': _REPLAY_SUFFIX})
 
-    # Settled history demand-mounts evidence through the shared Process owner.
-    # Exercise that public disclosure before inspecting individual tool cards.
-    process = frame.locator('.conversation-history-process > summary')
-    process.focus()
-    process.press('Enter')
+    # A settled reply keeps its calls in a closed tool panel. Open it through
+    # the reader's keyboard control before inspecting individual tool cards.
+    panel = frame.locator('.conversation-tool-panel__toggle')
+    panel.focus()
+    panel.press('Enter')
     frame.wait_for_selector('.ptool-result-block')
     assert frame.locator('.ptool-result-block').count() == 4
     assert frame.locator('.conversation-round-header').count() == 0

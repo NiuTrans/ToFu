@@ -65,6 +65,7 @@ from urllib.parse import urlparse
 
 from lib.config_dir import config_path
 from lib.json_store import read_json, update_json_atomic
+from lib.error_envelope import BadRequest
 from lib.log import audit_log, get_logger
 
 logger = get_logger(__name__)
@@ -104,7 +105,7 @@ def normalize_host(value: str) -> str:
     """
     raw = str(value or '').strip()
     if not raw:
-        raise ValueError('host is required')
+        raise BadRequest('host is required', field='host')
     if '://' in raw:
         raw = urlparse(raw).netloc or ''
     raw = raw.split('/')[0].split('@')[-1].strip()
@@ -115,21 +116,21 @@ def normalize_host(value: str) -> str:
         raw = raw.split(':')[0]
     raw = raw.strip().rstrip('.').lower()
     if not raw:
-        raise ValueError('host is required')
+        raise BadRequest('host is required', field='host')
     try:
         ipaddress.ip_address(raw)
     except ValueError:
         # Not an IP literal — a hostname, which is what we want.
         logger.debug('[PrivHosts] %r is not an IP literal — treating as hostname', raw)
     else:
-        raise ValueError(
+        raise BadRequest(
             'bare IP addresses are not accepted — allowlist the HOSTNAME '
             'instead. Internal load balancers rotate their address between '
-            'lookups, so an IP entry silently stops matching.')
+            'lookups, so an IP entry silently stops matching.', field='host')
     if '.' not in raw and raw != 'localhost':
         # A single label ('intranet') is almost always a typo or an
         # over-broad entry; require a dotted name so the intent is explicit.
-        raise ValueError(f'{raw!r} is not a qualified hostname (expected e.g. host.example.com)')
+        raise BadRequest(f'{raw!r} is not a qualified hostname (expected e.g. host.example.com)', field='host')
     return raw
 
 

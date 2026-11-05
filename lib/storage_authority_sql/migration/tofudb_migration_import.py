@@ -88,7 +88,7 @@ LEGACY_PROJECT_BRAIN_CUTOVER_POLICY = {
 _FOLD_OCCUPANCY: set[str] = set()
 
 PLAN: dict[str, Any] = {
-    'id': 'tofu-db.offline-import.v27',
+    'id': 'tofu-db.offline-import.v28',
     'retiredSearchRebuildPolicy': 'fts5-internal-index-with-archived-content-and-config',
     'retiredTradingMirrorPolicy': 'exact-current-plugin-rows',
     'turnProjectionSourcePolicy': 'decode-private-storage-codec;require-materialized-inline-projection;reject-checkpoints-and-patch-heads',
@@ -507,6 +507,13 @@ PLAN: dict[str, Any] = {
                     'columns': ['swarm_key', 'agent_id', 'role', 'objective',
                                 'status', 'messages_json', 'result_json',
                                 'rounds_used', 'delivered', 'updated_at'],
+                },
+                {
+                    # Folded into the agent document it overlays.
+                    'name': 'swarm_agent_checkpoint_markers',
+                    'keys': ['swarm_key', 'agent_id'],
+                    'columns': ['swarm_key', 'agent_id', 'result_json',
+                                'rounds_used', 'updated_at'],
                 },
             ],
             'operations': (
@@ -4550,13 +4557,23 @@ def _swarm_session_document(row: dict[str, Any], owner: int) -> dict[str, Any]:
     }
 
 
-def _swarm_agent_document(row: dict[str, Any]) -> dict[str, Any]:
+def _swarm_agent_document(row: dict[str, Any],
+                          marker: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The agent as every live read projects it: a checkpoint marker overlays
+    its compact result fields, rounds and update time on the full save."""
     messages = _json_load(row['messages_json'])
     result = _json_load(row['result_json'])
     if not isinstance(messages, list) or not isinstance(result, dict):
         raise MigrationImportError('swarm agent document is invalid')
     rounds_used = _int(row['rounds_used'])
     updated_at = _int(row['updated_at'])
+    if marker is not None:
+        overlay = _json_load(marker['result_json'])
+        if not isinstance(overlay, dict):
+            raise MigrationImportError('swarm checkpoint marker is invalid')
+        result = {**result, **overlay}
+        rounds_used = _int(marker['rounds_used'])
+        updated_at = _int(marker['updated_at'])
     if not 0 <= rounds_used < 2**64 or not 0 < updated_at < 2**64:
         raise MigrationImportError('swarm agent counters are invalid')
     return {
@@ -4712,6 +4729,8 @@ def _import_swarm(
     owner = _session_owner(session)
     session_table = _plan_table('swarm', 'swarm_sessions')
     agent_table = _plan_table('swarm', 'swarm_agents')
+    markers = {(_text(row['swarm_key']), _text(row['agent_id'])): row for row in _scan(
+        source, _plan_table('swarm', 'swarm_agent_checkpoint_markers'))}
     rows = 0
     digest = hashlib.sha256(b'tofu-db.swarm-snapshot-chain.v1').hexdigest()
     restored_sessions: set[str] = set()
@@ -4723,7 +4742,8 @@ def _import_swarm(
         digest = _record_chain(digest, document)
         rows += 1
     for row in _scan(source, agent_table):
-        document = _swarm_agent_document(row)
+        document = _swarm_agent_document(row, markers.pop(
+            (_text(row['swarm_key']), _text(row['agent_id'])), None))
         if document['swarm_key'] not in restored_sessions:
             raise MigrationImportError(
                 'swarm agent references a session outside the operator scope')
@@ -4731,6 +4751,8 @@ def _import_swarm(
         _verify_swarm_agent(session, document)
         digest = _record_chain(digest, document)
         rows += 1
+    if markers:
+        raise MigrationImportError('swarm checkpoint marker has no agent checkpoint')
     progress = _resume_or_empty(checkpoint, 'swarm')
     if progress and (not progress['complete'] or progress['rows'] != rows
                      or progress['sha256'] != digest):

@@ -168,13 +168,17 @@ def test_pending_real_task_owns_delivery_before_batch_wake(monkeypatch):
     assert all(row['kind'] != message_queue.KIND_WORKFLOW for row in rows)
 
 
-def test_startup_scans_receipts_even_without_process_records(monkeypatch):
+def test_startup_scan_settles_records_without_starting_a_wake_turn(monkeypatch):
+    """The record scan gates wakes and must finish before readiness, but the
+    collective wake starts a model turn. It runs after readiness from the
+    post-ready pass and the maintenance tick (2026-10-23: a wake turn started
+    inside the recovery phase held boot readiness for ~17 s)."""
     called = []
     monkeypatch.setattr(background_commands, '_posix_durable', lambda: False)
     monkeypatch.setattr(message_queue, 'drain_idle_background_batches',
                         lambda: called.append(True) or [])
     assert background_commands.recover_background_commands_on_startup() == 0
-    assert called == [True]
+    assert called == []
     assert background_commands.conversation_results_complete(
         conv_id='no-live-command', user_id=1)
 
@@ -236,7 +240,7 @@ def test_failed_restart_delivery_blocks_batch_until_recovered(monkeypatch, tmp_p
     monkeypatch.setattr(background_commands, '_read_exit_code', lambda paths: 0)
     monkeypatch.setattr(background_commands, '_result_from_record',
                         lambda record, paths: 'done')
-    outcomes = iter((False, True))
+    outcomes = iter(('failed', 'queued'))
     monkeypatch.setattr(background_commands, '_deliver_record',
                         lambda record, result: next(outcomes))
     monkeypatch.setattr(message_queue, 'drain_idle_background_batches',
@@ -276,7 +280,7 @@ def test_live_recovery_scan_never_deletes_unpublished_record(monkeypatch, tmp_pa
     monkeypatch.setattr(background_commands, '_result_from_record',
                         lambda record, paths: 'done')
     monkeypatch.setattr(background_commands, '_deliver_record',
-                        lambda record, result: True)
+                        lambda record, result: 'queued')
     assert background_commands.recover_background_commands_on_startup() == 1
     assert not background_commands.recovery_needs_retry()
     assert not record_dir.exists()
@@ -338,3 +342,40 @@ def test_legacy_receipt_starts_new_turn_from_canonical_root(monkeypatch):
                               'readOnlyPaths': ['/project/docs']}
     original = next(row for row in rows if row['queueId'] == receipt['queueId'])
     assert original['config'] == old_config
+
+
+def test_batch_wake_turn_records_the_context_it_runs_with(monkeypatch, tmp_path):
+    """The proactive wake round carries its own context rail (mvk7np4uiwkpv2)."""
+    import lib.conversation_sync.task_start as task_start
+    from lib.turn_lifecycle import list_turns
+
+    conv_id = 'batch-wake-context'
+    seed_conversation(conv_id, user_id=1, title='Batch')
+    project = str(tmp_path / 'workspace' / 'project')
+    message_queue.enqueue_message(
+        conv_id, {'text': 'done', '_backgroundCommand': 'bg_ctx'},
+        {'model': 'claude-opus-5.5', 'projectPath': project,
+         'searchMode': 'multi', 'fetchEnabled': True, 'codeExecEnabled': True},
+        kind=message_queue.KIND_BACKGROUND_RECEIPT, user_id=1)
+    _command(conv_id, 'bg_ctx', published=True)
+
+    def start(conversation_id, config, **kwargs):
+        kwargs['on_task_registered']('wake-task')
+        return 'wake-task', None
+
+    monkeypatch.setattr(task_start, 'start_conversation_attempt_executor', start)
+    assert message_queue.dispatch_completed_background_batch(conv_id, user_id=1)
+
+    wake = next(turn for turn in list_turns(conv_id, user_id=1)['turns']
+                if turn['actor'] == 'human')
+    assert wake['projection']['origin']['initiator'] == 'proactive'
+    assert wake['projection']['contextSnapshot'] == {
+        'blockId': 'turn-context',
+        'snapshot': {
+            'roots': [{'short': 'workspace/project', 'path': project, 'ro': False}],
+            'tools': [{'label': 'Search ×N', 'tone': 'search'},
+                      {'label': 'Fetch', 'tone': 'net'},
+                      {'label': 'Code Exec', 'tone': 'code'}],
+            'modes': [], 'model': 'claude-opus-5.5', 'depth': '',
+        },
+    }

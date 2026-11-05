@@ -45,6 +45,20 @@ def _claims(token: object) -> dict:
         return {}
 
 
+def _resolved_child(root: Path, name: str, resolved_root: dict) -> Path:
+    """``(root / name).resolve(strict=True)`` with ``root`` resolved once.
+
+    The canonical home has no symlink components left, so only a symlinked
+    leaf needs a full walk; errors match the per-file resolution's.
+    """
+    if 'path' not in resolved_root:
+        resolved_root['path'] = root.resolve(strict=True)
+    candidate = resolved_root['path'] / name
+    if stat.S_ISLNK(os.lstat(candidate).st_mode):
+        return candidate.resolve(strict=True)
+    return candidate
+
+
 def _read_file_login(*, expected_account_id: str = '', environment=None,
                      home: Path | None = None, command_settings=None,
                      command_verified: bool = False) -> dict:
@@ -58,9 +72,10 @@ def _read_file_login(*, expected_account_id: str = '', environment=None,
     root = Path(environment.get('CODEX_HOME') or (home or Path.home()) / '.codex')
     if not root.is_absolute():
         return {'shared_login_issue': 'invalid_codex_home'}
+    resolved_root: dict = {}
     try:
         config = root / 'config.toml'
-        settings = tomllib.loads(_read_private(config.resolve(strict=True) if command_verified else config).decode()) if config.exists() else {}
+        settings = tomllib.loads(_read_private(_resolved_child(root, 'config.toml', resolved_root) if command_verified else config).decode()) if config.exists() else {}
         settings.update(command_settings or {})
         if settings.get('cli_auth_credentials_store', 'file') != 'file':
             return {'shared_login_issue': 'credential_store_unsupported'}
@@ -70,7 +85,7 @@ def _read_file_login(*, expected_account_id: str = '', environment=None,
         path = root / 'auth.json'
         # Codex itself has selected this home. Resolve local symlink indirection,
         # then still require an owned regular non-writable credential target.
-        data = json.loads(_read_private(path.resolve(strict=True) if command_verified else path))
+        data = json.loads(_read_private(_resolved_child(root, 'auth.json', resolved_root) if command_verified else path))
         if not isinstance(data, dict) or data.get('auth_mode') not in (None, 'chatgpt'):
             return {'shared_login_issue': 'not_chatgpt_login'}
         tokens = data.get('tokens')
@@ -111,10 +126,12 @@ def _read_file_login(*, expected_account_id: str = '', environment=None,
 def read_local_login(*, expected_account_id: str = '', environment=None,
                      home: Path | None = None, refresh: bool = False) -> dict:
     """Automatically follow the installed Codex command, not a guessed path."""
-    from lib.oauth import codex_command_login as native
     from lib.oauth.codex_command_login import command_context, renew_command_login
-    deadline = time.monotonic() + native._DEADLINE_SECONDS
-    context = command_context(environment=environment, home=home, retry_failed=refresh)
+    # Discovery and renewal, lock waits included, share one native flight:
+    # a read never chains two cold startup budgets.
+    flight_started = time.monotonic()
+    context = command_context(environment=environment, home=home, retry_failed=refresh,
+                              flight_started=flight_started)
     issue = context.get('shared_login_issue')
     if issue:
         # Existing file-only installations keep their explicit local seam when
@@ -132,7 +149,7 @@ def read_local_login(*, expected_account_id: str = '', environment=None,
         # A changed/malformed source never authorizes renewal or rebinding.
         renewed = renew_command_login(root, expected_account_id=snapshot['account_id'],
             settings=context['settings'], environment=environment, home=home,
-            timeout_seconds=max(0, deadline - time.monotonic()))
+            flight_started=flight_started)
         if renewed.get('shared_login_issue'):
             return {'shared_login_issue': renewed['shared_login_issue'],
                     'account_id': snapshot.get('account_id', '')}

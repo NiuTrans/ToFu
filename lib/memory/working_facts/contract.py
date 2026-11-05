@@ -3,8 +3,10 @@ from functools import lru_cache
 import json
 from pathlib import Path
 
+from lib.error_envelope import BadRequest
 
-class FactInputError(ValueError):
+
+class FactInputError(BadRequest):
     """The proposal must be corrected before another write is attempted."""
 
 

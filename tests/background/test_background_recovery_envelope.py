@@ -1,6 +1,8 @@
 """Completion recovery replays the entire durable request after lost ACKs."""
 import json
+import os
 import threading
+from unittest.mock import patch
 
 import pytest
 
@@ -226,6 +228,72 @@ def test_completion_config_restores_source_roots_and_readonly_descendants():
     }
     assert config == before
     assert completion_delivery_config(cleaned) == cleaned
+
+
+@pytest.mark.parametrize('still_running_at_restart', [False, True])
+def test_restart_recovered_completion_wakes_with_the_launch_config(
+        monkeypatch, tmp_path, still_running_at_restart):
+    """A restart must not demote the completion turn to server defaults.
+
+    The completion turn runs with the published config. An empty one starts it
+    on the default model without the launching turn's project, so the project
+    tools leave the wire while the transcript keeps calling them.
+    """
+    monkeypatch.setattr(commands, '_registry', {})
+    monkeypatch.setattr(commands, '_records_root', lambda: str(tmp_path))
+    monkeypatch.setattr(commands, '_posix_durable', lambda: True)
+    monkeypatch.setattr(commands, 'REATTACH_POLL_S', 0.01)
+    woken = threading.Event()
+    monkeypatch.setattr(commands, 'wake_completed_background_batch',
+                        lambda *_: woken.set())
+    calls = []
+
+    class Client:
+        def command(self, operation, payload, command_id):
+            calls.append(json.loads(json.dumps(payload)))
+            return {'queueId': payload['queue_id']}
+
+    monkeypatch.setattr(message_queue, '_queue_client', lambda **_: Client())
+
+    class ProcessEndsBeforeWorkerRuns:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    with patch('lib.tasks_pkg.background_commands.threading.Thread',
+               ProcessEndsBeforeWorkerRuns):
+        command_id = commands.start_background_command(
+            task={'id': 'launcher', 'convId': 'conv-restart-config', '_userId': 7},
+            config={'model': 'claude-opus-5.5', 'thinkingDepth': 'max',
+                    'projectPath': '/project', 'codeExecEnabled': True,
+                    '_turnId': 'settled-turn', 'assistantMsgId': 'settled-reply'},
+            command='make test',
+            execute=lambda *_: pytest.fail('ran in the previous process'))
+    commands._registry.clear()  # The restarted process has no registry.
+    record_dir = tmp_path / command_id
+    (record_dir / 'stdout.log').write_text('ok\n')
+    (record_dir / 'stderr.log').write_text('')
+
+    if still_running_at_restart:
+        record = json.loads((record_dir / 'record.json').read_text())
+        record.update(pid=os.getpid(), pgid=os.getpgrp() + 1)
+        (record_dir / 'record.json').write_text(json.dumps(record))
+        monkeypatch.setattr(commands, '_record_pid_alive', lambda record: True)
+        assert commands.recover_background_commands_on_startup() == 1
+        assert calls == []
+        (record_dir / 'exit_code').write_text('0')
+        assert woken.wait(5)
+    else:
+        (record_dir / 'exit_code').write_text('0')
+        assert commands.recover_background_commands_on_startup() == 1
+
+    assert len(calls) == 1
+    assert calls[0]['config'] == {
+        'model': 'claude-opus-5.5', 'thinkingDepth': 'max',
+        'projectPath': '/project', 'codeExecEnabled': True}
+    assert not record_dir.exists()
 
 
 def test_completion_without_admission_metadata_keeps_explicit_linked_root():

@@ -68,6 +68,43 @@ function mutableProjection(projection: TurnProjection): MutableProjection {
   return copied;
 }
 
+/* Rounds that rebase and receipt projection may write: swarm launches and
+ * their agents, senders, and rounds whose run id comes from tool output. */
+function presentationWritableRound(round: TurnToolRound): boolean {
+  if (!round || typeof round !== 'object') return false;
+  if (round._swarm || round.toolName === 'spawn_agents'
+      || round.toolName === 'send_agent_message'
+      || round._swarmSnapshot !== undefined || round._swarmRunId !== undefined
+      || round._swarmAgents !== undefined || round._swarmMessageReceipts !== undefined
+      || round._agentMessageReceipt !== undefined) return true;
+  const output: unknown = round.toolContent;
+  return typeof output === 'string' ? output.includes('swarm_run_id')
+    : Boolean(output && typeof output === 'object' && 'swarm_run_id' in output);
+}
+
+/**
+ * Presentation copy for rebase, compose and candidate reads. Only writable
+ * rounds are cloned (in one batch); segments, text, signatures and every other
+ * round stay shared immutable TurnStore values. Deep-cloning whole multi-MB
+ * projections here cost tens of milliseconds per Surface commit.
+ */
+function presentationProjection(projection: TurnProjection): MutableProjection {
+  const source = (projection ?? {}) as MutableProjection;
+  const rounds = Array.isArray(source.toolRounds) ? source.toolRounds : [];
+  const writable: number[] = [];
+  rounds.forEach((round, index) => {
+    if (presentationWritableRound(round)) writable.push(index);
+  });
+  const toolRounds = [...rounds];
+  if (writable.length) {
+    const copies = cloneValue(writable.map(index => rounds[index]));
+    writable.forEach((index, offset) => { toolRounds[index] = copies[offset]; });
+  }
+  const copied: MutableProjection = { ...source, toolRounds };
+  projectMessageReceipts(copied);
+  return copied;
+}
+
 function copyTurn(
   turn: TurnRecord,
   advanceRevision: boolean,
@@ -80,6 +117,10 @@ function copyTurn(
       + (advanceRevision ? 1 : 0),
     updatedAt: advanceRevision ? updatedAt : turn.updatedAt,
   };
+}
+
+function presentationTurn(turn: TurnRecord): TurnRecord {
+  return { ...turn, projection: presentationProjection(turn.projection) };
 }
 
 function hasSwarm(turn: TurnRecord | null | undefined): boolean {
@@ -182,13 +223,13 @@ function rebase(
   previousOverlay: TurnRecord | null | undefined,
 ): TurnRecord | null {
   if (!durable) {
-    return previousOverlay ? copyTurn(previousOverlay, false) : null;
+    return previousOverlay ? presentationTurn(previousOverlay) : null;
   }
   if (!previousOverlay || !hasSwarm(previousOverlay)) {
-    return copyTurn(durable, false);
+    return presentationTurn(durable);
   }
 
-  const projection = mutableProjection(durable.projection);
+  const projection = presentationProjection(durable.projection);
   const rebased: TurnRecord = {
     ...durable,
     projection,
@@ -339,7 +380,7 @@ function compose(
       if (!turn) continue;
       // One private copy per Turn, regardless of receipt count. The batch
       // mutates only this copy and never the authoritative/transient inputs.
-      const copy = copyTurn(turn, false);
+      const copy = presentationTurn(turn);
       if (applyMessageReceipts(copy.projection, enrichedReceipts)) turnsById[turn.turnId] = copy;
     }
   }

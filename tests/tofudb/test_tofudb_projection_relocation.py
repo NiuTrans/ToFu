@@ -27,19 +27,22 @@ pytestmark = [pytest.mark.unit, pytest.mark.serial]
 _SECRET = b'tofu-projection-relocation-test-secret'
 
 
-def _request(session, operation, payload, *, command_id=None, denied=False):
+def _attempt(session, operation, payload, *, command_id=None):
     deadline = int(time.time() * 1000) + 15_000
     if isinstance(session, EmbeddedRuntime):
         response = session.execute_json(operation, payload, command_id=command_id,
                                         deadline_unix_ms=deadline)
-        status, value = response['status'], response['payload']
-        error = (response['error_code'], response['error_message'])
-    else:
-        response = session.request(operation, payload, command_id=command_id,
-                                   deadline_unix_ms=deadline)
-        status = response.status
-        value = response.value() if status == 0 else None
-        error = (response.error_code, response.error_message)
+        return (response['status'], response['payload'],
+                (response['error_code'], response['error_message']), response['retryable'])
+    response = session.request(operation, payload, command_id=command_id,
+                               deadline_unix_ms=deadline)
+    value = response.value() if response.status == 0 else None
+    return (response.status, value, (response.error_code, response.error_message),
+            response.retryable)
+
+
+def _request(session, operation, payload, *, command_id=None, denied=False):
+    status, value, error, _ = _attempt(session, operation, payload, command_id=command_id)
     if denied:
         assert status != 0, 'forged owner must not be admitted'
         return None
@@ -99,15 +102,26 @@ def _open(mode, binary, authority, projection, *, owner=11):
 
 
 def _page(session, owner, query='relocationneedle', *, expected_ids=None):
+    """Wait for READY coverage, which must already hold ``expected_ids``.
+
+    Readiness precedes the background projection open, which answers only a
+    retryable ``database_unavailable``. READY covers every write acknowledged
+    before the query, so the first READY page is final
+    (docs/STORAGE_TOFUDB.md, "Search projection launch admission").
+    """
     deadline = time.monotonic() + 30
     while True:
-        result = _request(session, 'conversation.search', {
+        status, result, error, retryable = _attempt(session, 'conversation.search', {
             'user_id': owner, 'query': query, 'limit': 20, 'page': True,
         })
-        if result['coverage'] == 'ready':
+        if status != 0:
+            assert retryable and error[0] == 'database_unavailable', error
+            result = error
+        elif result['coverage'] == 'ready':
             assert not result['incomplete'] and not result['coverage_reasons']
-            if expected_ids is None or {item['id'] for item in result['items']} == expected_ids:
-                return result
+            if expected_ids is not None:
+                assert {item['id'] for item in result['items']} == expected_ids, result
+            return result
         assert time.monotonic() < deadline, result
         time.sleep(0.05)
 
@@ -127,9 +141,7 @@ def _seed(session, owner):
         'title': f'relocationneedle title owner {owner}',
         'created_at': 1700000000000, 'updated_at': 1700000000000,
     }, command_id=f'title-command-{owner}')
-    result = _page(session, owner)
-    assert {item['id'] for item in result['items']} == {f'body-{owner}', f'title-{owner}'}
-    return result
+    return _page(session, owner, expected_ids={f'body-{owner}', f'title-{owner}'})
 
 
 def _turns(session, owner):

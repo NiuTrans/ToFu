@@ -491,6 +491,84 @@ class IntegrationTest(unittest.TestCase):
             self.assertNotIn('timers', body)
         _run(go())
 
+    def test_timer_check_requires_admin(self):
+        from lib.api_keys import create_key
+        _row, token = create_key(owner_user_id=1, name='timer-check-reader', scopes=['chat'])
+        async def go():
+            r = await self._client().post(
+                '/api/v1/timer/tmr_any/check',
+                headers={'Authorization': f'Bearer {token}'})
+            self.assertEqual(r.status_code, 403)
+        _run(go())
+
+    def test_timer_check_reports_the_verdict_and_delivery_lane(self):
+        from lib.api_keys import create_key
+        from lib.scheduler.timer._loop import (
+            TimerCheckOutcome, TimerContinuationOutcome)
+        _row, token = create_key(owner_user_id=1, name='timer-checker', scopes=['admin'])
+        outcomes = [
+            TimerCheckOutcome('wait', 'predicate no match (exit=1)'),
+            TimerCheckOutcome('ready', 'summary present',
+                              TimerContinuationOutcome('steered')),
+            TimerCheckOutcome('ready', 'summary present',
+                              TimerContinuationOutcome('retry')),
+            None,
+        ]
+        checked = []
+
+        def _check(timer_id, *, user_id):
+            checked.append((timer_id, user_id))
+            return outcomes.pop(0)
+
+        async def go():
+            headers = {'Authorization': f'Bearer {token}'}
+            not_ready = await self._client().post(
+                '/api/v1/timer/tmr_chk/check', headers=headers)
+            self.assertEqual(not_ready.status_code, 200)
+            body = await not_ready.get_json()
+            self.assertEqual((body['ready'], body['decision'], body['reason']),
+                             (False, 'wait', 'predicate no match (exit=1)'))
+            self.assertNotIn('delivery', body)
+
+            ready = await self._client().post(
+                '/api/v1/timer/tmr_chk/check', headers=headers)
+            body = await ready.get_json()
+            self.assertEqual((body['ready'], body['delivery']), (True, 'steered'))
+
+            busy = await self._client().post(
+                '/api/v1/timer/tmr_chk/check', headers=headers)
+            self.assertEqual(busy.status_code, 409)
+            self.assertEqual((await busy.get_json())['error_code'],
+                             'timer_delivery_retry')
+
+            gone = await self._client().post(
+                '/api/v1/timer/tmr_chk/check', headers=headers)
+            self.assertEqual(gone.status_code, 409)
+            self.assertEqual((await gone.get_json())['error_code'], 'timer_inactive')
+
+        with mock.patch('lib.scheduler.timer.get_timer',
+                        lambda timer_id, *, user_id: {'id': timer_id, 'status': 'active'}), \
+                mock.patch('lib.scheduler.timer.check_timer_now', _check):
+            _run(go())
+        self.assertEqual(checked, [('tmr_chk', 1)] * 4)
+
+    def test_timer_check_refuses_a_settled_timer_without_checking(self):
+        from lib.api_keys import create_key
+        _row, token = create_key(owner_user_id=1, name='timer-check-settled', scopes=['admin'])
+        checked = []
+        async def go():
+            r = await self._client().post(
+                '/api/v1/timer/tmr_done/check',
+                headers={'Authorization': f'Bearer {token}'})
+            self.assertEqual(r.status_code, 409)
+            self.assertEqual((await r.get_json())['error_code'], 'timer_inactive')
+        with mock.patch('lib.scheduler.timer.get_timer',
+                        lambda timer_id, *, user_id: {'id': timer_id, 'status': 'triggered'}), \
+                mock.patch('lib.scheduler.timer.check_timer_now',
+                           lambda *a, **k: checked.append(a)):
+            _run(go())
+        self.assertEqual(checked, [])
+
     def test_swarm_status_unknown_task(self):
         from lib.api_keys import create_key
         _row, token = create_key(owner_user_id=1, name='swarm-tester', scopes=['chat'])

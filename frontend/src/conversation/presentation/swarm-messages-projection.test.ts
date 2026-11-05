@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { swarmMessagesProjection } from './swarm-messages-projection';
 import { applyMessageReceipt } from './agent-message-receipts';
 const receipt = { swarmRunId: 'run', agentId: 'run', messageId: 'm', senderTaskId: 'child-task', state: 'submitted', content: 'To coordinator' };
@@ -16,10 +16,8 @@ describe('run communication projection', () => {
   it('recovers complete history from the activity API after push-only messages', () => {
     const live = turn({ _swarm: true, _swarmRunId: 'run' });
     applyMessageReceipt(live.projection, receipt);
-    expect(swarmMessagesProjection([live])[0].messageReceiptsAvailable).not.toBe(true);
     const [view] = swarmMessagesProjection([live], [{ swarm_key: 'reusable-key', swarm_id: 'run',
-      messageReceipts: [receipt], messageReceiptsAvailable: true }]);
-    expect(view.messageReceiptsAvailable).toBe(true);
+      messageReceipts: [receipt] }]);
     expect(view.messageReceipts).toEqual([receipt]);
   });
   it('keeps coordinator receipts without a child recipient row and survives reload', () => {
@@ -41,10 +39,48 @@ describe('run communication projection', () => {
     expect(result[0].messageReceipts?.[0].state).toBe('input_confirmed');
     expect(result[1].messageReceipts).toEqual([]);
   });
-  it('keeps incomplete history and authoritative sender mappings', () => {
+  it('keeps authoritative sender mappings', () => {
     const participants = [{ id: 'child', taskId: 'child-task', label: 'Researcher' }];
-    const result = swarmMessagesProjection([], [{ swarm_id: 'run', messageReceipts: [receipt], messageReceiptsAvailable: false, messageParticipants: participants }]);
-    expect(result[0].messageReceiptsAvailable).toBe(false);
+    const result = swarmMessagesProjection([], [{ swarm_id: 'run', messageReceipts: [receipt], messageParticipants: participants }]);
+    expect(result[0].messageReceipts).toEqual([receipt]);
     expect(result[0].messageParticipants).toEqual(participants);
+  });
+
+  it('indexes each incoming receipt once across many waves of the same run', () => {
+    const size = 128;
+    const turns = Array.from({ length: size }, (_, index) => turn({
+      _swarmSnapshot: { swarm_id: 'run', messageReceipts: [{ ...receipt, messageId: 'm-' + index }] },
+    }));
+    const stringify = vi.spyOn(JSON, 'stringify');
+    let keyBuilds: number;
+    let result: ReturnType<typeof swarmMessagesProjection>;
+    try {
+      result = swarmMessagesProjection(turns);
+      keyBuilds = stringify.mock.calls.filter(([value]) => Array.isArray(value)
+        && value.length === 3 && value[0] === 'run').length;
+    } finally {
+      stringify.mockRestore();
+    }
+    expect(result![0].messageReceipts?.map(value => value.messageId)).toEqual(
+      Array.from({ length: size }, (_, index) => 'm-' + index));
+    expect(keyBuilds!).toBeLessThanOrEqual(size);
+  });
+
+  it('keeps first-seen order, confirmation and latest participant evidence across all sources', () => {
+    const confirmed = { ...receipt, state: 'input_confirmed', inputInjectedAt: 2, inputConfirmedAt: 3 };
+    const other = { ...receipt, messageId: 'other', state: 'unconfirmed' };
+    const turns = [turn({ _swarmSnapshot: { swarm_id: 'run', messageReceipts: [confirmed],
+      messageParticipants: [{ id: 'child', taskId: 'worker', label: 'Before' }] } }),
+    turn({ _swarmSnapshot: { swarm_id: 'run', messageReceipts: [other], agents: [{ messageReceipts: [receipt] }] },
+      _swarmMessageReceipts: [{ ...receipt, inputInjectedAt: 20, inputConfirmedAt: undefined, content: undefined }] })];
+    const swarms = [{ swarm_id: 'run', messageReceipts: [{ ...other, state: 'submitted' },
+      { ...receipt, swarmRunId: 'foreign' }, { swarmRunId: 'run', messageId: 'invalid' }],
+    messageParticipants: [{ id: 'child', taskId: 'worker', label: 'After' },
+      { id: 'child', taskId: 'second-worker', label: 'Distinct worker' }] }];
+    const before = JSON.stringify([turns, swarms]);
+    const [view] = swarmMessagesProjection(turns, swarms);
+    expect(view.messageReceipts).toEqual([confirmed, other]);
+    expect(view.messageParticipants).toEqual(swarms[0].messageParticipants);
+    expect(JSON.stringify([turns, swarms])).toBe(before);
   });
 });

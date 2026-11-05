@@ -13,10 +13,15 @@ import { brandIconHtml } from '../../core/model-brand-icons';
 import { _i18nLang, t } from '../../i18n';
 import { modelPricePresentation } from '../settings/model-price-localization';
 import { fetchAaScores, refreshAaScores, saveAaKey } from './api';
-import { buildVendorGroups } from './model';
+import { buildVendorGroups, countAaScoredModels } from './model';
 import { createReasoningEditor } from '../settings/reasoning-editor';
 import type { ModelRoutingInferenceProfile } from '../../api/api-v1-model-routing.generated';
-import { buildParetoPoints, closeParetoDialog, openParetoDialog } from './pareto-chart';
+import {
+  aaIndexVersionSuffix,
+  buildParetoPoints,
+  closeParetoDialog,
+  openParetoDialog,
+} from './pareto-chart';
 import type {
   AaBlock,
   ModelCatalogDocument,
@@ -104,23 +109,24 @@ function renderParetoEntry(groups: VendorGroup[]): HTMLElement {
     + '<path class="frontier" d="M8 22l5-5 5 1 8-10"/>'
     + '<circle cx="8" cy="22" r="1.5"/><circle cx="13" cy="17" r="1.5"/>'
     + '<circle cx="18" cy="18" r="1.5"/><circle cx="26" cy="8" r="1.5"/></svg></span>'
-    + '<span class="stg-mc-pareto-entry-text"><strong>成本 × AA Index</strong>'
+    + '<span class="stg-mc-pareto-entry-text">'
+    + `<strong>成本 × AA Index${aaIndexVersionSuffix(activeAa?.index_version)}</strong>`
     + `<span>${points.length >= 2
       ? `${points.length} 个模型 · 官方价格 · Pareto 前沿`
       : t('modelCatalog.aa.chartWaiting')}</span></span>`
     + '<svg class="stg-mc-pareto-entry-chevron" viewBox="0 0 24 24" aria-hidden="true">'
     + '<path d="M9 5l7 7-7 7"/></svg>';
   if (points.length >= 2) {
-    button.addEventListener('click', () => openParetoDialog(groups, { toUsd: priceToUsd }));
+    button.addEventListener('click', () => openParetoDialog(groups, {
+      toUsd: priceToUsd,
+      indexVersion: activeAa?.index_version,
+    }));
   }
   return button;
 }
 
-function aaScoreCount(): number {
-  return Object.keys(activeAa?.scores ?? {}).length;
-}
-
-function aaStatusCopy(): { label: string; detail: string; state: string } {
+/** ``scored``: catalog Models with a published score, not raw AA matches. */
+function aaStatusCopy(scored: number): { label: string; detail: string; state: string } {
   if (aaBusy && !activeAa) {
     return {
       label: t('modelCatalog.aa.statusLoading'),
@@ -131,14 +137,14 @@ function aaStatusCopy(): { label: string; detail: string; state: string } {
   if (activeAa?.status === 'ok') {
     return {
       label: t('modelCatalog.aa.statusReady'),
-      detail: t('modelCatalog.aa.readyDetail', { n: aaScoreCount() }),
+      detail: t('modelCatalog.aa.readyDetail', { n: scored }),
       state: 'ready',
     };
   }
   if (activeAa?.status === 'stale') {
     return {
       label: t('modelCatalog.aa.statusStale'),
-      detail: t('modelCatalog.aa.staleDetail', { n: aaScoreCount() }),
+      detail: t('modelCatalog.aa.staleDetail', { n: scored }),
       state: 'stale',
     };
   }
@@ -156,7 +162,7 @@ function aaStatusCopy(): { label: string; detail: string; state: string } {
   };
 }
 
-function aaKeySourceLabel(): string {
+function aaKeySourceLabel(): string | null {
   if (activeAa?.key_source === 'settings') {
     return t('modelCatalog.aa.keySourceSettings', { hint: activeAa.key_hint || '••••' });
   }
@@ -166,7 +172,7 @@ function aaKeySourceLabel(): string {
   if (activeAa?.key_source === 'env') {
     return t('modelCatalog.aa.keySourceEnv', { hint: activeAa.key_hint || '••••' });
   }
-  return t('modelCatalog.aa.keySourceNone');
+  return null;
 }
 
 function errorMessage(error: unknown): string {
@@ -241,8 +247,8 @@ async function persistAaKey(apiKey: string): Promise<void> {
   }
 }
 
-function renderAaSource(): HTMLElement {
-  const status = aaStatusCopy();
+function renderAaSource(scored: number): HTMLElement {
+  const status = aaStatusCopy(scored);
   const disclosure = element('details', `stg-mc-aa-source is-${status.state}`);
   disclosure.open = aaGuideOpen || activeAa?.status === 'no_key';
   disclosure.addEventListener('toggle', () => { aaGuideOpen = disclosure.open; });
@@ -251,7 +257,8 @@ function renderAaSource(): HTMLElement {
   summary.appendChild(element('span', 'stg-mc-aa-mark', 'AA'));
   const identity = element('span', 'stg-mc-aa-identity');
   identity.append(
-    element('strong', undefined, t('modelCatalog.aa.sourceTitle')),
+    element('strong', undefined,
+      `${t('modelCatalog.aa.sourceTitle')}${aaIndexVersionSuffix(activeAa?.index_version)}`),
     element('span', undefined, status.detail),
   );
   const state = element('span', `stg-mc-aa-state is-${status.state}`);
@@ -299,7 +306,8 @@ function renderAaSource(): HTMLElement {
   });
 
   const controls = element('div', 'stg-mc-aa-controls');
-  controls.appendChild(element('span', 'stg-mc-aa-key-source', aaKeySourceLabel()));
+  const keySource = aaKeySourceLabel();
+  if (keySource) controls.appendChild(element('span', 'stg-mc-aa-key-source', keySource));
   if (activeAa?.key_source) {
     const refresh = element('button', 'stg-mc-aa-link', t('modelCatalog.aa.refreshNow'));
     refresh.type = 'button';
@@ -316,7 +324,8 @@ function renderAaSource(): HTMLElement {
     });
     controls.appendChild(clear);
   }
-  body.append(explanation, form, controls);
+  body.append(explanation, form);
+  if (controls.childElementCount) body.append(controls);
   if (aaError) body.appendChild(element('p', 'stg-mc-aa-error', aaError));
   disclosure.append(summary, body);
   return disclosure;
@@ -478,8 +487,6 @@ function renderVendorGroup(group: VendorGroup, remainingBudget: number, editors:
 function render(): void {
   const root = container();
   if (!root) return;
-  const description = document.querySelector('#settingsTab_models .settings-desc');
-  if (description) description.textContent = t('modelCatalog.aa.modelBoundary');
   // Preserve live inputs across asynchronous AA repaints. Only currently
   // mounted editors (at most MAX_VISIBLE_MODELS) survive this one render;
   // changed profiles and unmounted Models release their old form nodes.
@@ -499,7 +506,7 @@ function render(): void {
   const input = document.getElementById('stgModelCatalogSearch') as HTMLInputElement | null;
   if (input && input.value !== searchQuery) input.value = searchQuery;
   if (!searchQuery) {
-    root.appendChild(renderAaSource());
+    root.appendChild(renderAaSource(countAaScoredModels(allGroups)));
     if (allGroups.length) root.appendChild(renderParetoEntry(allGroups));
   }
   if (!allGroups.length) {

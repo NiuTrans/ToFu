@@ -21,7 +21,6 @@ fully-logged HTTP wrapper.
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 import time
@@ -30,6 +29,7 @@ import uuid
 from quart import Blueprint, request
 
 from lib import lifecycle_approval as _lca
+from lib.server import server_reexec
 from lib.runtime.runtime_paths import data_root
 from lib.api_response import (
     api_conflict, api_error, api_forbidden, api_internal_error, api_not_found,
@@ -58,24 +58,6 @@ UPDATE_CHANNEL = 'update'
 # ``apply_in_progress`` (a live download, re-attachable via its task_id).
 _APPLY_STATE_NAME = 'update_apply_state.json'
 _ACTIVE_APPLIES: dict = {}  # task_id → Thread; in-process liveness truth
-
-
-def _prepare_server_reexec_frontend() -> str:
-    """Prepare current disk code in an isolated control interpreter."""
-    from serverctl_pkg.application_restart import run_application_restart_control
-
-    try:
-        run_application_restart_control(_restart_project(), stage='prepare')
-    except (OSError, RuntimeError) as exc:
-        logger.warning('[Update] application restart preparation failed: %s', exc)
-        return str(exc)
-    return ''
-
-
-def _restart_project() -> str:
-    return os.path.realpath(
-        os.environ.get('TOFU_PROJECT_PATH')
-        or os.path.join(os.path.dirname(__file__), '..', '..'))
 
 
 def _apply_state_path() -> str:
@@ -150,7 +132,7 @@ def _enrich_with_apply_state(payload):
     return payload
 
 
-def _enrich_with_code_pending(payload):
+def _enrich_with_code_pending(payload, *, current_head=None):
     """Project "on-disk source differs from the loaded-at-boot source" onto
     the /update/check payload as ``code_pending``.
 
@@ -161,11 +143,13 @@ def _enrich_with_code_pending(payload):
     the UI then tells the operator a restart will pick them up, instead of
     letting them discover it via the post-restart warning toast.
     ``pending`` is None on a non-git deploy; the UI shows nothing then.
+    ``current_head`` is the HEAD this request already observed; None lets
+    the fingerprint read it.
     """
     if not isinstance(payload, dict):
         return payload
     from lib import boot_identity as _bi
-    payload['code_pending'] = _bi.pending_code_changes()
+    payload['code_pending'] = _bi.pending_code_changes(current_head=current_head)
     return payload
 
 
@@ -191,9 +175,12 @@ def _enrich_with_code_pending(payload):
     tags=['system'],
 )
 def update_check():
-    from lib.self_update import check_for_update
+    from lib.self_update import check_for_update, observe_repository
     try:
-        payload = check_for_update()
+        # One git process answers both "is this a checkout?" and "which HEAD
+        # is on disk?" for the update check and the code-pending projection.
+        repository = observe_repository()
+        payload = check_for_update(repository=repository)
     except Exception as e:
         logger.error('[Update] check failed: %s', e, exc_info=True)
         return api_internal_error(e, context='update_check',
@@ -203,7 +190,7 @@ def update_check():
     except Exception as e:
         logger.warning('[Update] apply-state enrichment failed: %s', e)
     try:
-        payload = _enrich_with_code_pending(payload)
+        payload = _enrich_with_code_pending(payload, current_head=repository.head)
     except Exception as e:
         logger.warning('[Update] code-pending enrichment failed: %s', e)
     return api_ok(payload)
@@ -300,130 +287,6 @@ def update_apply():
     return api_ok({'taskId': task_id, 'started': True})
 
 
-def _perform_server_reexec(reason: str, *, frontend_prevalidated: bool = False,
-                           requested_at: float | None = None) -> bool:
-    """Request a graceful process replacement through its lifecycle owner.
-
-    The caller must have verified there is no in-flight work — see
-    update_restart's list_running_tasks guard and lib/auto_restart.py's
-    precondition bundle. The host-local Supervisor is offered the replacement
-    for EVERY launch mode (not only ``TOFU_MANAGED_BY=supervisor``): the
-    manager kills and respawns the worker from outside, so a restart never
-    depends on the sick process replacing its own image — the failure mode
-    behind the stuck-retry incident. A freshly reloaded manager also cannot
-    keep launch-time resource policy pinned in a stale parent or inherited
-    environment. Only when the manager cannot be reached or refuses does the
-    worker fall back to the bounded in-place ``execv`` path. Returns ``False``
-    only when every lifecycle bridge refuses the request.
-
-    ``frontend_prevalidated`` marks that the synchronous request path already
-    ran (and passed) the frontend artifact preflight this restart; re-running
-    it here would rebuild/validate the same artifact twice, adding several
-    seconds of dead time to every restart on a slow filesystem.
-    """
-    if frontend_prevalidated:
-        logger.info('[Update] Frontend preflight already passed in-request; '
-                    'skipping the duplicate build')
-    else:
-        preflight_error = _prepare_server_reexec_frontend()
-        if preflight_error:
-            logger.error(
-                '[Update] Restart preflight refused before shutdown: %s',
-                preflight_error,
-            )
-            audit_log(
-                'self_update_restart_preflight_failed',
-                pid=os.getpid(),
-                reason=reason,
-                detail=preflight_error[:500],
-            )
-            return False
-
-    project = _restart_project()
-    try:
-        from serverctl_pkg.application_restart import run_application_restart_control
-        supervisor_started = time.monotonic()
-        restart_kwargs = {
-            'stage': 'delegate',
-            'reason': reason,
-        }
-        if requested_at is not None:
-            restart_kwargs['requested_at'] = requested_at
-        result = run_application_restart_control(project, **restart_kwargs)
-        logger.info(
-            '[Update] Supervisor accepted deferred worker restart in '
-            '%.1fs', time.monotonic() - supervisor_started)
-    except Exception as exc:
-        logger.warning(
-            '[Update] Manager delegation unavailable (%s); falling back to '
-            'in-place re-exec', exc)
-        audit_log(
-            'self_update_manager_delegation_unavailable',
-            pid=os.getpid(),
-            reason=reason,
-            detail=str(exc)[:500],
-        )
-    else:
-        audit_log(
-            'self_update_managed_restart_requested',
-            pid=os.getpid(),
-            reason=reason,
-            manager_pid=(result.get('supervisorRefresh') or {}).get(
-                'managerPid'),
-        )
-        logger.warning(
-            '[Update] Current Supervisor accepted a fresh worker generation '
-            '(%s)', reason)
-        return True
-
-    from lib.server.server_reexec import (
-        begin_server_reexec,
-        finish_server_reexec_preparation,
-    )
-
-    if not begin_server_reexec(reason):
-        # Every bridge refused BEFORE the shutdown point of no return, so this
-        # process is guaranteed to keep serving. Roll back the acceptance
-        # stamp consume_restart committed in-request: leaving it would make
-        # the next human-approved retry hit cooldown/restartPending against a
-        # process that will never replace itself (the stuck-retry incident).
-        try:
-            from lib.lifecycle_approval import rollback_restart_stamp
-            if rollback_restart_stamp(pid=os.getpid()):
-                logger.warning(
-                    '[Update] Restart refused by every bridge; acceptance '
-                    'stamp rolled back so a retry can proceed')
-        except Exception as rb_exc:
-            logger.warning('[Update] Restart stamp rollback failed: %s', rb_exc)
-        return False
-    logger.info(
-        '[Update] Graceful server re-exec requested (%s); draining lifecycle',
-        reason,
-    )
-    # The shutdown event and its hard deadline are armed above before these
-    # best-effort writes touch the data volume.  ``execv`` skips atexit, so the
-    # freshness snapshot still has to land before the main thread replaces the
-    # process image.
-    try:
-        from lib import write_freshness as _wf
-        _wf.save_snapshot()
-    except Exception as _wf_e:
-        logger.warning('[Update] write-freshness snapshot save failed: %s', _wf_e)
-    # tofu_guard must not relaunch into the drain / fresh-boot window.
-    # execv KEEPS the pid, so the guard's process-age check can never see a
-    # re-exec — this marker is the only truthful signal. The fresh image
-    # clears it at boot-ready (server.py); the guard ignores markers older
-    # than 300s. Best-effort: the live instance lock remains the second fence.
-    try:
-        with open(os.path.join(data_root(), '.reexec_in_progress'), 'w') as _fh:
-            json.dump({'pid': os.getpid(), 'ts': time.time()}, _fh)
-    except Exception as _mk_e:
-        logger.warning('[Update] re-exec marker write failed (guard may race): %s',
-                       _mk_e)
-    finish_server_reexec_preparation()
-    return True
-
-
 def _deferred_reexec(delay: float = 0.3, *, frontend_prevalidated: bool = False,
                      requested_at: float | None = None):
     """Request lifecycle-owned replacement after the HTTP response can flush.
@@ -435,7 +298,7 @@ def _deferred_reexec(delay: float = 0.3, *, frontend_prevalidated: bool = False,
     every extra millisecond here is dead time in the user-visible restart.
     """
     time.sleep(delay)
-    _perform_server_reexec(
+    server_reexec.perform_server_reexec(
         'update',
         frontend_prevalidated=frontend_prevalidated,
         requested_at=requested_at,
@@ -609,7 +472,7 @@ def update_restart():
         })
     record_preparation({'phase': 'checking'})
     with observe_preparation(record_preparation):
-        preflight_error = _prepare_server_reexec_frontend()
+        preflight_error = server_reexec.prepare_server_reexec_frontend()
     record_preparation({'phase': 'failed' if preflight_error else 'prepared'})
     if preflight_error:
         logger.error(

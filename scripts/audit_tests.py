@@ -130,6 +130,9 @@ _PATH_RE = re.compile(
     r'^(lib|routes|static|scripts|tests|tofu|docs|desktop|clients)/'
     r'[\w./\-]+\.(py|js|css|md|json|html|txt|toml|sh|d\.ts)$')
 
+# Names that always denote a pytest or tempfile temporary directory.
+_TEMPORARY_TREE_SOURCES = frozenset({'tmp_path', 'tmpdir', 'tmp_path_factory', 'tempfile'})
+
 # Shipped source dirs whose TEXT being read by a test = implementation-face.
 _SHIPPED_DIRS = (
     'lib/', 'routes/', 'frontend/src/', 'static/', 'scripts/',
@@ -157,8 +160,92 @@ def _tracked(pattern: str) -> list[str]:
             f'Cannot enumerate tracked files for {pattern!r}: '
             f'git exited {out.returncode}: {out.stderr.strip()[:2000]}')
     tracked = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
-    return [rel for rel in tracked
-            if os.path.isfile(os.path.join(REPO, rel))]
+    return [rel for rel in tracked if _is_file(rel)]
+
+
+_IGNORED_CACHE: dict[tuple[str, str], bool] = {}
+_INDEX_PATHS_CACHE: dict[str, frozenset[str]] = {}
+
+
+def _index_paths() -> frozenset[str]:
+    """Every index entry of REPO, listed once; empty outside a git checkout."""
+    if REPO not in _INDEX_PATHS_CACHE:
+        result = subprocess.run(['git', 'ls-files', '-z'], cwd=REPO,
+                                capture_output=True, timeout=120)
+        _INDEX_PATHS_CACHE[REPO] = frozenset(
+            os.fsdecode(path) for path in result.stdout.split(b'\0') if path
+        ) if result.returncode == 0 else frozenset()
+    return _INDEX_PATHS_CACHE[REPO]
+
+
+def _gitignored(rel: str) -> bool:
+    """Whether ``rel`` is a gitignored local output (a build or runtime file).
+
+    Its existence follows the local build, not the committed tree, so it is
+    neither a dead anchor (F) nor shipped source (G): CI audits a clean
+    checkout and must reach the same census as a built one. Outside a git
+    checkout nothing is ignored. ``git check-ignore`` never reports an index
+    entry, so tracked paths are answered without one process per path.
+    """
+    key = (REPO, rel)
+    if key not in _IGNORED_CACHE:
+        if rel in _index_paths():
+            _IGNORED_CACHE[key] = False
+        else:
+            result = subprocess.run(['git', 'check-ignore', '-q', '--', rel],
+                                    cwd=REPO, capture_output=True, timeout=60)
+            _IGNORED_CACHE[key] = result.returncode == 0
+    return _IGNORED_CACHE[key]
+
+
+_WALKS: dict[int, tuple[ast.AST, list[ast.AST]]] = {}
+
+
+def _walk(node: ast.AST) -> list[ast.AST]:
+    """``ast.walk(node)`` in the same order, materialized once per audited file.
+
+    Each file's checks revisit the module and every test body many times;
+    re-walking with generators dominated the census. ``analyze_file`` clears
+    the memo, and each entry keeps its node alive so an id cannot be reused.
+    """
+    cached = _WALKS.get(id(node))
+    if cached is None or cached[0] is not node:
+        cached = _WALKS[id(node)] = (node, list(ast.walk(node)))
+    return cached[1]
+
+
+def _parses_json(node) -> bool:
+    """``json.load(...)`` / ``json.loads(...)``: the read becomes data."""
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == 'json'
+            and node.func.attr in {'load', 'loads'})
+
+
+def _reads_only_parsed_json(function, read_calls) -> bool:
+    """Every read is a whole file handed straight to ``json.load(s)``.
+
+    ``json.loads(path.read_text())`` and ``json.load(f)`` on a ``with open``
+    handle parse the file itself. Text that is sliced or searched before it
+    is parsed is still inspected as source.
+    """
+    handles = {}
+    for node in _walk(function):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                if (isinstance(item.context_expr, ast.Call)
+                        and _call_name(item.context_expr) == 'open'
+                        and isinstance(item.optional_vars, ast.Name)):
+                    handles[item.optional_vars.id] = item.context_expr
+    parsed = set()
+    for call in _walk(function):
+        if not _parses_json(call) or not call.args:
+            continue
+        argument = call.args[0]
+        if isinstance(argument, ast.Name) and argument.id in handles:
+            argument = handles[argument.id]
+        parsed.add(id(argument))
+    return all(id(call) in parsed for call in read_calls)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -173,6 +260,10 @@ class FileReport:
         self.findings: list[tuple[str, int, str]] = []   # (category, line, detail)
         self.test_names: set[str] = set()
         self.imports: set[str] = set()
+        # Dotted ``lib.x``/``routes.x`` names and ``lib/x.py`` paths in the raw
+        # text: importlib/patch strings that AST imports miss.
+        self.module_mentions: set[str] = set()
+        self.path_mentions: set[str] = set()
 
     def add(self, cat: str, line: int, detail: str):
         self.findings.append((cat, line, detail))
@@ -180,7 +271,7 @@ class FileReport:
 
 def _is_test_func(node) -> bool:
     return (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name.startswith('test'))
+            and node.name.startswith('test_'))
 
 
 def _call_name(node) -> str:
@@ -193,14 +284,37 @@ def _call_name(node) -> str:
     return ''
 
 
+def _own_body_nodes(scope):
+    pending = [scope]
+    while pending:
+        node = pending.pop(0)
+        yield node
+        if node is not scope and isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        pending.extend(ast.iter_child_nodes(node))
+
+
+def _comparison_call_ids(fn) -> set[int]:
+    return {
+        id(node) for comparison in _own_body_nodes(fn)
+        if isinstance(comparison, ast.Compare)
+        for node in ast.walk(comparison)
+        if isinstance(node, ast.Call)
+    }
+
+
 def _body_asserts(fn) -> bool:
-    for n in ast.walk(fn):
+    compared_calls = _comparison_call_ids(fn)
+    for n in _own_body_nodes(fn):
         if isinstance(n, ast.Assert):
             return True
         if isinstance(n, ast.Raise):
             return True
         if isinstance(n, ast.Call):
             nm = _call_name(n)
+            if (nm == 'approx' and id(n) not in compared_calls):
+                continue
             if (nm in _ASSERT_CALL_NAMES or _ASSERT_HELPER_RE.match(nm or '')
                     or (nm == 'run' and isinstance(n.func, ast.Attribute)
                         and isinstance(n.func.value, ast.Name)
@@ -275,11 +389,29 @@ def _owned_method_defs(fn, module_tree):
     receiver = fn.args.args[0].arg
     if receiver not in {'self', 'cls'}:
         return {}
-    for owner in ast.walk(module_tree):
+    for owner in _walk(module_tree):
         if isinstance(owner, ast.ClassDef) and fn in owner.body:
             return {f'{receiver}.{name}': method
                     for name, method in _module_function_defs(owner).items()}
     return {}
+
+
+def _callback_raises(fn) -> bool:
+    """The callback deliberately fails when the subject invokes it."""
+    return any(isinstance(node, ast.Raise) for node in _own_body_nodes(fn)) or any(
+        isinstance(node, ast.Call)
+        and (_qualified_name(node.func) in {'pytest.fail', 'self.fail', 'self.failUnless'}
+             or _call_name(node) == 'throw') for node in _own_body_nodes(fn))
+
+
+def _executable_callback_asserts(fn) -> bool:
+    """The callback itself asserts or fails; its unused closures do not execute."""
+    if _body_asserts(fn):
+        return True
+    return any(isinstance(node, ast.Call)
+               and (_qualified_name(node.func) in {
+                   'pytest.fail', 'self.fail', 'self.failUnless',
+               } or _call_name(node) == 'throw') for node in _own_body_nodes(fn))
 
 
 def _closure_asserts(fn, local_funcs: dict, helper_funcs: dict, depth: int = 2,
@@ -292,11 +424,111 @@ def _closure_asserts(fn, local_funcs: dict, helper_funcs: dict, depth: int = 2,
     ``_nc()`` driver. Judging only the immediate body called ~110 such tests
     "assertion-free", which is noise that buries the handful of real ones.
     """
-    if _body_asserts(fn):
+    if fn in _walk(module_tree):
+        direct = _body_asserts(fn)
+        installed_failure_callbacks = False
+        if not direct:
+            local_defs = {
+                node.name: node for node in _own_body_nodes(fn)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            local_callbacks = dict(local_defs)
+            namespace_callbacks = {}
+            local_classes = {
+                node.name: node for node in _own_body_nodes(fn) if isinstance(node, ast.ClassDef)}
+            for statement in _own_body_nodes(fn):
+                if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Lambda):
+                    continue
+                for target in statement.targets:
+                    if isinstance(target, ast.Name):
+                        local_callbacks[target.id] = statement.value
+                    elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                        namespace_callbacks[target.value.id] = statement.value
+            for call in (node for node in _own_body_nodes(fn)
+                         if isinstance(node, ast.Call)):
+                name = _qualified_name(call.func)
+                if name in {'monkeypatch.setattr', 'monkeypatch.setitem'}:
+                    for argument in call.args:
+                        if isinstance(argument, ast.Lambda):
+                            callback = argument
+                        elif (isinstance(argument, ast.Call) and isinstance(argument.func, ast.Name)
+                                and argument.func.id in local_classes):
+                            callback = local_classes[argument.func.id]
+                        elif isinstance(argument, ast.Name) and argument.id in local_classes:
+                            callback = local_classes[argument.id]
+                        elif isinstance(argument, ast.Name):
+                            callback = local_classes.get(argument.id) or local_callbacks.get(argument.id)
+                            if callback is None and argument.id in namespace_callbacks:
+                                installed_failure_callbacks = True
+                                continue
+                            if callback is None and argument.id in local_classes:
+                                candidate = local_classes[argument.id]
+                                if any(_callback_raises(node) for node in _walk(candidate)
+                                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+                                    installed_failure_callbacks = True
+                        else:
+                            continue
+                        if callback is None:
+                            continue
+                        if _callback_raises(callback) or (
+                                isinstance(callback, ast.ClassDef) and any(
+                                    _callback_raises(node) for node in _walk(callback)
+                                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))):
+                            installed_failure_callbacks = True
+                        if _executable_callback_asserts(callback):
+                            return True
+                callback = call.args[0] if call.args else None
+                if (name.split('.')[-1] in {'map', 'submit', 'run', 'add_done_callback'}
+                        and isinstance(callback, ast.Name)
+                        and callback.id in local_defs):
+                    direct = any(_executable_callback_asserts(node) for node in _walk(local_defs[callback.id])
+                                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))
+                    if direct:
+                        break
+                if name.split('.')[-1] not in local_defs:
+                    if (name.split('.')[-1].startswith('register_')
+                            and isinstance(callback, ast.Name) and callback.id in local_defs
+                            and _callback_raises(local_defs[callback.id])):
+                        installed_failure_callbacks = True
+                    continue
+                target_name = name.split('.')[-1]
+                target = local_defs[target_name]
+                if (name == target_name or len(name.split('.')) > 1
+                        or any(isinstance(item, ast.Name) and item.id == target_name
+                               for item in ast.walk(call))
+                        or any(isinstance(item, ast.Constant)
+                               and item.value == target_name
+                               for item in ast.walk(call))):
+                    direct = any(_executable_callback_asserts(node) for node in _walk(target)
+                                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))
+                if direct:
+                    break
+            if any(_callback_raises(handler)
+                   for statement in _own_body_nodes(fn) if isinstance(statement, ast.With)
+                   for item in statement.items
+                   if isinstance(item.context_expr, ast.Call)
+                   and _call_name(item.context_expr) == 'raises'
+                   for handler in statement.body):
+                direct = True
+            # A raising callback installed on the subject makes its top-level
+            # call a no-raise/no-call contract. Unknown drivers stay unchecked.
+            if installed_failure_callbacks and any(
+                    isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+                    and (isinstance(statement.value.func, ast.Attribute)
+                         or (isinstance(statement.value.func, ast.Name)
+                             and statement.value.func.id not in local_defs
+                             and statement.value.func.id not in {'case'}))
+                    for statement in fn.body):
+                direct = True
+    else:
+        direct = any(_body_asserts(node) for node in _walk(fn)
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                          ast.Lambda)))
+    if direct:
         return True
     if depth <= 0:
         return False
-    assigned = {n.id for n in ast.walk(fn)
+    assigned = {n.id for n in _walk(fn)
                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
     shadowed = assigned | {arg.arg for arg in ast.walk(fn.args) if isinstance(arg, ast.arg)}
     bindings = {name: helper for name, helper in {**helper_funcs, **local_funcs}.items()
@@ -305,7 +537,7 @@ def _closure_asserts(fn, local_funcs: dict, helper_funcs: dict, depth: int = 2,
     bindings.update({name: helper for name, helper in scoped.items()
                      if name.split('.')[0] not in assigned})
     matrices = _parametrized_drivers(fn, module_tree, bindings)
-    for n in ast.walk(fn):
+    for n in _walk(fn):
         if not isinstance(n, ast.Call):
             continue
         nm = _qualified_name(n.func)
@@ -334,12 +566,12 @@ def _skip_only(fn) -> bool:
     to gate on a missing external tool (node/tsc). Recognised by the guarded
     call sitting at STATEMENT level after the skip gate.
     """
-    calls = {_call_name(c) for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    calls = {_call_name(c) for c in _walk(fn) if isinstance(c, ast.Call)}
     if 'skip' not in calls:
         return False
     hard = calls & (_ASSERT_CALL_NAMES | {'fail'})
-    has_assert = any(isinstance(x, ast.Assert) for x in ast.walk(fn))
-    has_raise = any(isinstance(x, ast.Raise) for x in ast.walk(fn))
+    has_assert = any(isinstance(x, ast.Assert) for x in _walk(fn))
+    has_raise = any(isinstance(x, ast.Raise) for x in _walk(fn))
     if hard or has_assert or has_raise:
         return False
     # 'must not raise' contract: a bare statement-level call to the subject
@@ -358,7 +590,7 @@ def _laundered(fn) -> str:
     be no assertion at all, and the exception handler makes 'the code worked'
     and 'the code blew up' produce the same green result.
     """
-    for n in ast.walk(fn):
+    for n in _walk(fn):
         if not isinstance(n, ast.Try):
             continue
         # Does the guarded body actually exercise the subject (any call)?
@@ -392,7 +624,8 @@ def _vacuous_assert(node: ast.Assert) -> str:
 
 def _swallows(fn) -> str:
     """A try/except whose handler cannot fail the test (pass / skip / print)."""
-    for n in ast.walk(fn):
+    assertions = None
+    for n in _walk(fn):
         if not isinstance(n, ast.Try):
             continue
         # Only interesting when the guarded body itself contains assertions:
@@ -401,22 +634,23 @@ def _swallows(fn) -> str:
                 body=n.body, type_ignores=[]))):
             continue
         for h in n.handlers:
-            names = {_call_name(c) for c in ast.walk(h) if isinstance(c, ast.Call)}
-            has_reraise = any(isinstance(x, ast.Raise) for x in ast.walk(h))
+            names = {_call_name(c) for c in _walk(h) if isinstance(c, ast.Call)}
+            has_reraise = any(isinstance(x, ast.Raise) for x in _walk(h))
             fails = bool(names & (_ASSERT_CALL_NAMES | {'fail'})) or any(
-                isinstance(x, ast.Assert) for x in ast.walk(h))
+                isinstance(x, ast.Assert) for x in _walk(h))
             # Worker failures cross a thread/process boundary before the test
             # asserts them. A collector counts only with an explicit assertion.
-            assertions = [ast.unparse(x.test) for x in ast.walk(fn)
-                          if isinstance(x, ast.Assert)]
-            for call in (x for x in ast.walk(h) if isinstance(x, ast.Call)):
+            if assertions is None:
+                assertions = [ast.unparse(x.test) for x in _walk(fn)
+                              if isinstance(x, ast.Assert)]
+            for call in (x for x in _walk(h) if isinstance(x, ast.Call)):
                 if (_call_name(call) == 'append' and isinstance(call.func, ast.Attribute)
                         and any(ast.unparse(call.func.value) in check for check in assertions)):
                     fails = True
                 if (_call_name(call) == '_exit' and call.args
                         and isinstance(call.args[0], ast.Constant) and call.args[0].value == 1):
                     fails = True
-            for assign in (x for x in ast.walk(h) if isinstance(x, ast.Assign)):
+            for assign in (x for x in _walk(h) if isinstance(x, ast.Assign)):
                 if any(isinstance(target, ast.Attribute)
                        and any('.' + target.attr in check for check in assertions)
                        for target in assign.targets):
@@ -453,6 +687,36 @@ def _unconditional_skip(dec) -> str:
 
 _SHARED_HELPERS_CACHE: dict = {}
 _IMPORTED_TEST_MODULE_CACHE: dict = {}
+_IS_FILE_CACHE: dict[tuple[str, str], bool] = {}
+_EXISTS_CACHE: dict[tuple[str, str], bool] = {}
+_TEXT_CACHE: dict[tuple[str, str], str | None] = {}
+
+
+def _is_file(rel: str) -> bool:
+    """``os.path.isfile`` below REPO, once per path: every stat is FUSE I/O."""
+    key = (REPO, rel)
+    if key not in _IS_FILE_CACHE:
+        _IS_FILE_CACHE[key] = os.path.isfile(os.path.join(REPO, rel))
+    return _IS_FILE_CACHE[key]
+
+
+def _exists(rel: str) -> bool:
+    key = (REPO, rel)
+    if key not in _EXISTS_CACHE:
+        _EXISTS_CACHE[key] = os.path.exists(os.path.join(REPO, rel))
+    return _EXISTS_CACHE[key]
+
+
+def _repo_text(rel: str) -> str | None:
+    """A shipped file's text, read once; None when it cannot be opened."""
+    key = (REPO, rel)
+    if key not in _TEXT_CACHE:
+        try:
+            with open(os.path.join(REPO, rel), encoding='utf-8') as f:
+                _TEXT_CACHE[key] = f.read()
+        except OSError:
+            _TEXT_CACHE[key] = None
+    return _TEXT_CACHE[key]
 
 
 def _shared_helper_defs() -> dict:
@@ -552,12 +816,12 @@ def _shipped_source_reads(tree) -> dict:
         if (candidate.startswith('./')):
             candidate = candidate[2:]
         if (candidate.startswith(_SHIPPED_DIRS)
-                and os.path.isfile(os.path.join(REPO, candidate))):
+                and _is_file(candidate)
+                and not _gitignored(candidate)):
             return candidate
         return ''
 
     known_path_names: dict[str, str] = {}
-
     def _literal_path_parts(node) -> list[str]:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             value = node.value.strip('/\\')
@@ -577,16 +841,21 @@ def _shipped_source_reads(tree) -> dict:
             parts.extend(_literal_path_parts(child))
         return parts
 
-    def _path_from_expression(node) -> str:
+    def _path_from_expression(node, temporary=frozenset()) -> str:
         if isinstance(node, ast.Name):
+            if node.id in temporary:
+                return ''
             return known_path_names.get(node.id, '')
+        # The repository-root spellings are a convention; a name the scope
+        # bound to a temporary directory is dynamic whatever it is called.
         dynamic_names = {
             item.id for item in ast.walk(node) if isinstance(item, ast.Name)
-            and item.id not in known_path_names
-            and item.id not in {'Path', 'PurePath', 'os', 'pathlib', '__file__'}
-            and item.id.upper() not in {
-                'ROOT', 'REPO', 'PROJECT_ROOT', 'BASE_DIR', 'HERE'}
-            and not item.id.upper().endswith('_ROOT')
+            and (item.id in temporary or (
+                item.id not in known_path_names
+                and item.id not in {'Path', 'PurePath', 'os', 'pathlib', '__file__'}
+                and item.id.upper() not in {
+                    'ROOT', 'REPO', 'PROJECT_ROOT', 'BASE_DIR', 'HERE'}
+                and not item.id.upper().endswith('_ROOT')))
         }
         # ``tmp_path / ... / 'index.html'`` names a generated fixture, not the
         # repository's top-level index.html. Only statically repo-rooted path
@@ -610,16 +879,71 @@ def _shipped_source_reads(tree) -> dict:
                     return resolved
         return ''
 
+    def _scope_statements(scope):
+        """The scope's own statements in source order. Nested def and class
+        bodies are excluded: a def is its own scope, a class body is none.
+        Statements never occur inside expressions, so only statement lists
+        are traversed."""
+        stack = list(reversed(scope.body))
+        while stack:
+            node = stack.pop()
+            yield node
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                continue
+            nested = []
+            for field in node._fields:
+                value = getattr(node, field, None)
+                if not isinstance(value, list):
+                    continue
+                for item in value:
+                    if isinstance(item, ast.stmt):
+                        nested.append(item)
+                    elif isinstance(item, (ast.excepthandler, ast.match_case)):
+                        nested.extend(item.body)
+            stack.extend(reversed(nested))
+
+    def _temporary_tree_names(scope) -> frozenset:
+        """Names every binding of which in *scope* derives from a temporary
+        directory: ``root = build_tree(tmp_path)`` or a name taken from
+        ``tempfile.TemporaryDirectory()``. A generator test reads its own
+        output beneath such a tree, never shipped source."""
+        bindings: dict[str, list] = {}
+        for statement in _scope_statements(scope):
+            if isinstance(statement, ast.Assign):
+                for target in statement.targets:
+                    if isinstance(target, ast.Name):
+                        bindings.setdefault(target.id, []).append(statement.value)
+            elif isinstance(statement, ast.With):
+                for item in statement.items:
+                    if isinstance(item.optional_vars, ast.Name):
+                        bindings.setdefault(item.optional_vars.id, []).append(
+                            item.context_expr)
+        names: set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for name, values in bindings.items():
+                if name not in names and all(
+                        any(isinstance(item, ast.Name)
+                            and (item.id in _TEMPORARY_TREE_SOURCES or item.id in names)
+                            for item in ast.walk(value))
+                        for value in values):
+                    names.add(name)
+                    changed = True
+        return frozenset(names)
+
     # Module constants such as ``OWNER = ROOT / 'lib' / 'owner.py'`` are a
     # normal spelling. Resolve them before walking function-local reads. Do
     # not absorb same-named locals from nested test functions into this map.
+    module_temporary = _temporary_tree_names(tree)
     for _round in range(2):
         for assignment in (node for node in tree.body
                            if isinstance(node, ast.Assign)):
             if len(assignment.targets) != 1 \
                     or not isinstance(assignment.targets[0], ast.Name):
                 continue
-            resolved = _path_from_expression(assignment.value)
+            resolved = _path_from_expression(assignment.value, module_temporary)
             if resolved:
                 known_path_names[assignment.targets[0].id] = resolved
 
@@ -628,19 +952,22 @@ def _shipped_source_reads(tree) -> dict:
                      if isinstance(node, (ast.FunctionDef,
                                           ast.AsyncFunctionDef))):
         read_calls = [
-            call for call in ast.walk(function)
+            call for call in _walk(function)
             if isinstance(call, ast.Call)
             and _call_name(call) in {'open', 'read', 'read_text'}
         ]
-        if not read_calls:
+        # A helper that parses whole files hands its caller data, exactly
+        # like the inline ``json.loads(...)`` assignment exempted below.
+        if not read_calls or _reads_only_parsed_json(function, read_calls):
             continue
+        temporary = _temporary_tree_names(function)
         helper_paths = set()
         for call in read_calls:
             name = _call_name(call)
             if name == 'open' and call.args:
-                resolved = _path_from_expression(call.args[0])
+                resolved = _path_from_expression(call.args[0], temporary)
             elif isinstance(call.func, ast.Attribute):
-                resolved = _path_from_expression(call.func.value)
+                resolved = _path_from_expression(call.func.value, temporary)
             else:
                 resolved = ''
             if resolved:
@@ -648,21 +975,13 @@ def _shipped_source_reads(tree) -> dict:
         source_reader_helpers[function.name] = (
             next(iter(helper_paths)) if len(helper_paths) == 1 else '')
 
-    def _walk_scope(scope):
-        stack = list(reversed(getattr(scope, 'body', ())))
-        while stack:
-            node = stack.pop()
-            yield node
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef, ast.Lambda)):
-                continue
-            stack.extend(reversed(list(ast.iter_child_nodes(node))))
-
-    scopes = [tree] + [n for n in ast.walk(tree)
+    scopes = [tree] + [n for n in _walk(tree)
                        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
     for scope in scopes:
+        statements = list(_scope_statements(scope))
+        temporary = _temporary_tree_names(scope)
         handle_bindings: list[tuple[str, int, int, str]] = []
-        for context in _walk_scope(scope):
+        for context in statements:
             if not isinstance(context, ast.With):
                 continue
             for item in context.items:
@@ -672,7 +991,7 @@ def _shipped_source_reads(tree) -> dict:
                         or not call.args
                         or not isinstance(item.optional_vars, ast.Name)):
                     continue
-                resolved = _path_from_expression(call.args[0])
+                resolved = _path_from_expression(call.args[0], temporary)
                 handle_bindings.append((
                     item.optional_vars.id,
                     context.lineno,
@@ -681,7 +1000,7 @@ def _shipped_source_reads(tree) -> dict:
                 ))
 
         # Direct children only, so a nested def's assignments stay in ITS scope.
-        for n in _walk_scope(scope):
+        for n in statements:
             if not isinstance(n, ast.Assign) or len(n.targets) != 1:
                 continue
             tgt = n.targets[0]
@@ -690,17 +1009,14 @@ def _shipped_source_reads(tree) -> dict:
             # Parsed JSON is contract/fixture data, not source text. Treating
             # a locale dictionary or build manifest as code invents a G
             # finding and makes E compare dictionary keys against raw JSON.
-            if (isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Attribute)
-                    and isinstance(n.value.func.value, ast.Name)
-                    and n.value.func.value.id == 'json'
-                    and n.value.func.attr in {'load', 'loads'}):
+            if _parses_json(n.value):
                 continue
             rel = ''
             for c in ast.walk(n.value):
                 if isinstance(c, ast.Call):
                     nm = _call_name(c)
                     if nm == 'open' and c.args:
-                        rel = rel or _path_from_expression(c.args[0])
+                        rel = rel or _path_from_expression(c.args[0], temporary)
                     elif nm in ('read', 'read_text'):
                         receiver = (c.func.value
                                     if isinstance(c.func, ast.Attribute)
@@ -715,22 +1031,72 @@ def _shipped_source_reads(tree) -> dict:
                                 rel = rel or max(
                                     matches, key=lambda binding: binding[1])[3]
                         elif receiver is not None:
-                            rel = rel or _path_from_expression(receiver)
+                            rel = rel or _path_from_expression(receiver, temporary)
                     elif nm in source_reader_helpers:
                         for argument in c.args:
-                            rel = rel or _path_from_expression(argument)
+                            rel = rel or _path_from_expression(argument, temporary)
                         rel = rel or source_reader_helpers[nm]
             if not rel:
                 continue
-            try:
-                with open(os.path.join(REPO, rel), encoding='utf-8') as f:
-                    out[(id(scope), tgt.id)] = (f.read(), rel)
-            except OSError:
-                pass
+            text = _repo_text(rel)
+            if text is not None:
+                out[(id(scope), tgt.id)] = (text, rel)
     return out
 
 
+def _created_path_literal_ids(tree: ast.AST) -> set[int]:
+    """Identify path occurrences created by this test before they are read.
+
+    A temporary repository can contain realistic source filenames. Match the
+    entire path expression in its lexical scope, not its spelling: writing
+    ``root / 'tests/example.py'`` does not excuse a separate repository read
+    through ``Path('tests/example.py')`` or a reference in another test.
+    """
+    scope_types = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+
+    def local_nodes(node):
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, scope_types):
+                yield from local_nodes(child)
+
+    result: set[int] = set()
+    for scope in (node for node in ast.walk(tree) if isinstance(node, scope_types)):
+        nodes = list(local_nodes(scope))
+        created: dict[str, int] = {}
+        for node in nodes:
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {'write_text', 'write_bytes', 'touch'}
+                    and isinstance(node.func.value, (ast.BinOp, ast.Call))):
+                key = ast.dump(node.func.value, include_attributes=False)
+                created[key] = min(created.get(key, node.lineno), node.lineno)
+        if not created:
+            continue
+        for node in nodes:
+            if not isinstance(node, (ast.BinOp, ast.Call)):
+                continue
+            first_write = created.get(ast.dump(node, include_attributes=False))
+            if first_write is not None and node.lineno >= first_write:
+                result.update(id(item) for item in ast.walk(node)
+                              if isinstance(item, ast.Constant))
+    return result
+
+
+def _innermost_def_scopes(tree) -> dict[int, int]:
+    """Map each node id to its innermost enclosing def (a def is its own)."""
+    scopes: dict[int, int] = {}
+    pending = [(tree, id(tree))]
+    while pending:
+        node, scope_id = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scope_id = id(node)
+        scopes[id(node)] = scope_id
+        pending.extend((child, scope_id) for child in ast.iter_child_nodes(node))
+    return scopes
+
+
 def analyze_file(rel: str) -> FileReport:
+    _WALKS.clear()
     rep = FileReport(rel)
     path = os.path.join(REPO, rel)
     try:
@@ -740,11 +1106,14 @@ def analyze_file(rel: str) -> FileReport:
         rep.add('A0', 0, f'unreadable: {e}')
         return rep
     rep.loc = src.count('\n') + 1
+    rep.module_mentions = set(re.findall(r'\b((?:lib|routes)(?:\.\w+)+)', src))
+    rep.path_mentions = set(re.findall(r'\b((?:lib|routes)/[\w/]+\.py)', src))
     try:
         tree = ast.parse(src, filename=rel)
     except SyntaxError as e:
         rep.add('A0', e.lineno or 0, f'SyntaxError: {e.msg}')
         return rep
+    nodes = _walk(tree)
 
     # ── string literals: repo paths + containment needles ──────────────
     # A needle is recorded WITH its enclosing SCOPE and the haystack variable,
@@ -759,7 +1128,7 @@ def analyze_file(rel: str) -> FileReport:
     # strings are not anchors used to locate source, so category F must not
     # classify them as dead reads.
     prose_ids: set[int] = set()
-    for owner in ast.walk(tree):
+    for owner in nodes:
         if not isinstance(owner, (ast.Module, ast.ClassDef, ast.FunctionDef,
                                   ast.AsyncFunctionDef)) or not owner.body:
             continue
@@ -769,7 +1138,7 @@ def analyze_file(rel: str) -> FileReport:
                 and isinstance(first.value.value, str)):
             prose_ids.add(id(first.value))
     negative_path_ids: set[int] = set()
-    for assertion in (n for n in ast.walk(tree) if isinstance(n, ast.Assert)):
+    for assertion in (n for n in nodes if isinstance(n, ast.Assert)):
         negative_parts: list[ast.AST] = []
         if isinstance(assertion.test, ast.UnaryOp) and isinstance(
                 assertion.test.op, ast.Not):
@@ -799,24 +1168,18 @@ def analyze_file(rel: str) -> FileReport:
         for item in ast.walk(value):
             if isinstance(item, ast.Constant) and isinstance(item.value, str):
                 synthetic_paths.add(item.value.strip())
-    needles: list[tuple[str, int, str, int]] = []
+    needles: list[tuple[str, int, str, ast.AST]] = []
     _or_branch = set()
-    for n in ast.walk(tree):
+    for n in nodes:
         if isinstance(n, ast.BoolOp) and isinstance(n.op, ast.Or):
             for v in n.values:
                 _or_branch.add(id(v))
     _neuter_var = re.compile(r'(?i)(neuter|poison|patched|mutat|broken|stripped)')
-    _scope_of: dict = {}
-    for scope in [tree] + [x for x in ast.walk(tree)
-                          if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        for c in ast.walk(scope):
-            _scope_of.setdefault(id(c), id(scope))
-            if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef)) and c is not scope:
-                for d in ast.walk(c):
-                    _scope_of[id(d)] = id(c)
-    for n in ast.walk(tree):
+    created_path_ids = _created_path_literal_ids(tree)
+    for n in nodes:
         if (isinstance(n, ast.Constant) and isinstance(n.value, str)
-                and id(n) not in prose_ids and id(n) not in negative_path_ids):
+                and id(n) not in prose_ids and id(n) not in negative_path_ids
+                and id(n) not in created_path_ids):
             v = n.value.strip()
             if _PATH_RE.match(v):
                 mentioned_paths.add(v)
@@ -830,8 +1193,7 @@ def analyze_file(rel: str) -> FileReport:
                 if len(s) >= 12 and re.search(r'[(_.\[=]', s):
                     hay = n.comparators[0]
                     if isinstance(hay, ast.Name) and not _neuter_var.search(hay.id):
-                        needles.append((s, getattr(n, 'lineno', 0), hay.id,
-                                        _scope_of.get(id(n), id(tree))))
+                        needles.append((s, getattr(n, 'lineno', 0), hay.id, n))
         if isinstance(n, (ast.Import, ast.ImportFrom)):
             mod = getattr(n, 'module', None) or ''
             for a in n.names:
@@ -850,7 +1212,7 @@ def analyze_file(rel: str) -> FileReport:
     has_runtime_adapter = any(
         isinstance(n, ast.ImportFrom)
         and (n.module or '').removeprefix('tests.') == '_runtime_sections'
-        for n in ast.walk(tree))
+        for n in nodes)
     if has_runtime_adapter:
         runtime_path = os.path.join(
             REPO, 'frontend', 'src', 'runtime', 'app-runtime.js')
@@ -883,7 +1245,7 @@ def analyze_file(rel: str) -> FileReport:
         # outputs that have no 1:1 source stem (the call supplies the concrete
         # source beside each name). Treat only literal names inside that call
         # as declared virtual paths.
-        for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+        for call in (n for n in nodes if isinstance(n, ast.Call)):
             if _call_name(call) != 'native_module_graph':
                 continue
             for item in ast.walk(call):
@@ -896,7 +1258,7 @@ def analyze_file(rel: str) -> FileReport:
 
     # F: dead path anchors
     for p in sorted(mentioned_paths):
-        if not os.path.exists(os.path.join(REPO, p)):
+        if not _exists(p) and not _gitignored(p):
             rep.add('F', 0, f'references missing path {p}')
 
     # Resolve provenance before classifying implementation-facing reads. A path
@@ -913,8 +1275,9 @@ def analyze_file(rel: str) -> FileReport:
 
     # E: drifted anchor — needle absent from the shipped source text it is
     # ACTUALLY tested against, resolved in the needle's OWN scope.
-    for needle, line, hay_name, scope_id in needles:
-        entry = (src_vars.get((scope_id, hay_name))
+    scope_of = _innermost_def_scopes(tree) if needles and src_vars else {}
+    for needle, line, hay_name, node in needles:
+        entry = (src_vars.get((scope_of.get(id(node), id(tree)), hay_name))
                  or src_vars.get((id(tree), hay_name)))
         if entry is None:
             continue   # haystack not proven shipped-source text in this scope
@@ -927,14 +1290,14 @@ def analyze_file(rel: str) -> FileReport:
     # ── per-test-function checks ───────────────────────────────────────
     # Collect callable defs so a DELEGATED assertion counts (_closure_asserts):
     # same-file helpers plus the shared tests/_*.py drivers.
-    local_funcs = {n.name: n for n in ast.walk(tree)
+    local_funcs = {n.name: n for n in nodes
                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     helper_funcs = {
         **_shared_helper_defs(),
         **_imported_test_helper_defs(tree),
     }
 
-    for n in ast.walk(tree):
+    for n in nodes:
         if isinstance(n, ast.Assert):
             why = _vacuous_assert(n)
             if why:
@@ -1031,21 +1394,19 @@ def coverage_gaps(reports: list[FileReport]) -> list[dict]:
     haystack = set()
     for r in reports:
         haystack |= r.imports
-    # Also scan raw test text for dotted module names (importlib / patch('lib.x.y')
-    # string usage that AST imports miss) AND for bare path mentions.
+    # Also use the raw-text dotted module names (importlib / patch('lib.x.y')
+    # string usage that AST imports miss) AND bare path mentions.
     blob_names: set[str] = set()
     blob_paths: set[str] = set()
     for r in reports:
-        try:
-            with open(os.path.join(REPO, r.rel), encoding='utf-8') as f:
-                txt = f.read()
-        except OSError:
-            continue
-        for m in re.finditer(r'\b((?:lib|routes)(?:\.\w+)+)', txt):
-            blob_names.add(m.group(1))
-        for m in re.finditer(r'\b((?:lib|routes)/[\w/]+\.py)', txt):
-            blob_paths.add(m.group(1))
-    known = haystack | blob_names
+        blob_names |= r.module_mentions
+        blob_paths |= r.path_mentions
+    # Every dotted prefix of a known name: a module counts as named when a
+    # test names it EXACTLY or something INSIDE it.
+    known_prefixes = set()
+    for name in haystack | blob_names:
+        parts = name.split('.')
+        known_prefixes.update('.'.join(parts[:end]) for end in range(1, len(parts) + 1))
 
     gaps = []
     for rel in _tracked('lib/**/*.py') + _tracked('routes/**/*.py') + \
@@ -1057,7 +1418,7 @@ def coverage_gaps(reports: list[FileReport]) -> list[dict]:
         mod = rel[:-3].replace('/', '.')
         # EXACT module, or a test naming something INSIDE it. Naming only the
         # PARENT package no longer counts (that was false-green cause #2).
-        if any(k == mod or k.startswith(mod + '.') for k in known):
+        if mod in known_prefixes:
             continue
         if _is_pure_facade(rel):
             continue

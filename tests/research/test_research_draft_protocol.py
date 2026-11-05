@@ -373,9 +373,11 @@ def test_draft_reads_original_task_instead_of_latest_direction(patched,monkeypat
 def test_invalid_original_source_cannot_fall_back_or_spend(patched,monkeypatch,source):
     draft, calls = patched
     from lib.research import records
+    from lib.turn_lifecycle import LifecycleNotFound
     monkeypatch.setattr(records,'load_record',lambda *a,**k:source)
     monkeypatch.setattr(draft,'load_research_artifacts',lambda *a,**k:pytest.fail('no fallback'))
-    with pytest.raises(ValueError):
+    # A missing record is the typed not-found; an existing invalid record is not.
+    with pytest.raises(LifecycleNotFound if source is None else ValueError):
         draft.draft_protocol(_DIRECTION,'en','idea_1',user_id=12,source_task_id='original-task')
     assert calls == []
 
@@ -414,7 +416,8 @@ def test_saved_original_source_remains_owner_scoped(fresh_db,monkeypatch):
         calls.append(kwargs['user_id'])
         return _fake_dispatch(_MODEL_REPLY)(messages,**kwargs)
     monkeypatch.setattr(draft,'dispatch_stream',dispatch)
-    with pytest.raises(ValueError,match='source is unavailable'):
+    from lib.turn_lifecycle import LifecycleNotFound
+    with pytest.raises(LifecycleNotFound,match='research source not found'):
         draft.draft_protocol(_DIRECTION,'en','idea_1',user_id=13,source_task_id='owner12-original')
     assert calls == []
     output = draft.draft_protocol(_DIRECTION,'en','idea_1',user_id=12,source_task_id='owner12-original')

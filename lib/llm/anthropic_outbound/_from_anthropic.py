@@ -31,13 +31,53 @@ _REPLAY_ONLY_BLOCK_TYPES = frozenset({
 })
 _MAX_TOOL_USE_ID_CHARS = 512
 _MAX_TOOL_NAME_CHARS = 512
+_MAX_REFUSAL_CATEGORY_CHARS = 64
+_MAX_REFUSAL_EXPLANATION_CHARS = 500
+
+
+def model_refusal_details(stop_reason: object,
+                          stop_details: object) -> dict | None:
+    """Bounded projection of a Claude refusal's ``stop_details``.
+
+    Returns None unless ``stop_reason`` is ``refusal``. ``category`` and
+    ``explanation`` stay None when absent or null: Anthropic documents null
+    as a normal, permanent value for refusals without a named category. The
+    explanation is display text whose wording is not stable, so no caller may
+    parse it. A malformed diagnostic never fails the response it describes.
+    """
+    if stop_reason != 'refusal':
+        return None
+    details = stop_details if isinstance(stop_details, dict) else {}
+    category = details.get('category')
+    explanation = details.get('explanation')
+    if isinstance(explanation, str):
+        explanation = explanation.strip()
+    return {
+        'category': (category[:_MAX_REFUSAL_CATEGORY_CHARS]
+                     if isinstance(category, str) and category else None),
+        'explanation': (explanation[:_MAX_REFUSAL_EXPLANATION_CHARS]
+                        if isinstance(explanation, str) and explanation
+                        else None),
+    }
 
 
 def _is_replay_state_block(block: object) -> bool:
-    """True for valid protocol state that must survive the OpenAI projection."""
+    """True for valid protocol state that must survive the OpenAI projection.
+
+    A signed ``thinking`` block is replay state. Where ``display`` defaults to
+    ``"omitted"`` (Opus 4.7+, Fable, Sonnet/Haiku 5.5) its text is empty and
+    the ``signature`` alone carries the encrypted reasoning; a response may
+    also hold several such blocks interleaved with tool calls. The flat
+    ``reasoning_content`` + ``thinking_signature`` projection represents
+    neither shape, so the ordered native content array is authoritative:
+    https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
+    """
     if not isinstance(block, dict):
         return False
     block_type = block.get('type')
+    if block_type == 'thinking':
+        signature = block.get('signature')
+        return isinstance(signature, str) and bool(signature)
     if block_type == 'compaction':
         # Anthropic documents a rare tool-enabled failure shape with
         # ``content: null``. Replaying it would make the server discard the
@@ -221,6 +261,16 @@ def _convert_usage(usage: dict) -> dict:
             for row in compaction_rows)
         result['compaction_output_tokens'] = sum(
             _int(row, 'output_tokens') for row in compaction_rows)
+    # The TTL breakdown prices 1-hour writes above 5-minute ones (lib.cost).
+    breakdowns = [row['cache_creation'] for row in iterations
+                  if isinstance(row.get('cache_creation'), dict)]
+    if not breakdowns and isinstance(usage.get('cache_creation'), dict):
+        breakdowns = [usage['cache_creation']]
+    if breakdowns:
+        result['cache_creation'] = {
+            key: sum(_int(row, key) for row in breakdowns)
+            for key in ('ephemeral_5m_input_tokens',
+                        'ephemeral_1h_input_tokens')}
     return result
 
 
@@ -251,10 +301,14 @@ def anthropic_response_to_openai(data: object) -> dict:
         logger.warning('[Anthropic] invalid non-stream response: %s', exc)
         return {'error': {'message': str(exc), 'type': 'invalid_response'}}
     finish = _map_stop_reason(stop_reason)
+    usage = _convert_usage(data.get('usage'))
+    refusal = model_refusal_details(stop_reason, data.get('stop_details'))
+    if refusal is not None:
+        usage['_model_refusal'] = refusal
     return {
         'id': data.get('id', ''),
         'object': 'chat.completion',
         'model': data.get('model', ''),
         'choices': [{'index': 0, 'message': msg, 'finish_reason': finish}],
-        'usage': _convert_usage(data.get('usage')),
+        'usage': usage,
     }

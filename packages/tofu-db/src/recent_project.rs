@@ -30,10 +30,6 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn resource_exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
-
 fn path_digest(path: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"tofu-db:recent-project-path:v1\0");
@@ -161,7 +157,7 @@ fn touch_one(
             transaction,
             count
                 .checked_add(1)
-                .ok_or_else(|| resource_exhausted("recent-project capacity is exhausted"))?,
+                .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("recent-project capacity is exhausted"))?,
         )?;
     }
     let use_count = current_count

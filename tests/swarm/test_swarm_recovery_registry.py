@@ -24,9 +24,10 @@ def registry(monkeypatch):
         ('_session_timestamps', {}),
         ('_key_aliases', {}),
         ('_sessions_lock', threading.Lock()),
-        ('_autocontinue_chain', {}),
         ('_autocontinue_inflight', set()),
         ('_autocontinue_lock', threading.Lock()),
+        ('_retiring_sessions', {}),
+        ('_retirement_workers', set()),
     ):
         monkeypatch.setattr(state, name, value)
         if hasattr(facade, name):
@@ -39,7 +40,8 @@ def registry(monkeypatch):
     monkeypatch.setattr(state, '_cleanup_timer_retirements', 0)
     controlled = SimpleNamespace(
         now=1000.0, timers=[], start_error=None, fail_after_start=False)
-    monkeypatch.setattr(state, 'time', SimpleNamespace(time=lambda: controlled.now))
+    monkeypatch.setattr(state, 'time', SimpleNamespace(
+        time=lambda: controlled.now, monotonic=lambda: controlled.now))
 
     class Timer:
         def __init__(self, interval, function):

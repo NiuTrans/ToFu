@@ -45,10 +45,11 @@ def test_snapshot_shape_matches_frontend_contract():
     assert snap['depth'] == ''
     assert snap['modes'] == []
     labels = {tool['label']: tool['tone'] for tool in snap['tools']}
+    # browserEnabled is set above, yet the always-on browser is a default tool
+    # with no chip on either side of the contract.
     assert labels == {
         'Search ×N': 'search',
         'Fetch': 'net',
-        'Browser': 'net',
         'Code Exec': 'code',
         'Memory': 'ai',
         'Image Gen': 'ai',

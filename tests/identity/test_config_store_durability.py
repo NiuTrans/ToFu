@@ -286,7 +286,7 @@ def test_search_updates_merge_with_concurrent_server_config_writer(
     monkeypatch.setattr(lib, 'reload_config', mock.Mock())
 
     def update_search():
-        result = search_settings.apply_updates({'fetch_top_n': 9})
+        result = search_settings.apply_updates({'block_domain': 'spam.example'})
         assert result['ok'] is True
 
     def update_provider():
@@ -302,7 +302,7 @@ def test_search_updates_merge_with_concurrent_server_config_writer(
     from lib.json_store import read_json
     saved = read_json(str(path), default={})
     assert saved['providers'] == [{'id': 'provider-concurrent'}]
-    assert saved['search']['fetch_top_n'] == 9
+    assert 'spam.example' in saved['search']['skip_domains']
 
 
 @pytest.fixture

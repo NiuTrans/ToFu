@@ -2,7 +2,8 @@
 
 Supports both the v1 (apikey-only) and v2 (appId + MD5 authStr signature)
 NiuTrans HTTP APIs. ``_niutrans_translate`` auto-selects based on whether an
-``app_id`` is configured.
+``app_id`` is configured. Every provider-side failure (transport, HTTP status,
+malformed body, API error code, empty result) raises :class:`MtProviderError`.
 """
 
 import hashlib
@@ -16,6 +17,14 @@ from lib.http_transport.client import http_post
 from ._config import _normalize_lang, _REQUEST_TIMEOUT
 
 logger = get_logger(__name__)
+
+
+class MtProviderError(RuntimeError):
+    """The MT provider failed or rejected the request.
+
+    The message is operator-facing provider diagnostics; anything else that
+    escapes an adapter is a server fault.
+    """
 
 
 def _niutrans_translate(text, source, target, cfg):
@@ -68,24 +77,27 @@ def _niutrans_v1(text, src_lang, tgt_lang, api_key, api_url=''):
         data = resp.json()
     except requests.Timeout:
         logger.warning('[MT:niutrans-v1] Timeout after %ds', _REQUEST_TIMEOUT)
-        raise RuntimeError('NiuTrans API timeout')
+        raise MtProviderError('NiuTrans API timeout')
     except requests.RequestException as e:
         logger.warning('[MT:niutrans-v1] Request failed: %s', e)
-        raise RuntimeError('NiuTrans API request failed: %s' % e)
+        raise MtProviderError('NiuTrans API request failed: %s' % e)
     except (ValueError, TypeError) as e:
         logger.warning('[MT:niutrans-v1] Invalid response: %s', e)
-        raise RuntimeError('NiuTrans API invalid response')
+        raise MtProviderError('NiuTrans API invalid response')
+    if not isinstance(data, dict):
+        logger.warning('[MT:niutrans-v1] Non-object response: %s', type(data).__name__)
+        raise MtProviderError('NiuTrans API invalid response')
 
     if 'error_code' in data or 'errorCode' in data:
         err_code = data.get('error_code') or data.get('errorCode', '')
         err_msg = data.get('error_msg') or data.get('errorMsg', '')
         logger.warning('[MT:niutrans-v1] API error: code=%s msg=%s', err_code, err_msg)
-        raise RuntimeError('NiuTrans API error %s: %s' % (err_code, err_msg))
+        raise MtProviderError('NiuTrans API error %s: %s' % (err_code, err_msg))
 
     result = data.get('tgt_text', '').strip()
     if not result:
         logger.warning('[MT:niutrans-v1] Empty translation result for %d-char input', len(text))
-        raise RuntimeError('NiuTrans returned empty translation')
+        raise MtProviderError('NiuTrans returned empty translation')
 
     return result
 
@@ -127,23 +139,26 @@ def _niutrans_v2(text, src_lang, tgt_lang, api_key, app_id, api_url=''):
         data = resp.json()
     except requests.Timeout:
         logger.warning('[MT:niutrans-v2] Timeout after %ds', _REQUEST_TIMEOUT)
-        raise RuntimeError('NiuTrans v2 API timeout')
+        raise MtProviderError('NiuTrans v2 API timeout')
     except requests.RequestException as e:
         logger.warning('[MT:niutrans-v2] Request failed: %s', e)
-        raise RuntimeError('NiuTrans v2 API request failed: %s' % e)
+        raise MtProviderError('NiuTrans v2 API request failed: %s' % e)
     except (ValueError, TypeError) as e:
         logger.warning('[MT:niutrans-v2] Invalid response: %s', e)
-        raise RuntimeError('NiuTrans v2 API invalid response')
+        raise MtProviderError('NiuTrans v2 API invalid response')
+    if not isinstance(data, dict):
+        logger.warning('[MT:niutrans-v2] Non-object response: %s', type(data).__name__)
+        raise MtProviderError('NiuTrans v2 API invalid response')
 
     if 'errorCode' in data:
         err_code = data.get('errorCode', '')
         err_msg = data.get('errorMsg', '')
         logger.warning('[MT:niutrans-v2] API error: code=%s msg=%s', err_code, err_msg)
-        raise RuntimeError('NiuTrans v2 API error %s: %s' % (err_code, err_msg))
+        raise MtProviderError('NiuTrans v2 API error %s: %s' % (err_code, err_msg))
 
     result = data.get('tgtText', '').strip()
     if not result:
         logger.warning('[MT:niutrans-v2] Empty translation result for %d-char input', len(text))
-        raise RuntimeError('NiuTrans v2 returned empty translation')
+        raise MtProviderError('NiuTrans v2 returned empty translation')
 
     return result

@@ -30,12 +30,6 @@ logger = get_logger(__name__)
 # ``pending_review``.  Per CLAUDE.md §10 (hyperparameters, model routing,
 # DB schema, security), these require an explicit human approve step.
 _SUGGEST_ONLY: dict[str, str] = {
-    'adjust_fetch_timeout':
-        'Adjust FETCH_TIMEOUT based on observed fetch failures.',
-    'adjust_fetch_top_n':
-        'Adjust FETCH_TOP_N based on citation vs fetch ratio.',
-    'toggle_llm_content_filter':
-        'Enable/disable the LLM content filter depending on IRRELEVANT drop rate.',
     'suggest_model_fallback':
         'Switch FALLBACK_MODEL when the primary model is degrading.',
     'extend_cache_ttl':

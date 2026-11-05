@@ -40,9 +40,11 @@ credential refresh can rebind a configured route in place.
 
 Problem: unbounded lifetime ID retention and fixed worker limits eventually
 refused useful work or underused larger devices. Decision: negotiated expiry
-fences permit reclaim, while cached CPU/memory headroom determines resident
-advisory delivery slots and resident memory budgets; overflow spools privately,
-wire prefixes stay bounded, and shutdown joins execution before reclaiming spools. Alternatives rejected:
+fences permit reclaim; each poll advertises the fixed `command_batch` delivery
+credit and execution stays demand-driven. Only the resident output memory
+budget follows the cached memory probe; overflow spools privately, wire
+prefixes stay bounded, and shutdown joins execution before reclaiming spools.
+CPU count and memory never size delivery or execution. Alternatives rejected:
 forgetting IDs without expiry replays side effects; growing an entire HTTP body
 with resident capacity can produce permanent 413 failures. See the bounded
 [resource measurements](RESOURCE_CONTROL.md#desktop-device-resources).

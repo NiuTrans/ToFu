@@ -39,11 +39,15 @@ def test_clean_block_history_skips_strip_and_normalize():
         {'role': 'user', 'content': [{'type': 'text', 'text': 'next'}]},
     ]
     body = _body(copy.deepcopy(messages))
-    original_ids = [id(m) for m in body['messages']]
+    source = body['messages']
+    original_ids = [id(m) for m in source]
     add_cache_breakpoints(body, log_prefix='')
-    # The tail marker wraps the tail message into a new dict, but no marker-
-    # strip or str→block wrap should rebuild the buried history carriers.
-    assert [id(m) for m in body['messages'][:4]] == original_ids[:4]
+    # Only the carriers that receive a marker (system prefix and tail) become
+    # new dicts; no marker-strip or str→block wrap rebuilds the buried history,
+    # and the source history is never written.
+    assert [id(m) for m in body['messages'][1:4]] == original_ids[1:4]
+    assert body['messages'][0] is not source[0]
+    assert source == messages
 
 
 def test_str_content_still_normalizes_under_the_gate():

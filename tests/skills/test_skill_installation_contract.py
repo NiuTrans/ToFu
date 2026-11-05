@@ -175,6 +175,27 @@ def test_uploaded_package_cannot_forge_origin_metadata(isolated):
             source, scope='project', project_path=_project(isolated))
 
 
+def test_installed_package_directory_reinstalls_only_with_marker_exclusion(isolated):
+    from lib.skills import InstallerError, install_skill_package
+    installed = install_skill_package(
+        _zip_bytes(), scope='project', project_path=_project(isolated),
+        source_url='https://example.com/sample')
+    package = os.path.dirname(installed['memory']['filepath'])
+    with pytest.raises(InstallerError, match='reserved Tofu origin metadata'):
+        install_skill_package(
+            package, scope='project', project_path=_project(isolated, 'copy'))
+
+    copied = install_skill_package(
+        package, scope='project', project_path=_project(isolated, 'excluded'),
+        exclude_source_origin_markers=True)
+    origin = json.loads(Path(
+        os.path.dirname(copied['memory']['filepath']), '.skill-origin.json',
+    ).read_text(encoding='utf-8'))
+    assert origin['source_url'] == '', (
+        'markers are never copied; provenance is only an explicit argument')
+    assert copied['content_sha256'] == installed['content_sha256']
+
+
 def test_zip_file_directory_collisions_fail_closed(isolated):
     from lib.skills import InstallerError, install_skill_package
     source = _zip_bytes(extra={
@@ -285,6 +306,63 @@ def test_resource_reads_are_complete_opaque_and_symlink_safe(isolated):
     linked = read_skill_resource(
         'manual', 'refs/linked.txt', project_path=project)
     assert 'symlinked paths are rejected' in linked
+
+
+def test_resource_reads_refuse_hidden_package_entries_like_the_manifest(
+        isolated):
+    from lib.skills import load_skill, read_skill_resource
+    project = _project(isolated)
+    package = Path(project) / '.tofu' / 'skills' / 'manual'
+    (package / 'refs' / 'v1.2').mkdir(parents=True)
+    (package / 'refs' / '.private').mkdir()
+    (package / '.cache').mkdir()
+    (package / '.secrets').mkdir()
+    (package / 'SKILL.md').write_text(
+        _skill_text('manual', body='instructions'), encoding='utf-8')
+    (package / 'refs' / 'v1.2' / 'notes.v2.txt').write_text(
+        'NESTED_RESOURCE', encoding='utf-8')
+    private = {
+        '.cache/dx-premint.json': 'CACHED_SESSION_TICKET',
+        '.secrets/token.json': 'PRIVATE_CREDENTIAL',
+        '.hidden': 'HIDDEN_FILE_BODY',
+        'refs/.private/key.txt': 'NESTED_PRIVATE_BODY',
+    }
+    for relative, body in private.items():
+        (package / relative).write_text(body, encoding='utf-8')
+
+    loaded = load_skill('manual', project_path=project)
+    assert 'skill://manual/refs/v1.2/notes.v2.txt' in loaded
+    nested = read_skill_resource(
+        'manual', 'skill://manual/refs/v1.2/notes.v2.txt',
+        project_path=project)
+    assert '<skill_resource>\nNESTED_RESOURCE\n</skill_resource>' in nested
+
+    requests = [
+        *private,
+        *(f'skill://manual/{relative}' for relative in private),
+        '.secrets\\token.json',
+        '.cache/absent.json',
+    ]
+    results = {
+        resource: read_skill_resource(
+            'manual', resource, project_path=project)
+        for resource in requests
+    }
+    not_refused = {
+        resource: result for resource, result in results.items()
+        if not result.startswith('Invalid skill resource request:')
+        or 'dot-prefixed' not in result
+    }
+    assert not_refused == {}
+    for relative, body in private.items():
+        assert f'skill://manual/{relative}' not in loaded
+        assert all(body not in result for result in results.values())
+    assert all('<skill_resource>' not in result
+               and str(package) not in result
+               for result in results.values())
+    # Refused before any filesystem probe: absence is indistinguishable.
+    assert results['.cache/absent.json'].replace(
+        'absent.json', 'dx-premint.json') == results['.cache/dx-premint.json']
 
 
 def test_skill_index_is_complete_xml_and_token_bounded(monkeypatch):
@@ -637,6 +715,65 @@ def test_auto_install_loads_guide_and_enforces_task_budget(
     assert task['_skillUsage'][0]['trigger'] == 'installation'
     assert task['_skillUsage'][0]['status'] == 'loaded'
     assert task.get('_tool_approval_receipts') == {}
+
+
+def test_concurrent_installs_of_one_round_share_the_task_budget(monkeypatch):
+    """Calls of one round run concurrently (owner decision 2026-10-28): four
+    approved installs racing for the same task still get three attempts."""
+    from lib.skills.tools import REQUEST_SKILL_INSTALL_TOOL
+    from lib.tasks_pkg.handlers.skills import _handle_skill_tool
+    from lib.tasks_pkg.tool_dispatch._flags import _call_id_signature
+    from tests._registered_chat_task import registered_chat_task
+    import lib.skills
+    import lib.skills.catalog_install as service
+
+    readers = threading.Barrier(4)
+
+    class RacingTask(dict):
+        """Every attempt reads the count before any writes, unless serialized."""
+
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            if key == '_skillInstallAttempts':
+                try:
+                    readers.wait(timeout=1)
+                except threading.BrokenBarrierError:
+                    pass
+            return value
+
+    installs = []
+
+    def install(catalog_id, **kwargs):
+        installs.append(catalog_id)
+        return {'memory': {'id': 'skill-creator', 'scope': 'global'},
+                'catalog_id': catalog_id, 'source_revision': 'd' * 40,
+                'content_sha256': 'e' * 64}
+
+    monkeypatch.setattr(service, 'install_catalog_skill', install)
+    monkeypatch.setattr(lib.skills, 'load_skill', lambda *a, **k: 'Skill loaded: **skill-creator**')
+    task = RacingTask(_gateway_task(REQUEST_SKILL_INSTALL_TOOL, attended=True))
+    task['id'] = 'skill-gate-racing'
+    args = {'catalog_id': 'skill-creator', 'scope': 'global'}
+    rows = [{'roundNum': number, 'llmRound': 1, 'toolName': 'request_skill_install',
+             'toolCallId': f'install-{number}', 'query': 'request_skill_install',
+             'status': 'searching'} for number in range(1, 5)]
+    task['toolRounds'] = rows
+    task['_tool_approval_receipts'] = {
+        row['toolCallId']: {'signature': _call_id_signature('request_skill_install', args),
+                            'minted_at': time.time()} for row in rows}
+    with registered_chat_task(task, user_id=1):
+        workers = [threading.Thread(target=_handle_skill_tool, args=(
+            task, {'id': row['toolCallId']}, 'request_skill_install', row['toolCallId'],
+            dict(args), row['roundNum'], row, {}, None, False)) for row in rows]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+
+    assert len(installs) == 3, 'concurrent installs overspent the task budget'
+    assert task['_skillInstallAttempts'] == 3
+    assert sum('task_install_budget_exhausted' in str(row.get('results'))
+               for row in rows) == 1
 
 
 def test_auto_install_cannot_bypass_plan_mode(monkeypatch, gateway_task_registry_cleanup):

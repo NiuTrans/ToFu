@@ -4,14 +4,21 @@ select_gate_commands is consumed by integration, delivery/status and linear
 checkpoints. Local Git policy wins; environment defaults belong only to the
 application Git common-dir (or an explicit operator root), never all projects.
 No storage, scans, caches or background work participate in this decision.
+
+retire_unrelated_publication_refs is the one rule both publication planes
+apply before reading candidate/stable/baseline ownership: refs stranded in an
+unrelated (rewritten) history are archived, never treated as an owner.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
+import time
+from typing import Callable
 
 from lib.git_runtime import git_executable
 
@@ -85,8 +92,10 @@ class GateCommands:
 
 def git_policy_environment() -> dict[str, str]:
     """Drop ambient Git routing/config injection; callers may add owned inputs."""
-    return {key: value for key, value in os.environ.items()
-            if not key.upper().startswith('GIT_')}
+    from lib.git_runtime import without_automatic_git_maintenance
+    return without_automatic_git_maintenance({
+        key: value for key, value in os.environ.items()
+        if not key.upper().startswith('GIT_')})
 
 
 def _policy_git(root: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -205,10 +214,85 @@ def require_unchanged_gates(root: str | Path, expected: GateCommands) -> None:
         raise GatePolicyError('Git gate policy changed during verification')
 
 
+PUBLICATION_REFS = (
+    'refs/tofu/candidate', 'refs/tofu/stable',
+    'refs/tofu/workspace-checkpoint-baseline',
+)
+RETIRED_PUBLICATION_REF_ROOT = 'refs/tofu/retired'
+_OBJECT_ID = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})')
+
+# Runs Git in the canonical root: git(args, input_text=None). Callers pass
+# their own runner so each plane keeps its environment, deadline and seams.
+GitRunner = Callable[..., subprocess.CompletedProcess]
+
+
+class PublicationRefError(RuntimeError):
+    """Publication ref ancestry could not be observed or retired safely."""
+
+
+def unrelated_publication_refs(git: GitRunner, head_sha: str) -> dict[str, str]:
+    """Return publication refs that share no history with ``head_sha``.
+
+    A history rewrite (an orphan rebuild, filter-repo) strands candidate,
+    stable and the linear baseline in the abandoned history. Neither plane can
+    merge, promote or fast-forward such a ref into HEAD's line again, yet its
+    mere presence refused every later publication. Disjoint history is the
+    proof: a ref that only diverged keeps a common ancestor, may hold verified
+    work, and stays the caller's fail-closed decision.
+    """
+    listed = git(['for-each-ref', '--format=%(refname) %(objectname)',
+                  *PUBLICATION_REFS])
+    if listed.returncode:
+        raise PublicationRefError('Cannot list publication refs')
+    present = {}
+    for line in listed.stdout.splitlines():
+        name, _, sha = line.partition(' ')
+        if name in PUBLICATION_REFS:  # for-each-ref also matches name/ children
+            if not _OBJECT_ID.fullmatch(sha):
+                raise PublicationRefError(f'Cannot resolve {name}')
+            present[name] = sha
+    unrelated = {}
+    for name, sha in present.items():
+        base = git(['merge-base', head_sha, sha])
+        if base.returncode == 0:
+            continue
+        if base.returncode == 1 and not base.stdout.strip() and not base.stderr.strip():
+            unrelated[name] = sha
+            continue
+        raise PublicationRefError(f'Cannot compare {name} with HEAD history')
+    return unrelated
+
+
+def retire_unrelated_publication_refs(git: GitRunner, head_sha: str) -> dict[str, str]:
+    """Archive publication refs from an unrelated history; return ref -> archive.
+
+    One compare-and-swap transaction pins HEAD and every old value. The commits
+    stay reachable under refs/tofu/retired/<UTC>-<head>/, so retirement never
+    lets garbage collection discard the abandoned history.
+    """
+    unrelated = unrelated_publication_refs(git, head_sha)
+    if not unrelated:
+        return {}
+    prefix = (f"{RETIRED_PUBLICATION_REF_ROOT}/"
+              f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{head_sha[:12]}")
+    archived = {name: f"{prefix}/{name.removeprefix('refs/tofu/')}" for name in unrelated}
+    commands = [f'verify HEAD {head_sha}']
+    for name, sha in unrelated.items():
+        commands += [f'delete {name} {sha}', f'create {archived[name]} {sha}']
+    result = git(['update-ref', '-m', 'tofu: retire publication refs from an unrelated history',
+                  '--stdin'], input_text='\n'.join(commands) + '\n')
+    if result.returncode:
+        raise PublicationRefError('Retiring unrelated publication refs failed: '
+                                  + (result.stderr or result.stdout or '').strip()[:500])
+    return archived
+
+
 __all__ = [
     'FORBIDDEN_CHECKPOINT_PARTS', 'FORBIDDEN_CHECKPOINT_ROOTS',
     'PROJECT_GATE_REQUIRED_SUFFIXES', 'forbidden_checkpoint_paths',
     'normalize_checkpoint_path', 'semantic_gate_paths', 'GatePolicyError',
     'GateCommands', 'git_policy_environment', 'select_gate_commands',
-    'require_unchanged_gates',
+    'require_unchanged_gates', 'PUBLICATION_REFS', 'RETIRED_PUBLICATION_REF_ROOT',
+    'PublicationRefError', 'unrelated_publication_refs',
+    'retire_unrelated_publication_refs',
 ]

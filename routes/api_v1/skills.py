@@ -32,12 +32,12 @@ from lib.api_response import (
     api_bad_request, api_created, api_error, api_internal_error,
     api_not_found, api_ok,
 )
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
 
 from .auth import request_user_id, require_auth
-from .memory import _project_path
 
 logger = get_logger(__name__)
 
@@ -46,6 +46,17 @@ api_v1_skills_bp = Blueprint('api_v1_skills', __name__)
 # Compressed upload cap. The installer independently enforces the canonical
 # 25 MiB unpacked selected-package budget for every source type.
 _INSTALL_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _project_path() -> str | None:
+    """Skills settings carry an explicit context, never the server checkout."""
+    from lib.request_parser import decode_proxy_path_arg
+    return decode_proxy_path_arg('project_path') or None
+
+
+def _skill_ref() -> str | None:
+    """Disambiguate same-id packages without accepting a filesystem source."""
+    return request.args.get('skill_ref') or None
 
 
 def http_get(*args, **kwargs):
@@ -62,22 +73,23 @@ def http_get(*args, **kwargs):
     summary='List installed skill packages',
     description=(
         'Returns ``{skills: [...]}`` — every installed skill package '
-        '(project + global scope). Use ``?scope=all|project|global`` to '
-        'filter. Memories are served by ``/api/v1/memory`` instead.'
+        'in the explicit project_path query context plus the owner store. '
+        'No project_path means personal skills only. include_shadowed=1 '
+        'retains duplicate IDs with skill_ref, project_path and source_path '
+        'for settings file management; mutations accept the selected skill_ref. '
+        'Use scope=all|project|global to filter.'
     ),
     tags=['skills'],
 )
 def list_skills_v1():
-    from lib.skills import list_skills
+    from lib.skills.settings import skill_library
     scope = request.args.get('scope', 'all')
-    skills = list_skills(
-        project_path=_project_path(), owner_user_id=request_user_id())
+    result = skill_library(
+        _project_path(), owner_user_id=request_user_id(),
+        include_shadowed=request.args.get('include_shadowed') == '1')
     if scope != 'all':
-        skills = [s for s in skills if s.get('scope') == scope]
-    for s in skills:
-        s.pop('filepath', None)
-        s.pop('package_dir', None)
-    return api_ok({'skills': skills})
+        result['skills'] = [s for s in result['skills'] if s.get('scope') == scope]
+    return api_ok(result)
 
 
 @api_v1_skills_bp.route('/api/v1/skills/<skill_id>', methods=['DELETE'])
@@ -92,7 +104,7 @@ def uninstall_skill_v1(skill_id):
     from lib.skills import uninstall_skill
     logger.warning('[Skills.v1] uninstalling %s', skill_id)
     ok = uninstall_skill(
-        skill_id, project_path=_project_path(),
+        skill_id, project_path=_project_path(), skill_ref=_skill_ref(),
         owner_user_id=request_user_id())
     if not ok:
         logger.warning('[Skills.v1] %s not found for uninstall', skill_id)
@@ -113,12 +125,12 @@ def toggle_skill_v1(skill_id):
     owner_user_id = request_user_id()
     data = parse_body(exact=('enabled',))
     mem = get_skill(
-        skill_id, project_path=_project_path(),
+        skill_id, project_path=_project_path(), skill_ref=_skill_ref(),
         owner_user_id=owner_user_id)
     if not mem:
         return api_not_found('Skill package not found')
     mem = set_skill_enabled(
-        skill_id, enabled=data.get('enabled'),
+        skill_id, enabled=data.get('enabled'), skill_ref=_skill_ref(),
         project_path=_project_path(), owner_user_id=owner_user_id)
     mem.pop('filepath', None)
     mem.pop('package_dir', None)
@@ -136,7 +148,7 @@ def toggle_skill_v1(skill_id):
 def skill_files_v1(skill_id):
     from lib.skills import get_skill, list_skill_files
     skill = get_skill(
-        skill_id, project_path=_project_path(),
+        skill_id, project_path=_project_path(), skill_ref=_skill_ref(),
         owner_user_id=request_user_id())
     if not skill:
         return api_not_found('Skill package not found')
@@ -168,7 +180,7 @@ def skill_env_status_v1(skill_id):
     from lib.skills.env import skill_env_status
     owner_user_id = request_user_id()
     skill = get_skill(
-        skill_id, project_path=_project_path(),
+        skill_id, project_path=_project_path(), skill_ref=_skill_ref(),
         owner_user_id=owner_user_id)
     if not skill:
         return api_not_found('Skill package not found')
@@ -192,7 +204,7 @@ def skill_env_set_v1(skill_id):
     from lib.skills.env import set_skill_env
     owner_user_id = request_user_id()
     skill = get_skill(
-        skill_id, project_path=_project_path(),
+        skill_id, project_path=_project_path(), skill_ref=_skill_ref(),
         owner_user_id=owner_user_id)
     if not skill:
         return api_not_found('Skill package not found')
@@ -206,7 +218,7 @@ def skill_env_set_v1(skill_id):
     try:
         meta = set_skill_env(
             skill_id, name, value, owner_user_id=owner_user_id)
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e), field='name')
     return api_ok({'binding': meta})
 
@@ -220,7 +232,7 @@ def skill_env_delete_v1(skill_id, env_name):
     from lib.skills.env import delete_skill_env
     owner_user_id = request_user_id()
     skill = get_skill(
-        skill_id, project_path=_project_path(),
+        skill_id, project_path=_project_path(), skill_ref=_skill_ref(),
         owner_user_id=owner_user_id)
     if not skill:
         return api_not_found('Skill package not found')
@@ -233,22 +245,31 @@ def skill_env_delete_v1(skill_id, env_name):
 @api_v1_skills_bp.route('/api/v1/skills/<skill_id>/scope', methods=['POST'])
 @require_auth
 @api_meta(
-    summary='Move a skill between project and global scope',
-    description='Body: ``{scope: "project"|"global"}``. Global skills are '
-                'visible in project-less chat mode too.',
+    summary='Move skill files to an explicit destination',
+    description='Body: ``{scope: "project"|"global", target_project_path?}``. '
+                'Project destinations require target_project_path. Physically '
+                'moves the directory; this is not a visibility-only toggle.',
     tags=['skills'],
 )
 def skill_scope_v1(skill_id):
     from lib.skills import set_skill_scope
-    data = parse_body(exact=('scope',))
+    data = parse_body(exact=('scope', 'target_project_path'))
     scope = (data.get('scope') or '').strip().lower()
     if scope not in ('project', 'global'):
         return api_bad_request(f'Invalid scope: {scope}', field='scope')
+    target = data.get('target_project_path')
+    if scope == 'project' and (
+            not isinstance(target, str) or not os.path.isabs(target)
+            or not os.path.isdir(target)):
+        return api_bad_request('Select an existing absolute project directory',
+                               field='target_project_path')
     try:
         skill = set_skill_scope(skill_id, scope,
                                 project_path=_project_path(),
+                                skill_ref=_skill_ref(),
+                                target_project_path=target if scope == 'project' else None,
                                 owner_user_id=request_user_id())
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e))
     if not skill:
         return api_not_found('Skill package not found')
@@ -295,6 +316,10 @@ def install_skill_package_v1():
         return api_bad_request(f'Invalid scope: {scope}')
 
     project_path = _project_path()
+    if scope == 'project' and (not project_path or not os.path.isabs(project_path)
+                               or not os.path.isdir(project_path)):
+        return api_bad_request('Select an existing absolute project directory',
+                               field='project_path')
     try:
         result = install_skill_package(
             source, scope=scope, project_path=project_path,
@@ -443,6 +468,10 @@ def skill_catalog_install_v1():
         return api_bad_request(f'Invalid scope: {scope}')
 
     project_path = _project_path()
+    if scope == 'project' and (not project_path or not os.path.isabs(project_path)
+                               or not os.path.isdir(project_path)):
+        return api_bad_request('Select an existing absolute project directory',
+                               field='project_path')
     try:
         result = install_catalog_skill(
             skill_id,

@@ -69,9 +69,12 @@ tofu_trading/
   static/ templates/        trading.html, trading.css, static/js/trading/*
 ```
 
+Historical simulation execution and accounting are documented in
+[`docs/SIMULATION.md`](docs/SIMULATION.md).
+
 ## Compatibility
 
-Version 0.2 is pinned to `tofu-agent>=0.17,<0.18` and is sidecar-native. Runtime code
+The compatible host version range is declared in `pyproject.toml`. Runtime code
 does not import `lib.database`, open `data/tofu.db`, choose SQLite/PostgreSQL,
 or send SQL over RPC. Existing DB-API-shaped business code runs only against a
 private, bounded in-memory evaluator; durable reads and writes are versioned

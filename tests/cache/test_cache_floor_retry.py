@@ -279,8 +279,8 @@ def test_floorretry_first_attempt_orphan_reconciled(monkeypatch):
     announced = acc.announced_tc_map
     assert 'tc_A' in announced, 'primary attempt must have announced tc_A'
     assert 'tc_B' not in announced, 'Layer-1: resend must not have announced tc_B'
-    # tc_A is spinning ('searching') until reconcile runs.
-    assert announced['tc_A'][1]['status'] == 'searching'
+    # tc_A (empty args, never prefetched) waits ('queued') until reconcile runs.
+    assert announced['tc_A'][1]['status'] == 'queued'
 
     # The orchestrator layer's reconcile (above FloorRetry) settles the orphan.
     n = acc.reconcile_announced_rounds(msg)
@@ -333,7 +333,7 @@ def test_transport_restart_retires_tool_only_attempt_state(monkeypatch):
     assert replacement['id'] != 'write_file_0'
     assert acc.reconcile_announced_rounds(msg) == 1
     assert [row['status'] for row in task['toolRounds']] == [
-        'aborted', 'searching',
+        'aborted', 'queued',
     ]
     assert set(acc.announced_tc_map) == {replacement['id']}
     acc.inject_into_cache(task)  # deterministic pool shutdown

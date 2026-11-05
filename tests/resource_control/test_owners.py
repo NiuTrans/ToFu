@@ -245,43 +245,28 @@ def test_frame_growth_and_native_pool_ports_do_not_open_connections():
         client.close()
 
 
-def test_memory_observation_combines_reclaimable_cgroup_and_host(monkeypatch):
-    import lib.cgroup_guard as guard
-    import lib.resource_control.runtime as runtime
-    monkeypatch.setattr(guard, 'process_rss_admission_snapshot', lambda: {
-        'headroom_bytes': 1000, 'reserve_bytes': 100, 'allowed': True})
-    monkeypatch.setattr(guard, 'pressure', lambda: {
-        'limit': 1000, 'usage': 950, 'reclaimable': 400})
-    monkeypatch.setattr(runtime, 'observe_host_memory_available_bytes', lambda: 2000)
-    assert runtime.memory_observation() == (False, 450)
-    monkeypatch.setattr(runtime, 'observe_host_memory_available_bytes', lambda: 50)
-    assert runtime.memory_observation() == (True, 50)
-
-
-def test_controller_sampler_runs_feedback_and_survives_probe_failure(monkeypatch):
+def test_controller_sampler_runs_feedback_and_survives_owner_read_failure(monkeypatch):
     import lib.resource_control.runtime as runtime
     class Controller:
         def snapshot(self):
+            calls.append('snapshot')
+            if calls.count('snapshot') == 1:
+                raise OSError('synthetic owner read failure')
             return {'revision': 1, 'resources': {}}
-        def tick(self, **kw):
-            assert kw == {'memory_pressure': False, 'headroom_bytes': 123, 'allow_growth': True}
+        def tick(self, *args, **kwargs):
+            # Memory, RSS and headroom are never feedback inputs.
+            assert args == () and kwargs == {}
             stopped.set()
             calls.append('tick')
             return self.snapshot()
     stopped, calls = threading.Event(), []
-    def memory():
-        calls.append('memory')
-        if len(calls) == 1:
-            raise OSError('synthetic kernel counter failure')
-        return False, 123
     async def sleep(_):
         return
-    monkeypatch.setattr(runtime, 'memory_observation', memory)
     monkeypatch.setattr(runtime.asyncio, 'sleep', sleep)
     log = SimpleNamespace(warning=lambda *args: calls.append('warning'))
     asyncio.run(runtime.run_controller(SimpleNamespace(
         shutdown_requested=stopped, resource_controller=Controller(), logger=log)))
-    assert calls == ['memory', 'warning', 'memory', 'tick']
+    assert calls == ['snapshot', 'warning', 'snapshot', 'tick', 'snapshot']
 
 
 def test_disabled_root_admission_is_not_reenabled_by_pool_resize():
@@ -289,7 +274,7 @@ def test_disabled_root_admission_is_not_reenabled_by_pool_resize():
     from lib.agent_core.admission import AdmissionController
     pool = RecoverableAgentExecutor(max_workers=2, queue_capacity=4, max_abandoned_workers=1)
     controller = ResourceController()
-    controller.launch_policy = {'automatic': True, 'root_maximum': 4, 'task_bytes': 64}
+    controller.launch_policy = {'automatic': True, 'root_maximum': 4}
     admission = AdmissionController(max_inflight=0)
     try:
         bind_root(controller, SimpleNamespace(agent_executor=pool), admission)
@@ -303,23 +288,19 @@ def test_disabled_root_admission_is_not_reenabled_by_pool_resize():
         pool.shutdown(wait=True)
 
 
-def test_feedback_probe_cannot_block_http_event_loop(monkeypatch):
+def test_feedback_sampling_cannot_block_http_event_loop(monkeypatch):
     import lib.resource_control.runtime as runtime
     started, release, stopped = threading.Event(), threading.Event(), threading.Event()
     loop_thread = threading.get_ident()
-    def memory():
-        assert threading.get_ident() != loop_thread
-        started.set()
-        assert release.wait(2), 'event loop was blocked by the probe'
-        return False, 123
     class Controller:
         def snapshot(self):
             assert threading.get_ident() != loop_thread
+            started.set()
+            assert release.wait(2), 'event loop was blocked by owner sampling'
             return {'revision': 1, 'resources': {}}
-        def tick(self, **kwargs):
+        def tick(self):
             stopped.set()
             return self.snapshot()
-    monkeypatch.setattr(runtime, 'memory_observation', memory)
     monkeypatch.setattr(runtime, 'catalog_document', lambda: {'control': {'sample_seconds': 0}})
     async def scenario():
         worker = asyncio.create_task(runtime.run_controller(SimpleNamespace(
@@ -345,18 +326,15 @@ def test_cancelled_feedback_cannot_apply_a_late_adjustment(monkeypatch):
     import lib.resource_control.runtime as runtime
     started, release, finished, stopped = (threading.Event() for _ in range(4))
     calls = []
-    def memory():
-        started.set()
-        assert release.wait(2)
-        return False, 123
     class Controller:
         def snapshot(self):
+            started.set()
+            assert release.wait(2)
             finished.set()
             return {'revision': 1, 'resources': {}}
-        def tick(self, **kwargs):
+        def tick(self):
             calls.append('late adjustment')
             return self.snapshot()
-    monkeypatch.setattr(runtime, 'memory_observation', memory)
     monkeypatch.setattr(runtime, 'catalog_document', lambda: {'control': {'sample_seconds': 0}})
     async def scenario():
         worker = asyncio.create_task(runtime.run_controller(SimpleNamespace(

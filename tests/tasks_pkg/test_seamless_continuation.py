@@ -47,7 +47,7 @@ def test_thirty_retained_receipts_seed_next_root_dispatch_without_reexecution():
     messages = [{'role': 'system', 'content': 'system'}]
     state = RoundState(model='gpt-6.1-sol', preset='default', thinking_enabled=False)
     apply_resume_state(task=task, cfg=cfg, messages=messages,
-                       model=state.model, tid='new-task', round_state=state)
+                       tid='new-task', round_state=state)
     assert state.model_round_start == 15
     assert state.tool_round_num == 30
     assert state.tool_call_happened
@@ -81,7 +81,7 @@ def test_progress_and_paid_requests_are_validated_detached_and_preserved(operati
     projection['todoState']['todos'][0]['content'] = 'mutated'
     task = {'id': 'new', 'content_lock': threading.Lock()}
     state = RoundState(model='gpt-6.1-sol', preset='default', thinking_enabled=False)
-    apply_resume_state(task=task, cfg=cfg, messages=[], model=state.model,
+    apply_resume_state(task=task, cfg=cfg, messages=[],
                        tid='new', prepared_state=prepared, round_state=state)
     assert state.model_round_start == 3
     assert task['_checkpointUsage']['prompt_tokens'] == 20

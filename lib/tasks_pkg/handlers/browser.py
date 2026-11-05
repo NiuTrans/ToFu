@@ -116,7 +116,7 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     from lib.browser.dispatch import execute_browser_tool
     browser_client_id = cfg.get('browserClientId') or None
 
-    display_metadata = {} if fn_name == 'browser_execute_js' else None
+    display_metadata = {} if fn_name in ('browser_execute_js', 'browser_read_page') else None
     if fn_name in PAGE_PREVIEW_TOOL_NAMES or fn_name == 'browser_fill_form':
         # browser_preview_page renders server-side and resolves project-
         # relative HTML paths; browser_fill_form's type='file' fields resolve
@@ -186,6 +186,8 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     }
     if display_metadata and display_metadata.get('tabTitle'):
         meta['tabTitle'] = display_metadata['tabTitle']
+    if is_read_tab and display_metadata and display_metadata.get('url'):
+        meta['url'] = display_metadata['url']
     # ── Screenshot: render the captured image inline in the timeline ──
     # The extension returns a full ``data:<mime>;base64,...`` URL; expose it
     # via ``imageDataUris`` (the same field read_files/inspect_image use) so
@@ -203,7 +205,9 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     _finalize_tool_round(
         task, rn, round_entry, [meta],
         status='error' if typed_error is not None else 'done')
-    return tc_id, tool_content, is_read_tab
+    # Evidence is a read that delivered an accepted page, the URL this row
+    # names in the Sources footer; blocked, empty or sparse reads are not.
+    return tc_id, tool_content, bool(meta['url'])
 
 
 # ═══ Image generation handler (extracted to executor_image.py) ═══════

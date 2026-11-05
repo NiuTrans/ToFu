@@ -148,6 +148,39 @@ class SearchConfig:
         'https://opnxng.com',
     ])
 
+    # ── Keyed search gateway (search/engines/gateway.py) ──
+    # One keyed JSON endpoint fronting several commercial search APIs. Each id
+    # in ``gateway_sources`` becomes its own engine tagged ``API:<id>``; the
+    # gateway is inactive unless URL, key and at least one source are set.
+    # Env: TOFU_SEARCH_GATEWAY_URL / TOFU_SEARCH_GATEWAY_API_KEY /
+    # TOFU_SEARCH_GATEWAY_SOURCES (comma separated).
+    gateway_url: str = field(
+        default_factory=lambda: os.environ.get('TOFU_SEARCH_GATEWAY_URL', ''))
+    gateway_api_key: str = field(
+        default_factory=lambda: os.environ.get('TOFU_SEARCH_GATEWAY_API_KEY', ''),
+        repr=False)
+    gateway_sources: list = field(
+        default_factory=lambda: os.environ.get(
+            'TOFU_SEARCH_GATEWAY_SOURCES', '').replace(',', ' ').split())
+    # True asks the gateway to crawl result pages (isFast=false). Rows whose
+    # body arrives within gateway_timeout_secs skip tofu-search's own fetch;
+    # the rest are fetched as usual. Slower per source (about 1-10 s observed)
+    # but immune to the anti-bot and proxy failures of our own fetches.
+    # Env: TOFU_SEARCH_GATEWAY_FULL_CONTENT.
+    gateway_full_content: bool = False
+    # Server-side budget per gateway request, clamped below the search
+    # deadline. A source needing longer (an LLM-backed one) reports a failure.
+    # Env: TOFU_SEARCH_GATEWAY_TIMEOUT_SECS.
+    gateway_timeout_secs: int = 10
+    # How the free engines (DDG, Brave, Bing, SearXNG, Marginalia) take part
+    # while gateway sources are configured: 'fallback' runs them only when the
+    # gateway produced no query-relevant candidate; 'parallel' always runs
+    # them alongside; 'off' never runs them, including the DDG/Brave retry
+    # and the browser-search fallback.
+    # Without gateway sources the free engines remain the only path.
+    # Env: TOFU_SEARCH_FREE_ENGINES.
+    free_engines: str = 'fallback'
+
     # ── Travel vertical (RollingGo / 道旅 MCP) ──
     # Credential for the RollingGo hotel + flight MCP endpoints. Read from the
     # environment at dataclass-construction time — NOT only inside configure()
@@ -207,8 +240,17 @@ class SearchConfig:
     llm_temperature: float = 0.0
 
     # Option B: Custom callable — takes (messages, **kwargs) -> str
-    # If set, this overrides the OpenAI endpoint config.
+    # If set, this overrides the OpenAI endpoint config. Raise the builtin
+    # TimeoutError when the call's ``timeout`` budget elapses: the filter
+    # serves the raw page at WARNING. Any other exception stays an ERROR.
     llm_function: Optional[Callable] = None
+
+    # Optional, explicitly owned local scoring instance. A config copy borrows
+    # the same instance/capacity reservations; its creator owns close().
+    # No model is loaded or downloaded by creating the default SearchConfig.
+    local_reranker: object = None
+    local_rerank_timeout: float = 30.0
+    local_rerank_cancel_event: object = None
 
     # ── Content filter settings ──
     filter_enabled: bool = True
@@ -224,7 +266,9 @@ class SearchConfig:
     # Per-LLM-call ceiling. 45s is generous for gate mode; in rewrite mode a
     # very long page may exceed it, in which case the raw text is served
     # (filtering is an enhancement, never a blocker). Raise it if you run
-    # rewrite mode against big pages. Was 300 before 0.6.
+    # rewrite mode against big pages. Was 300 before 0.6. A budget below
+    # 1.5 s (this value, or the remainder of a nearly spent search deadline)
+    # cannot fit one verdict, so the call is skipped; cached verdicts apply.
     filter_timeout: int = 45
     # Gate mode judges relevance from bounded selected passages — the full body
     # is never sent to the LLM, which kills the prompt-processing cost too.
@@ -350,6 +394,12 @@ def configure(**kwargs) -> SearchConfig:
             'TOFU_SEARCH_SEARXNG_URL': ('searxng_url', str),
             'TOFU_SEARCH_SEARXNG_ENGINES': ('searxng_engines', str),
             'TOFU_SEARCH_MCP_CONTENT_BUDGET_CHARS': ('mcp_content_budget_chars', int),
+            'TOFU_SEARCH_GATEWAY_URL': ('gateway_url', str),
+            'TOFU_SEARCH_GATEWAY_API_KEY': ('gateway_api_key', str),
+            'TOFU_SEARCH_GATEWAY_SOURCES': ('gateway_sources', _as_csv),
+            'TOFU_SEARCH_GATEWAY_FULL_CONTENT': ('gateway_full_content', _as_bool),
+            'TOFU_SEARCH_GATEWAY_TIMEOUT_SECS': ('gateway_timeout_secs', int),
+            'TOFU_SEARCH_FREE_ENGINES': ('free_engines', str),
             'ROLLINGGO_API_KEY': ('rollinggo_api_key', str),
             'TOFU_XHS_MIN_INTERVAL_S': ('xhs_min_interval_s', float),
             'TOFU_XHS_CACHE_TTL_S': ('xhs_cache_ttl_s', int),

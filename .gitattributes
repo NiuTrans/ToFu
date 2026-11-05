@@ -38,8 +38,8 @@ static/settings.css linguist-generated=true -diff
 # Other generated outputs (regenerators live in scripts/gen_*). Same rule:
 # review the generator and its source contract, not the emitted artifact.
 # Authored lookalikes are deliberately NOT matched: tests/test_*_generated.py
-# are tests ABOUT generated artifacts; frontend/src/i18n/locales/{zh,en}.json
-# are the i18n source authority.
+# are tests ABOUT generated artifacts; frontend/src/i18n/locales/*.json are
+# authored (zh, en) or reviewed translations (scripts/translate_i18n_locales.py).
 *.generated.js   linguist-generated=true -diff
 *.generated.ts   linguist-generated=true -diff
 *.generated.json linguist-generated=true -diff

@@ -272,7 +272,7 @@ fn metrics_payload(observers: &ControlObservers) -> Value {
         "commitStages": commit_stage_snapshot(),
         "historyPromotion": fsync_stats::history_promotion_snapshot(),
         "requestProfile": crate::request_profile::snapshot(),
-        "resourceExhaustionReasons": fsync_stats::resource_exhaustion_snapshot(),
+        "resourceExhaustionReasons": crate::resource_exhaustion::resource_exhaustion_snapshot(),
     });
     if let Some(observer) = &observers.wal_write_buffer { payload[crate::generated_storage_v2::WAL_WRITE_BUFFER_METRICS_FIELD] = observer.write_buffer_metrics(); }
     if let Some(observer) = &observers.blob_codec_pool { payload["blobCodecPool"] = observer.metrics(); }
@@ -389,8 +389,8 @@ mod tests {
         assert!(payload["commitStages"].is_array());
         assert_eq!(payload["resourceExhaustionReasons"]["contract"],
             json!(crate::generated_storage_v2::NATIVE_RESOURCE_EXHAUSTION_CONTRACT));
-        assert_eq!(payload["resourceExhaustionReasons"]["fixedCounterBytes"], 64);
-        assert_eq!(payload["resourceExhaustionReasons"]["counters"].as_array().unwrap().len(), 8);
+        assert_eq!(payload["resourceExhaustionReasons"]["fixedCounterBytes"], 72);
+        assert_eq!(payload["resourceExhaustionReasons"]["counters"].as_array().unwrap().len(), 9);
         assert!(payload.get("listener").is_none());
     }
 

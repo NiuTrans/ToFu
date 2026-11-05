@@ -44,7 +44,7 @@ _HERMES_PRUNE_MIN_CHARS = 200
 
 def _hermes_tool_stub(msg: dict) -> str:
     """Build a Hermes-style informative 1-line stub for a tool output, e.g.
-    ``[read_files] output (1,200 chars)`` / ``[grep_search] -> N lines``.
+    ``[read_files] output (1,200 chars)`` / ``[search_files] -> N lines``.
     Falls back to the generic placeholder Hermes uses for unknowns."""
     name = msg.get('name', 'tool')
     text = _content_text(msg)

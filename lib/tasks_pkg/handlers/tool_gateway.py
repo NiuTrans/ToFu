@@ -112,6 +112,9 @@ def _replay_execute_gateway_receipt(task, receipts, receipt_key, tc_id, rn,
 # task identities disappear automatically, avoiding both ID reuse and a
 # process-lifetime id(task) registry.
 _GATEWAY_LOCKS = WeakLockPool(threading.RLock)
+# Concurrent search_tools calls of one round bump the same per-task counts.
+# Leaf lock: nothing is called while it is held.
+_SEARCH_QUERY_COUNTS_LOCK = threading.Lock()
 
 
 def _gateway_lock(task: dict[str, Any]) -> threading.RLock:
@@ -202,14 +205,15 @@ def _note_search_query(task: dict[str, Any], fn_args: Any, catalog) -> int:
         fingerprint,
         str(fn_args.get('namespace') or '').strip().lower(),
         str(fn_args.get('query') or '').strip().lower())
-    counts = task.setdefault('_tool_search_query_counts', {})
-    if not isinstance(counts, dict):
-        counts = {}
-        task['_tool_search_query_counts'] = counts
-    if key not in counts and len(counts) >= 128:
-        return 1
-    counts[key] = int(counts.get(key) or 0) + 1
-    return counts[key]
+    with _SEARCH_QUERY_COUNTS_LOCK:
+        counts = task.setdefault('_tool_search_query_counts', {})
+        if not isinstance(counts, dict):
+            counts = {}
+            task['_tool_search_query_counts'] = counts
+        if key not in counts and len(counts) >= 128:
+            return 1
+        counts[key] = int(counts.get(key) or 0) + 1
+        return counts[key]
 
 
 def _with_browser_availability(result, task, catalog, fn_args):
@@ -229,6 +233,39 @@ def _with_browser_availability(result, task, catalog, fn_args):
             result['notice'] = (
                 (result['notice'] + ' ' if result.get('missing_name') else '')
                 + availability['message'] + ' ' + availability['recovery_hint'])
+    return result
+
+
+def _with_capability_availability(result, task, catalog, fn_args, task_cfg=None):
+    """Add browser, curated-connector and dormant bundled-plugin evidence."""
+    result = _with_browser_availability(result, task, catalog, fn_args)
+    if result.get('status') != 'ok':
+        return result
+    from lib.mcp.connector_guidance import connector_search_availability
+    evidence = connector_search_availability(
+        int(task.get('_userId') or 0), str(fn_args.get('query') or ''),
+        str(fn_args.get('namespace') or ''),
+        (task.get('_executableToolNamespaceByName') or {}).values())
+    from lib.tools.optional_plugins import bundled_plugin_search_availability
+    evidence = [
+        *evidence,
+        *bundled_plugin_search_availability(
+            task_cfg or {}, fn_args.get('query'),
+            fn_args.get('namespace'), (_schema_name(tool) for tool in catalog)),
+    ]
+    if evidence:
+        result['capability_availability'] = [
+            *(result.get('capability_availability') or []), *evidence]
+        dormant_names = {
+            row['tool_name'] for row in evidence
+            if row.get('reason_code') == 'bundled_plugin_not_enabled'}
+        if result.get('missing_name') in dormant_names:
+            # The tool exists: it is gated, not a hallucinated name.
+            result.pop('missing_name', None)
+        result['notice'] = ' '.join(filter(None, [
+            result.get('notice'),
+            *(f"{row['message']} {row['recovery_hint']}" for row in evidence),
+        ]))
     return result
 
 
@@ -311,7 +348,8 @@ def handle_search_tools(
             'notice': search_execution_notice(_search_execution_gateway(task)),
         }
     if result.get('status') == 'ok':
-        result = _with_browser_availability(result, task, catalog, fn_args)
+        result = _with_capability_availability(
+            result, task, catalog, fn_args, task_cfg=cfg)
         repeat = _note_search_query(task, fn_args, catalog)
         # Search result schemas are model disclosures, not imports. Remember
         # only the page actually returned; pagination can still disclose later
@@ -855,7 +893,8 @@ def _execute_program(
                 contract_documents_by_name=(
                     task.get('_toolContractDocumentsByName') or {}),
                 visible_names=visible, disclosed_names=disclosed)
-            result = _with_browser_availability(result, task, catalog, arguments)
+            result = _with_capability_availability(
+                result, task, catalog, arguments, task_cfg=cfg)
             return result
         except Exception as exc:
             search_exception = exc

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 
+from lib.error_envelope import BadRequest
 from lib.orchestration.definition_contract_registry import (
     definition_write_contract,
 )
@@ -68,7 +69,7 @@ def parse_definition_write_precondition(raw_value: str | None) -> int:
     """Parse the definition ``If-Match`` token without HTTP dependencies."""
     if raw_value is None:
         header = definition_write_contract()['preconditionHeader']
-        raise ValueError(f'{header} is required')
+        raise BadRequest(f'{header} is required', field=header)
     token = str(raw_value).strip()
     if token.startswith('W/'):
         token = token[2:].strip()
@@ -78,12 +79,12 @@ def parse_definition_write_precondition(raw_value: str | None) -> int:
     header = contract['preconditionHeader']
     version_field = contract['versionField']
     if not token or not token.isascii() or not token.isdigit():
-        raise ValueError(
-            f'{header} must be a quoted {version_field} integer')
+        raise BadRequest(
+            f'{header} must be a quoted {version_field} integer', field=header)
     version = int(token)
     if not is_definition_version(version):
-        raise ValueError(
-            f'{header} version exceeds the safe integer range')
+        raise BadRequest(
+            f'{header} version exceeds the safe integer range', field=header)
     return version
 
 

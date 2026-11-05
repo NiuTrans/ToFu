@@ -11,12 +11,14 @@ import json
 from pathlib import Path
 import subprocess
 import re
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 @lru_cache(maxsize=1)
 def browser_api_inventory() -> dict:
+    require_node_modules('typescript')
     result = subprocess.run(
         ['node', 'scripts/frontend_api_inventory.mjs'], cwd=ROOT,
         capture_output=True, text=True, timeout=60, check=True,

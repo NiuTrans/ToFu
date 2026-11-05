@@ -33,6 +33,10 @@ export interface RichPorts {
   text?(key: string, fallback: string): string;
   asset?(id: string, signal: AbortSignal): Promise<Blob>;
   openArtifact?(id: string): void;
+  /** Shared lightbox opener. Asset bitmaps only exist as object URLs here, so
+   * the caller receives that URL; without it a rich figure's image cannot be
+   * enlarged at all (only the small Fullscreen control acts on the figure). */
+  previewImage?(source: string): void;
 }
 interface Entry { node: HTMLDetailsElement; identity: string; dispose(): void; resource?: {provider:string; scope:string; update(block: import('./contract.generated').resource_panel):void}; form?: {binding:string; reload():void} }
 interface Mount { entries: Map<string, Entry>; title: HTMLElement; summary: HTMLElement; layout: ReturnType<typeof createResponseLayout> }
@@ -269,9 +273,36 @@ export function renderRichResponse(host: HTMLElement, value: unknown, ports: Ric
             if (abort.signal.aborted || current.signal.aborted || image !== nextImage) return;
             nextImage.hidden = true; unavailable();
           };
+          /* A rich figure was the one body image with no enlargement path:
+           * its bitmap is an object URL the document never sees, so the
+           * Markdown lightbox never applied. Route it to the same opener the
+           * prose images use — object URLs are exempt from the URL allowlist
+           * because this module created them. */
+          const openPreview = () => {
+            if (nextImage.hidden || !objectUrl) return;
+            ports.previewImage?.(objectUrl);
+          };
+          const previewKeydown = (event: KeyboardEvent) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            openPreview();
+          };
+          if (ports.previewImage) {
+            nextImage.classList.add('rich-image-preview');
+            nextImage.tabIndex = 0;
+            nextImage.setAttribute('role', 'button');
+            nextImage.addEventListener('click', openPreview);
+            nextImage.addEventListener('keydown', previewKeydown);
+          }
           nextImage.addEventListener('load', loaded);
           nextImage.addEventListener('error', failed);
-          imageCleanup = () => { nextImage.removeEventListener('load', loaded); nextImage.removeEventListener('error', failed); nextImage.removeAttribute('src'); };
+          imageCleanup = () => {
+            nextImage.removeEventListener('load', loaded);
+            nextImage.removeEventListener('error', failed);
+            nextImage.removeEventListener('click', openPreview);
+            nextImage.removeEventListener('keydown', previewKeydown);
+            nextImage.removeAttribute('src');
+          };
           objectUrl = URL.createObjectURL(blob);
           figure.prepend(nextImage);
           nextImage.src = objectUrl;
@@ -286,7 +317,10 @@ export function renderRichResponse(host: HTMLElement, value: unknown, ports: Ric
       actions.append(actionButton({ kind: 'download_asset', label: text('rich.download', 'Download'), targetId: item.id }),
         button(text('rich.fullscreen', 'Fullscreen'), `fullscreen:${item.id}`, () => {
           if (figure.requestFullscreen) void figure.requestFullscreen().catch(() => {});
-        }));
+        }),
+        ...(ports.previewImage ? [button(text('markdown.previewImage', 'Enlarge image'), `enlarge:${item.id}`, () => {
+          if (image && objectUrl) ports.previewImage?.(objectUrl);
+        })] : []));
       figure.append(actions);
       details.append(figure);
       initialImages.push(load);

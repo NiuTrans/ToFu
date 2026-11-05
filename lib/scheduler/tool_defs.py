@@ -64,10 +64,11 @@ SCHEDULE_TOOL_CREATE = {
                 "tools_config": {
                     "type": "object",
                     "description": (
-                        "Agent execution settings. Keys: "
+                        "Agent tool settings. Keys: "
                         "searchMode, fetchEnabled, projectPath, codeExecEnabled, "
-                        "browserEnabled, memoryEnabled, imageGenEnabled, model. "
-                        "Missing keys inherit target-conversation settings."
+                        "browserEnabled, memoryEnabled, imageGenEnabled. "
+                        "Missing keys inherit target-conversation settings; "
+                        "the model always follows the target conversation."
                     )
                 },
                 "max_executions": {
@@ -262,21 +263,7 @@ TIMER_TOOL_CREATE = {
                     "default": 120
                 }
             },
-            "required": ["continuation_message"],
-            "anyOf": [
-                {
-                    "properties": {
-                        "check_instruction": {"type": "string"}
-                    },
-                    "required": ["check_instruction"]
-                },
-                {
-                    "properties": {
-                        "condition_command": {"type": "string"}
-                    },
-                    "required": ["condition_command"]
-                }
-            ]
+            "required": ["continuation_message"]
         }
     }
 }
@@ -338,8 +325,35 @@ SCHEDULER_TOOL_NAMES = {
 }
 
 
+def schedule_tools_without_current_conversation(tools, *, reason):
+    """Describe scheduler tools for a task that owns no conversation turn.
+
+    A headless request, a child invocation or a task without a conversation
+    has no conversation a timer could continue or ``current`` could name
+    (lib.tasks_pkg.conversation_delivery refuses both), so ``timer_create`` is
+    withheld and the target hint must not offer ``current``. ``reason`` is the
+    lower-case clause naming why. Other schemas are unchanged.
+    """
+    import copy
+
+    projected = []
+    for tool in tools:
+        name = tool.get('function', {}).get('name')
+        if name == 'timer_create':
+            continue
+        if name == 'schedule_create':
+            tool = copy.deepcopy(tool)
+            tool['function']['parameters']['properties']['target_conv_id'][
+                'description'] = (
+                f'Required for agent: an existing conversation ID. `current` '
+                f'is unavailable: {reason}.')
+        projected.append(tool)
+    return projected
+
+
 __all__ = [
     'SCHEDULE_TOOL_CREATE', 'SCHEDULE_TOOL_LIST', 'SCHEDULE_TOOL_MANAGE',
     'AWAIT_TASK_TOOL', 'TIMER_TOOL_CREATE', 'TIMER_TOOL_MANAGE',
     'SCHEDULER_TOOLS', 'SCHEDULER_TOOL_NAMES',
+    'schedule_tools_without_current_conversation',
 ]

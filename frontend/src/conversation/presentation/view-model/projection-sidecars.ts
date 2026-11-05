@@ -14,6 +14,7 @@ import {
 import {
   normalizeErrorEnvelope,
 } from '../../../api/errors';
+import { isRefusedTurn } from '../turn-finish';
 import {
   activityAnchorIndex,
   activityAnchorWindows,
@@ -276,7 +277,8 @@ export function addProjectionSidecarBlocks(
       .map((entry) => activityEntryWithTiming(entry, projection.timingTrace)),
     ...routeSnapshotActivityEntries(projection.routeSnapshot),
   ];
-  const terminalError = turn.status === 'failed'
+  const refused = isRefusedTurn(turn);
+  const terminalError = turn.status === 'failed' || refused
     ? normalizeErrorEnvelope(turn.settlement?.error) : null;
   const terminalErrorEntry = terminalError
     ? [...activityEntries].reverse().find((entry) => (
@@ -326,8 +328,8 @@ export function addProjectionSidecarBlocks(
       status: 'failed',
       severity: terminalError.severity === 'warning' ? 'warning' : 'error',
       count: 1,
-      summary: 'Turn failed',
-      summaryKey: 'activity.error.failed',
+      summary: refused ? 'Model refused' : 'Turn failed',
+      summaryKey: refused ? 'activity.error.refused' : 'activity.error.failed',
       reasonCode: terminalError.kind,
       ...(terminalError.model ? { model: terminalError.model } : {}),
       ...(terminalStatusCode == null

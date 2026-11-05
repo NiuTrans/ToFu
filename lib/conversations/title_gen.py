@@ -17,6 +17,7 @@ import re
 import time
 
 from lib.log import get_logger
+from lib.http_transport.ui_languages import UI_LANGUAGE_ENGLISH_NAMES
 
 logger = get_logger(__name__)
 
@@ -131,12 +132,11 @@ _SYSTEM_PROMPT_BASE = (
 
 # Per-UI-language title rule. When the caller passes an explicit interface
 # language we force the title into it; otherwise the title mirrors the
-# conversation's own language.
+# conversation's own language. Every selectable UI language has a rule.
 _LANG_RULES = {
-    'zh': '- Write the title in Simplified Chinese, regardless of the '
-          "conversation's language.",
-    'en': '- Write the title in English, regardless of the '
-          "conversation's language.",
+    code: f'- Write the title in {name}, regardless of the '
+          "conversation's language."
+    for code, name in UI_LANGUAGE_ENGLISH_NAMES.items()
 }
 _LANG_RULE_DEFAULT = (
     "- Use the SAME language as the user's message "
@@ -145,10 +145,14 @@ _LANG_RULE_DEFAULT = (
 
 # Length guidance is language-specific: char budgets read better for CJK,
 # word counts for English. Both target a single scannable sidebar line.
+_WORD_LENGTH_RULE = '- Keep it to roughly 3-7 words — tight but complete.'
 _LENGTH_RULES = {
     'zh': '- Keep it to roughly 6-16 Chinese characters — tight but '
           'complete.',
-    'en': '- Keep it to roughly 3-7 words — tight but complete.',
+    'ja': '- Keep it to roughly 8-20 Japanese characters — tight but '
+          'complete.',
+    'ko': '- Keep it to roughly 8-20 Korean characters — tight but '
+          'complete.',
 }
 _LENGTH_RULE_DEFAULT = (
     '- Keep it short: about 3-7 words, or 6-16 characters for CJK.'
@@ -159,7 +163,8 @@ def _system_prompt(lang: str | None) -> str:
     """Build the title system prompt, forcing output language when given."""
     key = (lang or '').lower()
     rule = _LANG_RULES.get(key, _LANG_RULE_DEFAULT)
-    length = _LENGTH_RULES.get(key, _LENGTH_RULE_DEFAULT)
+    length = _LENGTH_RULES.get(
+        key, _WORD_LENGTH_RULE if key in _LANG_RULES else _LENGTH_RULE_DEFAULT)
     return _SYSTEM_PROMPT_BASE.format(lang_rule=rule, length_rule=length)
 
 
@@ -281,9 +286,10 @@ def generate_conversation_title(messages: list, lang: str | None = None) -> str:
 
     Args:
         messages: The conversation's message list (dicts with role/content).
-        lang: Optional UI language ('zh' / 'en'). When given, the title is
-            forced into that language so it matches the interface; otherwise
-            it mirrors the conversation's own language.
+        lang: Optional UI language code from the UI language manifest
+            ('zh', 'en', 'ja', ...). When given, the title is forced into
+            that language so it matches the interface; otherwise it mirrors
+            the conversation's own language.
 
     Returns:
         A cleaned, length-capped title. Falls back to the truncated first

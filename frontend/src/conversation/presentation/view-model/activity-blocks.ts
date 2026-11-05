@@ -93,6 +93,140 @@ function toolRoundHasRejection(round: TurnToolRound): boolean {
   );
 }
 
+/* A failure → automatic recovery chain is ONE incident, not a wall of rows.
+ * The backend stream reports each half of it through its own channel, and a
+ * naive render repeats the same text four or five times:
+ *
+ *   provider-attempt "m17 request failed"   ┐ the same request, nested in the
+ *   logical        "model request failed"   ┘ logical span (identical detail)
+ *   phase          "refused — retrying on kimi…"   ┐ the same switch decision,
+ *   model switch   "Model switched: a → b"         ┘ reason repeated again
+ *
+ * Fold that chain into the one row the reader actually needs: which model
+ * failed, why, and where service continued. Every rule below fails open — a
+ * non-adjacent row, a different cause, or missing correlation evidence keeps
+ * its own row rather than losing the only record of an event. The durable
+ * timeline is never mutated, so diagnostics and replay stay authoritative. */
+
+function foldRecoveredFailureChain(
+  entries: ReadonlyArray<AnchoredActivityEntry>,
+): AnchoredActivityEntry[] {
+  const merged: AnchoredActivityEntry[] = [];
+  const sameProducer = (left: TurnActivityEntry, right: TurnActivityEntry) => (
+    (!left.taskId || !right.taskId || left.taskId === right.taskId)
+    && (!left.attemptId || !right.attemptId || left.attemptId === right.attemptId)
+  );
+  const absorbedDetail = (switchEntry: TurnActivityEntry) => {
+    const detail = switchEntry.detail ?? '';
+    const kind = switchEntry.reasonCode ?? '';
+    // "<kind>: <cause>" or the bare cause — strip the envelope prefix so the
+    // recovered row keeps the cause text, not a duplicated error taxonomy.
+    return detail.startsWith(`${kind}: `) ? detail.slice(kind.length + 2) : detail;
+  };
+  const absorbFailure = (index: number) => {
+    const switchEntry = merged[index];
+    const failure = merged[index - 1];
+    if (!failure) return false;
+    if (failure.kind !== 'model' || failure.status !== 'failed') return false;
+    if (!sameProducer(failure, switchEntry)) return false;
+    const fromModel = switchEntry.fromModel ?? '';
+    // The switch must be the recovery OF THIS failure. The selected model is
+    // the evidence: either the summary names it, or the failure's own model
+    // field still holds it (no attempt folded a wire deployment in). A wire
+    // deployment legitimately differs from fromModel, so it is not a veto.
+    const selectedModel = typeof failure.summaryArgs?.model === 'string'
+      ? failure.summaryArgs.model : failure.model;
+    if (fromModel && selectedModel && selectedModel !== fromModel) return false;
+    merged[index - 1] = {
+      ...failure,
+      // The switch owns the identity (its window is what a live stream
+      // resolves next); the failure keeps its own chronology evidence and
+      // position, so the merged row stays exactly where the failure was
+      // reported instead of migrating across a later prose block.
+      id: switchEntry.id,
+      spanId: switchEntry.spanId,
+      parentSpanId: switchEntry.parentSpanId,
+      kind: 'model',
+      status: 'switched',
+      severity: 'warning',
+      summary: switchEntry.summary,
+      summaryKey: switchEntry.summaryKey,
+      summaryArgs: switchEntry.summaryArgs,
+      detail: absorbedDetail(switchEntry) || failure.detail,
+      detailKey: switchEntry.detailKey,
+      detailArgs: switchEntry.detailArgs,
+      fromModel: switchEntry.fromModel,
+      toModel: switchEntry.toModel,
+      action: switchEntry.action,
+      reasonCode: switchEntry.reasonCode,
+      // The switch row names both selected models; the facts line keeps the
+      // wire deployment that actually refused, which is the one diagnostic
+      // neither selected model can express.
+      model: failure.model,
+      providerId: failure.providerId,
+      keyHint: failure.keyHint,
+    };
+    merged.splice(index, 1);
+    return true;
+  };
+
+  // Only the typed task-level fallback record joins the fold. A route-snapshot
+  // row is a different decision (connection/provider routing) and keeps its
+  // own summary, detail and position.
+  const isFallbackSwitch = (entry: TurnActivityEntry) => (
+    entry.kind === 'model' && entry.status === 'switched'
+    && entry.summaryKey === 'activity.model.switched'
+  );
+  const isAttemptOf = (child: TurnActivityEntry, parent: TurnActivityEntry) => (
+    Boolean(child.parentSpanId) && child.parentSpanId === parent.spanId
+  );
+
+  for (const entry of entries) {
+    const previous = merged[merged.length - 1];
+
+    // 1. A failed provider attempt and its failed logical request are the SAME
+    //    failure with the same text, not two requests (the attempt completes
+    //    first, so it usually precedes its parent). Keep one row: the logical
+    //    model name and duration, plus the attempt's routing facts.
+    if (entry.kind === 'model' && entry.status === 'failed' && previous
+        && previous.kind === 'model' && previous.status === 'failed'
+        && sameProducer(entry, previous)
+        && (isAttemptOf(previous, entry) || isAttemptOf(entry, previous))) {
+      const parent = isAttemptOf(previous, entry) ? entry : previous;
+      const attempt = parent === entry ? previous : entry;
+      merged[merged.length - 1] = {
+        ...parent,
+        // The summary names the model the user selected; the facts line keeps
+        // the deployment that actually served (and failed) the request, which
+        // is otherwise the only lost diagnostic of the fold.
+        model: attempt.model || parent.model,
+        providerId: attempt.providerId || parent.providerId,
+        keyHint: attempt.keyHint || parent.keyHint,
+        statusCode: parent.statusCode ?? attempt.statusCode,
+        detail: parent.detail || attempt.detail,
+      };
+      continue;
+    }
+
+    // 2. The phase that announces a fallback IS the following switch record,
+    //    word for word including the reason. Drop the announcement only when
+    //    its own typed switch is present to carry the fact.
+    if (isFallbackSwitch(entry) && previous
+        && previous.kind === 'status' && previous.phase === 'retrying'
+        && sameProducer(previous, entry)) {
+      merged.pop();
+    }
+
+    merged.push(entry);
+
+    // 3. One failed request immediately followed by its own model switch is a
+    //    single recovered incident: name the cause ONCE on the switch row.
+    if (isFallbackSwitch(entry) && merged.length > 1) {
+      absorbFailure(merged.length - 1);
+    }
+  }
+  return merged;
+}
 export function visibleActivityEntries(
   timeline: TurnActivityTimeline | undefined,
   toolRounds: ReadonlyArray<TurnToolRound>,
@@ -131,7 +265,7 @@ export function visibleActivityEntries(
    * row as the last visible record. execute_tools rows are exempt: they
    * replay as actionable child-validation rows below. */
 
-  return (timeline?.entries ?? []).flatMap((entry) => {
+  const visible = (timeline?.entries ?? []).flatMap((entry) => {
     if (!activityEntryIsVisible(entry)) return [];
 
     const owner = renderedRound(entry);
@@ -145,9 +279,19 @@ export function visibleActivityEntries(
         && owner?.status === 'error') {
       return [];
     }
+    /* The tool card owns a settled outcome (badge + its real output). The
+     * timeline's aborted row is the span the lost completion frame left open,
+     * so it repeats the card with a stale "started" summary. A running round
+     * keeps the row: it is then the only evidence that the call stopped. */
+    if (entry.kind === 'tool' && entry.status === 'aborted'
+        && entry.toolName !== 'execute_tools'
+        && owner && owner.status !== 'running') {
+      return [];
+    }
     if (entry.toolName !== 'execute_tools') return [entry];
     return legacyGatewayValidationEntries(entry, toolRounds);
   });
+  return foldRecoveredFailureChain(visible);
 }
 
 /** Project v2 failover decisions into the same chronological diagnostic lane

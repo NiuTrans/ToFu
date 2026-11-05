@@ -31,22 +31,21 @@ from lib.agent_core.admission import (
 )
 from lib.agent_core.execution_session import (
     acquire_and_bind_admission,
-    bind_billing_reservation,
     bind_model_route,
     execution_session_for_task,
 )
-from lib.agent_core.principal import principal_key
-from lib.agent_core.sse_limit import limiter as sse_limiter
 from lib.api_response import (
-    api_bad_request, api_error, api_internal_error, api_ok,
+    api_bad_request, api_internal_error, api_ok,
     sse_response,
 )
-from lib.billing.request_flow import (
-    estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
-)
+from lib.billing.request_flow import settle_task
 from lib.model_routing import ModelRoutingError
+from lib.error_envelope import BadRequest
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
+from lib.compat.openai_projection import (
+    openai_completion_chunk, openai_finish_reason,
+)
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.rate_limit.rate_limit_api import record_tokens
@@ -60,6 +59,7 @@ from lib.turn_verdict import (
     terminal_finish_reason,
 )
 
+from ._task_billing import prepare_task_billing
 from .auth import (
     current_auth,
     guard_model_relay_or_dispose,
@@ -90,12 +90,12 @@ def _validate_messages(messages: list) -> list[dict]:
     out = []
     for i, m in enumerate(messages):
         if not isinstance(m, dict):
-            raise ValueError(f'messages[{i}] must be an object')
+            raise BadRequest(f'messages[{i}] must be an object', field='messages')
         role = m.get('role')
         if role not in ('system', 'user', 'assistant', 'tool'):
-            raise ValueError(f'messages[{i}].role invalid: {role!r}')
+            raise BadRequest(f'messages[{i}].role invalid: {role!r}', field='messages')
         if 'content' not in m and 'tool_calls' not in m:
-            raise ValueError(f'messages[{i}] missing content/tool_calls')
+            raise BadRequest(f'messages[{i}] missing content/tool_calls', field='messages')
         out.append(m)
     return out
 
@@ -139,7 +139,7 @@ def _completion_response(task, *, model: str, requested_id: str = '') -> dict:
     """
     require_deliverable_task(task)
     raw_finish = terminal_finish_reason(task)
-    finish = _openai_finish_reason(
+    finish = openai_finish_reason(
         raw_finish, aborted=bool(task.get('aborted')))
     from lib.cost import normalize_usage
     _un = normalize_usage(task.get('usage') or {})
@@ -186,48 +186,9 @@ def _completion_response(task, *, model: str, requested_id: str = '') -> dict:
     return body
 
 
-def _openai_finish_reason(raw_finish: str, *, aborted: bool = False) -> str:
-    """Map one already-validated terminal reason to OpenAI's closed enum."""
-    if aborted:
-        return 'length'
-    mapping = {
-        'stop': 'stop',
-        'done': 'stop',
-        'completed': 'stop',
-        'end_turn': 'stop',
-        'length': 'length',
-        'max_tokens': 'length',
-        'context_length': 'length',
-        'budget_exceeded': 'length',
-        'incomplete': 'length',
-        'max_turns': 'length',
-        'aborted': 'length',
-        'interrupted': 'length',
-        'tool_calls': 'tool_calls',
-        'tool_use': 'tool_calls',
-        'function_call': 'function_call',
-        'content_filter': 'content_filter',
-    }
-    try:
-        return mapping[raw_finish]
-    except KeyError as exc:
-        raise ValueError(
-            f'unsupported verified finish reason: {raw_finish!r}') from exc
-
-
 def _sse_event(payload) -> str:
     """Format a single SSE message in OpenAI's wire shape."""
     return f'data: {json.dumps(payload, ensure_ascii=False)}\n\n'
-
-
-def _try_acquire_sse_slot(auth):
-    """Account for a principal-owned connection; refuse when the cap is hit."""
-    token = sse_limiter.try_acquire(principal_key(auth))
-    if token is None:
-        return None, api_error(
-            'Too many concurrent streams for this principal; retry shortly.',
-            status=503, error_kind='overloaded', retry_after=5)
-    return token, None
 
 
 def _settle_streaming_billing(task, *, user_id: str, model: str) -> None:
@@ -242,8 +203,7 @@ def _settle_streaming_billing(task, *, user_id: str, model: str) -> None:
 
 
 async def _stream_generator(task, model: str, requested_id: str,
-                            *, billing_user_id: str = '',
-                            sse_slot_token: str | None = None):
+                            *, billing_user_id: str = ''):
     """SSE generator: emits incremental chunks while the task runs.
 
     Wire format: each chunk is a ``chat.completion.chunk`` JSON line.
@@ -275,13 +235,9 @@ async def _stream_generator(task, model: str, requested_id: str,
 
         for ev in new_events:
             etype = ev.get('type', '')
-            chunk = {
-                'id': completion_id,
-                'object': 'chat.completion.chunk',
-                'created': int(time.time()),
-                'model': model,
-                'choices': [{'index': 0, 'delta': {}, 'finish_reason': None}],
-            }
+            chunk = openai_completion_chunk(
+                completion_id, model,
+                created=int(time.time()))
             if not emitted_role:
                 chunk['choices'][0]['delta']['role'] = 'assistant'
                 emitted_role = True
@@ -323,7 +279,7 @@ async def _stream_generator(task, model: str, requested_id: str,
                     if 'finishReason' in ev
                     else terminal_finish_reason(task)
                 )
-                final['choices'][0]['finish_reason'] = _openai_finish_reason(
+                final['choices'][0]['finish_reason'] = openai_finish_reason(
                     raw_finish, aborted=bool(task.get('aborted')))
                 if ev.get('usage') or task.get('usage'):
                     final['usage'] = ev.get('usage') or task.get('usage')
@@ -357,14 +313,10 @@ async def _stream_generator(task, model: str, requested_id: str,
                     _billed = True
                 yield 'data: [DONE]\n\n'
                 return
-            yield _sse_event({
-                'id': completion_id, 'object': 'chat.completion.chunk',
-                'created': int(time.time()), 'model': model,
-                'choices': [{'index': 0, 'delta': {},
-                             'finish_reason': _openai_finish_reason(
-                                 terminal_finish_reason(task),
-                                 aborted=bool(task.get('aborted')))}],
-            })
+            yield _sse_event(openai_completion_chunk(
+                completion_id, model,
+                created=int(time.time()),
+                finish_reason=openai_finish_reason(terminal_finish_reason(task), aborted=bool(task.get('aborted')))))
             if task.get('usage'):
                 yield _sse_event({'usage': task['usage']})
             if billing_user_id and not _billed:
@@ -377,8 +329,6 @@ async def _stream_generator(task, model: str, requested_id: str,
         # Block until the next event (or 15s heartbeat) — no busy-wait.
         woke = await wait_for_event(task_id, timeout=15.0)
         if not woke:
-            if sse_slot_token:
-                sse_limiter.refresh(sse_slot_token)
             yield ': heartbeat\n\n'
     except (GeneratorExit, asyncio.CancelledError):
         logger.info('[api_v1.chat] stream client disconnected task=%s',
@@ -386,8 +336,6 @@ async def _stream_generator(task, model: str, requested_id: str,
         raise
     finally:
         unregister_waiter(task_id)
-        if sse_slot_token:
-            sse_limiter.release(sse_slot_token)
 
 
 # ── Routes ──────────────────────────────────────────────────────────
@@ -427,7 +375,7 @@ async def chat_completions():
     try:
         messages_in = require_list(body, 'messages')
         messages = _validate_messages(messages_in)
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e), field='messages')
     if not messages:
         return api_bad_request('messages is empty', field='messages')
@@ -443,7 +391,8 @@ async def chat_completions():
         return api_bad_request(
             'caller has no repository owner identity', field='model')
     try:
-        model, _model_selection, _route_group = mint_native_request_route(
+        model, _model_selection, _route_group = await asyncio.to_thread(
+            mint_native_request_route,
             body,
             owner_user_id=_auth_for_route.owner_user_id,
             tenant_id=_auth_for_route.tenant_id,
@@ -519,8 +468,10 @@ async def chat_completions():
 
     from lib.tasks_pkg.manager import create_task, reject_unstarted_chat_task
     from lib.tasks_pkg.spawn import spawn_task
+    # ``conversation_id`` is the caller's job label, never a saved conversation.
     task = create_task(
-        conversation_id, messages, cfg, user_id=owner_user_id
+        conversation_id, messages, cfg, user_id=owner_user_id,
+        saved_conversation=False,
     )
     task['_tenant_id'] = (auth.tenant_id if auth else None)
     task['_inline_messages'] = True
@@ -552,112 +503,30 @@ async def chat_completions():
             conv_id=conversation_id)
         raise
 
-    # ── Billing: pre-flight reserve (multi-user mode only) ──
-    # Estimate the cost of the request based on prompt size + the
-    # caller's max_tokens cap. If the wallet can't cover the
-    # estimate, return 402 BEFORE dispatching the task. The estimate
-    # is held as a ledger entry under ``ref_id=task_id``; settle()
-    # refunds the gap post-flight. Personal/private/open installs
-    # (no ``user_id``) skip this entirely.
+    # Reserve before dispatch; the session owns release or terminal settlement.
     billing_user_id = auth.account_user_id if auth else ''
-    reservation_micro = 0
-    if billing_user_id:
-        from lib.billing import InsufficientFunds
-        try:
-            est_completion = int(cfg.get('maxTokens')
-                                  or body.get('max_tokens') or 1024)
-            reservation_micro = reserve_for_task(
-                task, user_id=billing_user_id,
-                model=cfg.get('model', '') or '',
-                prompt_tokens=estimate_prompt_tokens(messages),
-                max_completion_tokens=est_completion)
-        except InsufficientFunds as e:
-            reject_unstarted_chat_task(
-                task, e, cause='billing_reservation_refused',
-                conv_id=conversation_id)
-            return api_error(
-                f'Insufficient credits. '
-                f'Estimated cost {e.needed_micro / 1_000_000:.4f} credits, '
-                f'balance {e.balance_micro / 1_000_000:.4f}.',
-                status=402,
-                error_kind='insufficient_funds',
-                balance_micro=e.balance_micro,
-                needed_micro=e.needed_micro)
-        except Exception as exc:
-            reject_unstarted_chat_task(
-                task, exc, cause='billing_reservation_failed',
-                conv_id=conversation_id)
-            raise
+    billing_refusal = prepare_task_billing(
+        task, account_user_id=billing_user_id,
+        execution_session=execution_session, conversation_id=conversation_id,
+        messages=messages, config=cfg, completion_hint=body.get('max_tokens'),
+        model_for_billing=lambda: cfg.get('model', '') or '',
+    )
+    if billing_refusal is not None:
+        return billing_refusal
 
-    if billing_user_id:
-        try:
-            bind_billing_reservation(
-                execution_session,
-                reservation_micro=reservation_micro,
-                settle=lambda: settle_task(
-                    task, user_id=billing_user_id,
-                    model=cfg.get('model', '') or '', raise_on_error=True,
-                ),
-                release=lambda: release_reservation(
-                    task, user_id=billing_user_id,
-                    reservation_micro=reservation_micro, raise_on_error=True,
-                ),
-            )
-        except Exception as exc:
-            reject_unstarted_chat_task(
-                task, exc, cause='billing_bind_failed',
-                conv_id=conversation_id)
-            raise
-
-    # Reserve a long-lived stream slot only after every preflight that can
-    # fail. From here onward every non-streaming-return path releases it, and
-    # the generator owns the normal disconnect/terminal release.
-    sse_slot_token = None
-    if stream:
-        try:
-            sse_slot_token, sse_rejection = _try_acquire_sse_slot(auth)
-        except Exception as exc:
-            reject_unstarted_chat_task(
-                task, exc, cause='sse_admission_failed',
-                conv_id=conversation_id)
-            raise
-        if sse_rejection is not None:
-            reject_unstarted_chat_task(
-                task, RuntimeError('SSE admission refused'),
-                cause='sse_admission_refused', conv_id=conversation_id)
-            return sse_rejection
-
-    # ── Admission control: refuse with 503 when at capacity ───────
+    # ── Execution ownership: an exact lease, never a capacity refusal ──
     try:
-        admission_lease = acquire_and_bind_admission(
-            execution_session, controller)
+        acquire_and_bind_admission(execution_session, controller)
     except Exception as exc:
-        if sse_slot_token:
-            sse_limiter.release(sse_slot_token)
         reject_unstarted_chat_task(
             task, exc, cause='admission_acquire_failed',
             conv_id=conversation_id)
         raise
-    if admission_lease is None:
-        if sse_slot_token:
-            sse_limiter.release(sse_slot_token)
-        reject_unstarted_chat_task(
-            task, RuntimeError('Task admission refused'),
-            cause='task_admission_refused', conv_id=conversation_id)
-        logger.warning('[api_v1.chat] admission refused (in_flight=%d/%d) '
-                       'key=%s model=%s', controller.in_flight,
-                       controller.capacity,
-                       (auth.key_id if auth else '') or 'anonymous',
-                       cfg.get('model', '?'))
-        return api_error('Server at capacity; retry shortly.', status=503,
-                         error_kind='overloaded', retry_after=5)
     register_waiter(task['id'])
 
     try:
         spawn_task(task)
     except Exception as e:
-        if sse_slot_token:
-            sse_limiter.release(sse_slot_token)
         # Spawn failure has not dispatched; the shared settlement releases the
         # billing hold, route group, and this exact admission lease in order.
         unregister_waiter(task['id'])
@@ -671,8 +540,7 @@ async def chat_completions():
     if stream:
         gen = _stream_generator(task, cfg.get('model', model or '?'),
                                  requested_id,
-                                 billing_user_id=billing_user_id,
-                                 sse_slot_token=sse_slot_token)
+                                 billing_user_id=billing_user_id)
         return sse_response(
             gen, extra_headers={'X-Tofu-Task-Id': task['id']})
 

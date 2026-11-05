@@ -22,7 +22,6 @@ from __future__ import annotations
 import os
 import sys
 import time
-from contextlib import contextmanager
 from concurrent.futures import Future
 from unittest.mock import patch
 
@@ -63,15 +62,14 @@ class TestStreamingFetchUrlDelegation:
         url = 'https://example.com/diagram.png'
         with patch('lib.tasks_pkg.handlers.search._core._fetch_url_one',
                    return_value=_asset_item(url)) as m:
-            out = acc._execute_one('fetch_url', {'url': url, 'reason': 'see the diagram'})
+            out = acc._execute_one('fetch_url', {'url': url})
 
         # Delegation happened with the serial-handler arg contract:
-        #   _fetch_url_one(url, user_question, fetch_reason=<'reason' arg>)
+        #   _fetch_url_one(url, user_question)
         assert m.call_count == 1
         args, kwargs = m.call_args
-        assert args[0] == url
-        assert args[1] == 'what is X'                 # lastUserQuery
-        assert kwargs.get('fetch_reason') == 'see the diagram'
+        assert args == (url, 'what is X')             # lastUserQuery
+        assert kwargs == {}
         # The staged-asset note reached the LLM content (old path returned "Failed").
         assert 'file asset' in out
         assert 'chars):' in out                        # "Content from <url> (N chars):"
@@ -90,17 +88,16 @@ class TestStreamingFetchUrlDelegation:
         assert out.startswith('Failed to fetch ftp://nope.')
         assert 'Rejected: ftp:// scheme' in out
 
-    def test_batch_routes_through_fetch_url_one_with_empty_reason(self):
-        """Batch mode calls _fetch_url_one per URL with fetch_reason='' (parity
-        with the serial batch worker) and carries display_results for the UI."""
+    def test_batch_routes_through_fetch_url_one(self):
+        """Batch mode calls _fetch_url_one per URL with the serial batch worker's
+        arguments and carries display_results for the UI."""
         from lib.tasks_pkg.streaming_tool_executor import (
             StreamingToolAccumulator, _ContentWithDisplayResults)
         acc = StreamingToolAccumulator(_make_task(), project_path='/tmp')
 
         urls = ['https://a.com/page', 'https://b.com/file.zip']
 
-        def fake(u, user_question, fetch_reason):
-            assert fetch_reason == ''                   # batch parity
+        def fake(u, user_question):
             assert user_question == 'what is X'
             if u.endswith('.zip'):
                 return _asset_item(u)                   # binary asset
@@ -111,7 +108,7 @@ class TestStreamingFetchUrlDelegation:
             }
 
         with patch('lib.tasks_pkg.handlers.search._core._fetch_url_one', side_effect=fake) as m:
-            out = acc._execute_one('fetch_url', {'urls': urls, 'reason': 'ignored-in-batch'})
+            out = acc._execute_one('fetch_url', {'urls': urls})
 
         assert m.call_count == 2
         assert isinstance(out, _ContentWithDisplayResults)
@@ -145,32 +142,32 @@ class TestStreamingFetchUrlDelegation:
         task = _make_task()
         task['_userId'] = '41'
         task['config'] = {'browserClientId': 'browser-a'}
-        bindings = []
+        from lib.browser import queue
+        from lib.search.search_bridge import _ChatuiBrowserProvider
 
-        @contextmanager
-        def fake_binding(*, user_id='', client_id='', required_capabilities=()):
-            bindings.append((user_id, client_id, tuple(required_capabilities)))
-            yield (str(user_id), str(client_id), 'Default')
+        lookups, bindings = [], []
 
-        monkeypatch.setattr('lib.search.search_bridge.bind_search_browser', fake_binding)
+        def clients(*, owner_user_id):
+            lookups.append(owner_user_id)
+            return [{'client_id': 'browser-a', 'profile': 'Default',
+                     'last_poll': 1, 'capabilities': []}]
+
+        def fetch(url, question):
+            provider = _ChatuiBrowserProvider().bind()
+            bindings.append((provider.user_id, provider.client_id, provider.profile))
+            return {'url': url, 'page_content': 'ok', 'is_pdf': False,
+                    'raw_chars': 2, 'filtered_chars': 2, 'error_msg': None,
+                    'saved_path': None, 'is_asset': False}
+
+        monkeypatch.setattr(queue, 'get_connected_clients', clients)
         url = 'https://example.com/page'
         acc = StreamingToolAccumulator(task, project_path='/tmp')
-        with patch(
-                'lib.tasks_pkg.handlers.search._core._fetch_url_one',
-                return_value={
-                    'url': url, 'page_content': 'ok', 'is_pdf': False,
-                    'raw_chars': 2, 'filtered_chars': 2, 'error_msg': None,
-                    'saved_path': None, 'is_asset': False,
-                }):
+        with patch('lib.tasks_pkg.handlers.search._core._fetch_url_one', side_effect=fetch):
             out = acc._execute_one('fetch_url', {'url': url})
 
         assert str(out).endswith('\n\nok')
-        # One selection binding plus the actual fetch binding. Both retain the
-        # request owner/device instead of falling back to request globals.
-        assert bindings == [
-            ('41', 'browser-a', ()),
-            ('41', 'browser-a', ()),
-        ]
+        assert lookups == ['41']
+        assert bindings == [('41', 'browser-a', 'Default')]
 
     def test_failed_streaming_fetch_is_not_injected_as_authoritative_cache(
             self):

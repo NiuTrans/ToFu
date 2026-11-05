@@ -2,6 +2,7 @@
 from pathlib import Path
 import os
 import subprocess
+import sys
 import threading
 
 import pytest
@@ -38,7 +39,7 @@ try:
     assert runtime._repository_runtime.retained_image_bytes()==0
 finally:runtime.close()
 '''
-    result=subprocess.run([os.environ['TOFU_BENCHMARK_PYTHON'],'-c',code,str(tmp_path),policy],
+    result=subprocess.run([os.environ.get('TOFU_BENCHMARK_PYTHON', sys.executable),'-c',code,str(tmp_path),policy],
         cwd=Path(__file__).resolve().parents[2],capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stderr
 
@@ -103,6 +104,12 @@ def test_sdk_close_requires_active_work_to_join_before_image_disposal(stream, mo
         (root/'0.rs').write_text('pub fn loaded_before_block() {}\n')
     entered=observe_first_ast(monkeypatch);images=observe_installed_images(monkeypatch)
     children=observe_children(monkeypatch);tasks=[];threads=[];errors=[]
+    completions=[]
+    finish=chat_task_runtime.finish
+    def observe_finish(task_id, **options):
+        completions.append(options.get('error'))
+        return finish(task_id, **options)
+    monkeypatch.setattr(chat_task_runtime, 'finish', observe_finish)
     _patch_route_slot(monkeypatch)
     def execute(task, *, executor=None):
         tasks.append(task)
@@ -112,7 +119,7 @@ def test_sdk_close_requires_active_work_to_join_before_image_disposal(stream, mo
                 chat_task_runtime.mark_running(task['id'])
                 entry={'query':'blocked repository','toolName':'repo_map','toolCallId':'sdk-blocked'}
                 result=tool_registry.lookup('repo_map')(task,{},'repo_map','sdk-blocked',{},1,entry,{},str(root),True)
-                chat_task_runtime.finish(task['id'],result=result[1],error='cancelled' if result[2] else None)
+                chat_task_runtime.finish(task['id'],result=result[1],error='cancelled' if entry['status']=='error' else None)
                 notify_task(task['id'], terminal=True)
             except BaseException as error:errors.append(error)
         thread=threading.Thread(target=run);threads.append(thread);thread.start()
@@ -127,6 +134,7 @@ def test_sdk_close_requires_active_work_to_join_before_image_disposal(stream, mo
         execution.abort()
         for thread in threads:thread.join(timeout=5)
         assert not errors and all(not thread.is_alive() for thread in threads)
+        assert completions == ['cancelled']
         runtime.close()
         assert images[0]._image.closed
     finally:

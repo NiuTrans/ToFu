@@ -31,6 +31,7 @@ from .domain import (
 )
 from .repository import OwnerBoundary, RepositoryPort, StoredAuthority
 from .inference import profile_from_metadata, resolve_inference_profile
+from .model_defaults import OFFICIAL_MODEL_FACTS, index_spelling_identities, unique_spelling_row
 
 
 _DEFAULT_CONTEXT_WINDOW = 128_000
@@ -282,13 +283,18 @@ class _IdentityMatch:
     model: dict[str, Any] | None
     confidence: str
     candidates: tuple[dict[str, str], ...] = ()
+    # The Model row carries an official directory entry's facts, which
+    # bound the Offering instead of being widened by the legacy seed.
+    official: bool = False
 
 
 def _official_rows(
     official_directory: Sequence[Mapping[str, Any]] | None,
-) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]],
+           dict[tuple[str, str], list[Mapping[str, Any]]]]:
     exact: dict[str, list[dict[str, Any]]] = {}
     bare: dict[str, list[dict[str, Any]]] = {}
+    rows: list[dict[str, Any]] = []
     for source in official_directory or ():
         if not isinstance(source, Mapping):
             continue
@@ -304,6 +310,8 @@ def _official_rows(
             "context_window": _context_window(source),
             "quality_rank": _quality_rank(source),
         }
+        if source.get("registration_metadata") is not None:
+            row["registration_metadata"] = copy.deepcopy(source["registration_metadata"])
         profile = profile_from_metadata(source, source="official")
         if profile:
             row["inference_profile"] = profile
@@ -314,7 +322,8 @@ def _official_rows(
             row["lifecycle"] = source["lifecycle"]
         exact.setdefault(model_id, []).append(row)
         bare.setdefault(_creator_identity.strip_routing_decoration(model_id), []).append(row)
-    return exact, bare
+        rows.append(row)
+    return exact, bare, index_spelling_identities(rows)
 
 
 def _identity_match(
@@ -322,13 +331,15 @@ def _identity_match(
     *,
     exact: Mapping[str, list[dict[str, Any]]],
     bare: Mapping[str, list[dict[str, Any]]],
+    spelling: Mapping[tuple[str, str], list[Mapping[str, Any]]],
     seed: Mapping[str, Any],
 ) -> _IdentityMatch:
     direct = exact.get(model_id) or []
     if len(direct) == 1:
         row = copy.deepcopy(direct[0])
         return _IdentityMatch(
-            "confirmed", ModelRef(row["creator_id"], row["model_id"]), row, "high")
+            "confirmed", ModelRef(row["creator_id"], row["model_id"]), row, "high",
+            official=True)
     stripped = _creator_identity.strip_routing_decoration(model_id)
     decorated = stripped != model_id
     decorated_matches = bare.get(stripped) or []
@@ -338,7 +349,8 @@ def _identity_match(
     if decorated and len(unique_decorated) == 1:
         row = copy.deepcopy(next(iter(unique_decorated.values())))
         return _IdentityMatch(
-            "confirmed", ModelRef(row["creator_id"], row["model_id"]), row, "high")
+            "confirmed", ModelRef(row["creator_id"], row["model_id"]), row, "high",
+            official=True)
     candidates = tuple(
         {"creator_id": creator_id, "model_id": official_model_id}
         for creator_id, official_model_id in sorted(unique_decorated)
@@ -360,10 +372,12 @@ def _identity_match(
             "capabilities": capabilities,
             "context_window": _context_window(seed),
             "quality_rank": _quality_rank(seed),
+            **({"registration_metadata": copy.deepcopy(seed["registration_metadata"])}
+               if seed.get("registration_metadata") is not None else {}),
             "lifecycle": (
                 "preview" if "preview" in official_id.lower()
                 else "dated_snapshot" if any(
-                    part.isdigit() and len(part) == 8
+                    part.isdigit() and len(part) in {4, 8}
                     for part in official_id.replace("_", "-").split("-"))
                 else "stable"
             ),
@@ -379,8 +393,22 @@ def _identity_match(
         list_pricing = _list_pricing(seed.get("pricing"))
         if list_pricing is not None:
             row["list_pricing"] = list_pricing
+        twin = unique_spelling_row(spelling, family, official_id)
+        if twin is not None:
+            # A respelling of exactly one official Model of this creator
+            # (case or dot/dash/underscore/space separators only) keeps its
+            # own identity but takes that Model's developer facts, never
+            # import defaults. A snapshot date or quantization suffix names
+            # another Model, which keeps its own facts.
+            for fact in OFFICIAL_MODEL_FACTS:
+                row.pop(fact, None)
+                if fact in twin:
+                    row[fact] = copy.deepcopy(twin[fact])
+            if not seed.get("display_name") and twin["display_name"] != twin["model_id"]:
+                row["display_name"] = twin["display_name"]
         return _IdentityMatch(
-            "confirmed", ModelRef(family, official_id), row, "high")
+            "confirmed", ModelRef(family, official_id), row, "high",
+            official=twin is not None)
     return _IdentityMatch("pending_identity", None, None, "pending")
 
 
@@ -443,7 +471,7 @@ def plan_legacy_migration(
     document = empty_document()
     issues: list[MigrationIssue] = []
     pending_secrets: list[PendingSecret] = []
-    exact, bare = _official_rows(official_directory)
+    exact, bare, spelling_rows = _official_rows(official_directory)
     model_catalog = server_config.get("model_catalog")
     if not isinstance(model_catalog, Mapping):
         model_catalog = None
@@ -640,13 +668,12 @@ def plan_legacy_migration(
                 ))
                 continue
             identity = _identity_match(
-                logical_id, exact=exact, bare=bare, seed=seed)
+                logical_id, exact=exact, bare=bare, spelling=spelling_rows, seed=seed)
             capabilities = _clean_strings(seed.get("capabilities")) or ["text"]
             context_window = _context_window(seed)
             if identity.state == "confirmed" and identity.ref is not None and identity.model is not None:
                 ref = identity.ref
-                canonical = any(r['creator_id'] == ref.creator_id
-                                for r in exact.get(ref.model_id, []))
+                canonical = identity.official
                 if canonical:
                     # Supply differences stay in the Offering. A relay cannot
                     # expand the public Model's capability/context baseline.

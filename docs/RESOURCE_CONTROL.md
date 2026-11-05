@@ -1,5 +1,268 @@
 # Automatic resource control
 
+## Hardware never limits work
+
+**Owner decision, 2026-10-24. This is a fixed policy, not a tuning
+opportunity.** CPU count, affinity/cgroup CPU quota, memory capacity or
+headroom, process RSS and cgroup pressure never size, cap, queue, refuse,
+shrink, recycle or kill user work. Reopening this needs a new explicit owner
+decision recorded in this section. `AGENTS.md` design principle 3 states the
+rule, and `tests/meta/test_hardware_never_limits_work.py` enforces it.
+
+**Owner clarification, 2026-10-26.** Concurrent task counts and memory usage
+must not limit execution, including fixed limits described as structural bounds.
+Problem: Coordinator delegation still refused active Workers at a persisted
+`maxConcurrent` value after hardware-derived ceilings were removed. Decision:
+new grants omit that field; old grants retain it as immutable evidence without
+enforcing it. Authorization, Stop and source-policy checks still run in the
+same grant CAS. Raising the constant or applying the change only to new
+requests was rejected because either leaves running requests subject to a cap.
+
+**Problem.** Successive iterations kept deriving work limits from the launch
+probe and from live memory readings:
+
+- Root, agent, sync, tool, Swarm, SSE and timer ceilings came from effective
+  CPU and memory units.
+- `task_concurrency_hard_ceiling` was derived from RSS and also capped
+  Coordinator delegation ("Worker capacity is occupied by this machine").
+- A `throughput` profile derived all of these again.
+- A memory-headroom guard ran before each request. It raised
+  `MemoryPressureError`, halved the request context, then ended the turn as
+  `server_busy`.
+- An in-process RSS recycle, plus the lifecycle manager's own RSS ceiling,
+  terminated the worker and aborted every running task.
+- A feedback controller shrank capacity under memory pressure and grew only
+  when it could measure headroom.
+
+Each was locally reasonable. Together they made a large shared host refuse or
+degrade work it could run, and every refusal reached the user as an
+unexplained "server busy". Earlier rounds had already removed the cgroup
+admission gate, root admission slots and Swarm permits (sections below), and
+the same shapes came back each time.
+
+**Decision.**
+
+Every launch setting in `contracts/resource_policy_v1.json` declares a
+`class`:
+
+- `unlimited`: admission, concurrency and fan-out ceilings. The value is
+  `runtime_guards.UNLIMITED` in every mode, and it is never written into the
+  environment.
+- `fixed`: hardware-independent constants. These are idle-reuse hints for
+  demand-driven pools (never execution ceilings), retry budgets, deadlines,
+  and measured tuning windows such as the FUSE tree-walk window.
+- `retention`: evict-only caches, TTLs, logs, replay windows and disk budgets.
+  Only this class may follow the launch probe. It bounds growth and never
+  refuses or delays work.
+
+Rules that follow from the classes:
+
+- Executors start every accepted job. A worker value only decides how many
+  idle threads or processes stay warm.
+- `task_concurrency_hard_ceiling()` returns the structural constant
+  `MAX_TASK_CONCURRENCY`, retained for decoding legacy `maxConcurrent` values
+  and resource catalog metadata. It is not an execution admission ceiling.
+
+Removed:
+
+- the request memory guard and the context shrink it triggered;
+- process-RSS relief, the in-process recycle, and the lifecycle manager's RSS
+  termination;
+- the knobs `TOFU_TASK_RSS_RESERVE_MB`, `TOFU_PROCESS_RSS_RELIEF_MB`,
+  `TOFU_PROCESS_RSS_RECYCLE_MB`, `TOFU_PROCESS_RSS_COOLDOWN_SEC`,
+  `TOFU_CGROUP_REQUEST_*` and `TOFU_RESOURCE_PROFILE`, which an old
+  environment may still contain and which are now ignored;
+- the controller's memory-pressure shrink and its headroom-gated growth;
+- the per-principal refusal for headless model-response SSE;
+- count refusals for embedded agent runs, human gates, automation claims and
+  stdin sensors;
+- the `min(8, cores)` thread caps in ONNX and the PDF parsers, and clamping of
+  numeric-library threads;
+- dead knobs: the Swarm wave, session and global caps, the timer live cap, the
+  project refresh queue, PDF maximum pages and the paper build queue;
+- the local search reranker's CPU- and memory-derived call gate, memory
+  refusal and RSS kill, the Docker environment provider's memory-derived
+  build-context and output limits, and the desktop agent's unused CPU- and
+  memory-derived worker and replay-ID sizing;
+- the storage Sidecar's startup refusal when its filesystem preflight measured
+  slower than `TOFU_STORAGE_PREFLIGHT_MAX_MS` (now ignored). Fsync,
+  atomic-replace and lock-exclusion failures still refuse; the latency is only
+  reported (see [STORAGE.md](STORAGE.md)).
+
+Kept, because none of these limits work:
+
+- aggregate cgroup relief (cache drop and `malloc_trim` on effective pressure,
+  with back-off), the boot self-check, the pressure journal and the OOM
+  witness;
+- the launch probe, used for diagnostics and retention sizing;
+- durability protections, which are not performance limits: the storage
+  minimum-free-bytes start floor, and frame and document protocol bounds.
+
+Memory exhaustion is left to the operating system. The lifecycle manager still
+classifies a kernel OOM kill and restarts the worker.
+
+Thread exhaustion is the operating system's verdict too. Problem: a refused
+`Thread.start()` (container pids limit, `ulimit -u`, thread-stack memory)
+escaped untyped, failed the turn as a non-retryable model failure and charged
+healthy slots. Decision: a tool round whose heartbeat thread is refused runs
+without keepalive ticks; a model attempt refused before sending raises
+`LocalRequestPreparationError(stage='thread_start')`, which releases its slot
+neutrally and authorizes no model switch; every refusal settles as `internal`,
+retryable, `origin=local`, `failureStage=thread_start`
+(`lib/error_envelope/_classify.py`). A tickless round does not refresh reaper
+liveness for an exempt human wait. Alternatives rejected: a thread ceiling or
+admission queue (forbidden above) and automatic retry, which adds load to an
+exhausted host.
+
+**Alternatives rejected.**
+
+- Raising each ceiling to a larger probe-derived number keeps the shape that
+  keeps coming back, and it still refuses work on smaller or busier hosts.
+- Keeping the memory guard behind a default-off switch: a dead switch gets
+  turned back on by the next "safety" iteration. An operator who needs
+  isolation should set a container or cgroup limit, which the kernel enforces
+  without refusing individual requests.
+- Setting idle-reuse hints to `UNLIMITED` would not run more work, since work
+  is already uncapped. It would only stop idle threads and processes from
+  retiring.
+- Removing the probe entirely: retention budgets still need floors on small
+  disks and small memory. They are evict-only.
+
+**Packaged components.** The guard also scans the Python sources of packaged
+distributions, plugins and bundles (`packages/`, `plugins/`, `bundles/`; tests
+and examples excluded). Every reader of CPU count or memory capacity/headroom,
+in the application or a package, is declared with the reason it never limits
+work.
+
+- The TofuDB engine (`packages/tofu-db/src/resource_probe.rs`) sizes its
+  connection reuse target, frame RAM-versus-file spill threshold and caches
+  from its own probe. None of these refuses a caller: `FrameAdmissionBudget`
+  (`server.rs`) rejects only the fixed protocol frame-size bound, and
+  `maximumConnections` is a reuse target. The embedded request memory value is
+  an observation-only hint, and the commit sequencer enqueues without a slot or
+  residency quota.
+- The optional local search reranker (`packages/tofu-search`) never gates,
+  refuses or stops scoring by host capacity; only a caller's explicit
+  `max_parallel` or `max_rss_mb` does (see "Optional local search ranking").
+- The Docker environment provider (`packages/tofu-environments`) bounds copied
+  build context by the staging volume only; command output uses the runner's
+  fixed maximum.
+- The Overleaf Git worker sandbox (`packages/tofu-overleaf-mcp`) keeps fixed
+  isolation bounds for untrusted repository content: 256 MiB of memory and one
+  CPU. These are security bounds on untrusted processes, never derived from
+  the host; its probe is diagnostic.
+
+## Optional local search ranking
+
+**Problem:** an optional CPU relevance model can retain large allocator/primitive
+caches across unrelated searches. **Decision:** `LocalReranker` owns an explicit
+reusable scope and one CPU observation for its default thread count; every
+scoring call owns a fresh process, bounded output, deadline, cancellation and
+joined group retirement. The parent never imports Torch or holds model weights.
+Idle model residency is zero after successful retirement. Failed cleanup retains
+the process (and any explicit reservation), fences new scoring and requires the
+owner's retryable `close()`.
+MCP startup owns this scope; request configurations borrow it. Host callers use
+`lib/search/search_bridge.py::bind_search_reranking` with their own owner.
+
+`tofu_workers/resources.py` is the shared stdlib observation owner for affinity,
+cgroup CPU, physical/cgroup memory capacity and headroom, and volume free space.
+Application caching and volume selection remain in `runtime_guards.py`.
+`scripts/gen_packaged_search_runtime.py` exports this probe and the shared
+`lib/project_mod/process_group.py` retirement implementation into standalone
+search. Generated copies import no host module.
+
+**Parent lifetime:** normal retirement cannot run after the supervisor is killed.
+The local worker therefore binds its launching parent before reading the request
+or loading model libraries, using the existing `bind_parent_lifetime` owner in
+`lib/paper/builds/pdf_validation_limits.py`, exported by the same generator.
+Linux parent-death signaling kills this worker and its native threads; checks
+before and after registration close the startup race. Missing, stale or failed
+binding refuses inference. This is not an arbitrary-descendant containment
+guarantee; the admitted CPU scorer does not launch subprocesses. Normal Stop,
+deadline and `close()` still join the whole process group. A timer in the parent
+alone cannot cover parent death; a second watchdog process adds unnecessary
+ownership when the Linux kernel already provides the required binding.
+
+Default intra-op threads are `max(1, effective CPUs // 4)`, following the local
+CPU study; the probe runs once per scorer, not every request. By default no
+host observation gates, refuses or stops a call ("Hardware never limits
+work"): simultaneous calls each start their own model process, and memory
+exhaustion is left to the operating system, which surfaces as an ordinary
+worker failure and lexical fallback. An explicit `max_parallel` gates
+simultaneous calls. An explicit `max_rss_mb` adds a per-child RSS guard sampled
+every 50 ms (it can overshoot before cancellation; this is not an OS memory
+limit), refuses an allowance below three times the pinned weight bytes and
+bounds input JSON to 1/16 of the allowance. Separate owners do not form a global
+reservation broker. Output fits 16 KiB plus 32 bytes per candidate. Anonymous
+input files close with the scoring call.
+
+**Alternatives rejected:** a permanent model worker can accumulate the measured
+shape-dependent caches while idle; changing padding or reducing the output head
+changes floating-point results and needs separate quality admission. Deriving a
+call gate, memory refusal and RSS kill from CPU count and memory headroom (the
+2026-10-22 default) declined or stopped optional scoring on busy hosts; the
+2026-10-24 owner decision removed it. The qualified CPU scorer retains the
+measured batch-of-eight numerical policy, which is independent of how many
+request-owned processes run.
+
+The 2026-10-22 three-document CPU smoke used 15 threads, Python 3.12.13,
+Torch 2.14.1+cpu and Transformers 5.20.2. It took 5.21 seconds including verification,
+imports and retirement; loading took 0.61 seconds and scoring 0.17 seconds.
+Sampled child RSS peaked at 1.13 GiB. This small input does not qualify long-body
+memory or general search quality. Verification covers admission/hash failures,
+stdout flooding, deadlines, Stop, descendant writers, live-thread zombie leaders,
+retained cleanup debt, scoped host binding and both MCP cancellation mechanisms.
+
+The broader qualification used the default 15 threads and four simultaneous
+processes on an observed 63-CPU host. Twenty-eight frozen metadata queries took
+202.50 seconds sequentially (median owned call 7.22 seconds); 64 predeclared
+body pools took 112.04 seconds across four calls (median 6.65 seconds). These
+times include snapshot hashing, process/library startup and retirement. Sampled
+child RSS peaked at 1.75 GiB for metadata and 2.08 GiB for bodies. Every process
+retired and the owner closed with zero active calls or cleanup debt. Parent RSS
+rose from 68.32 to 110.29 MiB while retaining experiment inputs and reports;
+this does not demonstrate flat parent RSS. Library regressions ran concurrently,
+so the times are host observations, not isolated throughput benchmarks.
+An installed-wheel cancellation probe stopped a real child after observing
+more than 1 GiB resident memory; Stop returned after 0.104 seconds, with the
+direct child reaped, its PID absent and no model imports in the parent. This
+proves that observed cancellation point, not a universal cancellation latency.
+An installed-wheel parent-death probe killed the launcher after the real model
+child exceeded 1 GiB RSS. At the 0.3-second observation the child had zero RSS
+and no live threads; the probe's subreaper then joined it. The offline guard
+test retains an independent pipe writer, so EOF cannot mask a missing binding.
+
+## Local storage cache retention
+
+The shared local-placement reserve and project-index disk retention are
+evict-only acceleration policies, described in [INDEX_FASTPATH.md](INDEX_FASTPATH.md).
+`TOFU_TREE_INDEX_DISK_MAX_MIB` limits only serialized reconstructible blobs;
+oversized indexes remain complete in memory and failed persistence retains
+live traversal. Free-space/inode probes never reject commands or file edits.
+
+## Memory prefetch corpus index retention
+
+Problem: every task-startup prefetch re-tokenized the whole metadata corpus
+for its BM25 shortlist (47 ms of CPU for 1,952 memories, about 89% of it
+tokenization), CPU that queues behind every busy thread under GIL pressure.
+Decision: `lib/memory/prefetch/_shortlist.py` retains exactly one
+`TokenCorpusIndex` (per-document term counts over a shared vocabulary), keyed
+by the exact source-ordered document texts. An unchanged corpus is never
+re-tokenized; any renamed, re-described, re-tagged, added, removed or reordered
+entry is a different key and replaces the slot, so retention follows the most
+recent corpus and never grows with history. Concurrent callers with one corpus
+share one build through the queued read coalescer. Scores are bit-identical to
+the streaming core because both run the same final pass; explicit body search
+keeps the streaming core and retains no corpus tokens. Measured on the 1,952-
+memory corpus: 3.1 MiB retained including the key, 5.5 ms per hit, 65 ms per
+rebuild. Alternatives rejected: a key of IDs plus stat fingerprints cannot
+prove a same-size edit inside a coarse filesystem timestamp tick (the
+frontmatter LRU needs its settle window for that reason), while the document
+text is exact by construction; postings lists retained 5.2 MiB and rebuilt in
+78 ms; several slots or a sized LRU would need a capacity knob. Specs:
+`tests/memory/test_memory_prefetch_corpus_index.py`.
+
 ## Artifact batch demand
 
 **Problem:** equally divided query budgets stranded spare capacity and repeated
@@ -14,6 +277,15 @@ maximum raw pages first raised transient allocation without improving delivery;
 fixed shares lose usable evidence. Cursor and failure semantics live in
 [TOOL_RESULT_QUERY.md](contracts/TOOL_RESULT_QUERY.md).
 
+Local page planning reduces repeated source IO while preserving the same
+authority boundary. It reuses the fetched page and model-view count, makes at
+most four additional sizing probes per attempt and permits two attempts before
+the existing halving path. The source signs and returns each actual page; no
+planned copy escapes. Planning copies have call-local lifetimes, and larger
+useful pages can increase temporary allocations and retained result bytes.
+Exhaustive character-level binary planning was rejected: it reduced queries but
+spent substantially more CPU in repeated tokenization.
+
 A paired 2026-10-21 disposable SQLite probe used the same retained sources and
 `o200k_base` counting for old/new handlers. Eight-item mixed batches, with one
 large page and seven tiny pages, reduced reads from 13 queries to 8 and delivered
@@ -23,17 +295,41 @@ afterward. More evidence intentionally consumes more model tokens: these are
 eliminated source queries and complete-page delivery, not whole-task cost or
 latency savings.
 
-The same mixed samples retained 9,213–18,426 serialized page bytes before batch
-fitting, versus 6,088–7,370 before; returned native JSON grew correspondingly
-through the existing retention owner. Three alternating measured runs after
-warm-up showed median Python traced peaks of 152–289 KB. A dense 16-read sample
-over 65,536-byte ranges kept 128 source queries, 512 returned body bytes per page
-and 5,719 model tokens in both versions. Its waiting-page payload grew from
-19,473 to 273,489 bytes and traced peak from 3.71 to 4.01 MB; the rejected raw-page
-variant reached 14.32 MB. These are serialized payload and Python allocation
-measurements, excluding native allocator/RSS and database/index overhead. Pages
-remain invocation-local; retained output follows the existing TTL/reclamation
-policy. Paired SQLite/TofuDB tests verify exact native capture and restart replay.
+A subsequent paired SQLite probe compared shared-demand fitting with/without
+bounded local planning. Dense batches of sixteen 65,536-byte canonical reads
+fell from 128 to 48 source queries and delivered 660 instead of 512 body bytes
+per page. Model tokens grew from 5,815 to 6,567 within the same 7,000 allowance.
+Waiting-page payload grew from 273,489 to 356,785 serialized bytes, final native
+JSON from 19,487 to 21,879 bytes, and median Python traced peak from 3.94 to
+4.86 MB. Three alternating untraced samples after warm-up showed median wall
+times of 163.54/161.96 ms and CPU times of 376.55/366.00 ms (before/after);
+these near-equal times are not a latency improvement claim. Mixed eight-item
+reads/searches still required eight queries and kept all requested evidence.
+
+A separate disposable TofuDB probe with the same alternating procedure observed
+128/48 queries, 512/650 body bytes per page and 5,783/6,527 model tokens.
+Python traced peak was 3.78/4.89 MB; median wall time was 181.85/171.46 ms and
+client-process CPU time 414.10/389.13 ms, excluding engine-process CPU. Mixed
+eight-item cases again kept eight queries and all requested evidence. Signed
+cursor contents differ across stores, so exact token/page sizes need not match.
+
+These are component observations with different returned evidence, not equal-work
+throughput or end-to-end cost claims. Python allocation excludes native allocator,
+RSS and database/index overhead. Pages remain invocation-local; retained output
+follows the existing TTL/reclamation policy. Paired SQLite/TofuDB tests verify
+exact native capture, scope, signed continuations and restart replay.
+
+Artifact cancellation borrows the existing occurrence context and task Stop
+signal; it creates no pool, timer, queue, poller or persistent state. Source
+calls already entered retain their existing deadline and joined lifetime, while
+later source/refit queries stop at cooperative boundaries. A 2026-10-21 paired
+SQLite probe injected Stop after the first read/search page: both fell from two
+queries to one, eliminating the one query after Stop. Injecting Stop after
+measuring an oversized eight-item batch reduced both read/search cases from
+sixteen queries to eight, eliminating all eight subsequent queries. These are
+deterministic boundary observations, not in-flight storage interruption or
+whole-task latency claims. Native-gateway tests verify joining the running query;
+SQLite/TofuDB restart tests verify that cancellation does not mutate its source.
 
 ## Canonical Artifact query projections
 
@@ -291,7 +587,7 @@ Each task-scoped receipt store has explicit count and weighted identity-byte bud
 
 ## Native scoped tool scheduler resources
 
-`packages/tofu-runtime/src/tool_scheduler.rs` starts one joined scoped worker for each qualified independent read. Legacy worker/call/byte budget fields are compatibility hints, never admission quotas. Ordered operations remain on the caller lane; immutable independent-read names and permission proofs decide which calls may overlap. Empty and ordered-only batches start no workers.
+`packages/tofu-runtime/src/tool_scheduler.rs` starts one joined scoped worker for each qualified independent read. Legacy worker/call/byte budget fields are compatibility hints, never admission quotas. Ordered operations remain on the caller lane; immutable independent-read names and permission proofs decide which calls may overlap. Empty and ordered-only batches start no workers. The concurrent composition (`Scheduler::concurrent`) starts one worker for every call, writes included, and keeps only the host-declared call order (TOOL_EXECUTION_POLICY.md, "Native application rounds").
 
 All required workers must start before effects are published. Partial startup withdraws publication and joins already-started workers, so a refused startup cannot execute later. Results retain original positions; scope disposal and required cleanup settle before feedback. Cleanup failure stops peers and stays fatal even during Stop. The scheduler tracks actual call/byte ownership with checked arithmetic; numeric overflow remains an error rather than corrupting accounting. Close waits for active guards and physical workers; self-close and recursive worker dispatch remain lifecycle errors.
 
@@ -354,9 +650,9 @@ The native runtime HTTP composition accepts explicit capacity-derived pool budge
 
 Users submit work and expect correct results quickly. An independent fixed resource limit can reject useful work even when the machine has room: a route pool counts candidate handles, whereas execution pools count running tasks. Increasing every constant hides leaks and can instead exhaust memory.
 
-The resource catalog in `contracts/resource_policy_v1.json` owns launch defaults and live resource declarations; derive their inventory from the contract rather than a copied count. Its generated stdlib projection (`scripts/gen_resource_policy.py`) supplies `runtime_guards.py`; the cached launch probe and existing capacity formulas still derive defaults from CPU affinity/cgroups, memory capacity/headroom and volume space. Explicit operator settings retain their documented domain meaning. Demand execution owners interpret legacy worker/slot values as idle-reuse or accounting hints, so an override cannot restore a removed admission quota. No tuning control is added to the user task flow. Explicit financial authorization and genuine provider/daemon constraints stay with their respective authorities.
+The resource catalog in `contracts/resource_policy_v1.json` owns launch defaults and live resource declarations; derive their inventory from the contract rather than a copied count. Its generated stdlib projection (`scripts/gen_resource_policy.py`) supplies `runtime_guards.py`; the cached launch probe sizes only `retention` settings (see "Hardware never limits work"). Explicit operator settings retain their documented domain meaning. Demand execution owners interpret legacy worker/slot values as idle-reuse or accounting hints, so an override cannot restore a removed admission quota. No tuning control is added to the user task flow. Explicit financial authorization and genuine provider/daemon constraints stay with their respective authorities.
 
-One serving-loop controller adjusts local budgets using measured demand and pressure for bounded domains. [Scan/heartbeat isolation](DEFENSIVE_PATTERNS.md#background-fan-out-before-demand-submission) protects the serving loop. Root acceptance is demand-driven; native owners retain usage, fairness and teardown; there is no second execution registry or lease counter. Storage selection, provider credentials/quotas, model choice, task quality, context, cost limits, and durable user state remain under their existing authorities.
+One serving-loop controller adjusts local budgets using measured demand, never memory pressure. [Scan/heartbeat isolation](DEFENSIVE_PATTERNS.md#background-fan-out-before-demand-submission) protects the serving loop. Root acceptance is demand-driven; native owners retain usage, fairness and teardown; there is no second execution registry or lease counter. Storage selection, provider credentials/quotas, model choice, task quality, context, cost limits, and durable user state remain under their existing authorities.
 
 Alternatives rejected: raising a single magic limit does not cover dependent pools; per-task hardware/configuration probes add latency; a second scheduler creates accounting divergence; automatic provider-quota or task-quality changes would violate the user's execution constraints.
 
@@ -373,7 +669,7 @@ Snapshots contain desired/effective capacity, used/waiting, completed/errors, bl
 | `model.requests` | dispatch request accounting | local counts and controller resize cannot block authorized requests; genuine provider failures keep their retry/cancellation policy |
 | `model.routes` | ephemeral handle registry | register every request-owned handle without a count ceiling; rollback and disposal remain exact |
 | `storage.rpc` | selected native v2 session pool | never exceed current daemon readiness budget; excess sessions close only when idle or released |
-| `storage.frames` | selected client's response frame admission | grow byte admission with headroom; preserve occupied bytes and response priority |
+| `storage.frames` | selected client's response frame admission | grow byte admission on demand; preserve occupied bytes and response priority |
 
 These are process budgets, not per-user quotas. Shared owners retain identity and fairness. Optional owners attach lazily on first normal use. Restarting a native storage client replaces its port; controller sampling opens no storage or provider connections. Legacy/SQLite clients do not acquire native RPC ports.
 
@@ -448,7 +744,7 @@ Measurement on this host with a synthetic parked-I/O barrier: 64 tasks all enter
 
 `benchmarks/conversation_concurrency.py` measures production executor and durable Turn operations on a disposable native authority, with a barrier provider to prove simultaneous running tasks, bounded output, SIGKILL/reopen, RSS and latency. It does not spend tokens or measure real-provider quotas. Use `--conversations 1000 --restart-while-running --rounds 4 --chunk-bytes 8192` on the target volume; `--recover-interrupted` instead checks application boot settlement of every interrupted attempt. Reports include the exact binary hash and filesystem, and retain failed authorities for diagnosis. Verify with `tests/resource_control/test_thousand_conversations.py` and the native run; capacity is conditional on the measured workload and current machine pressure.
 
-Native readiness distinguishes a stuck authority holder from sustained useful contention. Successful foreground mutex acquisitions advance one authority-local counter; the watchdog observes it without taking the mutex. Progress resets the contention window even when every sampled `try_lock` is busy. A held mutex with no progress still trips the existing ten-second threshold, and poisoning never clears on progress. A process-global counter was rejected because work in another authority could mask a real wedge. Raising the threshold would only delay recovery. Thousand-task verification must sample readiness as well as completion: correct readback alone does not prove the supervisor will keep a busy, healthy daemon alive.
+Native readiness distinguishes a stuck authority holder from sustained useful contention. Successful foreground mutex acquisitions advance one authority-local counter; the watchdog observes it without taking the mutex. Progress resets the contention window even when every sampled `try_lock` is busy. A held mutex with no progress still trips the existing ten-second threshold, and poisoning never clears on progress. A process-global counter was rejected because work in another authority could mask a real wedge. Raising the threshold would only delay recovery. Published-view reads (lock-free replicas and cached query answers) never advance the counter: on 2026-11-02 a 1,585 s `log_aggregate.flush` hold kept `system.health` ready while the published view answered the application's reads, so no liveness probe failed until the hold ended. Counting served reads as a separate liveness signal was rejected: they prove readers are served, not that the writer can make progress. Thousand-task verification must sample readiness as well as completion: correct readback alone does not prove the supervisor will keep a busy, healthy daemon alive.
 
 `lib.resource_control.resource_snapshot()` exposes credential-free diagnostics. The existing admin-scoped `/metrics` emits `tofu_resource_{desired,effective, used,waiting,maximum,blocked,errors,pressure}` with bounded resource/unit labels and `tofu_resource_policy_revision`. `[Resources]` logs record adjustments and failure reasons. Diagnostics and sampling contain no user/task IDs or content. `tofu_task_startup_stage_seconds` separates context construction, registration, preparation, binding, submission and physical worker entry. Compare it with the executor's actual queue-wait metric and storage RPC timings before attributing startup latency to exhausted slots. New code takes effect through the ordinary serving-runtime startup boundary; changing source alone does not replace an already running server.
 
@@ -458,7 +754,9 @@ Run `python3 scripts/gen_resource_policy.py --check` and `pytest -q tests/resour
 
 A local synthetic measurement (12 independent 40 ms waiting jobs, one initial worker, sufficient headroom, feedback samples advanced for the experiment) completed in 0.4821 s at fixed capacity and 0.2417 s after automatic growth to two workers. This measures queue parallelism, not provider latency. With six synthetic idle owners, 1,000 feedback ticks averaged 0.149 ms/tick under tracemalloc; retained traced allocation after collection was 1,664 bytes (peak 212,848 bytes). Startup/idle creates no resource-controller thread.
 
-Completed native authority holds of at least one second emit an `authority_hold` diagnostic naming only the operation and elapsed time. Foreground commands, overlay merge, rotation prepare/install and pack install share this timer; no user content enters the record. The threshold bounds log frequency per serialized holder. Readiness measurements retain at most eight failure examples (component state or probe exception), so a failed load result can distinguish contention from an unavailable health transport.
+Completed native authority holds of at least one second emit an `authority_hold` diagnostic naming the operation, the elapsed time and how that time split across the phases inside the hold: `operation=<op> elapsed_ms=<n> phases=<phase>:<ms>,... stages=<stage>:<ms>,...`. The engine record's `timestamp` marks the hold's end ([engine log lines](LOGGING.md#data-flow)). Foreground commands, overlay merge, rotation prepare/install and pack install share this timer; no user content enters the record. The threshold bounds log frequency per serialized holder.
+
+Problem: the record named only the elapsed time, so a multi-second `turn.event.record` hold, a recurring `turn.events.prune` hold or the historical 921 s hold could not be told apart as reads, fsyncs, journal writes or merge work. Decision: a reporting hold attributes its own thread's spans through the request-profile span tokens, whether or not the request is sampled. Every always-on stage timer, the once-per-commit OCC validation and publication timers and the VFS open/read/write/sync probes that run inside the hold charge their exclusive time to one fixed phase: `decode`, `execute`, `read`, `stage` (blob/page staging), `validate`, `journal` (WAL record), `sync` (fsync and durability waits), `apply`, `merge` (overlay merge, checkpoint, rotation, catalog), `retention`, `publish` (receipt, outbox, indexes, response) and `wait`; `other` is hold time outside every instrumented stage, so `phases` sums to `elapsed_ms`. `stages` gives the same exclusive split per stage name, both lists in descending order. A stage without its own phase (generic VFS writes, wrappers) charges its enclosing stage, while reads, fsyncs and waits keep their phase whatever issued them; the table is `authority_watch.rs::hold_phase_of_stage`. A hold nested inside another attributed hold on the same thread prints only its elapsed time. Sampled requests (`TOFU_DB_REQUEST_PROFILE_EVERY`) also total their holds as `holds` and `holdPhaseNanos`. Hot read diagnostics stay opt-in: outside holds attribution costs one thread-local read per span, inside holds two clock reads per VFS call. Alternatives rejected: attributing only sampled requests misses the rare production hold that matters; a lower threshold or a per-hold metric stream adds a tunable and log volume; per-command phase timers would duplicate the stage vocabulary. Readiness measurements retain at most eight failure examples (component state or probe exception), so a failed load result can distinguish contention from an unavailable health transport.
 
 Overlay merges begin at 64 entries after every cold open, then measured hold latency grows or shrinks slices across 1..2,048 entries toward the existing 25 ms target. A fast mount still reaches the full batch; starting at the full batch was rejected because cold DolphinFS merges held authority for 7.9 s. Slow failed merges also reduce the next slice, while empty or immediately rejected work cannot grow it. Rotation write admission is checked before page materialization, preventing repeated expensive merges that cannot publish. The per-key durable merge cursor and original commit versions are unchanged.
 
@@ -487,7 +785,19 @@ Completed reasoning above 4,096 characters does not build its rich body until op
 
 ### Large snapshot JSON decoding
 
-Problem: the optional accelerated decoder built a large tree, discovered unsupported floats, discarded it, and parsed the same response with stdlib. Decision: an 8 KiB probe at each response edge declines explicit float members before speculative parsing. The probe only selects the original parser; remaining accelerator shape/number checks and typed errors are unchanged. It owns at most 16 KiB of temporary slices and adds no cache, pool, or threads. Alternative rejected: admitting all floating-point values can change original number semantics, while a complete JSON pre-scan adds work to every large read. A frozen 30,482,608-byte native snapshot response decoded in 241–261 ms before and 196–203 ms with the rejection probe over three alternating samples. This is decoder time only; native history materialization and HTTP rendering remain separate costs. Exact huge integers, negative zero, quoted numeric source, Unicode and malformed response behavior are specified by the wire-client tests.
+Problem: `tofu_db.wire` decoded with orjson only when the decoded tree had no float, at most 4,096 values and 32 levels, after an 8 KiB edge probe for float members. Turn projections always carry cost and timing floats, so every snapshot, turn page, conversation list and event read paid a stdlib parse, often after building and discarding an orjson tree; stdlib `raw_decode` was 34% self time of the live snapshot path (2026-10-28 py-spy sample). Responses below 8 KiB always used stdlib.
+
+Decision: decide exactness from the input bytes and parse once. Measured on CPython 3.12.13 with orjson 3.12.0, orjson returns a different value than `json.loads(payload.decode("utf-8"))` in exactly two cases: integer literals outside int64/uint64 become floats, and float mantissas beyond 768 significant digits are truncated before rounding (near-halfway decimals printed with 770+ digits round to the other neighbour). Duplicate keys and key order, `-0`/`-0.0`, subnormals, overflow and underflow edges, whitespace, BOM and control characters behave identically. Everything else stdlib accepts and orjson does not (NaN/Infinity tokens, unpaired surrogate escapes, overflow to infinity, nesting beyond orjson's 1,024 levels; stdlib reaches about 10,000) is an orjson `JSONDecodeError`. The nesting case relies on CPython 3.12's C recursion limit exceeding 1,024. On 3.10/3.11, which the standalone wheel also admits, stdlib's limit is the caller's remaining Python recursion budget. There, a document nested between that budget and 1,024 levels decodes instead of raising `RecursionError`. Invalid input makes both reject. A `bytes.translate` + `find` scan finds decimal digit runs of 19+ digits. A run selects stdlib when it has 128+ digits, or when it is an out-of-range integer literal in value position. Adjacent bytes identify fraction digits, exponent digits and string text, and an ambiguous case selects stdlib. A mantissa has at most two runs, so an accelerated float carries at most 254 digits. Otherwise orjson parses the bytes once without a UTF-8 text copy, and its `JSONDecodeError` selects stdlib, which returns or raises exactly as before. The size threshold is removed because the single parse is also faster for small responses: an 11-byte document takes 0.49 µs instead of 1.32 µs, and a 6 KiB document 30 µs instead of 63 µs. The scan holds one transient mask the size of the payload, which is released before the parse. The old fallback copied the payload into a `str`, which takes 1–4 bytes per character. No cache, pool, thread or retained state is added.
+
+Alternatives rejected: keeping the float heuristic, which stays on stdlib or parses twice for every projection; admitting floats unchecked, which silently rounds exact large integers and long mantissas; walking the decoded tree for suspicious floats, which runs at Python speed (2.5–4.8 ms per 1–2 MiB page here, slower than the scan on container-heavy pages); regex digit scans (6–15 ns/byte against about 1.4 ns/byte for translate + find on this host); and a compiled scan inside the CRC accelerator, which would remove most of the remaining scan cost but adds compiler and verification machinery.
+
+Measurements: the figures are 15 interleaved samples on a shared, loaded host, before → after, median decoder time. Two live-captured snapshots took 12.28 → 6.78 ms (2.02 MiB) and 3.85 → 2.15 ms (0.68 MiB). Turn-history pages (1.30 and 1.40 MiB) took 16.37 → 6.57 ms and 6.93 → 4.88 ms. The conversation catalog (48 KiB) took 0.79 → 0.20 ms, and a 29.7 MiB storage-shaped synthetic page took 270.8 → 156.9 ms. Pure orjson takes 3.80 ms on the 2.02 MiB snapshot and 112.1 ms on the 29.7 MiB page, so the scan costs about 1.4 ns/byte. The captured payloads are HTTP browser projections, used as stand-ins for storage payloads of the same composition. These are decoder times only; native query time and HTTP rendering are separate. The differential, randomized, mutation and hypothesis specs in `tests/tofudb/test_tofudb_v2_client.py` compare values, float bits, key order and exception types with stdlib, and kill scan mutants that drop the range, context or long-run checks. Rerun them after any orjson upgrade: a new value-changing divergence must fail them, not ship.
+
+### Storage response frame receive
+
+Problem: `tofu_db.wire._read_exact` called `recv(remaining)`, which allocates the remaining frame size on every call, appended each piece to a bytearray and then copied the result into `bytes`. It accounted for about 6% self time in the live snapshot sample. Decision: each frame is received with `recv_into` into one preallocated buffer, as storage.v1 already does. The MessagePack decoder copies each field once out of a scoped memoryview into owned `bytes`; no view escapes, so overflow mappings still close after decoding. Streamed response chunks still accumulate in one bytearray. Joining a chunk list measured no faster end to end, and it doubles the transient payload peak (RSS grows 60 MiB instead of 32 MiB for 30 × 1 MiB). No cache, pool or retained state is added.
+
+Measurement: a client `request()` plus `json()` ran against a fake daemon process over TCP loopback, one variant per process, with 12–25 rounds; figures are medians. Client CPU for the transport fell from 2.82 to 2.47 ms for a 2.02 MiB streamed response, and from 56.9–58.6 to 53.3–54.2 ms for 29.7 MiB. Including the single-parse decoder, the whole request took 18.52 → 8.00 ms (2.02 MiB), 20.75 → 7.05 ms (1.30 MiB), 1.03 → 0.35 ms (48 KiB) and 317–327 → 183–184 ms (29.7 MiB). Software CRC32C, at about 22 ms per 30 MiB, is now the largest remaining transport cost.
 
 
 ## Request Inspector history working set
@@ -500,6 +810,112 @@ The existing cache retains at most 16 entries and an aggregate conservative uniq
 
 A controlled append-only 400/800/1,600-round Unicode fixture measured `tracemalloc` allocations after fixture/import setup. At 1,600 rounds, retained Python allocations fell from 21,331,462 to 1,302,966 bytes and cold selected read time from 15.43 to 0.71 seconds; one storage read and exact payload/fold results were preserved. This excludes source-fixture storage, native digest allocations, unrelated server work and primary-worker RSS. It establishes the read-cache scaling improvement, not the cause of a live service's memory growth. Timings vary with host load; allocation figures describe the integrated owner. Focused regression owners are `test_snapshot_replay_index.py` and `test_request_inspector_snapshot_budget.py`, alongside existing replay, wire, read-cache, query-bound and page-recovery tests.
 
+
+### Browser Inspector read resources
+
+Problem: an in-flight poll/store refresh could finish after close and schedule
+another poll; cache writes could settle out of order. Decision:
+`inspector-session.ts` owns one opening's timer/subscription resources through
+the common lifecycle scope. Existing 3/15-second polling and 800-ms store
+coalescing remain unchanged. Retired callbacks cannot rearm work or replace a
+new opening's timer. Pane replacement/close also releases its content node
+while the read finishes. `inspector-payloads.ts` retains the existing forty-entry
+FIFO, never user evidence; pending cache rights exist only for unsettled reads
+and are released on success, failure or a superseding live observation.
+Independent live reads are still admitted and use the existing API transport.
+Alternatives rejected: a second poll loop, changing cadence/retention budgets,
+or discarding only DOM updates while stale responses overwrite cached evidence.
+
+Controlled native browser-owner scenarios hold a read across close: the
+previous poll and store-refresh paths each leave one timer after settlement;
+the current owner leaves zero. A 41-address fixture proves the first payload
+is evicted and the remaining forty-entry FIFO policy is unchanged. These are
+resource-lifetime and retention measurements, not RSS, frame-time or whole-app
+throughput claims. Specifications: `tests/frontend/test_inspector_read_lifecycle.py`.
+
+Browser feed navigation retains only the current wire's entries, ordinal
+projection and mounted divider index. `inspector-navigation.ts` uses the
+existing 120-ms scroll coalescing and 1,600-ms highlight duration, with one
+cleanup per highlighted divider. Close, scroller replacement and a detail
+pane retire those resources; jump-list rows are keyed and owned by the opening.
+No history/cache budget, polling cadence or work-admission policy changes.
+In an equivalent 120-Turn scroll fixture, full-divider DOM queries fall from
+120 to zero after one index build per render, with the same selected Turn.
+For three Turns, a feed refresh reads canonical Turn order once instead of
+six times. Closing with pending navigation/highlight work leaves zero timers
+and the retired scroller schedules none. These count resource operations;
+they do not measure frame time, browser heap or overall application speed.
+Specs: `tests/frontend/test_inspector_navigation.py`.
+
+Trace presentation retains no new cache, timer or durable state. Its pure
+projection allocates one row per represented depth, rather than per possible
+depth or a fixed four-row cutoff. A fixture with two spans at depths zero and
+one million keeps both bars in two rows; this is sparse-input robustness,
+not a change to canonical server depth semantics or retention. Closing the
+Inspector still uses the existing session/detail owners.
+
+The standalone eager Trace stylesheet is removed. Before opening diagnostics,
+the page now avoids that request (3,627 authored bytes / 1,329 gzip bytes).
+Its token-based source owner is 3,741 bytes / 1,074 gzip bytes and joins the
+existing diagnostics CSS preload. These deterministic source/gzip measurements
+exclude minification, network headers, other chunks and browser execution;
+they establish demand ownership, not a whole-application speedup. No history,
+evidence-retention or work-admission budget changes. Specs:
+`test_inspector_trace_projection.py` and the actual lazy-style browser journey
+in `test_inspector_trace_browser.py`.
+
+Inline Inspector reads retain one mount/read identity and weak panel/origin
+witnesses. They hold no panel, body or title node across an await; a chat
+re-render can remove the panel without waiting for transport settlement. Close
+retires the mount, and stale retries cannot create another read. The existing
+payload owner still owns the forty-entry FIFO and state/request/diff reads;
+no timer, observer, cache, history cap or execution-admission rule is added.
+
+An isolated Chromium witness holds a request unfinished, removes its panel by
+either the close control or DOM replacement, and requests garbage collection.
+A separate removed-node control proves that collection runs. The previous
+renderer retains the panel in both cases; the native owner releases it before
+the request settles, then ignores the late response. This measures reachability
+of those specific DOM nodes, not browser heap, RSS, transport duration or total
+application memory. Specs: `tests/frontend/test_inspector_inline_browser.py`.
+
+The native flat-feed presenter retains one wire-view reference and a presentation
+token, with no additional DOM cache, timer, observer or transport. Read coalescing
+and last-good snapshots still belong to `diagnostics-wire-controller`; close or
+conversation selection clears the view and retires old controls. Message nodes
+continue through the existing identity reconciler. Loading and failure notices
+clear obsolete `_rawMessages`/`_rawTools` copy roots. The synthetic one-message /
+one-tool fixture retained previous evidence in those fields before extraction;
+the native loading notice clears both while the new read remains unfinished.
+This checks those particular DOM-owned references, not browser heap or RSS.
+Specs: `tests/frontend/test_inspector_feed_owner.py`.
+
+### Browser message reconciliation
+
+Problem: each flat-feed refresh rebuilt all message DOM, including expanded
+evidence, while the streaming path used length/count fingerprints that missed
+equal-size edits. Decision: `diagnostics-message-reconciliation.ts` compares
+complete JSON wire records and reuses unchanged cards through the existing
+renderer. Versions live in a WeakMap keyed by card; owner-driven removal deletes
+the version, and external DOM teardown permits garbage collection. Matching
+queues and selection endpoints exist only during a render. No new transcript
+store, polling loop, timer, worker, work ceiling or durable state is introduced.
+Alternatives rejected: a strong cache by message ID would retain retired
+conversations; digest-only equality cannot prove complete evidence equality;
+clipping tools or messages loses the information this surface exists to inspect.
+
+A 2026-10-28 paired Node 22/jsdom 25 workload used 100/500/1,000 messages,
+roughly 576 content characters per message, one divider, and an expanded card
+every 50 messages. After three warmups, 15 unchanged 1,000-message refreshes
+created 157,590 -> 90 elements (only divider elements remain); median render
+time was 351.25 -> 7.92 ms. A changing tail measured 345.15 -> 8.53 ms, and
+single-message appends 344.67 -> 7.82 ms. These are synthetic DOM/JavaScript
+measurements, excluding network, browser layout and whole-app load. Complete
+comparisons still scan all wire bytes. The 1,000-message fixture adds 688,225
+serialized characters in weak version values, or 1,376,450 bytes as a UTF-16
+payload estimate before engine/object overhead; it is not an RSS bound. Native
+browser tests separately verify selection, focus, nested disclosure and theme
+geometry. Existing wire coverage/retention policy remains authoritative.
 
 ## Long-history inspector continuation
 
@@ -518,9 +934,11 @@ A controlled constant-message legacy fixture with 1,000/10,000/20,000 source sna
 
 ## Optional JavaScript program instances
 
-Problem: full JavaScript must bound host queues, guest CPU/memory and cleanup without retaining a new idle worker pool. Decision: compile one immutable 637,405-byte reactor on first use, with fuel metering and parallel compilation disabled; each program owns and closes a fresh Store, promises and receipt map. The existing tool worker invokes callback ports. Scheduling reserves at most 16 child calls before the guest yields. Source is bounded to 32 KiB. Returns and model handoffs use canonical artifact/token-budget delivery without a fixed 1 MiB execution rejection. Private bridge packets are bounded to the instance heap size, scaling with the same launch probe. Normal execution uses a cumulative 30-second active guest deadline, including bootstrap, built-ins and return serialization, excluding child tool waits and synchronous host bridge work. A lazy shared 10-ms epoch ticker interrupts WASM built-ins; Stores have independent deadlines. The last Store release stops and joins the ticker, and engine disposal joins it before closing native handles. This adds at most one thread while programs own Stores and no idle worker. Fuel remains metered for statistics and explicit deterministic budgets; its default exact-JSON integer maximum is not the normal execution boundary. Timeout and explicit fuel failures identify their reason and limit; engine traps are classified separately. Problem: a fixed 2-billion instruction cutoff rejected ordinary large projections far below the heap bound. Decision: measure actual guest execution time rather than engine instruction density. Alternatives rejected: raising the fixed fuel constant repeats the same size-dependent failure; disabling every execution boundary allows infinite loops and expensive built-ins to occupy workers forever.
+Problem: full JavaScript must bound host queues, guest CPU/memory and cleanup without retaining a new idle worker pool. Decision: compile one immutable 637,405-byte reactor on first use, with fuel metering and parallel compilation disabled; each program owns and closes a fresh Store, promises and receipt map. The existing tool worker invokes callback ports. Scheduling reserves at most 16 child calls before the guest yields. Source is bounded to 32 KiB. Returns and model handoffs use canonical artifact/token-budget delivery without a fixed 1 MiB execution rejection. Private bridge packets are bounded to the instance heap size, scaling with the same launch probe. Normal execution uses a cumulative 30-second active guest deadline, including bootstrap, built-ins and return serialization, excluding child tool waits and synchronous host bridge work. A lazy shared 10-ms epoch ticker interrupts WASM built-ins; Stores have independent deadlines, armed when the Store is created instead of at the first exported call. Problem: Wasmtime's default Store deadline is already expired once the ticker advances the engine epoch, and instantiation is the program's first WASM entry, so a host whose instantiation path enters guest code trapped with an interrupt before any guest time was spent and reported it as an exhausted execution budget (Windows and macOS release-wheel verification; the pinned reactor instantiates without a start function on Linux). Decision: arm the 30-second budget before instantiation, so instantiation, bootstrap and guest work share one measured deadline. Alternatives rejected: a larger default budget cannot cover an already-expired deadline; arming per exported call repeats the same pre-entry window; skipping the startup check removes the only bound on a wedged instantiation. Verify `test_javascript_execution_budget.py`. The last Store release stops and joins the ticker, and engine disposal joins it before closing native handles. This adds at most one thread while programs own Stores and no idle worker. Fuel remains metered for statistics and explicit deterministic budgets; its default exact-JSON integer maximum is not the normal execution boundary. Timeout and explicit fuel failures identify their reason and limit; engine traps are classified separately. Problem: a fixed 2-billion instruction cutoff rejected ordinary large projections far below the heap bound. Decision: measure actual guest execution time rather than engine instruction density. Alternatives rejected: raising the fixed fuel constant repeats the same size-dependent failure; disabling every execution boundary allows infinite loops and expensive built-ins to occupy workers forever.
 
-`TOFU_PROGRAM_HEAP_MAX_MIB` uses the launch probe: personal heap grows with capacity/128 and headroom/64, with a 16..1,024 MiB envelope; unknown probes use 32 MiB. Distributed default is 256 MiB; explicit overrides use the same finite envelope. Linear memory is independently bounded to twice the heap plus 16 MiB. There is no persistent instance, continuation, temporary file or child work owned by this adapter after completion, observation, cancellation or failure.
+`TOFU_PROGRAM_HEAP_MAX_MIB` uses the launch probe: personal heap grows with capacity/128 and headroom/64, with a 16..1,024 MiB envelope; unknown probes use 32 MiB. Distributed default is 256 MiB; explicit overrides use the same finite envelope. Linear memory is independently bounded to twice the heap plus 16 MiB. Apart from the compiled reactor below, there is no persistent instance, continuation, temporary file or child work owned by this adapter after completion, observation, cancellation or failure.
+
+**Compiled reactor reuse.** Problem: every process paid single-threaded Cranelift compilation (1,500–1,594 ms) before its first program; in a real-app probe the first program after a start finished its turn 2.4 s later than a warm one. Decision: `lib/tools/javascript/compiled_module.py` keeps one owner-only derived file, `data/javascript-engine/quickjs-<first 16 hex digits of the reactor SHA-256>.cwasm` (a SHA-256 of the payload, then Wasmtime's serialized module; 2,939,864 bytes for the pinned reactor on Wasmtime 49). A miss compiles exactly as before, writes atomically and removes files for other reactor builds, so retention stays at one file. Loading requires a regular file owned by this user without group/other write permission and a matching digest; Wasmtime itself rejects artifacts from another version, target or fuel/epoch configuration. Unreadable, foreign or corrupted files are misses; an unwritable data root only loses reuse. Fresh-process measurement (Python 3.12/Wasmtime 49): engine preparation 1,500–1,594 ms on a miss versus 13–21 ms on a hit, including a 2.9 MiB read from the FUSE data root. Alternatives rejected: parallel compilation (216 ms) still repeats per process and retains a compiler pool; Wasmtime's built-in cache adds a background worker, its own size settings and a home-directory location that may be unwritable; a packaged precompiled artifact breaks on CPU-feature differences; compiling at startup taxes every start. Verify `test_javascript_compiled_module.py`.
 
 A fresh-process local measurement on Python 3.12/Wasmtime 49 processed 240 and 2,400 synthetic rows (84,784 and 852,635 input bytes): warm medians over five runs were 12.94 and 25.23 ms; the first run including compilation took 1,099.8 ms. Guest linear memory was 1,572,864 and 3,342,336 bytes. Process RSS was 19.4 MB before import, 34.1 MB after import, 85.3/87.9 MB after both workloads and 87.9 MB after collection; thread count stayed one. RSS includes compilation, native dependencies and allocator retention, and is distinct from guest memory. These adapter measurements exclude tools, models and gateway overhead. After removing fixed return rejection, a 1,200,000-byte UTF-8 return with a 64 MiB guest heap took 27.76 ms median over three warm runs and used 4 MiB WASM linear memory; this excludes model, tool and artifact delivery overhead. A 100,641-character string projected through `Object.keys` reproduced the old fuel failure at 23,592,960 linear-memory bytes, well below its heap limit. With the elapsed deadline it completed 100,641 keys (794,683 output bytes), consuming 3,828,887,994 instructions and 32,112,640 linear-memory bytes. Five warm local runs had a 734.9-ms median adapter latency; the last run recorded 647.8-ms active guest time. Thread count returned to one after every run. This measures local adapter work, not model latency, and claims no instruction or memory reduction. Failure diagnostics reuse the existing at-most-16 canonical child receipts and the program's 1 MiB input-delivery bound; they add no resident cache or worker. Only failure parses complete inline JSON to summarize its root and first item, with at most eight 64-character keys and no field values. A 1,000-row, 749,519-byte local input produced a 204-byte diagnostic: median 3.90 ms over 20 warm runs with Python allocation tracing, maximum traced allocation 1,002,312 bytes. This measures diagnostics after imports, excluding models, tool execution and the engine; parsed objects leave scope immediately. Alternatives: a resident VM pool adds task-state lifetimes; default parallel compilation retains an unnecessary compiler thread pool; an unmetered engine misses long-running built-ins. Verification: `test_javascript_program.py`, `test_javascript_resources.py`, resource catalog and existing gateway tests.
 
@@ -543,9 +961,21 @@ Measurement: a 1,000-row / 1,000-section query visits 1,000 rows, while repeatin
 
 ## Native Codex login discovery
 
-Problem: services missed the user's installed Codex environment, while spawning its runtime for every token read would create needless latency and memory work. Decision: the native-login adapter has one metadata cache (30 seconds, failures 5 seconds) and one last-verified metadata snapshot (absolute age 120 seconds), one serialized flight for the process OS credential authority and no bearer cache. One lifecycle-owned native metadata session avoids repeated shell/cold startup during metadata revalidation. Its reader and idle reaper are lazy; there is no import-time process launch. Fresh command metadata is read without the native-auth lock, so healthy access-file reads do not wait for renewal. Concurrent recovery callers join one completed probe even when it fails, rather than queueing repeated native launches. Timeout/unavailability may reuse the verified source within its absolute age, with live source/config stamps and live bearer checks; policy rejection/source change revokes it, and failures never renew its age. Freshness expiry starts one demand-driven revalidation worker while healthy reads return immediately; clear/exit drain it. Revalidation uses the warm session's config/read and configRequirements/read, never account/read. The idle reaper terminates/reaps the process and joins its reader after 60 seconds without a metadata exchange, or 120 seconds from startup. Demand rotates at 90 seconds to rediscover shell hooks/remote policy before the absolute age limit; warm success cannot renew that startup policy age. Steady residency is at most one native process and two adapter threads (reader + reaper); demand revalidation adds one finite worker. Renewal can temporarily add a second, one-shot process and reader, serialized against metadata exchanges. No resident pool scales with request/account count. Unsupported stores retain no optional native session. Launcher provenance hashes the entire sanitized environment, retaining no raw values. Known source/config stamps invalidate reuse, and stamps are checked around policy reads. Native diagnostics name spawn/initialize_sent/ initialize_received/session_reuse at debug level and lock/initialize/config/ requirements/renewal timeouts at warning level, without protocol bodies, paths, stderr or environment. Pre-response initialize timeout still cannot distinguish shell setup from native boot: no safe acknowledgement exists at that boundary. Task preparation retries have three attempts and a 30-second admission window, with cancellation-aware backoff and no tool replay, new thread or persistent state. Each native transport owns its reader and process group. Discovery plus renewal share a 4-second protocol budget including lock waits, with 1 MiB stdout, 64 KiB per line and 16 queued protocol messages; teardown terminates/reaps children and joins the reader. Catalogue startup reconciliation already runs in the post-ready worker. Native Codex's own reconstructible artifacts stay under its lifecycle; Tofu creates no durable cache or copied token. Account-file replacement/logout is checked on every read; cached command metadata cannot mask token deletion. Measurement on this host with Codex 0.160.0: automatic discovery without a CODEX_HOME override took 1.795 seconds with child peak RSS 180,336 KiB; a following access-only read took 1 ms. That historical one-shot implementation had zero idle workers/processes; the reusable transport now retains bounded residency until idle reclamation. This is a native-runtime probe cost, not inference throughput or a resource-budget raise. Additional measurement on this host: native discovery took 0.332, 0.299 and 0.295 seconds across three probes; 50 healthy reads had a 0.325 ms median and 0.426 ms maximum. The protocol budget remains 4 seconds; extending the timeout would add latency without correcting lock contention or duplicate recovery launches. Alternatives rejected: shell-profile text parsing misses wrappers and layering; per-read runtime launches amplify cost; retaining a second refresh token races the native credential authority. Behavioral tests cover source selection, single-flight, live file replacement, renewal and bounded teardown. Historical metadata-only measurement on this host: 200 synthetic access-file reads with source stamp verification took 0.932 ms median / 1.085 ms maximum with tracemalloc active; one initial probe, zero subsequent probes and zero new idle workers. Traced peak allocation was 1,082,838 bytes, including the existing bounded file reader. Alternative rejected: indefinitely retaining last-good policy would bypass revocation; raising every native-command timeout would leave startup on the critical path and add latency to healthy requests.
+Problem: services missed the user's installed Codex environment, while spawning its runtime for every token read would create needless latency and memory work. Decision: the native-login adapter has one metadata cache (30 seconds; failures 5 seconds, or the 60-second refusal window after a startup exhausted its ceiling) and one last-verified metadata snapshot (absolute age 120 seconds), one serialized flight for the process OS credential authority and no bearer cache. One lifecycle-owned native metadata session avoids repeated shell/cold startup during metadata revalidation. Its reader and idle reaper are lazy; there is no import-time process launch. Fresh command metadata is read without the native-auth lock, so healthy access-file reads do not wait for renewal. Concurrent recovery callers join one completed probe even when it fails, rather than queueing repeated native launches. Timeout/unavailability may reuse the verified source within its absolute age, with live source/config stamps and live bearer checks; policy rejection/source change revokes it, and failures never renew its age. Freshness expiry starts one demand-driven revalidation worker while healthy reads return immediately; clear/exit drain it. Revalidation uses the warm session's config/read and configRequirements/read, never account/read. The idle reaper terminates/reaps the process and joins its reader after 60 seconds without a metadata exchange, or 120 seconds from startup. Demand rotates at 90 seconds to rediscover shell hooks/remote policy before the absolute age limit; warm success cannot renew that startup policy age. Steady residency is at most one native process and two adapter threads (reader + reaper); demand revalidation adds one finite worker. Renewal can temporarily add a second, one-shot process and reader, serialized against metadata exchanges. No resident pool scales with request/account count. Unsupported stores retain no optional native session. Launcher provenance hashes the entire sanitized environment, retaining no raw values. Known source/config stamps invalidate reuse, and stamps are checked around policy reads. Native diagnostics name spawn/initialize_sent/ initialize_received/session_reuse at debug level and lock/initialize/config/ requirements/renewal timeouts with elapsed and budget milliseconds at warning level, without protocol bodies, paths, stderr or environment. Pre-response initialize timeout still cannot distinguish shell setup from native boot: no safe acknowledgement exists at that boundary. Task preparation retries have three attempts and a 30-second admission window, with cancellation-aware backoff and no tool replay, new thread or persistent state. Each native transport owns its reader and process group. Each exchange on an initialized app-server has a 4-second budget; spawn plus initialize of a new app-server uses the learned [cold startup budget](#native-codex-cold-startup-budget), and lock waits that may queue behind such a flight use that budget plus one exchange. Output stays bounded to 1 MiB stdout, 64 KiB per line and 16 queued protocol messages; teardown terminates/reaps children and joins the reader. Catalogue startup reconciliation already runs in the post-ready worker. Native Codex's own reconstructible artifacts stay under its lifecycle; Tofu creates no durable cache or copied token. Account-file replacement/logout is checked on every read; cached command metadata cannot mask token deletion. Measurement on this host with Codex 0.160.0: automatic discovery without a CODEX_HOME override took 1.795 seconds with child peak RSS 180,336 KiB; a following access-only read took 1 ms. That historical one-shot implementation had zero idle workers/processes; the reusable transport now retains bounded residency until idle reclamation. This is a native-runtime probe cost, not inference throughput or a resource-budget raise. Additional measurement on this host: native discovery took 0.332, 0.299 and 0.295 seconds across three probes; 50 healthy reads had a 0.325 ms median and 0.426 ms maximum. The warm exchange budget remains 4 seconds; extending it would add latency without correcting lock contention or duplicate recovery launches. Alternatives rejected: shell-profile text parsing misses wrappers and layering; per-read runtime launches amplify cost; retaining a second refresh token races the native credential authority. Behavioral tests cover source selection, single-flight, live file replacement, renewal and bounded teardown. Historical metadata-only measurement on this host: 200 synthetic access-file reads with source stamp verification took 0.932 ms median / 1.085 ms maximum with tracemalloc active; one initial probe, zero subsequent probes and zero new idle workers. Traced peak allocation was 1,082,838 bytes, including the existing bounded file reader. Alternative rejected: indefinitely retaining last-good policy would bypass revocation; raising every native-command timeout would leave startup on the critical path and add latency to healthy requests.
 
 New synthetic lifecycle measurement: a delayed initial boot plus four cache expiries with 16 concurrent metadata callers each used one initialize and five config/requirements exchanges, with zero account reads. This is subprocess startup amortization, not token caching or an inference-throughput claim. Idle reclamation, absolute-age expiry and generation-fenced clear/restart tests verify that owned processes/readers/reapers exit rather than leak.
+
+## Native Codex cold startup budget
+
+Problem: native startup cost depends on the Codex home, not only on this process. On the development host (Codex 0.160.0) app-server `initialize` took 0.32 seconds with `CODEX_HOME` on local disk but 8.9–9.3 seconds across three runs with a network-storage home holding large native state, while `codex --version` took 0.10 seconds and `bash -ic true` 0.06 seconds. The former fixed 4-second cold exchange failed every discovery and renewal at `phase=initialize` (Tofu's adapter run in-process against that home logged `phase=initialize issue=codex_command_timeout elapsed_ms=3997`), so the borrowed access token expired and stayed expired.
+
+Decision: spawn plus `initialize` of a new app-server (first use, rotation, source change, one-shot renewal) has a cold startup budget separate from the 4-second budget of each exchange on an initialized app-server. The cold budget is learned per hashed launcher provenance in a process-local LRU of at most 16 non-default entries (one 64-character hash and one float each; a launcher at the default stores nothing). It starts at 4 seconds, doubles after an `initialize` timeout that used the whole learned budget, becomes max(4, 2t, 0.75 × previous) after a startup completed in t seconds, and is clamped to a 30-second ceiling. `TOFU_CODEX_NATIVE_STARTUP_MAX_SECONDS` overrides the ceiling with a finite value from 4 to 300 seconds; other values warn once and keep 30. A startup cut short by a caller's earlier deadline is not evidence and changes nothing. Blocking discovery, the demand revalidation worker and renewal wait for the flight lock and run with the learned budget plus one exchange, so they outlast a same-provenance flight that is legitimately starting native Codex. One credential read anchors that flight at its start: renewal receives only what discovery left, and because each stage reads the current budget, a renewal after a cold discovery uses the budget that discovery just learned. Healthy warm reads and verified-metadata reads stay lock-free, warm exchanges keep 4 seconds, and an unavailable explicit home still fails before spawn within the 4-second wait. Budget changes log at info level with reason and observed, new, previous and ceiling milliseconds, never paths, environment or provenance hashes. Learned budgets are timing hints, not credential authority: clear, logout and reconnect keep them, and they never authorize reuse.
+
+Bounds: a hung native start fails at its learned budget, at most the ceiling. One flight holds the native-auth lock for at most the ceiling plus one exchange (34 seconds by default) plus bounded child teardown, and one credential read, discovery plus renewal, takes at most one such flight. Clear and exit do not wait it out: they raise a cancel count that the response wait polls every 0.1 seconds. The flight's owner then terminates, reaps and joins its child (TERM, 0.5-second grace, KILL) and publishes nothing. Flights admitted before clear returns are refused before spawn, and their callers see the transient `codex_command_unavailable`. Clear therefore finishes within child teardown, well inside the default 30-second `TOFU_SHUTDOWN_HARD_SECS`. No process, thread, queue or durable state is added. Besides the budget LRU there is one 16-entry refusal LRU, and native residency, idle reclamation, rotation and absolute policy age are unchanged. A process converges after ceil(log2(t / 4 s)) initialize timeouts per launcher provenance; explicit recovery bypasses the 5-second failure cache to supply those attempts. One faster start lowers a converged budget by at most a quarter: 9, 1 and 9-second starts learn 18, 13.5 and 18 seconds, and six consecutive 1-second starts return 18 seconds to the default. An `initialize` timeout that used the whole budget at the ceiling cannot converge by retrying. It opens a 60-second refusal window for that launcher: discovery, revalidation and renewal fail before spawn with `codex_command_timeout`, and discovery caches that failure for the window. Every other failure keeps its 5-second cache (0 seconds for an unverifiable home). The ceiling is therefore paid at most once per window. Clear, logout, reconnect or a changed ceiling end the window early.
+
+Measurement on this host with the learned budget, metadata only (no renewal, no credential read) against the same network home in a fresh process: the 4- and 8-second attempts timed out at 4.02 and 8.02 seconds; the 16-second attempt succeeded in 9.60 seconds (shell, spawn and initialize 9.58 seconds) and learned 19.17 seconds; the next cold start after clear succeeded first time in 9.35 seconds and relearned 18.62 seconds. No app-server child remained after clear. Synthetic comparison with a 1.05-second startup and a 1-second default: the previous fixed budget timed out on 3 of 3 attempts, while the learned budget recovered on the second and stayed healthy. End-to-end task preparation and renewal against the real home were not measured. Synthetic specs (scaled budgets, never the real login) measured each rule. With a never-answering start and a 30-second budget, clear returned in 0.023 seconds during a discovery flight and 0.028 seconds during a renewal flight; the previous blocking clear took 30.00 seconds. A read whose discovery queued 2 seconds behind the flight lock ended in 3.5 seconds at its 3.3-second flight; chained flights took 5.0 seconds. In a 1.0-second, fast, 1.0-second start sequence the third start took 1.076 seconds within a 1.607-second budget, while halving left 9 ms (1.175 seconds observed against a 1.184-second budget). At a 0.6-second ceiling, three recoveries and three renewal reads each re-paid 0.60 seconds before the window; with it they took under 0.5 seconds in total and started no child.
+
+Alternatives rejected: raising the fixed constant lengthens every warm exchange and every hung start yet still fails on slower storage; moving `CODEX_HOME` to local disk breaks host migration, where an explicit home is the operator's authoritative source; persisting learned budgets would carry stale host and mount timing across migration, while relearning costs at most ceil(log2(t / 4 s)) failures per process; one global budget would let a slow launcher delay failure detection for unrelated launchers. A timed lock in clear would skip the wipe or abandon a child its flight still owns, and a new public `cancelled` issue would cross the compaction and frontend vocabulary. Separate discovery and renewal budgets doubled read latency, and a deadline fixed at the read's entry would discard a budget learned mid-read. Halving on a fast start leaves no headroom, and keeping the maximum never adapts. Lengthening only the discovery failure cache leaves explicit recovery and renewal re-paying the ceiling, and refusing indefinitely would never notice storage that became fast. Tests: `tests/oauth/test_codex_native_startup_budget.py`.
 
 ## Stage counter contention experiment
 
@@ -627,7 +1057,7 @@ Measurements on this host: 512 unacknowledged 32 KiB frames held 16,790,418 seri
 
 ## Desktop device resources
 
-Problem: fixed worker clamps underused larger devices, while lifetime replay retention grew indefinitely. Decision: `lib/desktop_agent/_runtime.py` preserves demand-driven local admission and the existing private output spool. Negotiated server delivery credits intersect effective CPUs with available GiB from the cached launch probe, falling back to one on probe failure. The retired worker override cannot reject issued commands. Resident output memory uses 1/128 of capacity/headroom (1 MiB lean fallback), split 7/8 results and 1/8 streams; larger output spools to private temporary files. Frames and HTTP prefixes stay bounded independently of pending disk output. Actual storage errors remain visible. Spool ACK deletes files promptly; shutdown joins owned work before reclaiming spools. One poll Session closes at run exit. Finite-deadline replay entries retire only after completion, expiry and acknowledgement, using a monotonic server-clock watermark and expiry heap; legacy records stay pinned until joined shutdown. Alternatives rejected: deleting IDs without command expiry permits repeated side effects; a larger whole HTTP body can exceed request-size limits and block ACK forever; abandoning workers before spool cleanup loses owned output lifecycle.
+Problem: fixed worker clamps underused larger devices, while lifetime replay retention grew indefinitely. Decision: `lib/desktop_agent/_runtime.py` preserves demand-driven local admission and the existing private output spool. Each poll advertises the fixed `command_batch` delivery credit; CPU count and memory never size delivery or execution (the earlier CPU- and memory-derived delivery credits and replay-ID sizing are retired under "Hardware never limits work"). The retired worker override cannot reject issued commands. Resident output memory, the only probe-derived value, uses 1/128 of capacity/headroom (1 MiB lean fallback), split 7/8 results and 1/8 streams; larger output spools to private temporary files. Frames and HTTP prefixes stay bounded independently of pending disk output. Actual storage errors remain visible. Spool ACK deletes files promptly; shutdown joins owned work before reclaiming spools. One poll Session closes at run exit. Finite-deadline replay entries retire only after completion, expiry and acknowledgement, using a monotonic server-clock watermark and expiry heap; legacy records stay pinned until joined shutdown. Alternatives rejected: deleting IDs without command expiry permits repeated side effects; a larger whole HTTP body can exceed request-size limits and block ACK forever; abandoning workers before spool cleanup loses owned output lifecycle.
 
 Reproduce the offline admission/reclamation measurement with `python benchmarks/desktop_runtime.py --commands 100000`. The 1s synthetic pickup TTL and 0.01s clock tick retain at most 101 IDs and finish with 100, exceeding the old 65,536 lifetime ceiling without restart. Three timing samples completed 100,000 transitions in 0.308–0.310s (median 323,753/s); a separate tracemalloc run reports residency; this is a kernel measurement, not actual tool throughput, process RSS, provider performance or multi-client certification. A loopback HTTP regression verifies two polls reuse one TCP connection.
 
@@ -758,6 +1188,14 @@ Problem: demand accumulators could outlive service teardown; registry removal al
 
 Problem: every provider chunk copied all completed translations, then serialized both the full block map and joined narration. Decision: incremental producers publish only the current block's partial/final preview in `partialByRound`. The presentation controller owns a null-prototype keyed index, merging changed keys without copying prior history or mutating borrowed DTOs. An explicit empty map resets previews; clearing/failing the activity releases it. Legacy whole-turn `partial` frames still work. Joined narration is derived lazily at presentation; the existing graph paint scheduler coalesces a burst while retaining every key. Text and reasoning blocks consume ephemeral previews independently; durable translations remain preferred and previews never become `translatedMarkdown`. The plain-text Surface renderer respects the selected display text too. Alternatives: increasing preview count with cumulative frames makes transport quadratic; overwriting each received map loses earlier blocks. No new worker, queue, timer, durable registry or capacity gate is added. These optional push previews remain reconstructible; authoritative completion/reload uses the Turn. A controlled 2,000-completed-block fixture reduces a progress payload from 7,249,045 bytes to 125 bytes. Real Chromium against the local app merges four updates into one subsequent paint, preserves all final previews and leaves the source TurnState unchanged. Completed cache bodies use the paired file owner below; empty accumulators retire on demand as described below. Payload size is not total RSS or throughput.
 
+## Translation preview retention and rehydration
+
+Problem: running-turn previews are push-only. Settled-Turn authority refuses translation overlays until the Turn settles, and each block's final preview is published once. The presentation controller kept its preview index only for the mounted conversation: frames for any other conversation were dropped, a conversation switch cleared the index, and nothing re-read previews after a reload, reconnect or hidden tab. On 2026-10-28 one 45-minute turn completed 72 previews, yet after the reader switched away and back every earlier block rendered in the source language until settlement. Decision: the controller keeps one preview index per conversation. Frames for an unmounted conversation merge without painting, a switch keeps them, and the settling done/aborted frame or conversation disposal releases them. `GET /api/v4/translate/previews/<conv_id>` returns the completed task-local preview cache of the caller's pending or running turns from the owner-scoped registry snapshot; it reads no Turn and writes nothing. The browser calls it when a conversation with an active attempt opens, when the tab becomes visible and when the push socket reconnects, and merges each result like a push frame. Results carry completed text only, so a merged result never replaces a fuller preview. Previews stay reconstructible presentation data: a restart still loses them and the settled Turn remains the authority. Alternatives: projecting previews into the running Turn bypasses settled-Turn revision authority and multiplies projection writes; replaying every running conversation's previews on push subscribe resends all of them on each reconnect; browser retention alone still loses previews on reload. No worker, timer, durable store or capacity gate is added. Measured on the settled 65-block turn of conversation mvr3tintep1ojq (72,363 source and 32,871 translated characters), a full rehydration response is 80,572 bytes. Retained browser state is the per-turn preview text push frames already delivered, released by the turn's done frame. These are payload measurements, not browser heap or RSS.
+
+## Live per-segment translation previews
+
+Problem: the fixed `TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MIN_CHARS` launch setting (256 in both profiles) skipped every narration preview below that size, so short tool-prelude narration stayed in the source language until the turn settled (19 of 20 narration segments in one measured running turn). Narration and reasoning shared one FIFO and one failure circuit, so reasoning failures paused and deferred narration, and completion paid for a second translation of the final reply under a key no projection segment carries. Decision: retire the setting from `contracts/resource_policy_v1.json`, `contracts/config_knobs_v1.json` and the generated bootstrap projection. Every completed narration segment costs one preview call; the final reply costs one call (the durable whole-turn job) instead of two. The existing backlog file keeps two ordered key queues and hands out narration before reasoning, FIFO within each kind; the task-local preview state holds one small circuit per kind with the unchanged failure limit and pause window. No worker, queue, timer, store, threshold or setting is added. Alternatives: a lower floor keeps an arbitrary cutoff; a worker per kind adds a thread per turn for the same provider; keeping the completion submission pays for a preview nobody sees. Behavior record and measurements: [ingest_media.md](modules/ingest_media.md#translation) (Live per-segment previews).
+
 ## Completed translation cache demand
 
 Problem: a 32-default/1,024-maximum preview count suppressed valid later segments, while paid originals/translations remained resident in task maps. Source/result thresholds also declined long input and discarded paid output. Decision: remove preview count and source/result character admission gates, and the preview-count launch knob. Complete source/result text uses the existing file-backed pending buffer and paid cache. One lazy anonymous file per task stores paired UTF-8 bodies; mapping views retain keys/ranges only. Pair indexes publish after complete writes, preserving prior paid pairs after partial-write failure. Replaced ranges reclaim when obsolete bytes exceed live bytes; copying uses 64 KiB scratch. Worker retirement/recreation reuses the same cache. Failed terminal persistence keeps the cache for retry; successful terminal handoff or explicit cancellation clears views and closes the empty file. Done notifications contain status only; consumers hydrate authoritative Turn facts rather than receiving another complete cache mirror. Provider cost, deadline/retry policy and source identity validation remain explicit. The translation engine retains whole-document context, protected markup and its truncation/model-rotation checks; local 32,000/64,000 character thresholds no longer decline input or discard completed output. Larger thresholds still refuse valid text, and arbitrary splitting breaks mixed-language/markup context. No extra worker, pool, timer, durable store or count quota is introduced. Alternatives: a larger count gate still suppresses valid previews; uncapped resident dictionaries grow payload heap; publishing half a pair corrupts source matching. The controlled 2,049-pair fixture retains 134,283,264 file bytes with 985,444 peak Python allocation bytes, writing in 0.104 s; clear leaves zero file bytes/open files. A 1,100-preview fixture crosses worker recreation and hands all exact pairs to the existing terminal commit. These measure resident cache ownership, not total RSS. Terminal enrichment borrows a pinned file snapshot and reads only authoritative segment keys as described below; its projection/storage encoding still follows the existing authority policy. A controlled long-text fixture retains 129 complete source/result pairs (280,000/150,000 characters each), totaling 94,170,000 file bytes with 1,485,460 peak Python allocation during append and 0.1473 s write time. Inputs were allocated before tracing; this is cache append memory, not total process RSS. Clearing closes the file. Real SQLite settlement/cold-read tests preserve long source and translated text under the ordinary owner/source/revision fences.
@@ -773,6 +1211,14 @@ Problem: terminal enrichment decoded every cached source/translation into two co
 ## Push connection demand
 
 Problem: local Push connection registration rejected process/owner counts at 64/12 reference defaults and 256/128 hard ceilings, scanning all existing peers for every new socket. Decision: remove connection quotas, constructor capacity arguments and their launch overrides. Authenticated sockets register in the existing weak set without a count scan; subscription/owner filtering and eager unregister/disconnect remain. Shutdown withdraws new registrations through its lifecycle fence and reports service closing (503), never capacity throttling. Health reports demand admission; obsolete connection-capacity gauges and install knob guidance are removed. No worker, timer, alternate registry or durable state is introduced by registration. Local event FIFOs have no count/byte/frame refusal, oldest-frame drop, sustained-pressure disconnect or 64-pong eviction. One immutable JSON publication is prepared on demand workers and shared across matching sockets; FIFO references pin segmented anonymous files until delivery or disconnect. Segment and idle worker reuse hints derive from existing launch observations and never restrict accepted work. Independent file ranges use short reservations and cursor-independent I/O where available. Slow encoding and disk reads preserve control/RPC priority; cancellation retains an active event and joins every asyncio waiter. Socket close joins privately owned workers; application shutdown joins the hub owner. Encoding/file/actual socket failures still end affected delivery explicitly, preserving durable authority. The sole socket writer sends stored JSON directly instead of parsing and serializing large event bodies on the serving loop. Event-limit launch knobs and capacity gauges are retired; health reports owned file counts/bytes. Alternatives: larger quotas still reject valid sockets; registration-time peer scans make bursts quadratic; evicting old sockets drops live ownership. The 2,049-same-owner fixture registers in 0.0059 s with 295,332 peak Python allocation bytes for the registry operation (clients allocated beforehand), then unregisters to zero. A 1,026-client fixture delivers only to its 513 authenticated matching owners, drains retained bytes, and releases every subscription/client on close. These are synthetic registry/lifetime measurements, not socket memory, actual network throughput. Increasing old quotas still rejects valid events; unbounded resident payload dictionaries multiply heap. Temporary files retain exact accepted bytes without a second durable store. Standard-library JSON encoding avoids oversized backing allocations from concurrent large orjson encodes. A controlled 129-event/33-client fixture holds 4,257 FIFO references to 135,273,695 file bytes, with 472,825 resident and 97,295,716 peak traced Python bytes after 0.6193 s preparation. Source bodies were created during tracing. Peak includes concurrently active inputs/encoding; resident bytes are measured after every preparation completes. Disconnect/unregister releases all files and client entries. This is temporary transport residency, not total RSS or a network throughput guarantee. Tests deliver 4,097 FIFO events and a 9 MiB Unicode frame, preserve shared publication identity/owner filtering, inject partial writes, and join repeated cancellation. A real Quart WebSocket receives 1,026 ordered events including the large frame without pressure disconnect.
+
+## Latest-value push frames
+
+Problem: an incremental translation pushed the whole cumulative partial of its block on every provider chunk. Each value deep-copied its frame on the translation thread, submitted an encode job to the Push frame pool shared by every conversation, spooled the text to a file range, and was read back and sent, even when a newer value of the same block was already queued for that socket. Translation threads waited on that pool's lock per chunk, encoding grew quadratically with a block's length, and a socket that fell behind received every stale partial before the final one. Decision: a publisher may name a latest-value key for a value that contains every earlier value of that key (`push_event(..., latest_value_key=...)`; incremental previews use the block id). The hub takes no deep copy and submits no work for such a value at publication. Each socket keeps one queued position per `(channel, taskId)` stream for the newest value of a key it has not dequeued: a newer value replaces it in place, any other frame of the stream fences the position, and a dequeued value is final. The value is encoded on a demand worker when the first socket sends it, once for every socket sending it, without a file range because it is consumed at once. A socket that keeps up still receives every value; frame-only clients and publication listeners (webhooks) receive every value; receivers replace per block, so skipped intermediates leave the same preview and the final translation is always delivered last. No count, byte, interval or debounce limit is introduced and no other frame is dropped. Alternatives rejected: a send interval or debounce (a tuning knob that delays the final value and still encodes values no socket needs); coalescing in the translation worker (it cannot know what a socket has sent, and asynchronous publication would need its own thread); encoding eagerly and discarding stale queued frames at send time (keeps the per-chunk copy, pool submission, encoding and spool write); superseding across other frames of the stream (a newer preview could overtake its task's `done`/`error` frame). Measurement, synthetic fixture with the real Hub, frame store and serving loop draining four owner sockets under four CPU-bound threads, four translations of 200 cumulative chunks each, and eight commit writers loading the same sockets, three alternating fresh-process runs: per-chunk publication p50 13–18 ms → 0.03–0.04 ms; frame-pool submissions 4,618–4,786 → 1,966–2,108; partial frames sent 800 → 7–8 and socket bytes 724–740 KB → 200–215 KB; translations finished in 10.1–11.6 s → 6.0–6.4 s; the final partial reached its socket 64–115 s → 0.2–29 s after publication, and was identical in every run. One pre-change run stalled in the pool convoy the production dump showed (translation 326 s, publication p50 1.3 s, max 51 s). These are component observations on a shared host, not production latency or browser paint time. Specs: `tests/agent_core/test_push_latest_value.py`, `tests/translate/test_translation_preview_frames.py` and `frontend/src/conversation/application/translation-activity.test.ts`.
+
+## JSON frame worker reuse
+
+Problem: the Push, direct-relay and webhook `JsonFrameStore` executors took their idle reuse target from `TOFU_AGENT_WORKERS`, the agent-task concurrency (1,200 on an operator-overridden throughput host), so short encode/read/HTTP jobs kept every carrier of their peak burst resident (291 Push frame threads observed). Decision: `resolve_push_budget` and `resolve_webhook_budget` size frame worker reuse from `TOFU_SYNC_WORKERS`, the fixed idle-reuse hint for short blocking jobs that also sizes the default executor ("Hardware never limits work"); overrides clamp at that pool's 512. Every accepted job still starts immediately; the value bounds only idle residency, and surplus carriers retire as soon as a burst drains. Alternatives rejected: agent concurrency (unrelated to the work class); a dedicated frame-worker knob (a second setting for the same job class). Measurement, 300 concurrent transport jobs through one store on this host: 300 carriers stay resident at reuse 1,200 versus 126 at the value then probed on this host (the fixed hint is now 16), VmRSS after the burst is 22,916 versus 22,252 KiB, and a post-burst frame read still completes in 0.15–0.2 ms. Idle carriers no longer cost per-event wake-ups (see targeted carrier wake-ups in [modules/task_engine.md](modules/task_engine.md)), so this bounds thread residency, not latency. `tests/agent_core/test_push_resource_policy.py` and `tests/webhook_policy/test_webhook_resource_policy.py` pin the source.
 
 ## Webhook subscription demand
 
@@ -1019,16 +1465,40 @@ Installed controlled error/Stop prefixes each retain three messages and one veri
 
 ## Native post-commit observers and release
 
-Problem: native root handoff skipped final translation, project/profile observers and the existing reconstructible-state release, leaving finished tasks retaining their full context. Decision: _completion_translation shares the final prose submission before terminal persistence; native projection uses its actual open round and runs once through the existing projection fence. _post_commit owns the same post-persist observer sequence used by Python: log invariants, busy notification, swarm result handoff, project settlement, commit observer admission, heavy-field release and optional profile consolidation over a borrowed messages reference. Python delegates its previous block and retains its callback injection seams. NativePreparedInvocation supplies this completion callback to run_native_task; it runs only after terminal.accepted and native route/cleanup joins, including an acknowledged error or cancellation. Unconfirmed terminal debt retains state. A cancellation while waiting joins the callback and preserves an existing primary failure.
+Problem: native root handoff skipped project/profile observers and the existing reconstructible-state release, leaving finished tasks retaining their full context. Decision: native projection uses its actual open round and runs once through the existing projection fence; neither completion path submits a final-reply translation (the durable whole-turn job owns it; see Live per-segment translation previews). _post_commit owns the same post-persist observer sequence used by Python: log invariants, busy notification, swarm result handoff, project settlement, commit observer admission, heavy-field release and optional profile consolidation over a borrowed messages reference. Python delegates its previous block and retains its callback injection seams. NativePreparedInvocation supplies this completion callback to run_native_task; it runs only after terminal.accepted and native route/cleanup joins, including an acknowledged error or cancellation. Unconfirmed terminal debt retains state. A cancellation while waiting joins the callback and preserves an existing primary failure.
 
 Alternatives: running the whole Python finalizer repeats terminal/accounting work; releasing after projection alone can discard pending commit evidence; starting profile work before acknowledgement races durable state; a separate background queue adds a lifecycle owner. No store, worker pool, timer, invoice or terminal state machine is added. Existing optional observer workers are entered through their existing feature gates and lifecycle. A retained 100,000-character message fixture verifies task.messages becomes None while only the explicit profile observer argument retains its reference. Real three-protocol done/error tasks read back durable Turn/tool effects and verify messages/tool-round release. These are lifecycle/retention facts, not RSS or whole-system throughput evidence. Sources-footer composition, full recovery, automatic binding and default Rust cutover remain pending.
 
 
 ## Native source evidence and final footer
 
-Problem: native gateway passed a discarded empty search accumulator to the canonical tool pipeline, and prepared terminal projection skipped the existing sources backstop. Decision: NativeGateway borrows the prepared request's all_search_results_text list. The existing pipeline alone decides which tool results are search evidence and applies its existing UTF-8 accumulation bound. Prepared terminal projection delegates the existing sources-footer helper once after canonical projection, before translation/snapshot/terminal persistence. Only successful final display text is decorated; raw model messages and paid usage remain unchanged. Existing cited-link, empty/aborted, deduplication and five-link rules remain the sole policy. No URL fetch, new accumulator policy, model call, storage authority, cache or worker is added.
+Problem: native gateway passed a discarded empty search accumulator to the canonical tool pipeline, and prepared terminal projection skipped the existing sources backstop. Decision: NativeGateway borrows the prepared request's all_search_results_text list for search classification, budgeting and the no-prose fallback. The existing pipeline alone decides which tool results enter it and applies its existing UTF-8 accumulation bound. Prepared terminal projection delegates the shared sources-footer helper once after canonical projection, before translation/snapshot/terminal persistence. Only successful final display text is decorated; raw model messages and paid usage remain unchanged. The footer's evidence is the task's settled page-reading rounds, never this corpus ([next section](#sources-footer-cites-only-pages-the-turn-opened)). No URL fetch, new accumulator policy, model call, storage authority, cache or worker is added.
 
-Alternatives: scraping arbitrary feedback invents source classification; copying the corpus creates another retained history; adding after commit makes stored/rendered text disagree; changing native result bytes alters raw provider evidence and retry identity. Tests verify borrowed list identity at canonical pipeline entry, normalized deduplication, cited-answer no-op and three actual protocols whose committed Turn contains the footer while model history remains raw. The borrowed list uses the existing owner/budget/lifetime and adds no retained corpus copy. Default native binding and full recovery remain pending; no whole-system performance admission follows.
+Alternatives: scraping arbitrary feedback invents source classification; copying the corpus creates another retained history; adding after commit makes stored/rendered text disagree; changing native result bytes alters raw provider evidence and retry identity. Tests verify borrowed list identity at canonical pipeline entry, opened-page deduplication, cited-answer no-op and three actual protocols whose committed Turn footer names the page opened through the real `fetch_url` handler, and none of that page's links, while model history remains raw. The borrowed list uses the existing owner/budget/lifetime and adds no retained corpus copy. Default native binding and full recovery remain pending; no whole-system performance admission follows.
+
+
+## Sources footer cites only pages the turn opened
+
+**Problem.** `_maybe_append_sources_footer` (`lib/tasks_pkg/orchestrator/_finalize.py`) regex-scanned the turn's search/fetch corpus and listed its first five URLs whenever the answer cited none. That corpus holds every engine hit of every `web_search` listing (the listing itself labels them unverified candidates) and every link inside opened page bodies, while `fetch_url` results served by the streaming prefetch did not enter it (the executor cached them with `is_search=False`). Footers were therefore inverted. On 2026-10-26 a finance spot-check received all five of its `fetch_url` results through the prefetch, and its footer listed five search hits led by Microsoft Learn and Office-support pages instead. A turn that opened one platform.claude.com page also listed four links from that page's body. man7 COLOPHON links appeared as sources, and a swarm report about a no-channel 503 carried four IMDb title pages. Two engineering queries reproduced the same day opened their listings with "Candidate for follow-up" lines, the first URLs the regex took, naming nytimes.com and an AI-art spam site.
+
+**Decision.** The footer reads only the turn's settled page-reading rounds in `task['toolRounds']`:
+
+- `fetch_url` result rows marked `fetched`, meaning content reached the model. The handler, streaming-prefetch and dedup-replay paths and the native gateway all settle identical rows.
+- Successful text `browser_read_page` reads. Their row `url` is the accepted page URL that the browser read reports through result display metadata.
+
+The footer ignores rounds that did not settle `done`, unfetched (irrelevant, blocked or failed) rows, and URLs that are not http(s) or contain whitespace or control characters. It drops fragments before deduplicating. It percent-encodes Markdown delimiters, so a model-chosen URL cannot open a link or image inside the footer.
+
+A turn that only ran `web_search` gets no footer. A listing proves only which candidates an engine returned, not which page an answer relied on. The search tool and the system-prompt citation nudge still let the model cite the hits it actually used.
+
+The cited-answer, empty/aborted, first-open order and five-link rules are unchanged. The classic finalize and the native terminal projection call the same helper. `toolRounds` already resets per Flow turn and per whole-turn retry, so the evidence needs no new state.
+
+**Alternatives rejected.**
+
+- Keeping the corpus and matching only `Content from <url>` headers. This still parses model-visible text, and the corpus is the no-prose fallback's evidence under its own admission rule ("Fetched evidence" in `docs/CONTEXT_INJECTIONS.md`), not a record of opened pages.
+- Footers for search-only turns built from engine-excerpted hits. The engine fetches its top candidates for every query regardless of relevance (17 of the 20 reproduced hits carried page excerpts), so the footer would list arbitrary candidates.
+- A separate task-level list filled by handlers. It needs resets at every per-turn boundary, plus a second recording point for prefetch hits that `toolRounds` already settles.
+
+Specs: `tests/tasks_pkg/test_sources_footer.py` covers the unit rules and real `run_task` turns (search-only, handler-fetched and streaming-prefetched). The native and browser sides are covered by `tests/tasks_pkg/test_native_prepared.py`, `tests/storage/test_native_task_terminal.py::test_native_source_footer_is_committed_with_final_display_text` and `tests/browser/test_browser_read_payload.py::TestReadPageUrlReceipt`.
 
 
 ## Native transition preserves the issued task route
@@ -1243,7 +1713,7 @@ Legacy terminal binding lookup also retires its first-200-record cutoff. Exact o
 
 ## Application native worker demand ownership
 
-**Problem:** per-task native process/encoder cost remained in the application. **Decision:** explicit reuse follows complete principal/cwd inode/transport keys, lazy serving-loop acquisition, joined readiness and host-owned process lifetime. The published launch-policy root_maximum sizes idle retention only; active demand creates independent workers without a count gate. One bounded frame pump per physical worker supplies backpressure, not an admission quota. Evicted/failed workers and host shutdown join before sealed-image release. **Alternatives rejected:** a global shared worker serializes machine capacity; owner-only reuse mixes principals; dropping source/inner-frame bounds hides cost or authority changes. Threaded prepare installs the owner under a short lock; no image IO or process allocation runs there. Callback/Stop failure retires a worker while existing accounting/terminal cleanup still joins. `system_native_application_worker_reuse_20261013.json` shows 26 exact priced/counted ROOT operations reusing one PID (one idle ready worker), then complete child/client/image cleanup. It retains 125 Python neighbors, actual callback-failure retirement, four real Stop combinations, 473 MSRV Rust tests (2 ignored), and Clippy. This small SQLite functional cohort establishes neither native-authority latency tails nor stopped-VM memory/concurrency admission. The prior standalone 2,000-task residency plateau is component evidence only; do not transfer it to the whole application. Default worker selection remains transient.
+**Problem:** per-task native process/encoder cost remained in the application. **Decision:** explicit reuse follows complete principal/cwd inode/transport keys, lazy serving-loop acquisition, joined readiness and host-owned process lifetime. The fixed `TOFU_AGENT_WORKERS` idle hint sizes idle retention only; active demand creates independent workers without a count gate. One bounded frame pump per physical worker supplies backpressure, not an admission quota. Evicted/failed workers and host shutdown join before sealed-image release. **Alternatives rejected:** a global shared worker serializes machine capacity; owner-only reuse mixes principals; dropping source/inner-frame bounds hides cost or authority changes. Threaded prepare installs the owner under a short lock; no image IO or process allocation runs there. Callback/Stop failure retires a worker while existing accounting/terminal cleanup still joins. `system_native_application_worker_reuse_20261013.json` shows 26 exact priced/counted ROOT operations reusing one PID (one idle ready worker), then complete child/client/image cleanup. It retains 125 Python neighbors, actual callback-failure retirement, four real Stop combinations, 473 MSRV Rust tests (2 ignored), and Clippy. This small SQLite functional cohort establishes neither native-authority latency tails nor stopped-VM memory/concurrency admission. The prior standalone 2,000-task residency plateau is component evidence only; do not transfer it to the whole application. Default worker selection remains transient.
 
 ## Complete project tree indexes
 
@@ -1253,11 +1723,23 @@ Problem: entry/frontier ceilings, a 30-level depth cutoff and a 600-second build
 
 Verification: `tests/project_mod/test_tree_index.py` creates 10,201 real files above a 10,000 retention target, builds/reloads the full index, changes it and checkpoints the complete revision on eviction. A 42-level real directory is queryable through both the index and cold live grep/Python find. `test_tree_index_scan_pressure.py` retains the 4,096-directory window/lifecycle measurement and verifies complete traversal past the legacy deadline and target. These tests do not prove constant frontier or retained-index RAM.
 
+Problem: the walk tests every entry against gitignore buckets that were each one `|`-joined regex of up to several hundred alternatives, and every unanchored `(?:^|/)` alternative is retried at each `/`. A live GIL profile attributed about 11% of all server GIL samples to this matching. Decision: `_GiBucket` answers wildcard-free unanchored globs with a component-set lookup, `*suffix`/`prefix*` globs with component `endswith`/`startswith`, and wildcard-free anchored globs with a path/prefix lookup; the remaining anchored alternatives share one `match` regex and the remaining unanchored ones one `search` regex. A bucket containing a bracket class that Python parses differently from the glob translator, and any path containing a newline, keep the original combined regex. Measured on this checkout's recorded walk (12,627 checks): 585 → 40 ms of matching per scan (14.8x); a full walk took 1.35 → 0.69 s process CPU with an identical file list. Verdicts matched exactly over the recorded walk, 39,643 paths from three trees, and three fuzz seeds of 424 rule sets each (2.7 M checks per seed). Alternatives considered: a fully factored per-pattern matcher was no faster and more complex; keeping the combined regex keeps the measured cost. Rebuild cadence is unchanged. `test_gitignore_buckets_answer_exactly_like_their_combined_regex` pins verdict parity, including the malformed-class fallback.
+
 ## Search chunk and child retirement
 
 Problem: eagerly submitting every indexed search chunk to the demand executor created a thread/process per chunk; concurrent timeout cleanup then scanned the whole host's `/proc` before reaping those children. Decision: the existing measured search profile defines an internal submission window; exact withheld counts use their existing two-chunk window. Every candidate remains eligible, results retain input order, and explicit `TOFU_GREP_INDEX_JOBS` overrides are honoured without the former eight-job clamp. Early completion cancels and joins prefetched searches. Cleanup reads only owned processes' per-thread child lists, closes pipes and reaps the direct child even after an output callback raises. Alternatives rejected: limiting the shared executor blocks independent user tasks; dropping chunks silently loses evidence; detached cleanup accumulates processes after the result has returned.
 
 Measurement: 1,024 synthetic 2 ms chunks retained all results at windows 2/8/16, with peak active chunks 2/8/16, elapsed 1.148/0.296/0.172 seconds and zero remaining search workers after each return. This measures scheduling, not storage throughput. Specs: `test_grep_withheld_recovery.py` and `test_grep_process_retirement.py` under `tests/project_mod/` cover complete counts, cancellation, failed worker creation, scoped child discovery, and direct-child/descriptor retirement.
+
+## Command stdin sensor discovery
+
+Problem: every interactive `run_command` keeps one stdin sensor that looks every 0.2 s for a descendant blocked in `read(0)` on the command's stdin pipe. Its descendant discovery read `/proc/<pid>/stat` of every process on the host, so each tick grew with the host's process count and every running command repeated the scan; a live server profile (2026-11-01, 240 s) attributed 154 GIL and 751 active samples to it. Decision: the sensor discovers descendants through `process_group.descendant_pids`, the owner search cleanup and activity supervision already use, which reads only the command's own per-thread child lists (`/proc/<pid>/task/<tid>/children`). A kernel that publishes no child lists (no `CONFIG_PROC_CHILDREN`, detected once per process on the calling thread's own task) falls back to one parent-link pass over `/proc`; previously such a kernel made `descendant_pids` return an empty subtree, so this also corrects search cleanup and activity supervision there. Detection semantics are unchanged: grandchildren and children forked by any thread are found, a member that exits mid-walk is skipped, and an orphan reparented out of the subtree is outside it for either method. Cadence and the one-sensor-per-command lifecycle are unchanged. Alternatives considered: one sensor thread serving every command in a single pass saves nothing once discovery is per subtree, because the subtrees are disjoint, and it would let one blocked procfs read (a `/proc/<pid>/syscall` read waits while its target holds the exec/ptrace credential lock) stall stdin detection for every other command; sharing one host scan per tick across commands still costs the whole host per tick; event-driven detection is unavailable because Linux reports no notification for a reader blocking on a pipe.
+
+Measurement on this 91-CPU host (130-215 visible processes): a `sh -> sh -> sleep` tree with stdin pipes and the production `StdinProbe`, 6 s windows, fresh processes alternating the pre-change tree and this one for two rounds. One tick touched 151 `/proc` paths across 144 processes before and 12 paths across the tree's 3 processes after. Sensor CPU per tick fell from 3.9-4.9 ms to 0.30-0.32 ms with one command and from 7.9-11.3 ms to 0.45-0.53 ms per command with eight; the eight sensors together fell from 303-421 to 19-23 ms of CPU per second. Beside four CPU-bound Python threads no full-scan tick completed within 6 s, because every procfs syscall is a GIL handoff, while subtree ticks completed in 0.95-1.3 s on average; in that saturated regime sensor CPU per second and the CPU-bound threads' throughput loss (2-8%) stayed within noise of each other. Specs: `tests/tasks_pkg/test_run_command_stdin_probe.py` (instrumented subtree-only reads with a full-scan control, discovery parity, a child exiting mid-scan, children of a non-main thread, parenthesized process names) and `tests/project_mod/test_grep_process_retirement.py`.
+
+Problem (2026-11-02): a live profile of the deployed server (35be815b9, 300 s) still charged 238 GIL samples to `descendant_pids` (267 to the sensor threads). The host kernel (4.18) publishes child lists (`CONFIG_PROC_CHILDREN=y`, `/proc/self/task/<tid>/children` present), so the whole-`/proc` fallback never ran, and no other caller scans per tick: 231 of the 238 samples came through the sensor's `_collect_descendants` and the rest from activity supervision. They sat on the per-thread child-list read (164) and the per-member thread listing (63). `Path.read_text` issues eight syscalls for an empty child list (openat, two fstat, ioctl, two lseek, read, close; strace), each a GIL release, and builds pathlib and text-layer objects, while live command trees are thread-heavy (one Python test run held 35 processes with 901 threads). Decision: read each child list through one raw descriptor until EOF (openat, read, close for an empty list) and list thread directories with `os.listdir`; the subtree, the walk order and the error behavior are unchanged, and discovery stays proportional to the subtree's threads because the kernel lists children per thread. Alternatives considered: one parent-link pass shared by every sensor per tick costs about 4.5 ms of CPU on this host (about 250 visible processes) against 0.05 ms for a small subtree and 1.4 ms for a 201-thread one, so it wins only above roughly 600 subtree threads; choosing per tick between the two needs the host's process count, which a container cannot read without that scan (`/proc`'s link count is host-wide); a helper process per tick (`ps`) avoids the GIL handoffs but launches a process every 0.2 s and depends on an external binary.
+
+Measurement on the same host: three commands, each a Python process with 33 threads and one child, ticked at the production cadence for 6 s: sensor CPU per tick 0.91-1.14 ms before, 0.41 ms after; one discovery walk of a 201-thread tree 4.2 to 1.4 ms and of an 801-thread tree 17.6 to 5.8 ms. Beside four CPU-bound Python threads a tick of a 9-thread command fell from 4.2 to 2.7 ms of sensor CPU and from 1.31 to 1.04 s of wall time (medians of four); beside eight, sensor CPU fell from 5.6 to 4.0 ms while the wall time stayed bound by GIL scheduling (2.5 and 2.7 s medians, spread 0.8-4.4 s). Spec: `test_probe_tick_reads_per_command_with_n_commands` (one and three concurrent commands: each tick reads only its own subtree, every member thread's child list once, nothing of the other commands; the parent-scan control lists `/proc` once per command per tick).
 
 ## Complete project write recovery evidence
 
@@ -1348,9 +1830,9 @@ PDF process counts size idle reuse; independent parses acquire workers on demand
 Desktop tool calls do not derive a 30-second failure from private defaults. Their existing event waits for owner/device settlement; only callers with an explicit timeout or cancellation signal stop waiting. A supplied Stop signal is checked every 250 ms by the existing calling thread, with no watcher thread, new pool, timer or durable growth. A stopped caller withdraws unclaimed work. Already claimed work keeps its existing queue entry until authorized settlement, then removes it. This is transport bookkeeping, not durable remote execution. Tests observe the entry retained across simulated elapsed time and removed after late settlement, and verify cancellation joins the waiter; no RSS claim is made.
 
 
-## Workspace tool lock waiting
+## Workspace lease waiting
 
-Tool writer admission retains cooperative file/checkout exclusion without a private five-second refusal. Default waiting continues on the existing condition and cross-process flock probes until acquisition or task cancellation. Explicit operator waits remain exact; nested fences share the combined lease deadline. `None` represents unlimited waiting through every fence rather than an infinite numeric timeout. No worker, queue, timer, persistent record, or descriptor is added: each waiting call owns its existing lease registry reference and any physical acquisition descriptor, releasing them on cancellation or failure. Real six-second writer holds prove both append and shell work survive the old default; local and process cancellation tests verify joined cleanup. This is behavior/lifecycle evidence, not a throughput or RSS measurement.
+Model tool calls take no workspace lease at all since 2026-10-28 ([`GIT_WORKSPACE_GUARD.md`](runbooks/GIT_WORKSPACE_GUARD.md#tool-calls-take-no-workspace-leases-owner-decision-2026-10-28)). Tofu's own lease callers retain cooperative file/checkout exclusion without a private five-second refusal. Default waiting continues on the existing condition and cross-process flock probes until acquisition or task cancellation. Explicit operator waits remain exact; nested fences share the combined lease deadline. `None` represents unlimited waiting through every fence rather than an infinite numeric timeout. No worker, queue, timer, persistent record, or descriptor is added: each waiting call owns its existing lease registry reference and any physical acquisition descriptor, releasing them on cancellation or failure. Local and process cancellation tests verify joined cleanup. This is behavior/lifecycle evidence, not a throughput or RSS measurement.
 
 
 ## Desktop command execution lifetime
@@ -1384,3 +1866,117 @@ Rich-response collections have no private count admission ceiling. Rendering and
 The rich-response `ResourceHub` retains one request/snapshot per document and owned scope/provider/connection/queue, only while subscribed views exist. Opening a visible panel reads once; optional 30-second updates run only for visible live subscribers in a visible document. Hidden views abort reads and drop timers; last release aborts, removes the visibility listener and drops the snapshot. Different scopes do not share data. No startup request, model polling, durable cache, fixed worker pool or job allocation is added. The backend joins its request-owned provider worker on cancellation, with the existing MCP timeout.
 
 Verification measures 100 identical visible subscriptions: one provider read, one refresh timer, zero timers after disposal; opening a different scope does not refresh the first. Tests also exercise hidden documents, late replies, provider failures and cancellation teardown. Row pagination is a display window of 20, not truncation; every admitted row remains reachable.
+
+## Demand-filled project content retention
+
+Problem: whole-project copying can spend more I/O and disk than the requested
+work, especially beside large ignored datasets. Decision: indexed search's
+`content_shadow` retains only repeatedly requested regular-file bytes, shares
+measured index placement and free-byte/inode reserves, and always searches
+uncached/oversized files at their source. Its default per-file copy interval is
+64 KiB through 8 MiB; smaller files retain the existing index/native-read path.
+Per-root 1 GiB / 200,000 entries and aggregate 4 GiB limits include allocated
+blocks and conservative metadata/name overhead. TTL is seven days. These are
+evict-only cache targets; active reader leases win and no work is refused.
+
+A fill round considers at most 2,000 files, copies at most 64 MiB, and checks a
+250 ms elapsed budget between files. No full project walk runs on this path.
+The demand heat map retains 8,192 observations for ten minutes; 256 root
+backoff entries last 60 seconds after a source-change retry. Fixed lock shards
+bound persistent lock inodes to 256. Validation uses eight physical I/O groups
+through the existing demand executor and joins them; it derives no fan-out or
+admission limit from hardware. See [INDEX_FASTPATH.md](INDEX_FASTPATH.md) for
+checksum/freshness, ownership, pressure/crash recovery, measurements and the
+rejected whole-project/source-import alternatives.
+
+## Turn attempt callback retention
+
+Each canonical browser TurnStore owns one callback-lifecycle subscription.
+Known registrations retire when their attempt and current-Turn reference leave
+canonical state; unmaterialized subscriptions remain caller-owned until explicit
+close or store disposal. Live observations follow currently referenced attempts.
+Closing the store releases all registrations even if its data rows were already
+deleted. Lease closure never closes the shared conversation stream or cancels
+backend work. No quota, timer, polling owner or durable state is added.
+
+A Node 22.23.4 diagnostic keeps the real runtime alive through 1,000 accepted
+attempt/deletion cycles and measures callback-object reachability with WeakRefs
+after explicit garbage collection. Turn and attempt row counts return to zero.
+Retained callbacks after deletion and after disposal both fall from 1,000 to zero;
+the workload still performs one snapshot read and creates/closes one stream.
+These are retained-reference counts, not process RSS or application latency.
+The executable lifetime cases are `core/turn-runtime-attempts.test.ts`;
+callback replacement and failure rules are in `DEFENSIVE_PATTERNS.md`.
+
+## Turn hydration view retention
+
+`core/turn-hydration.ts` shares one explicit snapshot read and retains its latest
+requested catalog shell. Read lifetime checks capture the conversation ID, not a
+superseded shell; settled lanes leave the map. The canonical Store and rendered
+view keep their existing independent owners. No cache, timer or quota is added.
+
+`tests/turn_hydration_retention.test.cjs` keeps the owner alive in a fresh Node
+22 process and uses two synthetic 1 MiB shell payloads. Before the ID-only capture,
+the old shell remained reachable while the shared read waited; afterward it is
+collected while the latest shell remains reachable. After settlement neither is
+retained by this owner. Both runs perform one read, one settings application,
+one metadata application and one bind. This is a reference-lifetime measurement,
+not RSS or application latency; the synthetic host deliberately holds no view.
+
+
+## Conversation Surface presentation retention
+
+Problem: a retained round-navigation callback captured the first lane and Turn;
+unchanged part caches retained entire older Turns, and focused tool-search hits
+captured old result objects. Removing the Surface left its final graph and DOM
+reachable from the public owner. Decision: handlers retain stable IDs and resolve
+the current projection; equality gates painting while caches adopt the latest
+projection. Node retirement releases only Surface-owned references, and disposal
+clears graph/window maps and the public root after renderer cleanup. Required
+cleanup failures propagate after sibling resources retire.
+
+The fresh-process GC specification `tests/conversation_surface_retention.test.cjs`
+uses two independently cloned views, each with a synthetic 1 MiB projection payload,
+and keeps the Surface/public root alive. Before repair, the superseded lane,
+Turn and block remained reachable, as did all four current graph objects after
+disposal. After repair, all four superseded objects are collected, all four
+current objects remain while mounted, and all four are collected after disposal.
+The focused tool-search case additionally keeps its result button and focus:
+it retained the old tool block before repair and releases it afterwards. Both
+cases preserve the Turn DOM node and the number of render-port calls.
+An open historical-process case keeps a detached panel button alive: the old
+process block remained reachable before repair and is collected after mount
+retirement clears its projected plan. Retired page/close callbacks are inert,
+including after a Turn with the same identity is restored.
+This measures object reachability, not RSS, production latency or durable-state
+retention. No transcript is truncated and no hardware-dependent cap is added.
+Alternatives rejected: repainting unchanged parts sacrifices DOM state; TTLs or
+larger limits leave retired ownership ambiguous; swallowing cleanup exceptions
+hides the failing renderer. The existing DOM/window policies remain the owners
+of mounted work.
+
+
+Duplicate convergence uses that same retirement boundary. The lifecycle probe
+creates independent renderer resources for a survivor and a duplicate: one leaf
+for a duplicate block, or four leaves for a duplicate Turn/content/lane slot.
+Before the change no duplicate leaf received renderer disposal. After the
+change every duplicate signal is aborted once and its Surface projection
+reference is removed; the survivor remains active and focused. Two duplicate
+Turns with eight leaves still finish all eight cleanup calls when the first
+one throws, then propagate that error. This is deterministic resource-lifecycle
+evidence, not an RSS or frame-latency measurement. No new persistent growth,
+retention budget or work-admission limit is introduced.
+
+Surface window preparation reuses composition's existing lane/Turn-location
+maps rather than retaining a second index. Ordered child-lane IDs add one scalar
+per branch edge; local stream deltas reuse these arrays. The existing mounted
+window limits and graph/disposal lifetime are unchanged. In a fresh-process
+Node 22/jsdom equivalent-work probe with 1,000 / 4,000 / 12,000 loaded Turns and
+80 mounted Turns, Surface numeric Turn-array reads per frame fell from
+3,001 / 12,001 / 36,001 to 82 / 82 / 82. All cases performed 119 block paints,
+kept the first mounted node, and produced the same tail revision and window.
+Thirty uninstrumented samples after five warm-ups showed mixed latency changes
+(Surface median baseline 8.32 / 7.87 / 8.25 ms; candidate 8.59 / 8.59 / 8.10 ms).
+The evidence establishes bounded traversal, not an end-user frame-time or RUM
+improvement. The deterministic regression compares equal working sets at two
+history sizes; existing fresh-process GC probes verify retired-graph release.

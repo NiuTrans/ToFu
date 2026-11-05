@@ -60,7 +60,7 @@ def test_typed_runtime_recognizes_queue_and_attempt_command_owners() -> None:
       require(BUNDLE);
       const conversationId = 'command-authority-contract';
       const runtime = window.createConversationTurnRuntime({
-        api:{eventsUrl(){return '/unused';}},
+        api:{},
       });
       const store = runtime.ensureRuntimeStore(conversationId);
       store.dispatch({type:'snapshot', snapshot:{

@@ -28,11 +28,15 @@ cold launch, launch after stop, option forwarding, and worker/import bypass.
    `python serverctl.py install-recovery`；Docker 使用仓库的 Compose 配置和
    `restart: unless-stopped`。不要同时运行 manager、旧 `tofu_guard` 和
    supervisord 三套所有者。
-3. **资源必须自适应、有界且留余量。** 个人模式启动时取 host、affinity/cpuset、
-   cgroup CPU 配额的最小值，同时结合物理/cgroup 内存容量、当前可用内存和解析后
-   的真实数据卷（含 `TOFU_DATA_DIR` / XDG 布局）剩余空间推导预算；探查失败使用
-   保守下限，所有推导仍有硬上限。Compose 先以
-   4 GiB limit / 512 MiB reservation 起步。8 GiB 是整机基线，不是 Tofu 可独占配额。
+3. **硬件从不限制工作。** CPU 数量、内存容量/余量、进程 RSS 与 cgroup 压力
+   不决定、不限制、不排队、不拒绝、不收缩、不回收也不杀死任务（见
+   [RESOURCE_CONTROL.md](../RESOURCE_CONTROL.md#hardware-never-limits-work)）。
+   执行类设置是 `unlimited` 或与硬件无关的固定常量；只有只淘汰的保留预算
+   （缓存、TTL、日志、回放窗口、磁盘预算）随启动探针变化：物理/cgroup 内存容量
+   与余量，以及解析后的真实数据卷（含 `TOFU_DATA_DIR` / XDG 布局）剩余空间；
+   探查失败使用保守下限。内存耗尽交给操作系统，隔离靠容器/cgroup 上限：Compose
+   先以 4 GiB limit / 512 MiB reservation 起步。8 GiB 是整机基线，不是 Tofu 可
+   独占配额。
    模型执行路由最多保留 64 个排序候选，不能先物化 Deployment×Credential 全积再截断；
    `tests/model_routing/test_model_routing_contract.py` 用 100×200 组合验证排序等价与增量堆峰值 <512 KiB
    （不含已建立的权威文档索引），主模型填满候选额度时不再扫描未使用的降级模型。
@@ -73,6 +77,12 @@ path before launch and every lifecycle lookup. Alternatives rejected: deleting
 the apparently stale PID file loses the live owner; accepting arbitrary matching
 process names weakens checkout ownership. Subprocess tests launch and control
 the same checkout through both paths and verify idempotency and teardown.
+The lookup reads the watchdog's whole command line (`ps -ww`): `ps` otherwise
+cuts it at an inherited `COLUMNS`, which GNU readline exports as 80 in any
+parent that imports it without a terminal (pytest's controller does, and its
+xdist workers inherit it), so a long checkout path had the same effect.
+Scrubbing `COLUMNS` at each caller was rejected because every other caller
+would stay exposed.
 
 **Manager signal handling.** Problem: group termination and watchdog forwarding
 can deliver SIGTERM twice while the first handler is writing its log, causing
@@ -85,6 +95,12 @@ and refuses any logging from the signal callback.
 对 live worker 执行 `stop` / `restart` 会中断在途任务：交互终端必须确认，非交互
 调用必须消费用户在 Tofu UI 中批准的一次性 `shutdown` / `restart` 记录。服务本来
 就未运行时，`stop` 保持幂等且不要求批准；`status`、`doctor`、`logs` 均为只读。
+
+启动控制请求必须等待共享的源码产物准备窗口。此前 `start` 沿用普通查询的
+5 秒 HTTP 超时，会在 manager 仍正确准备产物时误报启动失败；现在它与
+`stop` / `restart` 使用相同的生命周期请求期限，普通查询保持短期限。
+不重发已受理的启动命令，也不把所有查询都延长。验证包含真实 CLI 往返和
+`tests/server/test_serverctl_start_deadline.py` 的延迟准备边界。
 应用内 restart 会在停止监听前按 manifest 中的全量构建输入 SHA-256 持锁修复并重新
 验证完整 frontend artifact；内容不匹配、损坏或缺少本地 builder 时旧 worker 继续
 在线，且不消费一次性批准或 cooldown。浏览器必须在这个同步预检开始前先绘制“准备
@@ -173,16 +189,14 @@ source digest 和消耗完整性。GET 只读，不触发模型或执行。使�
 
 | 防线 | 默认行为 | 目的 |
 |---|---|---|
-| 任务背压 | 个人探针按 CPU、内存容量、启动时可用内存和任务 RSS 包络推导 1..48 个根 Agent 槽；8 CPU/8 GiB 常见结果为 4，64 CPU/64 GiB 且可用 48 GiB 的参考结果为 18，超大服务器在默认 64 GiB worker 硬预算内最多 48 | 尽量利用服务器资源，同时给 OS、浏览器和进程非任务基线留出明确空间 |
-| Agent 等待队列 | 有限 FIFO，默认每个执行槽 8 个等待项（总量 8..512）；绑定后仍为 `pending`，工作线程入口才是 `running` | 用户能区分“已受理、等本机 Agent 槽”和“已经执行”，队列饱和显式失败而非无限堆积 |
-| 卡死槽恢复 | reaper 判定卡死后隔离旧线程，按独立预算补位；默认每 4 个逻辑槽最多 1 个、总计 1..4 | Python 无法安全杀线程；恢复吞吐但不让僵尸线程无限增加 |
+| 任务执行 | 根任务数量不设上限（`TOFU_MAX_INFLIGHT_TASKS` 默认 unlimited）：提交即准备 worker，可取消的交接队列没有容量拒绝；`TOFU_AGENT_WORKERS` 固定 16，只决定保留多少空闲线程 | CPU、内存、进程 RSS 与 cgroup 压力都不拒绝、排队或收缩任务；内存耗尽交给操作系统与容器上限 |
+| 卡死线程补位 | reaper 判定卡死后隔离旧线程，按独立预算补位；默认 `ceil(workers/4)` 限制在 1..4（固定 16 个 worker 提示时为 4） | Python 无法安全杀线程；恢复吞吐但不让僵尸线程无限增加 |
 | run_command 自动转后台 | 子进程运行 60 秒后转交，显式与转交命令共用最多 32 个进程内控制项；满额时保留前台，完成项优先回收 | 原执行 worker 继续读取输出，不另起命令；`tracemalloc` 实测 32 个转交控制项及其任务代理共 87,276 字节（约 2,727 字节/项，未含已有执行线程与输出缓冲），完成后释放任务代理；转交命令只在当前服务进程内可控制，显式后台命令另有重启记录 |
-| allocator | 个人随数值预算 1..4；容器早期回退 2；分布式 8 | 避免大载荷释放后留下几十个 64 MiB arena |
-| Sidecar RPC | 个人探针 2..12；分布式 64 | 与有效存储并发对齐，不把 256 个线程当吞吐 |
+| allocator | 固定 8 个 glibc arena（个人、分布式与 Compose 相同） | 避免大载荷释放后留下几十个 64 MiB arena |
+| Sidecar RPC | 固定 64，仅为监听 backlog 与空闲连接复用提示 | 不限制活跃请求 |
 | serving-loop 空闲线程 | 个人探针 300..1800 秒；分布式 3600 秒 | 超过热线底线的 sync/agent burst 线程仅在 active=queued=0 时整代退役；容量不变、后续按需重建 |
 | subscription 路由探针 | 活跃竞速最多 32；批次结束为 0 | 单路由 singleflight 不变；最后一个在途探针完成后整池退出，下次网络竞速按需重建 |
-| tree-index 构建器 | 同时最多 2 个 root；批次结束为 0 | 每个 root 内部 walk 仍受独立 job/时间/条目预算约束；最后一个 root 完成后精确代次退出，下次 stale refresh 按需重建 |
-| Project refresh 消费者 | summary/status/watch 各最多 2；个人空闲 30..300 秒后为 0 | owner+project/conv 合并和队列上限不变；submit 与超时退出同锁仲裁，后续事件按需补齐 worker |
+| tree-index 构建器 | 每个 root 构建都被受理并按需启动；每次 walk 固定 8 个在途目录扫描；批次结束为 0 | 扫描窗口是实测的 FUSE 元数据调优值，不随硬件变化；最后一个 root 完成后精确代次退出，下次 stale refresh 按需重建 |
 | 在线技能验证 | 并发搜索共享最多 4；最后一批结束为 0 | 批次 lease 阻止每请求复制线程池；异常残留在新代发布前有界排空，验证/安装信任边界不变 |
 | Codex 模型目录 | 登录/真实变化后 3 分钟；稳定时 6→12→24→48→60 分钟；未登录/分布式为 0 worker | ETag 与归一化行比较识别真实变化；失败保留 last-good 并同样退避，缓存新鲜度上限 60 分钟 |
 | 远程 provider 模型目录 | 与本地端点监控共享 1 个 worker；启动 600 秒后首跑，之后固定每 6 小时 | 严格只增：既有行不改不删，用户删除的同步模型记入 per-owner dismissed 台账（`data/config/model_catalog_sync.json`）永不复活；>200 条的聚合目录整体跳过，单 pass 每 provider 至多导入 32 条；`TOFU_MODEL_CATALOG_SYNC=0` 整体退出 |
@@ -195,20 +209,14 @@ source digest 和消耗完整性。GET 只读，不触发模型或执行。使�
 | 直连/代理路径探测 | 最多 64 个主机；新路径/真实失败立即探测；默认失败退避 3→6→12→24→48→60 分钟，稳定上限 60 分钟，闲置 24 小时停止 | 真实请求成功会延后同路径的合成 GET；持久化保留真实 last-seen，重启不会把废弃主机重新激活 |
 | 日志后台维护 | 安静态 2 个周期 worker、默认至多 5 次唤醒/小时；重复尾部 worker 为 0 | 核心/外部保留共享 15 分钟线程；聚合空闲仅按小时 TTL 唤醒、有积压仍 15 秒批刷；首个被压制 delta 才创建短生命周期尾部 worker |
 | Git integration 队列 | 本地 submit/retry 立即唤醒；空队列探测 3→6→12→24→48→60 秒 | 每日空读 28,800→≤1,440（降低 95%）；跨进程 ready/崩溃 claim 检测仍 ≤60 秒；存储故障独立 5..30 秒退避且停机精确 join |
-| 会话目录到达合并 | 与 Sidecar RPC 容量相同，硬上限 256；8 ms 到达窗 | 仅合并同 owner/同投影且尚未开始的读取；开始即摘除，完成结果不缓存，饱和时直读 |
-| Project refresh 队列 | 个人探针 16..128；分布式 512（status/watch/summary 各一条） | 唯一 scope 有界，重复 scope 合并；过载只延迟可重建的 warm refresh |
-| 增量翻译 | 活跃 accumulator 个人 2..16、分布式 32；每任务 preview 队列个人 8..32、分布式 64 | 限制线程和文本积压；终态 handoff 永不丢弃 |
-| 共享翻译通道 | worker 个人 1..2、分布式 16；等待队列个人 4..32、分布式 128；空闲 60/600 秒退线程 | 发送前、显式文本、整轮、PPTX、论文共享按 owner 轮转的硬界队列；完整 Turn 译文先提交并终结任务，15 秒上限的可重建分段富化再排到同一 owner 队尾，饱和可丢弃且不新建线程；前台发送仅在自身 owner 内插队；同一 worker 值还限制实际 MT/LLM 并发；其他饱和后台返回可重试 `server_busy`/HTTP 503，发送路径降级为带 `server_busy` 原因的原文 |
-| 翻译限流调用预算 | 每次翻译个人 4..8、分布式 16，显式硬上限 64 个真实上游限流响应 | 等待槽位不计数；预算耗尽终止整项可选翻译且禁止 direct fallback；交互式编码/研究调度默认仍可等待恢复 |
-| 存储启动余量 | `data/` 所在卷容量的 1%，限制在 256 MiB..2 GiB | 不让 SQLite/WAL 吃掉文件系统最后空间 |
-| cgroup admission | 源码 96%；Compose 90% | 高压时拒绝新任务 |
-| process RSS admission | 新任务必须还能在 worker 硬上限内容纳一个 `TOFU_TASK_RSS_RESERVE_MB` 包络 | 即使共享 cgroup 尚有数百 GiB，也不再把已经接近自身上限的 worker 推过回收线 |
-| 大请求闸门 | process RSS 每轮检查；共享 cgroup 在源码 95% / Compose 90% 时检查，且绝对余量低于 `max(64 MiB, body×8)` 才拒绝 | 先在软 RSS 线触发派生上下文裁剪，同时避免共享 cgroup 百分比假阳性 |
-| aggregate relief | 源码 92%；Compose 85% | 清缓存、丢日志页缓存、`malloc_trim` |
-| aggregate relief 冷却 | 连续 5 次无有效回收后默认 600→1200→2400→3600 秒封顶；压力跌回触发线下或有效回收后复位 | 共享 cgroup/FUSE slab 持续压力下减少无效热缓存清空，日志、OOM 检查与进程 RSS 防线继续 |
-| 进程软 RSS | 个人按有效容量/当前余量推导；8 GiB 常见结果 2 GiB | 在 worker 变胖时主动回收 |
-| 进程硬 RSS | 个人按有效容量/当前余量推导；8 GiB 常见结果 3 GiB | 应用与 manager 独立采样，超限优雅轮换 worker |
-| 外部恢复 | manager / container runtime | OOM、崩溃、卡死后重新拉起 |
+| 会话目录到达合并 | 与 Sidecar RPC 提示相同（固定 64），硬上限 256；8 ms 到达窗 | 仅合并同 owner/同投影且尚未开始的读取；开始即摘除，完成结果不缓存，饱和时直读 |
+| 增量翻译 | 每个执行任务一个 accumulator；闭合的叙述/推理轮次没有数量或字符准入闸 | 预览策略与已完成分段缓存跨空闲线程退役保留；终态 handoff 永不丢弃 |
+| 共享翻译通道 | 按需启动的 owner 公平通道：每个受理的调用都立即获得 worker；`TOFU_TRANSLATE_WORKERS` 固定 16，只决定空闲线程复用；空闲 60/600 秒退线程 | 发送前、显式文本、整轮、PPTX、论文共享同一通道，没有活跃/等待数量配额；完整 Turn 译文先提交并终结任务，可重建的分段富化排在同一 owner 之后；前台发送仅在自身 owner 内插队 |
+| 翻译限流调用预算 | 每次翻译个人固定 8、分布式 16，显式硬上限 64 个真实上游限流响应 | 等待槽位不计数；预算耗尽终止整项可选翻译且禁止 direct fallback；交互式编码/研究调度默认仍可等待恢复 |
+| 存储启动余量 | `data/` 所在卷容量的 1%，限制在 256 MiB..2 GiB | 不让 SQLite/WAL 吃掉文件系统最后空间；这是持久性保护，不是性能限制 |
+| aggregate relief | 源码 92%；Compose 85%，按 reclaim-aware 有效压力（用量减 `inactive_file`）触发 | 尽力清可重建缓存、丢日志页缓存、`malloc_trim`；从不阻塞、拒绝或收缩工作 |
+| aggregate relief 退避 | 每次无进展（实测回收 < 上限 0.1%）都推迟下一次：默认 37.5→75→150→300→600（第 5 次，CRITICAL 一次）→1200→2400→3600 秒封顶；一次有效回收，或有效压力低于触发线 2 个百分点才复位；自上次 relief 后 Tofu RSS 增长达到同一 0.1% 线时提前重开 | 共享 cgroup/FUSE slab 持续压力下不再每 30 秒清空热缓存；连续无进展中只有首条为 WARNING，重复条目为 INFO，升级为一次 CRITICAL；压力日志与 OOM 检查不受退避影响 |
+| 外部恢复 | manager / container runtime | 内核 OOM kill、崩溃、卡死后重新拉起；manager 把 OOM kill 分类记录 |
 | worker 风暴熔断 | 120 秒内 5 次失败 | 指数退避，第 5 次暂停并要求显式恢复 |
 | 任务恢复熔断 | 2 分钟 5 次 boot | 避免恢复任务形成重启风暴 |
 
@@ -224,20 +232,25 @@ MCP 装配、内存选择或上下文预取；阶段中取消时，预取池在�
 future 并释放任务引用。排障时若看到 `aborted_during_prep_<stage>`，该任务不应再有
 后续 LLM 请求；若仍有，则是取消门禁回归。
 
-共享 cgroup 的百分比只是开始评估的信号，不是单独的拒绝条件。这点对
-Tofu 与其他进程共享的大 cgroup 尤其重要：`99%` 可能仍有 1 GiB 以上绝对余量，
-不应拒绝几 MiB 的请求。只有当百分比越线且请求特定峰值包络仍无法容纳时，
-该分支才拒绝。worker 自身的软 RSS 包络是另一条独立边界，不要求共享 cgroup 先高压；
-否则单进程会先撞到按本机容量推导的 worker RSS 回收线。编排器随后先不调用摘要模型
-地裁剪派生上下文，在同一模型上有界重试；
-本地内存压力不是模型故障证据，不会触发模型切换或池救援。
+内存压力从不是拒绝条件：没有 cgroup 或进程 RSS 准入闸、没有请求前的内存余量
+检查，也不会因内存裁剪上下文、把回合结束为 `server_busy` 或轮换 worker。
+需要隔离时设置容器/cgroup 内存上限，由内核执行，而不是逐个拒绝请求。
 
-准入与请求包络判定使用 reclaim-aware 口径（`effective_pct` = 用量减去
-`memory.stat` 的立即可回收 page cache）。2026-09-18 事故：共享 cgroup 原始用量
-97% 中约 120 GiB 是其他租户的可回收缓存（tofu 自身 RSS <1 GiB），按原始口径
-拒绝一切新任务等于自我 DoS——同机 node/opencode/qemu 均无此自限。`memory.stat`
-不可读时退回原始口径（保守）。cgroup 准入闸可用 `TOFU_ADMISSION_CGROUP_PCT=0`
-整体关闭（保留更真实的进程自身 RSS 闸 `TOFU_ADMISSION_PROCESS_RSS`）。
+aggregate relief 的触发使用 reclaim-aware 有效压力（`effective_pct` = 用量减去
+`memory.stat` 的立即可回收 page cache；`memory.stat` 不可读时退回原始口径）。
+Problem：共享 cgroup（v1，上限
+220 GiB）原始用量 92–97%，其中约 93–99 GiB 是其他租户的 `inactive_file`，有效压力
+仅约 48–55%；按原始口径触发的 relief 全天每 30 秒运行一次（约 118 次/小时），每次
+清空 Tofu 自身缓存、重新 trim 同一批几百 MB 堆内存，用量却不动，且压力在
+91.1–92.0% 抖动时反复复位退避。Decision：触发与复位都用有效压力；每次无进展
+都按上表指数推迟下一次；复位要求有效压力低于触发线 2 个百分点（滞回）或一次
+有效回收；退避期间 Tofu 自身 RSS 增长达到有效回收线时提前重开（这部分增长
+正是 relief 能交还的）。两个阈值都是 cgroup 上限的比例，随探测容量缩放。压力
+日志 `logs/cgroup_pressure.log` 的 top-RSS 采样仍按原始口径，保留突发 OOM 前的
+证据。Alternatives considered：保留原始口径、只加大冷却——仍把他人缓存当压力，
+且那批 relief 每次都「有效」回收同一批反复长回的堆，退避永不生效；只按 Tofu 归属
+内存触发——不反映真实 OOM 风险；完全关闭 aggregate relief——工作集真正逼近上限
+时会失去让渡。
 
 数据目录在网络盘（FUSE/NFS）时，存储 RPC 的 5 秒默认 deadline 会被 fsync 风暴
 打穿：任何请求（包括纯读）都在单一 authority 写者后排队超时，全线 503。
@@ -251,34 +264,17 @@ fdatasync，掉电丢失窗口 ≤ flush 间隔，receipt 按 lost-ACK 幂等重
 可用 `.env` 显式调整：
 
 ```dotenv
-TOFU_PROCESS_RSS_RELIEF_MB=2048
-TOFU_PROCESS_RSS_RECYCLE_MB=2867
-TOFU_PROCESS_RSS_COOLDOWN_SEC=300
-TOFU_TASK_RSS_RESERVE_MB=512
 TOFU_CGROUP_RELIEF_COOLDOWN_SEC=600
-TOFU_MAX_INFLIGHT_TASKS=4
 TOFU_EXECUTOR_IDLE_SECONDS=300
 TOFU_PROJECT_REFRESH_IDLE_SECONDS=30
-TOFU_PROJECT_REFRESH_QUEUE_CAPACITY=64
 TOFU_PROJECT_UNDO_CACHE_CAPACITY=128
-TOFU_INCREMENTAL_TRANSLATE_ACTIVE=8
-TOFU_INCREMENTAL_TRANSLATE_QUEUE_CAPACITY=16
-TOFU_INCREMENTAL_TRANSLATE_PREVIEW_SEGMENTS=32
-TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS=30
-TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MIN_CHARS=256
+TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS=45
 TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MAX_429_ATTEMPTS=1
-FETCH_FILTER_MIN_CHARS=6000
-FETCH_FILTER_GATE_MAX_CHARS=6000
 TOFU_TRANSLATE_CACHE_MAX_MIB=256
 TOFU_TRANSLATE_MAX_429_ATTEMPTS=8
-TOFU_TRANSLATE_WORKERS=2
-TOFU_TRANSLATE_QUEUE_CAPACITY=16
 TOFU_TRANSLATE_WORKER_IDLE_SECONDS=60
 TOFU_NETPATH_INTERVAL=180
 TOFU_NETPATH_MAX_INTERVAL=3600
-TOFU_MODEL_CATALOG_STABLE_INTERVAL=43200
-TOFU_MODEL_CATALOG_FAILURE_INTERVAL=172800
-TOFU_ADMISSION_CGROUP_PCT=90
 TOFU_STORAGE_RPC_DEADLINE_S=20
 TOFU_DB_DURABILITY=strict
 TOFU_MANAGER_MAX_FAILURES=5
@@ -288,17 +284,14 @@ TOFU_SQLITE_SNAPSHOT_MAX_AGE_HOURS=26
 ```
 
 `python serverctl.py doctor` 的 `Probe`/`Budget` 行会显示本次探查输入、实际数据
-路径、日志/存储余量和当前零配置预算。启动器把同一次快照物化进 child 环境，避免
-主进程与 Sidecar 因瞬时
-余量变化选择不同并发。显式 `.env` 值优先于探针，并单独显示在 `Override` 行。
-个人模式的 `TOFU_MAX_INFLIGHT_TASKS` 仍受 worker RSS 硬边界约束；要提高并发，必须
-同时用测量结果提高 `TOFU_PROCESS_RSS_RECYCLE_MB` 或降低已证实的单任务包络，不能只把
-任务数从 4 改成 8。
+路径、日志/存储余量和当前零配置预算；`unlimited` 设置显示为 `unlimited`。启动器
+把同一次快照物化进 child 环境，避免主进程与 Sidecar 因瞬时余量变化选择不同的保留
+预算；执行类默认值在所有主机上相同。显式 `.env` 值优先，并单独显示在
+`Override` 行。
 
-阈值必须来自观测，不要为追求更高吞吐直接关闭保护。若合法单任务就超过软阈值，
-先把 PDF/视频/浏览器等重任务迁到受限 worker，再提高阈值。
-manager 只依赖标准库和 `/proc`，即使应用导入失败或仍运行旧代码，也会执行硬 RSS
-上限；这个外部回收同样计入 120 秒滚动失败窗口，持续泄漏不会演变为无限重启风暴。
+manager 只依赖标准库和 `/proc`：它把内核 OOM kill 与崩溃分类记录并重启 worker，
+这些失败计入 120 秒滚动失败窗口，持续泄漏不会演变为无限重启风暴。它不按 RSS
+终止 worker。
 
 ## 四、Kubernetes 基线
 
@@ -337,7 +330,7 @@ spec:
 - cgroup memory ≥80% 持续 5 分钟告警，≥90% 立即告警；
 - `oom_kill` 增量立即告警，不能只看进程退出码；
 - 10 分钟内 worker 重启 ≥3 次立即告警；
-- worker RSS 连续增长、回收后仍不下降立即告警；
+- worker RSS 连续增长、aggregate relief 后仍不下降立即告警（告警供排障，Tofu 不会因此拒绝或轮换）；
 - `/health/live` 失败 2 分钟、`/health/ready` 不就绪 30 秒、磁盘可用 <15%、inode <10%；
 - 备份超 26 小时未成功、最近一次恢复演练失败立即告警。
 - `system.metrics.attempt_events.by_type` 的写入字节增速异常，或任一
@@ -368,8 +361,8 @@ python3 -m lib.logging_pkg.log_diagnostics --max-bytes 32768 --pretty
 支持包会自动包含有界且常见凭据尽力脱敏的 worker、资源压力与 faulthandler 等
 诊断尾部，不读取对话存储或数据库；日志可能引用用户文本或未知格式的密钥，分享前
 应检查，严格场景使用 `--no-logs`。`doctor` 会显示 cgroup 使用量/上限、swap 上限、内核 OOM 次数、当前 worker RSS、
-manager 实际执行的 worker RSS 硬上限、Supervisor 已加载/磁盘期望的源码指纹，以及
-worker 当前/下一次启动的任务并发与 RSS 预算。`supervisor_source_stale` 只需执行
+Supervisor 已加载/磁盘期望的源码指纹，以及 worker 当前/下一次启动的资源预算
+（`TOFU_MAX_INFLIGHT_TASKS`、`TOFU_AGENT_WORKERS`）。`supervisor_source_stale` 只需执行
 `serverctl.py ensure`，不会停止 worker；`worker_resource_budget_stale` 必须等任务空闲后
 执行一次获批的 managed restart，禁止为消除 warning 强杀仍在运行的对话。
 最近快照年龄和路径。manager 状态将 worker exit 分成 `workerFailureCount` 与
@@ -377,7 +370,8 @@ worker 当前/下一次启动的任务并发与 RSS 预算。`supervisor_source_
 混合计数，不能再当 crash 数。clean marker 必须同时匹配 PID、host、worker generation
 时间戳且只能消费一次；手动关机把 durable desired state 改成 stopped，显式 restart
 证书或 manager 在发信号前持久化的 PID 意图会立即恢复。没有该意图的普通 SIGTERM
-以及 memory recycle 都进入故障预算，防止外部信号或泄漏形成无限拉起。状态还会保留实际恢复 RTO。
+进入故障预算，防止外部信号形成无限拉起；旧版本 worker 写下的 `memory_recycle`
+关机标记同样计入。状态还会保留实际恢复 RTO。
 `status --json` 中 `ready` 表示 manager 状态与健康探测一致，
 `applicationReachable` 表示通过 PID 身份校验的实际应用端点可达；两者不一致时
 `portDrift` 与 `applicationUrl` 直接指出可用端口和生命周期漂移。`status` 在
@@ -402,7 +396,7 @@ manager 离线、启动卡住、端口漂移或运行态 conflict/crashloop/degr
 启动锁不得因心跳过期被 unlink：活 owner 释放锁或退出之前拒绝第二实例。
 独立 Supervisor 保留控制与诊断入口；应用循环完全卡住时应用 HTTP 本身仍可能
 无法响应，不伪报健康。现有依赖重试仍按各自截止时间和所有权运行，不重放已完成
-工具或切换存储。实际进程退出、显式获批 stop/restart 与既有 RSS 硬边界各自保留。
+工具或切换存储。实际进程退出与显式获批 stop/restart 各自保留。
 Alternatives：延长强杀阈值仍会中断可恢复任务；抢锁另起实例会产生双 owner；
 将探针失败伪装成健康会掩盖不可用。本策略保存恢复机会，不承诺修复永久内核阻塞。
 
@@ -413,13 +407,14 @@ Alternatives：延长强杀阈值仍会中断可恢复任务；抢锁另起实�
 ```bash
 python -m pytest -q tests/cgroup_guard/test_cgroup_guard.py tests/server/test_server_manager.py \
   tests/storage/test_storage_runtime_shutdown.py tests/lifecycle_approval/test_update_restart_guard.py \
-  tests/tasks_pkg/test_shutdown_quiesce.py tests/server/test_shutdown_hard_deadline.py
+  tests/tasks_pkg/test_shutdown_quiesce.py tests/server/test_shutdown_hard_deadline.py \
+  tests/meta/test_hardware_never_limits_work.py
 python healthcheck.py
 python serverctl.py doctor
 ```
 
 每月至少在预发布环境演练一次：强制杀 worker 后确认 manager 在 60 秒内换 PID；
-制造 85%/90% 内存压力确认先背压再恢复；中断数据库/网络确认错误可见且不会无限
+制造 85%/90% 内存压力确认 aggregate relief 只回收缓存、任务照常受理且不被拒绝；中断数据库/网络确认错误可见且不会无限
 重试；从异机备份恢复到空环境并校验 SQLite `integrity_check`。故障注入不要在有真实
 进行中任务的生产实例上执行。
 
@@ -452,10 +447,10 @@ source validation. This magnifies metadata/read latency on FUSE mounts.
 Decision: enumerate with DirEntry metadata without following directory links,
 read small source files concurrently with ordered SHA-256 framing, and use
 one complete source validation at the application preparation boundary.
-Worker lanes derive from the cached launch CPU/headroom observation; each lane
-reserves 64 MiB of headroom and at most two 1 MiB-prefetch results are pending.
-Large inputs retain streamed hashing; the temporary executor joins on every
-exit, including a read failure. No persistent cache or thread is introduced.
+Every input read is submitted to one temporary demand executor and streams
+64 KiB chunks into an anonymous spool file; the cached launch observation only
+sizes how many idle reader threads stay warm, never how many reads run.
+The temporary executor joins on every exit, including a read failure. No persistent cache or thread is introduced.
 Manager pre-stop and pre-spawn checks remain separate freshness boundaries.
 Alternatives rejected: mtime-only caches miss equal-size/preserved-mtime edits;
 dropping source freshness or post-repair validation permits stale bundles;

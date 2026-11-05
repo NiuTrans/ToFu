@@ -124,8 +124,7 @@ impl FrameAdmissionBudget {
             .in_flight_bytes
             .checked_add(bytes);
         if next_bytes.is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::accounting_overflow(
                 "storage.v2 frame byte accounting overflow",
             ));
         }
@@ -280,8 +279,7 @@ impl PendingStreamedRequest {
             payload
                 .try_reserve_exact(total_payload_bytes)
                 .map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::OutOfMemory,
+                    crate::resource_exhaustion::reservation_failure(
                         "storage.v2 streamed request allocation failed",
                     )
                 })?;
@@ -1081,7 +1079,13 @@ pub(crate) fn dispatch_one_request_inner_mode(
                     },
                 }
             }
-            Ok(admitted) if admitted.operation.kind == StorageOperationKind::Query => {
+            Ok(admitted) if admitted.operation.kind == StorageOperationKind::Query
+                || admitted.operation.name == "project_brain.recovery.snapshot" => {
+                // This maintenance operation is a certified read: no business
+                // mutation, receipt, or outbox entry. Keep wire admission intact
+                // but hydrate history on a pinned replica. Holding the writer
+                // here makes recovery trigger the authority wedge watchdog.
+                // Replicas remain read-only if its IR ever attempts a mutation.
                 if request.command_id.is_none() && !stores.authority.is_poisoned()
                     && connection_alive() && now_unix_ms() < request.deadline_unix_ms {
                     if let Some(cached) = stores.published_queries.as_ref().and_then(|view| view.try_cached(request.into())) {
@@ -1524,8 +1528,10 @@ fn error_response(
         SessionDispatchError::Execution(execution) => {
             let status = match execution {
                 SemanticExecutionError::InvalidPayload
+                | SemanticExecutionError::InvalidPayloadFence(_)
                 | SemanticExecutionError::ToolResultQuery(_, _)
-                | SemanticExecutionError::DiagnosticInvalidPayload => STATUS_BAD_REQUEST,
+                | SemanticExecutionError::DiagnosticInvalidPayload
+                | SemanticExecutionError::SearchCursorInvalidPayload => STATUS_BAD_REQUEST,
                 SemanticExecutionError::DiagnosticUnsupported => STATUS_NOT_IMPLEMENTED,
                 SemanticExecutionError::NotFound => STATUS_BAD_REQUEST,
                 SemanticExecutionError::AuthorityScopeMismatch => STATUS_FORBIDDEN,
@@ -1543,14 +1549,21 @@ fn error_response(
                 SemanticExecutionError::Integrity(_) => STATUS_INTEGRITY_FAILURE,
                 SemanticExecutionError::StorageUnavailable => STATUS_UNAVAILABLE,
                 SemanticExecutionError::PayloadTooLarge
-                | SemanticExecutionError::ResourceExhausted
+                | SemanticExecutionError::ResourceExhausted(_)
+                | SemanticExecutionError::ResourceBound(_)
                 | SemanticExecutionError::CapacityBusy => STATUS_RESOURCE_EXHAUSTED,
             };
             let code = execution.code();
-            // Integrity carries the exact fence diagnostic; every other code
-            // keeps the historic behavior of echoing the code as the message.
+            // Integrity, literal validation fences and deterministic resource
+            // bounds carry their exact diagnostic; every other code keeps the
+            // historic behavior of echoing the code as the message.
             let error_message = match &execution {
                 SemanticExecutionError::Integrity(message) => message.clone(),
+                SemanticExecutionError::InvalidPayloadFence(reason) => (*reason).to_owned(),
+                SemanticExecutionError::SearchCursorInvalidPayload => {
+                    "invalid conversation search cursor".to_owned()
+                }
+                SemanticExecutionError::ResourceBound(bound) => bound.message().to_owned(),
                 _ => code.to_owned(),
             };
             (status, code, execution.retryable(), error_message)
@@ -1609,6 +1622,53 @@ mod tests {
 
     fn authenticator() -> StorageV2Authenticator {
         StorageV2Authenticator::new(&[9; crate::protocol::AUTH_TOKEN_BYTES], scope()).unwrap()
+    }
+
+    #[test]
+    fn recovery_snapshot_reads_published_state_while_writer_is_held() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        database.configure_logical_outbox(&[72; 32], 1024 * 1024, 128 * 1024).unwrap();
+        let session = authenticator().authenticate(&hello()).unwrap();
+        let work_id = format!("pw_{:x}", Sha256::digest(b"task"));
+        let mut start = request("project_brain.work.start", 11, json!({
+            "owner_user_id": 11, "project_key": "/recovery",
+            "work_item": {"id": &work_id[..27], "taskId": "task", "status": "active",
+                "title": "Recover me", "startedAt": 1, "conversationId": "conversation",
+                "trigger": "file_write", "changedPaths": [], "artifacts": [],
+                "resultSummary": "", "finishedAt": null,
+                "_titlePriority": 100, "_titleRefined": false}, "timestamp": 1
+        }));
+        start.command_id = Some("recovery-seed".into());
+        let seeded = session.dispatch(&mut database, &start, 1_000);
+        assert_eq!(seeded.status, 0, "{:?}", seeded.error_message);
+        let before = database.logical_outbox_status(7, 11).unwrap().last_sequence;
+        let wal_before = database.wal_len().unwrap();
+        let published = database.enable_published_queries().unwrap();
+        let database = Mutex::new(database);
+        let stores = StorageV2Stores::new(&database, None).with_published_queries(published);
+        let crate::authority_admission::Admission::Entered(_permit) = stores.authority_admission
+            .acquire(Instant::now() + Duration::from_secs(1), &mut || true).unwrap()
+            else { panic!("writer admission failed") };
+        let guard = database.lock().unwrap();
+        let mut snapshot = request("project_brain.recovery.snapshot", 11, json!({}));
+        snapshot.command_id = Some("recovery-read".into());
+        snapshot.deadline_unix_ms = 1_100;
+        let RequestDispatch::Responded(response) = dispatch_one_request(
+            &stores, &session, &snapshot, false, 1_000, &mut || 1_000, &mut || true,
+        ).unwrap() else { panic!("recovery disconnected") };
+        assert_eq!(response.status, 0, "{:?}", response.error_message);
+        let page: Value = serde_json::from_slice(&response.payload).unwrap();
+        assert_eq!(page["projects"][0]["workItems"][0]["taskId"], "task");
+        assert_eq!(page["capped"], false);
+        assert_eq!(guard.wal_len().unwrap(), wal_before);
+        assert_eq!(guard.logical_outbox_status(7, 11).unwrap().last_sequence, before);
+        // Snapshot routing never bypasses the normal admission boundary.
+        snapshot.owner_id = 12;
+        let RequestDispatch::Responded(denied) = dispatch_one_request(
+            &stores, &session, &snapshot, false, 1_000, &mut || 1_000, &mut || true,
+        ).unwrap() else { panic!("denied recovery disconnected") };
+        assert_eq!(denied.error_code.as_deref(), Some("authority_scope_mismatch"));
     }
 
     #[test]
@@ -1707,6 +1767,27 @@ mod tests {
         let message = response.error_message.unwrap();
         assert!(message.contains("stored turn projection is missing segments"));
         assert!(!message.contains('\n'));
+    }
+
+    #[test]
+    fn validation_fence_names_its_literal_while_other_invalid_input_stays_opaque() {
+        let req = request("turn.event.record", 11, json!({}));
+        let respond = |error: io::Error| error_response(
+            &req,
+            STORAGE_SCHEMA_VERSION,
+            SessionDispatchError::Execution(crate::semantic_executor::map_storage_error(error)),
+        );
+        let fenced = respond(crate::semantic_executor::validation_fence(
+            "attempt event exceeds the conversation-sync document bound"));
+        assert_eq!(fenced.status, STATUS_BAD_REQUEST);
+        assert_eq!(fenced.error_code.as_deref(), Some("database_protocol_error"));
+        assert!(!fenced.retryable);
+        assert_eq!(fenced.error_message.as_deref(),
+            Some("attempt event exceeds the conversation-sync document bound"));
+        let opaque = respond(io::Error::new(
+            io::ErrorKind::InvalidInput, "invalid type: string \"private user-body\""));
+        assert_eq!(opaque.error_code.as_deref(), Some("database_protocol_error"));
+        assert_eq!(opaque.error_message.as_deref(), Some("database_protocol_error"));
     }
 
     #[test]
@@ -1938,7 +2019,7 @@ mod tests {
         let prepared = {
             let mut authority = database.lock().unwrap();
             let engine = authority.engine_mut_for_test();
-            engine.set_rotation_threshold_bytes_for_test(crate::ACTIVE_LOG_MAX_BYTES);
+            engine.set_rotation_threshold_bytes_for_test(crate::ACTIVE_LOG_CHECKPOINT_BYTES);
             for index in 0..31_u8 {
                 let payload = vec![index; 2 * 1024 * 1024];
                 engine
@@ -2685,6 +2766,31 @@ mod tests {
     }
 
     #[test]
+    fn resource_exhaustion_retry_flag_follows_its_contract_reason() {
+        // A deterministic per-request bound (domain_resource_bound) arrives
+        // non-retryable and names itself: replaying the identical request
+        // re-reads the same bytes to be refused again. Transient shedding
+        // stays retryable and keeps echoing the code.
+        let request = request("conversation.get", 11, json!({"conv_id": "c", "user_id": 11}));
+        for (execution, retryable, message) in [
+            (crate::semantic_executor::map_storage_error(
+                crate::resource_exhaustion::domain_bound("turn list exceeds 10000 rows")),
+                false, "turn list exceeds 10000 rows"),
+            (crate::semantic_executor::map_storage_error(
+                crate::resource_exhaustion::capacity_quota("swarm session capacity reached")),
+                true, "database_resource_exhausted"),
+        ] {
+            let response = error_response(
+                &request, STORAGE_SCHEMA_VERSION,
+                SessionDispatchError::Execution(execution));
+            assert_eq!(response.status, STATUS_RESOURCE_EXHAUSTED);
+            assert_eq!(response.error_code.as_deref(), Some("database_resource_exhausted"));
+            assert_eq!(response.error_message.as_deref(), Some(message));
+            assert_eq!(response.retryable, retryable);
+        }
+    }
+
+    #[test]
     fn sub_frame_and_zero_memory_hints_select_file_buffers_without_refusal() {
         for hint in [0, 1, 1024, MAX_FRAME_BODY_BYTES - 1] {
             let budget = FrameAdmissionBudget::new(hint).unwrap();
@@ -2966,6 +3072,289 @@ mod tests {
             assert_eq!(stores.authority_admission.waiting_count(),0);
             assert_eq!(database.lock().unwrap().snapshot_pin_metrics().unwrap().active_handles,0);
         }
+    }
+
+    fn retention_command(operation: &str, payload: Value, command_id: &str) -> Request {
+        let mut command = request(operation, 11, payload);
+        command.command_id = Some(command_id.to_owned());
+        command
+    }
+
+    fn dispatched(database: &mut AuthorityDatabase, session: &StorageV2Session, request: &Request, now: u64) -> Value {
+        let response = session.dispatch(database, request, now);
+        assert_eq!(response.status, 0, "{} {:?}", request.operation, response.error_message);
+        serde_json::from_slice(&response.payload).unwrap()
+    }
+
+    /// One settled Attempt whose sync replay, Attempt events and task events
+    /// all fall before the retention cutoff (2,000 ms). Production write-path
+    /// settings are pinned; the logical outbox is optional per deployment.
+    fn seed_settled_retention(database: &mut AuthorityDatabase, session: &StorageV2Session, outbox: bool) {
+        database.set_write_overlay_for_test(true);
+        database.set_entity_tombstone_reclaim_override_for_test(Some(true));
+        let mut seed = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        crate::turn::append_settled(database, &mut seed, &crate::turn::AppendSettledRequest {
+            conversation_id: "retention-conversation".to_owned(),
+            actor: "assistant".to_owned(),
+            status: "pending".to_owned(),
+            projection_json: serde_json::to_vec(&json!({
+                "content": "before", "thinking": "",
+                "largeStableEvidence": "x".repeat(128 * 1024),
+            })).unwrap(),
+            projection_timestamp: None,
+            settlement_json: b"{}".to_vec(),
+            lane_id: "main".to_owned(),
+            command_id: "retention-seed".to_owned(),
+            kind: "reply".to_owned(),
+            run_id: String::new(),
+            turn_id: "retention-turn".to_owned(),
+            attempt_id: Some("retention-attempt".to_owned()),
+            created_at_ms: 1_000,
+            committed_at_ms: 1_000,
+            defaults: crate::conversation_header::TurnDefaults {
+                allow_create: true,
+                title: "Retention".to_owned(),
+                settings_json: b"{}".to_vec(),
+                created_at_ms: 1_000,
+            },
+        }).unwrap();
+        database.commit(seed).unwrap();
+        let mut bind = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        crate::turn::attempt_bind(database, &mut bind, "retention-attempt", "retention-task", "", 1_200).unwrap();
+        database.commit(bind).unwrap();
+        if outbox {
+            database.configure_logical_outbox(&[72; 32], 1024 * 1024, 128 * 1024).unwrap();
+        }
+        dispatched(database, session, &retention_command("turn.event.record", json!({
+            "attempt_id": "retention-attempt", "task_id": "retention-task", "user_id": 11,
+            "slim": true, "content": "after", "thinking": "running",
+            "task_event": {
+                "task_id": "retention-task", "sequence": 2,
+                "event": {"type": "delta", "content": "after"},
+                "preceding_events": [
+                    {"task_id": "retention-task", "sequence": 0, "event": {"type": "delta", "content": "a"}},
+                    {"task_id": "retention-task", "sequence": 1, "event": {"type": "delta", "content": "ft"}}
+                ]
+            },
+            "now": 1_300
+        }), "retention-running"), 1_300);
+        dispatched(database, session, &retention_command("turn.event.record", json!({
+            "attempt_id": "retention-attempt", "task_id": "retention-task", "user_id": 11,
+            "terminal": true, "status": "completed", "slim": true,
+            "content": "final", "thinking": "done",
+            "settlement": {"outcome": "completed", "cause": "finished", "resumeOptions": []},
+            "now": 1_400
+        }), "retention-terminal"), 1_400);
+    }
+
+    fn retention_state(database: &mut AuthorityDatabase, session: &StorageV2Session) -> Value {
+        let mut state = serde_json::Map::new();
+        for (name, operation, payload) in [
+            ("sync", "turn.sync.changes", json!({"conversation_id": "retention-conversation", "user_id": 11, "after": 0, "limit": 100})),
+            ("attemptEvents", "turn.events.list", json!({"attempt_id": "retention-attempt", "user_id": 11, "projection_mode": "patch"})),
+            ("turn", "turn.get", json!({"conversation_id": "retention-conversation", "turn_id": "retention-turn", "user_id": 11})),
+            ("settledTaskEvents", "event.list", json!({"task_id": "retention-task"})),
+            ("settledTaskBounds", "event.bounds", json!({"task_id": "retention-task"})),
+            ("liveTaskEvents", "event.list", json!({"task_id": "live-task"})),
+            ("liveTaskBounds", "event.bounds", json!({"task_id": "live-task"})),
+            ("foreground", "record.list", json!({"namespace": "retention-foreground", "prefix": "", "limit": 100})),
+        ] {
+            state.insert(name.to_owned(), dispatched(database, session, &request(operation, 11, payload), 9_000));
+        }
+        Value::Object(state)
+    }
+
+    /// The first deferred write after any overlay merge or structural commit
+    /// republishes the root directory; under tombstone reclaim that root is
+    /// part of every range witness. Steady state between merges starts there.
+    fn republish_root(databases: [&mut AuthorityDatabase; 2], session: &StorageV2Session, label: &str) {
+        for database in databases {
+            dispatched(database, session, &retention_command("record.put", json!({"namespace": "retention-prime",
+                "key": label, "value": {"prime": true}}), &format!("prime-{label}")), 4_000);
+        }
+    }
+
+    #[test]
+    fn retention_prunes_prepare_outside_writer_beside_live_writes_and_match_serial() {
+        for outbox in [false, true] {
+            let session = authenticator().authenticate(&hello()).unwrap();
+            let control_directory = tempfile::tempdir().unwrap();
+            let mut control = AuthorityDatabase::initialize(control_directory.path()).unwrap();
+            seed_settled_retention(&mut control, &session, outbox);
+            let directory = tempfile::tempdir().unwrap();
+            let mut seeded = AuthorityDatabase::initialize(directory.path()).unwrap();
+            seed_settled_retention(&mut seeded, &session, outbox);
+            let database = Mutex::new(seeded);
+            let stores = StorageV2Stores::new(&database, None);
+            // Sync replay releases its Attempt references before event retention.
+            let prunes = [
+                retention_command("turn.sync.prune", json!({"user_id": 11, "created_before_ms": 2_000, "max_rows": 20_000}), "retention-sync-prune"),
+                retention_command("turn.events.prune", json!({"user_id": 11, "settled_before_ms": 2_000, "max_attempts": 16, "max_rows": 4_096}), "retention-attempt-prune"),
+                retention_command("event.prune", json!({"created_before_ms": 2_000, "retention_class": "streaming", "limit": 100}), "retention-task-prune"),
+            ];
+            for (index, prune) in prunes.iter().enumerate() {
+                let now = 5_000 + index as u64;
+                // Live streaming load committed between preparation and commit.
+                let live = [
+                    retention_command("event.append", json!({"task_id": "live-task", "sequence": index + 1,
+                        "event": {"type": "delta", "content": "live"}}), &format!("live-append-{index}")),
+                    retention_command("record.put", json!({"namespace": "retention-foreground",
+                        "key": format!("k{index}"), "value": {"v": index}}), &format!("live-record-{index}")),
+                ];
+                republish_root([&mut control, &mut *database.lock().unwrap()], &session, &format!("{outbox}-{index}"));
+                let expected = session.dispatch(&mut control, prune, now);
+                assert_eq!(expected.status, 0, "{:?}", expected.error_message);
+                for write in &live {
+                    dispatched(&mut control, &session, write, now);
+                }
+                let admitted = session.admit(prune, now).unwrap();
+                let wal_before = database.lock().unwrap().wal_len().unwrap();
+                let ParallelPreparationOutcome::Prepared(prepared) = prepare_parallel_command(
+                    &stores, &session, admitted, &mut || now, &mut || true).unwrap()
+                    else { panic!("{} must prepare on the snapshot lane", prune.operation) };
+                assert_eq!(database.lock().unwrap().wal_len().unwrap(), wal_before);
+                for write in &live {
+                    dispatched(&mut database.lock().unwrap(), &session, write, now);
+                }
+                let Some(RequestDispatch::Responded(response)) = finish_parallel_command(
+                    &stores, &session, admitted, prepared, &mut || now, &mut || true).unwrap()
+                    else { panic!("{} conflicted with unrelated live writes (outbox={outbox})", prune.operation) };
+                assert_eq!(response.status, 0, "{:?}", response.error_message);
+                assert_eq!(response.payload, expected.payload, "{}", prune.operation);
+                if prune.operation == "turn.events.prune" {
+                    assert_ne!(serde_json::from_slice::<Value>(&response.payload).unwrap()["deleted_rows"], 0);
+                }
+                assert_eq!(database.lock().unwrap().snapshot_pin_metrics().unwrap().active_handles, 0);
+            }
+            let state = retention_state(&mut database.lock().unwrap(), &session);
+            assert_eq!(state, retention_state(&mut control, &session));
+            assert_eq!(state["attemptEvents"], json!([]));
+            assert_eq!(state["settledTaskEvents"], json!([]));
+            assert_eq!(state["turn"]["projection"]["content"], "final");
+            assert_eq!(state["liveTaskEvents"].as_array().unwrap().len(), 3);
+        }
+    }
+
+    #[test]
+    fn prepared_retention_prune_refused_by_root_republication_retries_on_writer() {
+        let session = authenticator().authenticate(&hello()).unwrap();
+        let control_directory = tempfile::tempdir().unwrap();
+        let mut control = AuthorityDatabase::initialize(control_directory.path()).unwrap();
+        seed_settled_retention(&mut control, &session, false);
+        let directory = tempfile::tempdir().unwrap();
+        let mut seeded = AuthorityDatabase::initialize(directory.path()).unwrap();
+        seed_settled_retention(&mut seeded, &session, false);
+        let database = Mutex::new(seeded);
+        let stores = StorageV2Stores::new(&database, None);
+        republish_root([&mut control, &mut *database.lock().unwrap()], &session, "before-merge");
+        let prune = retention_command("turn.sync.prune", json!({"user_id": 11,
+            "created_before_ms": 2_000, "max_rows": 20_000}), "merged-sync-prune");
+        let admitted = session.admit(&prune, 5_000).unwrap();
+        let ParallelPreparationOutcome::Prepared(prepared) = prepare_parallel_command(
+            &stores, &session, admitted, &mut || 5_000, &mut || true).unwrap()
+            else { panic!("turn.sync.prune must prepare on the snapshot lane") };
+        // A drain merge followed by the next deferred write physically
+        // replaces the witnessed root; reclaim forbids version-only reuse.
+        database.lock().unwrap().merge_entity_overlay_fully().unwrap();
+        control.merge_entity_overlay_fully().unwrap();
+        republish_root([&mut control, &mut *database.lock().unwrap()], &session, "after-merge");
+        assert!(finish_parallel_command(&stores, &session, admitted, prepared,
+            &mut || 5_000, &mut || true).unwrap().is_none(), "prepared prune survived root republication");
+        assert_eq!(database.lock().unwrap().snapshot_pin_metrics().unwrap().active_handles, 0);
+        let expected = session.dispatch(&mut control, &prune, 5_000);
+        assert_eq!(expected.status, 0, "{:?}", expected.error_message);
+        let RequestDispatch::Responded(response) = dispatch_one_request(
+            &stores, &session, &prune, false, 5_000, &mut || 5_000, &mut || true).unwrap()
+            else { panic!("prune retry disconnected") };
+        assert_eq!(response.status, 0, "{:?}", response.error_message);
+        assert_eq!(response.payload, expected.payload);
+        assert!(serde_json::from_slice::<Value>(&response.payload).unwrap()["deletedRows"].as_u64().unwrap() > 0);
+        assert_eq!(retention_state(&mut database.lock().unwrap(), &session), retention_state(&mut control, &session));
+    }
+
+    #[test]
+    fn prepared_attempt_event_prune_refused_by_a_new_reference_keeps_the_stream_on_writer_retry() {
+        let session = authenticator().authenticate(&hello()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut seeded = AuthorityDatabase::initialize(directory.path()).unwrap();
+        seed_settled_retention(&mut seeded, &session, false);
+        dispatched(&mut seeded, &session, &retention_command("turn.sync.prune", json!({"user_id": 11,
+            "created_before_ms": 2_000, "max_rows": 20_000}), "release-sync-references"), 4_000);
+        dispatched(&mut seeded, &session, &retention_command("record.put", json!({"namespace": "retention-prime",
+            "key": "steady", "value": {"prime": true}}), "prime-steady"), 4_000);
+        let database = Mutex::new(seeded);
+        let stores = StorageV2Stores::new(&database, None);
+        let events = |database: &Mutex<AuthorityDatabase>| dispatched(&mut database.lock().unwrap(), &session,
+            &request("turn.events.list", 11, json!({"attempt_id": "retention-attempt", "user_id": 11,
+                "projection_mode": "patch"})), 5_000);
+        let retained = events(&database);
+        assert!(!retained.as_array().unwrap().is_empty());
+        let prune = retention_command("turn.events.prune", json!({"user_id": 11, "settled_before_ms": 2_000,
+            "max_attempts": 16, "max_rows": 4_096}), "referenced-attempt-prune");
+        let admitted = session.admit(&prune, 5_000).unwrap();
+        let ParallelPreparationOutcome::Prepared(prepared) = prepare_parallel_command(
+            &stores, &session, admitted, &mut || 5_000, &mut || true).unwrap()
+            else { panic!("turn.events.prune must prepare on the snapshot lane") };
+        {
+            let mut authority = database.lock().unwrap();
+            let mut reference = authority.begin_with_identity_claim_scopes(7, 11).unwrap();
+            crate::turn::reference_attempt_events_for_test(&authority, &mut reference,
+                "retention-attempt", "retention-conversation", 999, 1).unwrap();
+            authority.commit(reference).unwrap();
+        }
+        assert!(finish_parallel_command(&stores, &session, admitted, prepared,
+            &mut || 5_000, &mut || true).unwrap().is_none(), "a stale prune deleted a referenced stream");
+        assert_eq!(database.lock().unwrap().snapshot_pin_metrics().unwrap().active_handles, 0);
+        assert_eq!(events(&database), retained);
+        let RequestDispatch::Responded(response) = dispatch_one_request(
+            &stores, &session, &prune, false, 5_000, &mut || 5_000, &mut || true).unwrap()
+            else { panic!("prune retry disconnected") };
+        assert_eq!(response.status, 0, "{:?}", response.error_message);
+        assert_eq!(serde_json::from_slice::<Value>(&response.payload).unwrap(),
+            json!({"deleted_rows": 0, "deleted_attempts": 0, "remaining": 1}));
+        assert_eq!(events(&database), retained);
+    }
+
+    #[test]
+    fn prepared_task_event_prune_refuses_concurrent_append_to_its_task() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut authority = AuthorityDatabase::initialize(directory.path()).unwrap();
+        authority.set_write_overlay_for_test(true);
+        authority.set_entity_tombstone_reclaim_override_for_test(Some(true));
+        let database = Mutex::new(authority);
+        let stores = StorageV2Stores::new(&database, None);
+        let session = authenticator().authenticate(&hello()).unwrap();
+        let append = |sequence: u64| retention_command("event.append", json!({"task_id": "renewed-task",
+            "sequence": sequence, "event": {"type": "delta"}}), &format!("renewed-{sequence}"));
+        for sequence in [1, 2] {
+            dispatched(&mut database.lock().unwrap(), &session, &append(sequence), 1_000);
+        }
+        let prune = retention_command("event.prune", json!({"created_before_ms": 2_000,
+            "retention_class": "streaming", "limit": 100}), "renewed-prune");
+        let admitted = session.admit(&prune, 5_000).unwrap();
+        let ParallelPreparationOutcome::Prepared(prepared) = prepare_parallel_command(
+            &stores, &session, admitted, &mut || 5_000, &mut || true).unwrap()
+            else { panic!("event.prune must prepare on the snapshot lane") };
+        // The prepared batch retires the whole task; this append changes its
+        // metadata and physical stream, so publishing the stale batch would
+        // corrupt both.
+        dispatched(&mut database.lock().unwrap(), &session, &append(3), 5_000);
+        assert!(finish_parallel_command(&stores, &session, admitted, prepared,
+            &mut || 5_000, &mut || true).unwrap().is_none(), "stale prune was published");
+        let sequences = |database: &Mutex<AuthorityDatabase>| dispatched(&mut database.lock().unwrap(),
+            &session, &request("event.list", 11, json!({"task_id": "renewed-task"})), 5_000)
+            .as_array().unwrap().iter().map(|row| row["sequence"].as_u64().unwrap()).collect::<Vec<_>>();
+        assert_eq!(sequences(&database), vec![1, 2, 3]);
+        let RequestDispatch::Responded(response) = dispatch_one_request(
+            &stores, &session, &prune, false, 5_000, &mut || 5_000, &mut || true).unwrap()
+            else { panic!("prune retry disconnected") };
+        assert_eq!(response.status, 0, "{:?}", response.error_message);
+        assert_eq!(serde_json::from_slice::<Value>(&response.payload).unwrap()["deleted"], 2);
+        assert_eq!(sequences(&database), vec![3]);
+        assert_eq!(dispatched(&mut database.lock().unwrap(), &session,
+            &request("event.bounds", 11, json!({"task_id": "renewed-task"})), 5_000),
+            json!({"retained_count": 1, "base_cursor": 3, "next_cursor": 4}));
+        assert_eq!(database.lock().unwrap().snapshot_pin_metrics().unwrap().active_handles, 0);
     }
 
 }

@@ -128,6 +128,11 @@ ATTEMPT_DISPATCH_REQUEST_STARTED_AT_MS_CONFIG_KEY = (
 #: recovery, and stamped before the rebind precisely because the rebind
 #: would otherwise erase the evidence.
 RESUME_MODEL_SWITCH_FROM_CONFIG_KEY = "_resumeModelSwitchFrom"
+#: The accepted human input still owes its send-path auto-translation. The
+#: turn command persists the authored text at once; attempt start translates
+#: it in the background and the worker joins the result before its first model
+#: request, so a slow translator never holds the browser's command open.
+DEFERRED_INPUT_TRANSLATION_CONFIG_KEY = "_deferredInputTranslation"
 ATTEMPT_DISPATCH_MODES = frozenset({"", CONVERSATION_EXECUTOR_DISPATCH_MODE})
 
 
@@ -145,6 +150,7 @@ __all__ = [
     "AttemptDispatchCancelled",
     "ATTEMPT_DISPATCH_REQUEST_STARTED_AT_MS_CONFIG_KEY",
     "RESUME_MODEL_SWITCH_FROM_CONFIG_KEY",
+    "DEFERRED_INPUT_TRANSLATION_CONFIG_KEY",
     "ATTEMPT_DISPATCH_MODES",
     "CONVERSATION_EXECUTOR_DISPATCH_MODE",
     "normalize_attempt_dispatch_mode",

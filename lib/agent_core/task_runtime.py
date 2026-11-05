@@ -69,9 +69,11 @@ quality dimensions get a new KEY inside ``artifact_quality`` — never a new
 """
 
 import asyncio
+from contextlib import contextmanager
 
 from lib.agent_core.publication import publication_commit, check_publication
 from copy import deepcopy
+from dataclasses import dataclass
 import json
 import threading
 from lib.agent_core.abort_signal import AbortSignal
@@ -89,7 +91,7 @@ from lib.agent_core.execution_session import (
 )
 from lib.ids import short_id
 from lib.identity import PrincipalContext, require_user_id
-from lib.log import bind_log_context, get_logger, req_id, set_req_id
+from lib.log import get_logger, req_id, set_log_context, set_req_id
 from lib.task_replay.task_replay import (
     TASK_REPLAY_EVENT_SEQUENCE_FIELD,
     TASK_REPLAY_EVENT_TYPE_FIELD,
@@ -108,6 +110,14 @@ except ImportError:  # pragma: no cover - minimal embedded installations
 
 
 _TASK_RUNTIME_RETENTION_BUDGET = resolve_task_runtime_retention_budget()
+
+
+@dataclass(frozen=True)
+class TaskCompletion:
+    """Result and presentation fields produced by an owned completion commit."""
+
+    result: Any
+    terminal_event_fields: dict
 
 
 _STALE_ATTEMPT_REJECTION_SUFFIX = (
@@ -145,6 +155,8 @@ _RUNTIME_OWNED_TASK_FIELDS = frozenset({
     '_requestId',
     '_executionSession',
     '_executionTerminalizing',
+    '_activeWorkerCount',
+    '_workerFinishedAt',
     'kind',
     'status',
     'artifact_quality',
@@ -166,6 +178,21 @@ _RUNTIME_OWNED_TASK_FIELDS = frozenset({
 
 
 from lib.agent_core import task_abort_signal
+
+
+def _terminal_reclaimable(task: dict) -> bool:
+    """Only settled carriers with no entered callback or durability debt expire."""
+    return (task.get('status') in TASK_REPLAY_TERMINAL_STATUSES
+            and not task.get('_executionTerminalizing')
+            and not task.get('_finalize_started_at')
+            and not task.get('_terminalPersistencePending')
+            and not task.get('_activeWorkerCount'))
+
+
+def _retained_since(task: dict) -> float:
+    """Start normal replay retention after the last actual producer exits."""
+    return max(float(task.get('finished_at') or task.get('created_at') or 0),
+               float(task.get('_workerFinishedAt') or 0))
 
 
 def _make_envelope(error, *, context: str, source: str) -> Optional[dict]:
@@ -402,12 +429,8 @@ class TaskRuntime:
             if task_id not in self._tasks and len(self._tasks) >= self.max_tasks:
                 terminal = sorted(
                     (item for item in self._tasks.values()
-                     if (item.get('status') in TASK_REPLAY_TERMINAL_STATUSES
-                         and not item.get('_executionTerminalizing')
-                         and not item.get('_finalize_started_at')
-                         and not item.get('_terminalPersistencePending'))),
-                    key=lambda item: float(item.get('finished_at')
-                                           or item.get('created_at') or 0),
+                     if _terminal_reclaimable(item)),
+                    key=_retained_since,
                 )
                 while terminal and len(self._tasks) >= self.max_tasks:
                     victim = terminal.pop(0)
@@ -935,9 +958,12 @@ class TaskRuntime:
                     # attempt), _events.py already logged a single WARNING and
                     # flagged the abort. Log at DEBUG here to avoid flooding
                     # error.log with thousands of identical ERROR rows while
-                    # the worker loop unwinds.
-                    is_stale_fence = str(e).endswith(
-                        _STALE_ATTEMPT_REJECTION_SUFFIX)
+                    # the worker loop unwinds. EventDeliveryRevoked is
+                    # storage's proof of that fence; frames after the first
+                    # rejection meet the revoked lane without the suffix.
+                    is_stale_fence = (
+                        type(e).__name__ == 'EventDeliveryRevoked'
+                        or str(e).endswith(_STALE_ATTEMPT_REJECTION_SUFFIX))
                     log_fn = logger.debug if is_stale_fence else logger.error
                     log_fn('[TaskRuntime:%s] authoritative persistence failed; '
                            'withholding push task=%s seq=%s: %s',
@@ -975,7 +1001,9 @@ class TaskRuntime:
                error: Any = None, error_context: str = '',
                degraded: Optional[bool] = None,
                degraded_reason: str = '',
-               terminal_event_fields: Optional[dict] = None) -> bool:
+               terminal_event_fields: Optional[dict] = None,
+               commit_result: Optional[Callable[[], TaskCompletion]] = None,
+               expected_task: Optional[dict] = None) -> bool:
         """Mark a task as terminal (done | error | aborted).
 
         Always emits a final event with type='done' or type='error' so
@@ -993,12 +1021,23 @@ class TaskRuntime:
         presentation fields to the one authoritative terminal event. Runtime
         fields (type/status/result/error/quality) always win, so a caller
         cannot publish a terminal frame that disagrees with task state.
+
+        ``commit_result`` optionally publishes a capability's artifact after
+        successful execution cleanup, under this terminal claim and outside
+        the registry lock. It returns the success result/event fields; the
+        supplied fields remain available for cancellation or cleanup failure.
+        A commit exception propagates to the worker's existing error policy.
+        Frozen terminal-persistence retries never repeat the artifact commit.
+
+        ``expected_task`` binds a worker's automatic settlement to its exact
+        carrier. A retired callback cannot settle a replacement with the same ID.
         """
         envelope = _make_envelope(error, context=error_context or self.kind,
                                   source=self.error_source)
         with self._lock:
             task = self._tasks.get(task_id)
             if (task is None
+                    or (expected_task is not None and task is not expected_task)
                     or task.get('status') in TASK_REPLAY_TERMINAL_STATUSES
                     or task.get('_executionTerminalizing')):
                 return False
@@ -1008,14 +1047,16 @@ class TaskRuntime:
             return self._finish_claimed(task_id, task, result=result, envelope=envelope,
                 abort_requested=abort_requested, error_context=error_context,
                 degraded=degraded, degraded_reason=degraded_reason,
-                terminal_event_fields=terminal_event_fields)
+                terminal_event_fields=terminal_event_fields,
+                commit_result=commit_result)
         finally:
             with self._lock:
                 if self._tasks.get(task_id) is task:
                     task['_executionTerminalizing'] = False
 
     def _finish_claimed(self, task_id, task, *, result, envelope, abort_requested,
-                        error_context, degraded, degraded_reason, terminal_event_fields):
+                        error_context, degraded, degraded_reason, terminal_event_fields,
+                        commit_result=None):
         """Settle and publish under finish's single terminalization guard."""
         requested_outcome = (
             ExecutionPhase.CANCELLED
@@ -1023,15 +1064,44 @@ class TaskRuntime:
             else ExecutionPhase.FAILED if envelope
             else ExecutionPhase.COMPLETED
         )
+        completion = None
+
+        def commit():
+            nonlocal completion
+            completion = commit_result()
+            if not isinstance(completion, TaskCompletion):
+                raise TypeError('commit_result must return TaskCompletion')
+
+        completion_callback = (
+            commit if commit_result is not None
+            and requested_outcome is ExecutionPhase.COMPLETED
+            and task.get('_terminalPersistenceCandidate') is None else None
+        )
         try:
-            execution_receipt = execution_session_for_task(task).settle(
+            session = execution_session_for_task(task)
+        except ValueError:
+            # Only a missing legacy execution carrier takes this path. A
+            # ValueError raised by a completion must keep its failure identity.
+            session = None
+        if session is not None:
+            execution_receipt = session.settle(
                 requested_outcome,
                 cause=(str((envelope or {}).get('kind') or '')
                        if envelope else ''),
+                on_completed=completion_callback,
             )
-        except ValueError:
+        else:
             # Adopted legacy/test carriers may predate the private session.
             execution_receipt = None
+            if completion_callback is not None:
+                completion_callback()
+        if (completion_callback is not None
+                and (execution_receipt is None
+                     or execution_receipt.outcome is ExecutionPhase.COMPLETED)):
+            if completion is None:
+                raise RuntimeError('execution already settled without a retained completion')
+            result = completion.result
+            terminal_event_fields = completion.terminal_event_fields
         settled_cancelled = bool(
             execution_receipt is not None
             and execution_receipt.outcome in {
@@ -1095,12 +1165,14 @@ class TaskRuntime:
         for runtime_field in (
                 TASK_REPLAY_EVENT_TYPE_FIELD,
                 TASK_REPLAY_EVENT_SEQUENCE_FIELD,
-                'taskId', 'status', 'result', 'error', 'artifact_quality'):
+                'taskId', 'status', 'result', 'error', 'artifact_quality',
+                'workerActive'):
             terminal_event.pop(runtime_field, None)
         terminal_event.update({
             TASK_REPLAY_EVENT_TYPE_FIELD: task_terminal_event_type(final_status),
             'status': final_status,
         })
+        terminal_event.update(self._worker_observation(task))
         if envelope:
             terminal_event['error'] = envelope
         if quality:
@@ -1136,12 +1208,17 @@ class TaskRuntime:
 
     def abort_owned(self, task_id: str, *, user_id: int,
                     source: str | None = None,
-                    expected_task: dict | None = None) -> bool:
+                    expected_task: dict | None = None,
+                    reason: str | None = None,
+                    reason_detail: str | None = None) -> bool:
         """Atomically signal an owned task before terminal settlement wins.
 
         Optional cancellation metadata is stamped under the same lock as the
         event. Resource callbacks belong outside this lock; ``expected_task``
         fences a caller's resource snapshot against registry replacement.
+        ``reason`` becomes ``_abort_reason`` only when this call is the task's
+        first stop, so an earlier Stop keeps its own cause; ``reason_detail``
+        (that cause's provenance) becomes ``_abortReasonDetail`` with it.
         """
         if (isinstance(user_id, bool)
                 or not isinstance(user_id, int)
@@ -1156,6 +1233,11 @@ class TaskRuntime:
                     or task.get('_executionTerminalizing')):
                 return False
             if source is not None:
+                if (reason and not task.get('aborted')
+                        and not task['abort_event'].is_set()):
+                    task['_abort_reason'] = str(reason)
+                    if reason_detail:
+                        task['_abortReasonDetail'] = str(reason_detail)
                 task['aborted'] = True
                 task.setdefault('_abort_timestamp', time.time())
                 task.setdefault('_abortSource', str(source or 'unknown'))
@@ -1322,6 +1404,10 @@ class TaskRuntime:
                              self.kind, _persistence_failure_detail(exc))
         self.reap_if_stalled(task)
 
+        # Observe BEFORE the event snapshot. A worker that exits during the
+        # snapshot may append its final event: returning true makes the reader
+        # drain once more rather than detach before seeing that event.
+        worker_observation = self._worker_observation(task)
         page = task_memory_replay_page(task, cursor)
         terminal = page.done
         try:
@@ -1333,6 +1419,7 @@ class TaskRuntime:
                          self.kind, task_id[:8], exc)
 
         extras = {
+            **worker_observation,
             'taskId': task_id,
             'createdAt': _epoch_ms(task.get('created_at')),
             # Falls back to created_at so a task with no events yet still
@@ -1400,15 +1487,44 @@ class TaskRuntime:
 
     # ── Spawning ───────────────────────────────────────────────
 
+    def _worker_observation(self, task: dict) -> dict:
+        with self._lock:
+            if '_activeWorkerCount' not in task:
+                return {}
+            return {'workerActive': task['_activeWorkerCount'] > 0}
+
+    @contextmanager
+    def _observe_worker(self, task: dict | None):
+        """Track entered callbacks on their exact carrier, even after finish.
+
+        This observation owns no execution, cancellation or terminal verdict.
+        Legacy/unmanaged carriers have no invented activity observation.
+        """
+        if task is None:
+            yield
+            return
+        with self._lock:
+            task['_activeWorkerCount'] = task.get('_activeWorkerCount', 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                task['_activeWorkerCount'] -= 1
+                if not task['_activeWorkerCount']:
+                    task['_workerFinishedAt'] = time.time()
+
     def _build_worker_callable(
         self,
         task_id: str,
+        task: dict | None,
         fn: Callable,
-        args: tuple,
-        kwargs: dict,
-    ) -> Callable[[], None]:
-        """Build the one context/error/lifecycle boundary for worker entry."""
-        task = self.get(task_id)
+        *,
+        on_error: Callable[[Exception], None] | None = None,
+        on_entry: Callable[[], None] | None = None,
+    ) -> Callable:
+        """Bind one exact carrier, isolated context and physical observation."""
+        import contextvars
+
         worker_request_id = ''
         if task is not None:
             worker_request_id = str(
@@ -1416,47 +1532,75 @@ class TaskRuntime:
                 or (task.get('meta') or {}).get('requestId')
                 or ''
             )
-        queued_at = time.monotonic()
+
+        def _run():
+            try:
+                if on_entry is not None:
+                    on_entry()
+                # Context.run restores the caller/pool context on every exit.
+                # Seed inert correlation; no request-scoped resources cross.
+                if worker_request_id:
+                    set_req_id(worker_request_id)
+                meta = (task.get('meta') or {}) if task is not None else {}
+                set_log_context(
+                    task_id=task_id,
+                    conversation_id=(meta.get('conversationId') or meta.get('convId')
+                                     or (task or {}).get('convId') or ''),
+                    trace_id=worker_request_id,
+                    user_id=meta.get('userId') or (task or {}).get('_userId') or '')
+                return fn()
+            except Exception as e:
+                if on_error is None:
+                    raise
+                on_error(e)
 
         def _wrapper():
+            # Transport evidence only: durable/domain admission still belongs
+            # to fn. A Future may fail without ever entering this callback.
+            _wrapper._tofu_worker_entered = True
+            with self._observe_worker(task):
+                return contextvars.Context().run(_run)
+
+        _wrapper._tofu_task_id = task_id
+        _wrapper._tofu_worker_entered = False
+        return _wrapper
+
+    def _queue_wait_observer(self) -> Callable[[], None]:
+        """Generic task entry measurement; domain workers retain their own."""
+        queued_at = time.monotonic()
+
+        def observe():
             try:
                 from lib.observability import record_task_queue_wait
-                record_task_queue_wait(
-                    self.kind, max(0.0, time.monotonic() - queued_at))
-            except Exception as exc:
+                record_task_queue_wait(self.kind, max(0.0, time.monotonic() - queued_at))
+            except Exception as error:
                 logger.debug('[TaskRuntime:%s] queue-wait metric skipped: %s',
-                             self.kind, exc)
-            # The asyncio branch deliberately runs in a fresh Context so a
-            # Quart request/app context (and its DB connection) cannot leak
-            # into a long-lived worker. Re-seed only the inert correlation id
-            # captured at task creation: provider, tool and exception logs then
-            # remain joinable to the originating HTTP request without copying
-            # any request-scoped resources into the pool thread.
-            previous_request_id = req_id()
-            if worker_request_id:
-                set_req_id(worker_request_id)
-            try:
-                meta = (task.get('meta') or {}) if task is not None else {}
-                with bind_log_context(
-                        task_id=task_id,
-                        conversation_id=(meta.get('conversationId')
-                                         or meta.get('convId') or ''),
-                        trace_id=worker_request_id,
-                        user_id=meta.get('userId') or ''):
-                    fn(*args, **kwargs)
-            except Exception as e:
-                logger.error('[TaskRuntime:%s] worker for task %s crashed: %s',
-                             self.kind, task_id[:8], e, exc_info=True)
-                self.finish(task_id, error=e,
-                            error_context=f'{self.kind}:worker_crash')
-            finally:
-                # Executor threads are reused. Restore the context that was
-                # present before this unit of work (normally empty in the
-                # deliberately fresh Context) so correlation never bleeds into
-                # the next unrelated background task.
-                set_req_id(previous_request_id)
+                             self.kind, error)
 
-        return _wrapper
+        return observe
+
+    def _finish_worker_crash(self, task_id: str, task: dict | None, error: Exception) -> None:
+        logger.error('[TaskRuntime:%s] worker for task %s crashed: %s',
+                     self.kind, task_id[:8], error, exc_info=True)
+        if task is not None:
+            self.finish(task_id, error=error, expected_task=task,
+                        error_context=f'{self.kind}:worker_crash')
+
+    def _fail_worker_start(self, task_id: str, task: dict | None, error: Exception) -> None:
+        if task is not None:
+            self.finish(task_id, error=error, expected_task=task,
+                        error_context=f'{self.kind}:worker_start')
+        raise error
+
+    def _runtime_worker(self, task_id: str, task: dict | None, fn: Callable, args, kwargs):
+        """Compose generic queue/crash policy; results still belong to finish."""
+        def invoke():
+            fn(*args, **kwargs)
+
+        return self._build_worker_callable(
+            task_id, task, invoke,
+            on_error=lambda error: self._finish_worker_crash(task_id, task, error),
+            on_entry=self._queue_wait_observer())
 
     def submit_worker(
         self,
@@ -1466,13 +1610,13 @@ class TaskRuntime:
         *args,
         **kwargs,
     ) -> Any:
-        """Submit through an injected bounded scheduler.
+        """Submit through an injected owner-aware scheduler.
 
         ``submitter`` receives ``(task_id, owner_user_id, worker_callable)``.
         This preserves the same request-context isolation, correlation, queue
         timing, and crash settlement as :meth:`spawn` while allowing a domain
-        owner to enforce finite capacity and owner-fair scheduling. Admission
-        exceptions propagate so that owner can map saturation explicitly.
+        owner to retain its scheduling policy. Submission exceptions propagate
+        so that owner can settle a failed launch explicitly.
         """
         task = self.get(task_id)
         if task is None:
@@ -1481,23 +1625,51 @@ class TaskRuntime:
         if owner_user_id <= 0:
             raise ValueError(
                 f'{self.kind} task {task_id} has no positive owner')
+        worker = self._runtime_worker(task_id, task, fn, args, kwargs)
+        return submitter(task_id, owner_user_id, worker)
+
+    def submit_owned_worker(
+        self, task: dict, submitter: Callable, fn: Callable, *,
+        on_error: Callable[[BaseException], None],
+    ):
+        """Return an executor Future while its domain owns failure settlement.
+
+        The Future retains the original worker exception. A cancelled,
+        unentered Future has no invented execution or terminal settlement.
+        """
+        worker = self._build_worker_callable(str(task.get('id') or ''), task, fn)
+
+        def completed(future):
+            if not future.cancelled():
+                error = future.exception()
+                if error is not None:
+                    on_error(error)
+
+        try:
+            future = submitter(worker)
+        except Exception as error:
+            on_error(error)
+            return None
+        future.add_done_callback(completed)
+        return future
+
+    def spawn_owned_worker(
+        self, task: dict, fn: Callable, *,
+        on_error: Callable[[Exception], None],
+        executor=None, serving_loop=None, on_queued: Callable | None = None,
+        thread_name: str | None = None,
+    ) -> None:
+        """Start background work with domain admission and settlement ports."""
         worker = self._build_worker_callable(
-            task_id, fn, tuple(args), dict(kwargs))
-
-        def _isolated_worker() -> None:
-            # A submitter may execute inline, create a thread from inside a
-            # request, or reuse a long-lived pool thread. Make isolation a
-            # TaskRuntime guarantee instead of relying on any scheduler's
-            # ContextVar inheritance defaults.
-            import contextvars
-            contextvars.Context().run(worker)
-
-        return submitter(task_id, owner_user_id, _isolated_worker)
+            str(task.get('id') or ''), task, fn, on_error=on_error)
+        self._spawn_worker(worker, executor=executor, serving_loop=serving_loop,
+                           on_error=on_error, on_queued=on_queued,
+                           thread_name=thread_name)
 
     def spawn(self, task_id: str, fn: Callable, *args, **kwargs) -> None:
         """Spawn a worker function for the task.
 
-        Inside an asyncio event loop: runs via asyncio.to_thread (tracked
+        Inside an asyncio event loop: runs on its default executor (tracked
         as an asyncio task, cancellable, awaitable).
         Outside: falls back to a daemon thread.
 
@@ -1505,35 +1677,104 @@ class TaskRuntime:
         worker's responsibility to call runtime.append_event(...) and
         runtime.finish(...) appropriately.
         """
-        _wrapper = self._build_worker_callable(
-            task_id, fn, tuple(args), dict(kwargs))
+        task = self.get(task_id)
+        worker = self._runtime_worker(task_id, task, fn, args, kwargs)
+        self._spawn_worker(
+            worker, on_error=lambda error: self._fail_worker_start(task_id, task, error))
 
-        def _isolated_wrapper() -> None:
-            import contextvars
-            contextvars.Context().run(_wrapper)
+    def _spawn_worker(
+        self, worker: Callable, *, on_error: Callable[[Exception], None],
+        executor=None, serving_loop=None,
+        on_queued: Callable | None = None, thread_name: str | None = None,
+    ) -> None:
+        """One loop/executor/thread transport for generic and domain workers."""
+        import contextvars
+
+        async def run_on_loop(loop):
+            # Only submission belongs to the start-error boundary. A callback
+            # can enter (and fail) before run_in_executor returns its Future.
+            try:
+                execution = loop.run_in_executor(executor, worker)
+            except Exception as error:
+                on_error(error)
+                return
+            reporter = None
+            try:
+                if executor is not None and on_queued is not None:
+                    reporter = asyncio.create_task(on_queued())
+                await execution
+            except Exception as error:
+                if worker._tofu_worker_entered:
+                    # Its error sink already ran. Preserve a failed sink's
+                    # exception without attempting terminal settlement twice.
+                    raise
+                on_error(error)
+            finally:
+                if reporter is not None:
+                    reporter.cancel()
+                    try:
+                        await reporter
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as error:
+                        logger.debug('[TaskRuntime:%s] queue observer failed: %s',
+                                     self.kind, error)
+
+        def track(future):
+            self._bg_tasks.add(future)
+
+            def completed(done):
+                self._bg_tasks.discard(done)
+                if not done.cancelled():
+                    error = done.exception()
+                    if error is not None:
+                        logger.error('[TaskRuntime:%s] background worker %s failed: %s',
+                                     self.kind, worker._tofu_task_id[:8], error,
+                                     exc_info=(type(error), error, error.__traceback__))
+
+            future.add_done_callback(completed)
 
         try:
             loop = asyncio.get_running_loop()
-        except RuntimeError as _e_audit:
-            logger.debug('[task_runtime] spawn caught %s: %s', type(_e_audit).__name__, _e_audit)
+        except RuntimeError:
             loop = None
 
         if loop and loop.is_running():
-            # ``asyncio.to_thread`` copies the caller's ContextVars by default.
-            # A background task must not inherit request-scoped authentication,
-            # correlation, or framework context, so run it inside a deliberately
-            # fresh context while retaining to_thread's tracked lifecycle.
-            async def _async_wrapper():
-                await asyncio.to_thread(_isolated_wrapper)
-            bg = asyncio.ensure_future(_async_wrapper())
-            self._bg_tasks.add(bg)
-            bg.add_done_callback(self._bg_tasks.discard)
-        else:
+            pending = run_on_loop(loop)
+            try:
+                submitted = contextvars.Context().run(asyncio.ensure_future, pending)
+            except Exception as error:
+                pending.close()
+                on_error(error)
+            else:
+                track(submitted)
+            return
+        if serving_loop is not None:
+            pending = None
+            try:
+                if serving_loop.is_running():
+                    pending = run_on_loop(serving_loop)
+                    submitted = contextvars.Context().run(
+                        asyncio.run_coroutine_threadsafe, pending, serving_loop)
+                else:
+                    submitted = None
+            except RuntimeError as error:
+                if pending is not None:
+                    pending.close()
+                logger.warning('[TaskRuntime:%s] serving-loop handoff failed: %s',
+                               self.kind, error)
+            else:
+                if submitted is not None:
+                    track(submitted)
+                    return
+        try:
             threading.Thread(
-                target=_isolated_wrapper,
-                name=f'{self.kind}-{task_id[:8]}',
+                target=worker,
+                name=thread_name or f'{self.kind}-{worker._tofu_task_id[:8]}',
                 daemon=True,
             ).start()
+        except Exception as error:
+            on_error(error)
 
     # ── TTL cleanup ────────────────────────────────────────────
 
@@ -1550,15 +1791,9 @@ class TaskRuntime:
         expired = []
         with self._lock:
             for tid, task in list(self._tasks.items()):
-                if task['status'] in TASK_REPLAY_TERMINAL_STATUSES:
-                    if (task.get('_executionTerminalizing')
-                            or task.get('_finalize_started_at')
-                            or task.get('_terminalPersistencePending')):
-                        continue
-                    finished = task.get('finished_at') or task.get('created_at', 0)
-                    if now - finished > ttl:
-                        expired.append(tid)
-                        del self._tasks[tid]
+                if _terminal_reclaimable(task) and now - _retained_since(task) > ttl:
+                    expired.append(tid)
+                    del self._tasks[tid]
         if expired:
             # INFO (was debug) + the evicted id prefixes: cleanup_stale is one
             # of only TWO registry-eviction paths (with discard_task), and a

@@ -8,8 +8,10 @@ grammars; `test_parser_catalog_laziness.py` verifies the first mixed-language
 transition and unchanged tags/references.
 
 `_native_rank.py` lazily prefers the optional independently installed
-`tofu-repo-kernel` wheel. Package absence/admission failure uses NetworkX;
-computation failure keeps reference-count fallback. The process retains only
+`tofu-repo-kernel` wheel. Package absence/admission failure uses the
+dependency-free `_python_rank.py` kernel on the same canonical graph; only a
+kernel computation failure keeps reference-count fallback, warned once per
+process, and other exceptions propagate. The process retains only
 one immutable native binding; graph arrays are call-local. Algorithm/C ABI
 source authority is `packages/tofu-repo-kernel/`, never the experiment wrappers.
 

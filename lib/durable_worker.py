@@ -444,6 +444,18 @@ class StorageWorkerJobStore:
             self._command_identity('claim', worker_id, now_ms),
         )
 
+    def claim_horizon(self, *, task_kinds: tuple[str, ...]) -> int | None:
+        """Read-only: 0 when ``claim_next`` can claim now, else ms until it can.
+
+        None means no queued, suspended or leased job of these kinds exists.
+        """
+        answer = self._client().query(
+            'worker_job.claim_horizon', {'task_kinds': list(task_kinds)})
+        delay = answer.get('claimableInMs') if isinstance(answer, Mapping) else -1
+        if delay is not None and (type(delay) is not int or delay < 0):
+            raise WorkerProtocolError('storage returned a malformed claim horizon')
+        return delay
+
     def claim_state(
         self, claim: WorkerJobClaim, *, now_ms: int,
     ) -> Mapping[str, Any]:

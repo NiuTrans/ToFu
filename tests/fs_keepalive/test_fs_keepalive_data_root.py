@@ -228,3 +228,57 @@ def test_keepalive_uses_one_interruptible_interval_deadline(monkeypatch):
     old_timer_wakes_per_day = 86_400 / 0.5
     new_timer_wakes_per_day = 86_400 / keepalive.KEEPALIVE_INTERVAL_S
     assert 1 - new_timer_wakes_per_day / old_timer_wakes_per_day >= 0.96
+
+
+def test_unanswered_probe_is_published_as_filesystem_stall(monkeypatch):
+    """The liveness judge reads these facts (lib/tasks_pkg/liveness.py).
+
+    A stat unanswered for the stale-mount bound explains every agent's silence;
+    the instant it returns restarts their silence (2026-11-02: a 27-minute
+    freeze killed five healthy workers the moment their I/O resumed).
+    """
+    import time
+    import lib.fs_keepalive as keepalive
+
+    entered, release = threading.Event(), threading.Event()
+
+    def blocking_probe(path):
+        entered.set()
+        release.wait(timeout=5.0)
+
+    monkeypatch.setattr(keepalive, '_probe_path', blocking_probe)
+    monkeypatch.setattr(keepalive, 'STAT_TIMEOUT_S', 0.05)
+    monkeypatch.setattr(keepalive, '_resumed_at', (0.0, 0.0))
+    runtime = keepalive._ProbeRuntime()
+    monkeypatch.setattr(keepalive, '_probe_runtime', runtime)
+    assert not keepalive.filesystem_unresponsive()
+    runtime.start()
+    try:
+        runtime.request(('data',))
+        assert entered.wait(timeout=1.0)
+        deadline = time.monotonic() + 2
+        while not keepalive.filesystem_unresponsive():
+            assert time.monotonic() < deadline, 'a stale stat was never published'
+            time.sleep(0.01)
+        assert keepalive.filesystem_resumed_at() == (0.0, 0.0)
+
+        before = time.time()
+        release.set()
+        deadline = time.monotonic() + 2
+        while keepalive.filesystem_unresponsive() or keepalive.filesystem_resumed_at()[1] == 0.0:
+            assert time.monotonic() < deadline, 'the recovery was never published'
+            time.sleep(0.01)
+        resumed = keepalive.filesystem_resumed_at()
+        assert resumed[1] >= before
+
+        # NEUTER: a stat answered within the bound is not a recovery.
+        monkeypatch.setattr(keepalive, 'STAT_TIMEOUT_S', 30.0)
+        generation = runtime.request(('data',))
+        results, _active = runtime.wait(generation, timeout=1.0)
+        assert results is not None
+        assert keepalive.filesystem_resumed_at() == resumed
+        assert not keepalive.filesystem_unresponsive()
+    finally:
+        release.set()
+        runtime.request_stop()
+        assert runtime.join(1.0)

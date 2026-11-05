@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -25,12 +24,8 @@ RESEARCH_RUNTIME_TS = os.path.join(
     'controllers', 'runtime.ts')
 RESEARCH_PAGE_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'evolution', 'research', 'page.ts')
-ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
-@pytest.mark.skipif(not shutil.which('node') or not os.path.isdir(
-    os.path.join(ROOT, 'node_modules', 'jsdom')) or not os.path.isfile(ESBUILD),
-    reason='node/jsdom/vite test bundler dev-deps not installed')
 def test_resume_reattaches_running_job_and_hydrates_finished_one():
     harness = r"""
 const fs = require('fs'), path = require('path');

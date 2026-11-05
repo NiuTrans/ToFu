@@ -18,6 +18,7 @@ Public API (also re-exported by lib/__init__ for back-compat):
     DEFAULT_USD_DISPLAY_RATES — bounded Settings presentation pivots
     get_model_price_display_policy() — browser-safe rates + freshness metadata
     get_pricing_data()       — thread-safe copy of live pricing state
+    pricing_revision()       — monotonic stamp of every runtime pricing change
     lookup_pricing(model, provider_id=None) — provider-scoped pricing resolution
     declared_pricing(info)   — convert an issued flat route price without a registry lookup
     first_pricing_increase_boundary(model, provider_id=None) — first proven tier cliff
@@ -53,6 +54,9 @@ from lib.pricing._provider import (  # noqa: E402,F401
 # ── Peak/off-peak price schedules ──
 from lib.pricing._peak import peak_multiplier  # noqa: E402,F401
 
+# ── Revision of every runtime pricing input (settled cost memos) ──
+from lib.pricing._revision import pricing_revision  # noqa: E402,F401
+
 # ── Online refresh / exchange-rate fetchers + live pricing state ──
 from lib.pricing._refresh import (  # noqa: E402,F401
     _do_update_pricing,
@@ -87,6 +91,7 @@ __all__ = [
     'first_pricing_increase_boundary',
     # peak schedules
     'peak_multiplier',
+    'pricing_revision',
     # refresh
     'get_model_price_display_policy',
     'get_pricing_data',

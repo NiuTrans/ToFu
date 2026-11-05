@@ -35,6 +35,7 @@ from lib.logging_pkg.log_policy import (
 )
 from lib.logging_pkg.log_rate_limit import DuplicateCoalescingFilter
 from lib.logging_pkg.log_record_values import BoundedFormatter
+from lib.logging_pkg.log_retention import log_removal
 from lib.logging_pkg.log_signals import LogBudgetFilter
 
 _LOG_FMT = ('%(asctime)s [%(levelname)s] %(name)s [%(threadName)s]: '
@@ -260,14 +261,18 @@ class _SizeAndTimeRotatingFileHandler(
                 continue
             total += stat.st_size
             rotated.append((stat.st_mtime_ns, name, path, stat.st_size))
-        for _mtime, _name, path, size in sorted(rotated):
+        for mtime_ns, _name, path, size in sorted(rotated):
             if total <= self.totalBudgetBytes:
                 break
             try:
                 os.remove(path)
-                total -= size
             except OSError:
                 continue
+            log_removal(path, size=size, modified=mtime_ns / 1e9,
+                        reason='family_budget',
+                        budget_bytes=self.totalBudgetBytes,
+                        family_bytes=total)
+            total -= size
 
 
 def _log_queue_capacity() -> int:

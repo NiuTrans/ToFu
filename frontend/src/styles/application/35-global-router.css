@@ -1,0 +1,29 @@
+/* Global Router (docs/ROUTER.md), shown as the main coordinator: the slot of
+ * its card (the card itself wears the shared coordination-leader styles), the
+ * compact header on the router conversation, and the compact Router
+ * disclosures it hosts (the Worker model control also shows on Project Router
+ * coordinator conversations). Tokens only; shared controls keep their ui-kit
+ * styling. */
+#globalRouterEntry{flex-shrink:0}
+.global-router-header{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-1) var(--space-3);padding:var(--space-2) var(--space-4);border-bottom:var(--control-edge-inset) solid var(--border);color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui)}
+.global-router-header[hidden]{display:none}
+.global-router-header-subtitle{min-width:0;overflow-wrap:anywhere}
+/* Compact disclosures: the summary is the at-a-glance value; an open one takes the row. */
+.global-router-header>details[open]{flex-basis:100%}
+.router-worker-model,.router-instructions,.router-watchdog{min-width:0;color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui)}
+.router-worker-model>summary,.router-instructions>summary,.router-watchdog>summary{cursor:pointer;color:var(--text-tertiary);overflow-wrap:anywhere}
+.router-worker-model>summary:hover,.router-instructions>summary:hover,.router-watchdog>summary:hover{color:var(--text-primary)}
+.router-worker-model[aria-busy="true"]>summary{cursor:progress}
+.router-worker-model-field{max-width:min(100%,32em);padding-top:var(--space-2)}
+.presence-strip>.router-worker-model{margin-bottom:var(--space-2)}
+.router-instructions-status{margin:var(--space-1) 0 0}
+.router-instructions-status:empty{display:none}
+.router-instructions-list{display:flex;flex-direction:column;gap:var(--space-2);margin:var(--space-2) 0 0;padding:0;list-style:none}
+.router-instruction{display:flex;flex-direction:column;gap:var(--space-1);padding:var(--space-2) var(--space-3);border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius-xs)}
+.router-instruction-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-2);color:var(--text-primary)}
+.router-instruction-state{color:var(--text-tertiary)}
+.router-instruction[data-state="paused"] .router-instruction-state{color:var(--warning-text)}
+.router-instruction-text{margin:0;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.router-instruction-scope{display:flex;flex-wrap:wrap;gap:var(--space-1) var(--space-3);margin:0;color:var(--text-tertiary);overflow-wrap:anywhere}
+.router-instruction-actions,.router-instructions-footer{display:flex;flex-wrap:wrap;gap:var(--space-1)}
+.router-instructions-footer:empty{display:none}

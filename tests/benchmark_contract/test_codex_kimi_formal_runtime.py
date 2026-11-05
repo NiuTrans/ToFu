@@ -87,7 +87,7 @@ def _runtime_fixture(
         CodexKimiBaselineSettings(
             codex_binary=codex,
             codex_sha256=codex_digest,
-            provider_face="meituan-chat",
+            provider_face="yourprovider-chat",
             provider_slot_id="kimi-slot-fixture",
         ),
     )
@@ -141,7 +141,7 @@ def test_formal_dry_run_is_secret_free_and_round_trips_runtime(
     ]
     assert manifest["codex_kimi_runtime"]["credentialBoundary"] \
         == "launcher-host-only"
-    assert manifest["provider_face"] == "meituan-chat"
+    assert manifest["provider_face"] == "yourprovider-chat"
     assert manifest["provider_slot_id"] == "kimi-slot-fixture"
     assert len(manifest["harbor_binary_sha256"]) == 64
     agent = config["agents"][0]
@@ -252,7 +252,7 @@ def test_formal_release_claim_exists_before_harbor_dispatch(
             "name": "codex", "version": "0.149.1",
             "binarySha256": codex.codex_sha256,
         },
-        provider_face="meituan-chat",
+        provider_face="yourprovider-chat",
         provider_slot_id="kimi-slot-fixture", thinking="high",
         experiment_arm="codex_0_149_1", pair_id="pair-tracked",
         comparison_role="baseline",
@@ -334,8 +334,9 @@ def test_run_streaming_removes_explicit_host_only_environment(host_tmp_path, mon
     assert log.read_text().strip() == "absent"
 
 
+@pytest.mark.parametrize('already_dispatched', [False, True])
 def test_resume_restarts_exact_proxy_without_exposing_host_credentials(
-    host_tmp_path, monkeypatch
+    host_tmp_path, monkeypatch, already_dispatched
 ):
     require_unix_socket_host(host_tmp_path)
     rootless, codex = _runtime_fixture(host_tmp_path)
@@ -348,6 +349,9 @@ def test_resume_restarts_exact_proxy_without_exposing_host_credentials(
     _, run_dir = start_harbor_run(_spec(host_tmp_path, rootless, codex), dry_run=True)
     manifest = json.loads((run_dir / "manifest.json").read_text())
     (run_dir / "jobs" / manifest["run_id"]).mkdir(parents=True)
+    if already_dispatched:
+        manifest.update(status="launcher_failed", exit_code=None)
+        (run_dir / "manifest.json").write_text(json.dumps(manifest))
     observed: dict[str, object] = {}
 
     from evaluations.swebench import preflight
@@ -365,6 +369,11 @@ def test_resume_restarts_exact_proxy_without_exposing_host_credentials(
 
     monkeypatch.setattr(harbor_runner, "run_streaming", fake_resume)
 
+    if not already_dispatched:
+        with pytest.raises(ValueError, match="prepared run already has a Harbor job"):
+            resume_harbor_run(run_dir, harbor_bin=manifest["harbor_binary"])
+        assert observed == {}, 'An ambiguous prepared job must never redispatch'
+        return
     assert resume_harbor_run(
         run_dir, harbor_bin=manifest["harbor_binary"]
     ) == 19
@@ -463,6 +472,9 @@ def test_resume_proxy_start_failure_is_recoverable_and_not_running(
     )
     manifest = json.loads((run_dir / "manifest.json").read_text())
     (run_dir / "jobs" / manifest["run_id"]).mkdir(parents=True)
+    # Recovery starts from a previously dispatched job, not a dry-run plan.
+    manifest.update(status="launcher_failed", exit_code=None)
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
     from evaluations.swebench import preflight
 
     monkeypatch.setattr(preflight, "harbor_checks", lambda **_kwargs: [])

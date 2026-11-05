@@ -222,6 +222,42 @@ def test_the_floor_pin_carries_its_rationale():
 
 def test_stale_search_wheel_refuses_release(tmp_path, monkeypatch):
     ex, dest = _fake_tree(tmp_path, monkeypatch, wheels=('tofu_search-0.5.1-py3-none-any.whl',))
+    monkeypatch.setattr(ex, '_build_search_wheel', lambda member, out: None)
     with pytest.raises(RuntimeError, match='STALE'):
         ex._bundle_tofu_search_wheel(dest, 'opensource')
     assert not list(dest.glob('vendor/tofu_search-*.whl'))
+
+
+def test_stale_search_wheel_is_rebuilt_from_the_shipped_member(tmp_path, monkeypatch):
+    """An export must not die because dist/ lags the source version.
+
+    The member source is in the tree being exported, so the wheel that
+    install.sh will need is rebuilt from it instead of failing the export
+    (2026-10: dist/ held 0.12.21 under a 0.12.25 floor and every export of
+    either mode aborted before the tree was usable).
+    """
+    import zipfile
+    ex, dest = _fake_tree(tmp_path, monkeypatch, wheels=('tofu_search-0.5.1-py3-none-any.whl',))
+    shipped = dest / 'packages' / 'tofu-search'
+    shipped.mkdir(parents=True)
+    (shipped / 'pyproject.toml').write_text('[project]\nversion = "0.5.3"\n', encoding='utf-8')
+    built = []
+
+    def fake_build(member, out):
+        built.append((member / 'pyproject.toml').read_text(encoding='utf-8'))
+        (member / 'build').mkdir()
+        (member / 'tofu_search.egg-info').mkdir()
+        wheel = out / 'tofu_search-0.5.3-py3-none-any.whl'
+        with zipfile.ZipFile(wheel, 'w') as archive:
+            archive.writestr('tofu_search-0.5.3.dist-info/METADATA',
+                             'Name: tofu-search\nVersion: 0.5.3\n')
+        return wheel
+
+    monkeypatch.setattr(ex, '_build_search_wheel', fake_build)
+    ex._bundle_tofu_search_wheel(dest, 'internal')
+    assert [p.name for p in (dest / 'vendor').glob('tofu_search-*.whl')] == [
+        'tofu_search-0.5.3-py3-none-any.whl']
+    # Built from the exact (sanitized) source the export ships, never the
+    # developer's working tree, and the builder's litter stays out of it.
+    assert built == ['[project]\nversion = "0.5.3"\n']
+    assert sorted(p.name for p in shipped.iterdir()) == ['pyproject.toml']

@@ -69,16 +69,18 @@ def test_binding_does_not_claim_immutable_contents(tmp_path, tracer):
 
 def test_borrowed_fds_preserve_leases_and_remain_caller_owned(tmp_path, monkeypatch):
     import os
-    from lib.project_mod import run_command
+    from lib.project_mod import workspace_lease
     (tmp_path/'lease').write_bytes(b'lease');(tmp_path/'data').write_bytes(b'data')
     lease = os.open(tmp_path/'lease',os.O_RDONLY);data = os.open(tmp_path/'data',os.O_RDONLY)
     try:
-        monkeypatch.setattr(run_command,'workspace_lease_fds',lambda:(lease,))
+        # An internal lease holder's child inherits the held workspace lease
+        # descriptors.
+        monkeypatch.setattr(workspace_lease,'workspace_lease_fds',lambda:(lease,))
         code = "import os,sys;assert os.read(int(sys.argv[1]),5)==b'lease';assert os.read(int(sys.argv[2]),4)==b'data'"
         result = run_command_process([sys.executable,'-S','-c',code,str(lease),str(data)],
             command='lease and borrowed inputs',timeout=5,base=str(tmp_path),child_env=_get_cmd_env(str(tmp_path)),extra_pass_fds=(data,))
         assert '[exit code: 0]' in result
         os.fstat(lease);os.fstat(data)
-        assert not os.get_inheritable(data)
+        assert not os.get_inheritable(lease) and not os.get_inheritable(data)
     finally:
         os.close(lease);os.close(data)

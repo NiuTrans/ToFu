@@ -90,13 +90,15 @@ def test_real_host_registry_admits_plugin_metadata(monkeypatch):
     _spec.register_tool_spec(replace(registered[0],source='plugin',plugin_name='environments'))
     assert _spec.all_specs()[0].plugin_name=='environments'
 
-def test_capacity_scales_with_memory_and_volume_and_missing_probe_is_lean():
+def test_capacity_follows_the_volume_never_host_memory_and_missing_probe_is_lean():
     small=host._capacity_defaults(SimpleNamespace(effective_memory_available_mb=32,disk_free_mb=16))
     large=host._capacity_defaults(SimpleNamespace(effective_memory_available_mb=32768,disk_free_mb=131072))
+    starved=host._capacity_defaults(SimpleNamespace(effective_memory_available_mb=1,disk_free_mb=131072))
     missing=host._capacity_defaults(SimpleNamespace(effective_memory_available_mb=None,disk_free_mb=None))
+    assert starved==large
     assert large['context_byte_limit']>small['context_byte_limit']
     assert large['context_file_limit']>small['context_file_limit']
-    assert large['output_limit']>small['output_limit']
+    assert small['output_limit']==large['output_limit']==missing['output_limit']==67108864
     assert small['context_byte_limit']==4*1048576 and missing['context_byte_limit']==1048576
 
 def test_compute_native_gateway_exact_approval_and_owner(context):

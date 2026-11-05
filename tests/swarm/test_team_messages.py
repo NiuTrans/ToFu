@@ -30,7 +30,7 @@ def test_worker_to_worker_preserves_provenance_and_namespaces_keys(context):
     assert receipt['message_id'] != root_receipt['message_id']
     assert receipt['execution_started'] is False
     assert message_service.send(c.child, request, c.session) == receipt
-    binding = binding_for(c.task, c.session.specs[1], 'conv-a')
+    binding = binding_for(c.task, c.session.specs[1], 'conv-a', run_id='launch')
     sibling = {'id': 'runtime-child-2', '_swarmMessageBinding': binding, 'config': {}}
     messages = [{'role': 'user', 'content': 'Review'}]
     inject_messages(sibling, messages, 0)

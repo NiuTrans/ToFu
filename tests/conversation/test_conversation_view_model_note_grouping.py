@@ -29,7 +29,6 @@ Run::
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -39,7 +38,6 @@ from tests._runtime_sections import native_module_path
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 
-_HAS_NODE = shutil.which('node') is not None
 
 pytestmark = pytest.mark.unit
 
@@ -146,7 +144,6 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason='node not installed')
 def test_typed_view_model_merges_adjacent_context_notes():
     out = _run_node(_HARNESS, {'VM_PATH': _view_model_module()})
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]

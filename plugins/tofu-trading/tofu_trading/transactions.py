@@ -19,8 +19,12 @@ def write_transaction(db, *, label: str = 'write') -> Iterator[object]:
     db.begin()
     try:
         yield db
-    except BaseException:
-        db.rollback()
+    except BaseException as write_failure:
+        try:
+            db.rollback()
+        except BaseException as rollback_failure:
+            # The write failure remains the outcome even when cleanup fails.
+            raise write_failure from rollback_failure
         raise
     else:
         db.commit()

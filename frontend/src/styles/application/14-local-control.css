@@ -1,0 +1,137 @@
+/* ═══════════════════════════════════════════
+   ★ Local Control — merged browser + desktop surface
+   One toolbar entry, one modal, two capability rows.
+   ═══════════════════════════════════════════ */
+
+/* Wide layout: the two capabilities are peers, so they sit SIDE BY SIDE
+   (browser left / computer right) instead of forcing a vertical scan past
+   one card to reach the other. The base .modal cap (92vw) still bounds small
+   windows; the grid collapses to one column before the cards get cramped. */
+.local-modal{width:940px}
+.local-modal .modal-desc{color:var(--text-secondary,#888);font-size:var(--font-size-md);margin:0 0 18px}
+.lc-cols{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-3);align-items:start}
+.lc-cols .lc-cap{margin-bottom:0}
+@media(max-width:860px){.lc-cols{grid-template-columns:1fr}.lc-cols .lc-cap{margin-bottom:var(--space-3)}}
+
+/* An <a class="btn …"> is still display:inline by default — and an inline
+   box's VERTICAL padding/border does not grow its line box, it PAINTS OVER
+   the lines above and below. Measured 2026-08-06: the agent-bundle CTA (an
+   anchor, unlike every <button> sibling, which is inline-block per UA style)
+   rendered its gold block straight across its own note paragraph. Any anchor
+   styled as a modal button gets the same box geometry a <button> would. */
+.lc-cap-setup a.btn{margin:2px 0 10px}
+
+.lc-cap{border:1px solid var(--border,#2a2a35);border-radius:12px;padding:14px var(--space-4);margin-bottom:var(--space-3);background:rgba(255,255,255,0.015)}
+.lc-cap-head{display:flex;align-items:center;gap:var(--space-3)}
+.lc-cap-icon{display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:8px;background:rgba(168,85,247,0.12);color:#a855f7;flex-shrink:0}
+.lc-cap-text{flex:1;display:flex;flex-direction:column;gap:3px;min-width:0}
+.lc-cap-text strong{font-size:var(--font-size-lg);color:var(--text-primary,#e8e8ed);font-weight:600}
+.lc-cap-status{display:flex;align-items:center;gap:6px;font-size:var(--font-size-sm)}
+.lc-status-text{color:var(--text-secondary,#9898a8)}
+
+/* Switch — reflects the REAL wire flag, one per capability. */
+.lc-switch{position:relative;width:40px;height:22px;border-radius:11px;border:none;flex-shrink:0;cursor:pointer;padding:0;background:var(--bg-active,#2a2a35);transition:background-color .18s ease}
+.lc-switch:hover{background:var(--bg-hover,#33333f)}
+.lc-switch.on{background:#a855f7}
+.lc-switch-knob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .18s ease}
+.lc-switch.on .lc-switch-knob{transform:translateX(18px)}
+/* Cannot be operated yet: nothing is connected, so flipping it would grant
+   the AI zero tools. Visibly inert + cursor tells the truth before the click. */
+.lc-switch:disabled,.lc-switch.lc-switch-off{opacity:.4;cursor:not-allowed}
+.lc-switch:disabled:hover,.lc-switch.lc-switch-off:hover{background:var(--bg-active,#2a2a35)}
+/* ON while the bridge is down: the tool registry ships ZERO tools for it, so
+   it must not read as healthy. Deliberately NOT disabled — switching it OFF
+   stays available, since that is the action a worried user actually wants. */
+.lc-switch.lc-switch-stale{background:#f59e0b}
+.lc-switch.lc-switch-stale:hover{background:#fbbf24}
+.tool-badge.lc-badge-stale{background:#f59e0b;color:#1a1a21}
+[data-theme="light"] .lc-switch.lc-switch-stale{background:#b45309}
+[data-theme="light"] .lc-switch.lc-switch-stale:hover{background:#92400e}
+[data-theme="light"] .tool-badge.lc-badge-stale{background:#b45309;color:#fff}
+/* One short line per row: what the AI actually gets. Users are granting real
+   access to their browser session and machine; the row title alone is not
+   enough to make that call. */
+.lc-cap-about{font-size:var(--font-size-sm);line-height:1.55;color:var(--text-secondary,#9898a8);margin:10px 0 0;padding-left:44px}
+
+/* The single detected-state instruction. Empty (and therefore invisible)
+   whenever the capability is already connected. */
+.lc-cap-setup:empty{display:none}
+.lc-cap-setup{margin:var(--space-3) 0 0;padding-top:var(--space-3);border-top:1px dashed var(--border,#2a2a35)}
+/* Both instruction forms in this panel share ONE typography declaration.
+   .lc-substep used to set only `margin`, which looked correct by ACCIDENT:
+   each of its two uses wraps an <a class="lc-dl-link">, and that class sets
+   its own font-size — a child was covering for the parent. The first bare
+   text node placed inside it (the open-the-page result note) inherited the
+   modal's default size and rendered visibly larger than the .lc-step lines
+   beside it. One rule is what stops that recurring; .lc-substep differs in
+   MARGIN only, so only margin is overridden below. */
+.lc-step,.lc-substep{font-size:12.5px;line-height:1.6;color:var(--text-secondary,#9898a8);margin:0 0 var(--space-2)}
+.lc-warn{color:#e8a13c;border:1px solid rgba(232,161,60,0.35);border-radius:6px;padding:6px 9px;background:rgba(232,161,60,0.07)}
+.lc-await{color:var(--text-secondary,#9898a8);border-left:2px solid rgba(168,85,247,0.4);padding-left:9px}
+.lc-role{border:1px solid var(--border,rgba(148,148,168,0.18));border-radius:8px;padding:10px var(--space-3);margin:0 0 10px}
+.lc-role-primary{border-color:rgba(168,85,247,0.45);background:rgba(168,85,247,0.05)}
+.lc-role-head{font-size:var(--font-size-md);font-weight:600;color:var(--text-primary,#e6e6ea);margin:0 0 7px}
+.lc-role-note{font-weight:400;font-size:12.5px;color:var(--text-secondary,#9898a8);line-height:1.6}
+.lc-copy{position:relative;display:block;padding:var(--space-2) 10px;border-radius:6px;word-break:break-all;font-size:var(--font-size-sm);font-family:'JetBrains Mono',monospace;color:#a855f7;cursor:pointer;border:1px dashed rgba(168,85,247,0.4);background:rgba(168,85,247,0.06);transition:background-color .2s ease,box-shadow .2s ease}
+.lc-copy:hover{background:rgba(168,85,247,0.14);box-shadow:0 0 0 2px rgba(168,85,247,0.18)}
+.lc-copy::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:var(--space-2);font-size:var(--font-size-xs);padding:3px var(--space-2);border-radius:5px;background:#1e293b;color:#e2e8f0;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s}
+.lc-copy:hover::after{opacity:1}
+.lc-copy.copied{background:rgba(34,197,94,0.16);color:#22c55e;border-color:rgba(34,197,94,0.4)}
+/* ── Pairing code display (P2) ──
+   The 6-digit code is the panel's primary action, so it gets the biggest
+   type in the dialog: wide-tracked JetBrains Mono digits next to a copy
+   button, inside a purple-tinted card that matches .lc-copy's family. */
+.lc-pair-code{display:flex;align-items:center;gap:var(--space-3);margin:2px 0 6px;padding:10px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.4);background:rgba(168,85,247,0.07)}
+.lc-pair-digits{font-family:'JetBrains Mono',monospace;font-size:26px;font-weight:700;letter-spacing:.18em;color:#c084fc;user-select:all}
+[data-theme="light"] .lc-pair-digits{color:#7e22ce}
+.lc-perm-note{font-size:11.5px;line-height:1.55;color:var(--text-tertiary,#6a6a7a);margin:10px 0 0}
+.lc-substep{margin:0 0 10px}
+.lc-dl-link{font-size:12.5px;color:#a855f7;text-decoration:none;border-bottom:1px solid rgba(168,85,247,0.35);padding-bottom:1px;transition:color .15s ease,border-color .15s ease}
+.lc-dl-link:hover{color:#c084fc;border-bottom-color:#c084fc}
+[data-theme="light"] .lc-dl-link{color:#7e22ce;border-bottom-color:rgba(126,34,206,0.35)}
+[data-theme="light"] .lc-dl-link:hover{color:#6b21a8;border-bottom-color:#6b21a8}
+/* ── Per-platform download links ──
+   The row can legitimately hold TWO links: on macOS the CPU architecture is
+   unknowable from the UA (Apple Silicon reports "Intel Mac OS X"), so when the
+   browser will not disclose it the backend returns both DMGs rather than guess
+   — a wrong guess is a download that refuses to open. Hence a wrapping flex row
+   instead of a single inline link.
+   The direct links are the PRIMARY action, so they are buttons rather than
+   underlined text; the releases-page link below them keeps the plain
+   .lc-dl-link treatment as the secondary "all downloads" escape hatch. */
+.lc-dl-row{display:flex;flex-wrap:wrap;gap:var(--space-2);margin:0 0 var(--space-2)}
+.lc-dl-direct{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;font-size:12.5px;font-weight:600;border:1px solid rgba(168,85,247,0.45);border-bottom:1px solid rgba(168,85,247,0.45);border-radius:7px;background:rgba(168,85,247,0.10);white-space:nowrap;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
+.lc-dl-direct:hover{background:rgba(168,85,247,0.20);border-color:#c084fc;border-bottom-color:#c084fc}
+[data-theme="light"] .lc-dl-direct{border-color:rgba(126,34,206,0.4);border-bottom-color:rgba(126,34,206,0.4);background:rgba(126,34,206,0.08)}
+[data-theme="light"] .lc-dl-direct:hover{background:rgba(126,34,206,0.16);border-color:#6b21a8;border-bottom-color:#6b21a8}
+/* Provenance badge: marks an artifact served by THIS server (mirrored or
+   built on-box) rather than fetched from the public GitHub network — the
+   fast/reliable path, so it gets the success hue, not the accent one. */
+.lc-dl-hosted{display:inline-flex;align-items:center;padding:3px var(--space-2);font-size:10.5px;font-weight:600;border-radius:999px;white-space:nowrap;color:#15803d;border:1px solid rgba(22,163,74,0.35);background:rgba(22,163,74,0.08)}
+[data-theme="light"] .lc-dl-hosted{color:#166534;border-color:rgba(21,128,61,0.4);background:rgba(21,128,61,0.10)}
+/* ── Collapsed secondary download (the full desktop app in the remote
+   branch). The agent is the primary action there; the full installer must
+   stay one line away WITHOUT competing for attention — a zero-JS <details>
+   keeps it discoverable but out of the numbered flow. */
+.lc-details{margin:0 0 var(--space-2);font-size:12.5px;color:var(--text-secondary,#9898a8)}
+.lc-details>summary{cursor:pointer;list-style:none;outline:none}
+.lc-details>summary::-webkit-details-marker{display:none}
+.lc-details>summary::before{content:'▸\00a0';color:#a855f7}
+.lc-details[open]>summary::before{content:'▾\00a0'}
+.lc-details>summary:hover{color:var(--text-primary,#e8e8f0)}
+.lc-details[open]>summary{margin-bottom:6px}
+
+/* ── Agent diagnostics inbox (2026-08-06) — the paste box for the
+   agent's「复制诊断信息」bundle; monospace because it is log text. */
+.lc-diag-text{width:100%;box-sizing:border-box;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.5;color:var(--text-primary,#e6e6ea);background:rgba(0,0,0,0.18);border:1px solid var(--border,rgba(148,148,168,0.18));border-radius:8px;padding:var(--space-2) 10px;margin:2px 0 var(--space-2);resize:vertical}
+[data-theme="light"] .lc-diag-text{background:rgba(0,0,0,0.03)}
+.lc-diag-actions{display:flex;align-items:center;gap:10px}
+.lc-diag-hint{font-size:var(--font-size-sm);color:var(--text-secondary,#9898a8)}
+.lc-diag-recent{margin:var(--space-2) 0 0}
+.lc-diag-recent-head{font-size:var(--font-size-xs);font-weight:600;color:var(--text-tertiary,#6a6a7a);margin:0 0 3px}
+.lc-diag-row{font-size:11.5px;color:var(--text-secondary,#9898a8);line-height:1.6}
+
+[data-theme="light"] .lc-cap{border-color:rgba(0,0,0,0.09);background:rgba(0,0,0,0.012)}
+[data-theme="light"] .lc-cap-icon{background:rgba(126,34,206,0.1);color:#7e22ce}
+[data-theme="light"] .lc-switch.on{background:#7e22ce}
+[data-theme="light"] .lc-copy{color:#7e22ce;border-color:rgba(126,34,206,0.35);background:rgba(126,34,206,0.05)}
