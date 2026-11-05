@@ -168,6 +168,101 @@ Specs: `test_a_large_head_does_not_force_small_followers_into_single_event_commi
 and `test_committed_rpc_prefix_is_published_while_a_later_batch_is_blocked`,
 plus the existing batch lost-ACK, stale-attempt and native no-spill cases.
 
+## Complete-history delivery measurements
+
+Problem: a fast empty patch or a slow-log percentile does not measure a whole
+continuation on a long retained history. Decision: use
+`benchmarks/storage_history_cohort.py` on complete private Turn exports, through
+the production capture, delivery FIFO, carried Turn transaction and push
+observer. A manifest pins each input by SHA-256; transcripts stay outside Git.
+The controlled continuation performs eight metadata events, two eight-event
+cycles of text/tool/usage changes, then successful terminal settlement. It
+does not execute the original model requests or tools. Every event must have
+its own revision and durable carrier, and publication must follow its commit.
+
+`--submission barrier` awaits each event; `queued` submits the continuation
+before its terminal barrier. `--concurrent` admits every selected conversation,
+seeds every complete history, then starts their continuations together. None of
+these experiment settings changes runtime admission or retention. The native
+authority is disposable, Strict, on the explicitly selected filesystem. Its
+existing operator benchmark owner permits an explicitly pinned older engine as
+the control; production source-match admission is not bypassed or changed.
+
+Clocks include capture, queue and persistence, and exclude seed/readback/reopen,
+HTTP, browser rendering and paid execution. Final projection comparison excludes
+the two wall-clock documents (`timingTrace`, `activityTimeline`), retains all
+other fields and every event payload, and normalizes only fixture-created IDs.
+Independently, SIGKILL/reopen must reproduce the **entire** saved Turn and event
+rows byte-for-byte under canonical JSON, including those clock documents.
+An offline integrity check, changed native PID, complete selected population,
+unchanged source/binary/input identities and ordered publication gate results.
+Missing or different work refuses comparison. Queue-event durations overlap;
+report elapsed cohort time separately from their sum. Pipeline stage counters
+are nested and must not be added.
+
+The 2026-11-05 cohort contains all 25 conversation IDs found in the retained
+slow-barrier log window, including worker/coordinator conversations: 406.66 MiB
+of projections, 0.12–54.40 MiB each, up to 2,243 tool rounds. These are selected
+problem histories, not an unbiased sample of all users or all event latencies.
+Two alternating fresh-process serial comparisons on `fuse.bgfuse` used the
+previous deployed engine (`2b7e708ab9ff…`) and the repaired release
+(`b2773bd711b4…`), with the same uncached producer normalizer and current FIFO.
+Each arm committed 625 timed events per process; all 25 continuations passed
+exact output, restart readback and integrity checks in every process.
+
+| Serial barrier observation | Previous engine | Repaired engine |
+|---|---:|---:|
+| Sum of event waits, run 1 | 149.05 s | 110.68 s |
+| Sum of event waits, reverse-order run 2 | 138.87 s | 106.80 s |
+| All-event pooled median / P95 (1,250 events per arm) | 37.85 / 1,112.14 ms | 25.83 / 867.03 ms |
+| Metadata-event pooled P95 | 1,144.81 ms | 331.20 ms |
+| Mixed-event pooled P95 | 988.49 ms | 838.82 ms |
+
+Run 1 reconstructed 22.28→16.29 GiB of checkpoint inputs; this counter is
+decoded input volume, **not bytes written to FUSE**. The improvement comes from
+avoiding repeated history work. Full text/tool changes and terminal settlement
+still have expensive materialization paths; this result does not establish a
+whole-application latency SLO or release readiness by itself.
+
+The same release pair's queued continuation reduced summed case elapsed time
+203.46→156.39 s; event P95 was 24.51→15.96 s because a queued event includes
+the work ahead of it. In the 25-way concurrent **per-event-barrier** pair,
+the cohort finished in 37.11→31.98 s, but event P95 worsened
+1.92→2.34 s and median 83.34→136.55 ms. Those single-pair observations do not
+establish a concurrent tail-latency improvement. All original timings remain
+in the result population. Percentiles use nearest rank over the full population.
+
+A later queued run of `b2773bd711b4…` failed after storage timeouts: the same
+terminal command committed and then returned `applied: false` on transport
+retry. It is excluded from successful latency comparisons and retained as a
+failure, not replaced by a shortened history. The independent minimal
+reproduction and the native/SQL lost-ACK specifications established the missing
+terminal receipt. The fix is owned by
+[storage idempotency](STORAGE.md#commands-queries-and-idempotency).
+The measurement harness now preserves failed authorities, daemon logs and
+partial reports, and refuses them as qualifying comparisons.
+
+Alternative rejected after measurement: a producer segment-normalization memo
+made a warm 51 MiB metadata microprofile substantially faster, but whole-cohort
+wait changed by −0.4% and +4.3% in the two paired runs. The extra cache and its
+input bookkeeping were removed. An optimization must survive the complete
+workload, including the small histories and changed-input paths.
+
+Example (private manifest rows contain `conversation`, `sha256`,
+`projection_bytes`, `rounds`; each `<conversation>.json` contains `turn`):
+
+```sh
+TOFUDB_BIN=/path/to/verified/tofu-db python3 benchmarks/storage_history_cohort.py \
+  --corpus /private/complete-history-export --directory /actual-volume/disposable \
+  --output /private/barrier-result.json
+```
+
+Run paired processes serially, reversing their order, and pass their JSON results
+to `compare_reports`; its executable rejection specs are
+`tests/meta/test_storage_history_cohort.py`. Content-free results retain all case
+clocks, input/code/binary hashes and authority/recovery provenance. Never replace
+the corpus with shortened histories when qualifying the same result.
+
 ## Pre-request checkpoint never awaits diagnostics
 
 Problem: every root model request first drained the task FIFO, so a paid call
