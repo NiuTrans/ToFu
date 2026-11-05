@@ -77,6 +77,10 @@ def render_worker(contract: dict, worker: dict) -> tuple[str, str]:
         f'WORKER_EXECUTION_WITNESS_FORMAT = {worker["conversationExecutionWitness"]["format"]!r}',
         f'WORKER_EXECUTION_CONFIG_KEY = {worker["conversationExecutionWitness"]["configKey"]!r}',
         f'WORKER_EXECUTION_PROCESS_FIELDS = frozenset({worker["conversationExecutionWitness"]["processFields"]!r})',
+        f'WORKER_EXECUTION_EXIT_FORMAT = {worker["conversationExecutionExit"]["format"]!r}',
+        f'WORKER_EXECUTION_EXIT_KEY = {worker["conversationExecutionExit"]["metadataKey"]!r}',
+        f'WORKER_EXECUTION_EXIT_PROOFS = frozenset({worker["conversationExecutionExit"]["proofs"]!r})',
+        f'WORKER_EXECUTION_EXIT_SETTLEMENTS = frozenset({worker["conversationExecutionExit"]["settlements"]!r})',
 
         '',
         'class WorkerLeaseAuthoritySnapshot(NamedTuple):',

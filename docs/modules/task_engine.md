@@ -68,11 +68,24 @@ constants share the SQL/application shape; native admission enforces the same
 shape and transaction. A missing process witness never grants death proof.
 An entered Attempt is never restarted just because its lease was reclaimed.
 Terminal outcome requires both canonical persistence receipts and physical exit;
-unknown process/effect/account outcomes remain with recovery. This adapter is
+`worker_recovery.py` records one entry-digest-bound exit receipt in existing
+task-result metadata after common cleanup. Completed transport retries can use
+it after the local carrier is evicted. A missing OS process capture still stores
+the original claim and permits joined completion, but grants no death proof.
+Actual local process death can settle an entered invocation as an explicit
+unknown external outcome without calling preparation, models or tools. Existing
+output, domain receipts and known usage remain intact; incomplete usage stays
+incomplete and automatic replay is disabled. A terminal result alone cannot
+prove required completion consumers exited: recovery preserves its known output
+and accounting but reports unknown overall settlement. Missing/foreign evidence
+and live terminal persistence debt remain unconfirmed. Unwound preparation uses
+the existing TaskRuntime to retain its exit evidence until persistence succeeds.
+This adapter is
 not production kind registration or independent process composition. Specs:
 `test_durable_attempt_execution.py`, `test_conversation_worker_binding.py`,
 `test_conversation_worker_publication.py`, `test_conversation_worker_children.py`
-and `test_durable_model_authority.py`, `test_worker_execution_witness.py`, plus
+and `test_durable_model_authority.py`, `test_worker_execution_witness.py`,
+`test_worker_exit_recovery.py`, plus
 worker/event-delivery neighbors.
 Generic thread/executor/async-wrapper rejection settles that same original
 carrier and preserves the launch exception. Background completion retrieves

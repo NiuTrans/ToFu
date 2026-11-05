@@ -1061,6 +1061,22 @@ Attempt reads omit it. Missing process evidence grants no death proof. This is
 one fixed-shape witness over the Attempt's existing retention, with no heartbeat
 history: a representative entry measured 310 JSON bytes before storage encoding.
 
+The conversation recovery owner stores one `conversationWorkerExit` receipt in
+the existing task-result metadata through its guarded checkpoint and current
+root claim. Its canonical entry digest binds the original immutable process and
+claim; it contains no process identifiers. The compact JSON receipt measures at
+most 174 bytes before storage encoding. Joined invocation cleanup confirms
+completion; a process-death proof alone records unknown overall settlement,
+including when a terminal result was saved before required consumers finished.
+Recovery preserves existing metadata and known invoices/usage. An unfinished
+result receives `usageComplete: false` and a typed manual-recovery error; this
+does not authorize wallet release or zero-cost settlement. The existing billing
+admission/invoice owners retain unresolved holds. Missing or foreign process
+evidence cannot trigger recovery, and a pending local persistence receipt stays
+unconfirmed. No effect is re-entered by recovery. The codec and executable
+cross-authority specs live in `conversation_sync/worker_recovery.py` and
+`tests/conversation/test_worker_exit_recovery.py`.
+
 Registered child births resolve the same root claim in storage, including nested
 births, Flow completion, checkpoint and replay batches with omitted proofs.
 Generic task record writes/deletes cannot bypass that boundary. A child tool

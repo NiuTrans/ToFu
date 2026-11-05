@@ -13,6 +13,11 @@ registration. Verify `tests/conversation/test_durable_attempt_execution.py` and
 the cross-authority worker publication contract in `docs/STORAGE.md`.
 `worker_control.py` carries the first acknowledged cancellation cause and
 provenance between Stop and the shared invocation cancellation owner.
+`worker_recovery.py` binds bounded task-result exit receipts to immutable entry
+evidence. The common worker's joined exit and local process death are distinct
+proofs; foreign/missing process evidence grants neither. Preserve unknown domain
+settlement and known accounting. Verify `test_worker_exit_recovery.py` alongside
+the common executor tests; this owner never re-enters a model or tool.
 
 ## Editing rules
 

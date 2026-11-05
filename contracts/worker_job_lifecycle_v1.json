@@ -60,10 +60,19 @@
     "Only the current backend epoch and backend-owned advancing clock prove or extend a live lease; delayed or forged caller clocks cannot revive one."
   ],
   "conversationPublication": {
-    "operations": ["turn.attempt.start", "turn.event.record", "turn.event.record_batch", "turn.visible.sync", "task_results.checkpoint"],
+    "operations": [
+      "turn.attempt.start",
+      "turn.event.record",
+      "turn.event.record_batch",
+      "turn.visible.sync",
+      "task_results.checkpoint"
+    ],
     "binding": "conversation-attempt:{attemptId}, established only by turn.attempt.dispatch_worker",
     "proofField": "worker_claim",
-    "proof": {"worker_id": "string:1..256", "fencing_token": "positive-signed-64-bit-integer"},
+    "proof": {
+      "worker_id": "string:1..256",
+      "fencing_token": "positive-signed-64-bit-integer"
+    },
     "atomic": "Validate the bound job, user, kind, attempt, live holder/token and backend lease epoch/time in the same transaction as publication. SQL holds the worker row until commit; native records its OCC dependency.",
     "missingOrStale": "database_conflict; no Turn, task event, replay or terminal accounting writes; omission cannot select legacy authority",
     "cancelled": "Start is refused. A current claim may drain evidence and checkpoints only after durable startedAt proves entry; an unentered cancelled attempt permits terminal cleanup only. The initial tool_effect entered event without reconciliation is a new effect admission: reject it after cancellation inside Turn and standalone replay transactions, including terminal wrappers and batches. A previously admitted effect can still return or attach reconciliation evidence. Cancellation never revokes the obligation to commit received evidence. Lost or expired claims remain refused for every write.",
@@ -81,7 +90,10 @@
     "crash": "The committed root entry proves external effects are possible. It cannot prove a particular provider call happened or completed; entered work requires domain recovery evidence and is never replayed from a fresh lease alone."
   },
   "conversationReplayPublication": {
-    "operations": ["event.append", "event.append_batch"],
+    "operations": [
+      "event.append",
+      "event.append_batch"
+    ],
     "proofField": "worker_claim",
     "binding": "A conversation-attempt:{attemptId} stream and every descendant resolved through immutable invocation births require the current root claim, even when require_attempts_live or worker_claim is omitted. Pure legacy batches retain their bulk append path only after ancestry resolution.",
     "owner": "Standalone replay producers carry explicit user_id alongside worker_claim; batching retains each row's owner.",
@@ -108,7 +120,13 @@
     "format": "tofu.conversation-worker-execution/v1",
     "configKey": "_conversationWorkerExecution",
     "processField": "worker_process",
-    "processFields": ["host", "boot", "pid_namespace", "pid", "started"],
+    "processFields": [
+      "host",
+      "boot",
+      "pid_namespace",
+      "pid",
+      "started"
+    ],
     "entry": "turn.attempt.start may carry the actual invocation process identity. Store its exact process and original worker claim in private accepted configuration in the same transaction as first startedAt. Identical retries revalidate authority; changed witnesses and late introduction after entry refuse.",
     "visibility": "Private owner-only execution reads; never public Attempt or client-controlled accepted configuration.",
     "absence": "Missing or unavailable process evidence grants no physical-exit proof and never permits replay. It does not prevent initial execution.",
@@ -146,5 +164,24 @@
     "authority": "only an owner/tenant-proved domain transition advances the counter and availability atomically",
     "claimObservation": "captured at claim; never advanced by heartbeat or cached run reads",
     "deferral": "unseen wake wins over an older requested availability"
+  },
+  "conversationExecutionExit": {
+    "format": "tofu.conversation-worker-exit/v1",
+    "metadataKey": "conversationWorkerExit",
+    "proofs": [
+      "joined",
+      "process_dead"
+    ],
+    "binding": "SHA-256 of canonical sorted compact JSON of the immutable execution witness",
+    "authority": "existing owner-scoped task_results checkpoint with the current root publication claim",
+    "joined": "the common task worker has exited including invocation cleanup; terminal task persistence must be acknowledged",
+    "processDead": "the existing process_owner owner_state proves death in the same host, boot and PID namespace; absence or foreign evidence remains unknown",
+    "unknown": "retain output, domain invoice and known usage; mark incomplete usage and disable automatic effect replay; never release an uncertain admission as zero cost",
+    "retention": "one fixed-shape exit receipt in the existing result metadata; no process or cost journal",
+    "settlements": [
+      "confirmed",
+      "unknown"
+    ],
+    "terminalReplay": "Only a joined exit receipt confirms all required completion consumers. Process death alone preserves known output and accounting but leaves overall settlement unknown even if a terminal result exists."
   }
 }
