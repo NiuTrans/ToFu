@@ -56,6 +56,7 @@
   "taskId": "s",
   "templated": 1,
   "timed_from_audio": true,
+  "toolCallId": "s",
   "toolContext": "s",
   "toolContextTools": [],
   "toolCount": 1,
