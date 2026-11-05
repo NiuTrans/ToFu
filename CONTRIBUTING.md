@@ -45,6 +45,7 @@ Never hand-edit generated artifacts. Edit their source and run the owner:
 | `frontend/src/runtime/app-runtime.js` | `frontend/src/runtime/sections/` | `npm run generate:runtime` |
 | `static/styles.css`, `static/settings.css` | `frontend/src/styles/` | `npm run generate:styles` |
 | Conversation clients/validators | `contracts/conversation_sync_v3.yaml` | `npm run generate:conversation-sync` |
+| Model-routing clients/validators and `lib/model_routing/generated_inference_defaults.py` | model-routing contracts and `lib/model_info/model_inference_defaults.json` | `python3 scripts/gen_api_v1_model_routing_contract.py` |
 | Runtime action catalog | action source modules | `npm run generate:actions` |
 | Tool inventory | tool registry | `python3 scripts/gen_tool_inventory.py` |
 | i18n contract, language module, locale delivery JSON | `frontend/src/i18n/languages.json`, `frontend/src/i18n/locales/` | `npm run generate:i18n` |

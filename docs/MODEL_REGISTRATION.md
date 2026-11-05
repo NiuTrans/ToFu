@@ -796,6 +796,21 @@ the declared default rung when known. Specifications:
 The bounded exact-identity defaults catalogue accepts at most eight
 `previous_profiles` per group. Corrections replace only exact prior shipped
 profiles; any different owner field or `source=configured` remains authoritative.
+
+Problem: rereading the maintained JSON after a checkout update pairs newer
+inference vocabulary with a running server's older schema and can prevent
+every route from loading. Decision: `lib/model_info/model_inference_defaults.json`
+remains the authored catalogue; `scripts/gen_api_v1_model_routing_contract.py`
+also derives `lib/model_routing/generated_inference_defaults.py`. Runtime
+normalization reads that imported snapshot, so the existing boot source pin
+keeps defaults with the schema and compiler until restart, including first use
+after a merge. Owner configuration still follows its repository revision.
+Run the generator and its `--check` mode whenever the catalogue changes.
+Alternatives rejected: hot-reloading only the schema leaves the compiler on
+its old vocabulary; catching validation errors and dropping defaults hides
+invalid metadata; restarting on every merge interrupts active tasks.
+Specification: `tests/model_routing/test_inference_defaults_snapshot.py`.
+
 Claude profiles for models whose API default is `display: "omitted"` (Opus
 4.7/4.8/5/5.5, Sonnet 5/5.5, Haiku 5.5, Fable/Mythos 5.x) declare
 `reasoning.display: "summarized"` ([controlling thinking display](https://platform.claude.com/docs/en/build-with-claude/thinking)):
@@ -1401,7 +1416,9 @@ target conversation refuses the turn; the candidate stays new for the next run.
 5. Add relay or gateway recipes only with served evidence: a public catalogue
    listing, or a live 200/429 probe through the existing probe tooling (an
    unserved gateway id answers 400).
-6. Run the focused test, `tests/model_routing/test_world_catalog_sync.py`,
+6. Regenerate the inference-defaults snapshot with
+   `python3 scripts/gen_api_v1_model_routing_contract.py`, then run its `--check`
+   mode. Run the focused test, `tests/model_routing/test_world_catalog_sync.py`,
    `test_model_info_release.py`, `test_model_registration_admission.py`,
    `tests/providers/test_provider_template_recipes.py` and
    `tests/context/test_context_profile_contract.py`; the watch must stop listing

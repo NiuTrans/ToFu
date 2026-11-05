@@ -114,14 +114,13 @@ def test_exact_identity_wins_over_a_canonical_twin():
 
 
 @pytest.fixture
-def declared_defaults(tmp_path, monkeypatch):
-    shipped = json.loads(model_defaults._PATH.read_text(encoding='utf-8'))
+def declared_defaults(monkeypatch):
+    shipped = json.loads(model_defaults.DEFAULTS_JSON)
     profile, other = (next(group['inference_profile'] for group in shipped['groups']
                            if model_id in group['model_ids'])
                       for model_id in ('claude-opus-5-5', 'claude-haiku-5-5'))
     assert profile != other
-    path = tmp_path / 'model_inference_defaults.json'
-    path.write_text(json.dumps({
+    source = json.dumps({
         'contract_version': shipped['contract_version'],
         'groups': [
             {'creator_id': 'anthropic', 'model_ids': ['claude-test-7-1'], 'inference_profile': profile},
@@ -131,8 +130,8 @@ def declared_defaults(tmp_path, monkeypatch):
             # Two Models sharing one spelling key with different facts.
             {'creator_id': 'anthropic', 'model_ids': ['claude-test-6-1'], 'inference_profile': profile},
             {'creator_id': 'anthropic', 'model_ids': ['claude-test-6.1'], 'inference_profile': other},
-        ]}), encoding='utf-8')
-    monkeypatch.setattr(model_defaults, '_PATH', path)
+        ]})
+    monkeypatch.setattr(model_defaults, 'DEFAULTS_JSON', source)
     return profile
 
 
