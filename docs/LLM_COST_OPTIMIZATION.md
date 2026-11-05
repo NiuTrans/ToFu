@@ -28,13 +28,22 @@ request config: mcpActiveToolLimit=8
 
 ### 2. Economic working set
 
-Window safety and economic efficiency are separate constraints. The existing 90%-of-usable-window trigger prevents overflow, but on a 1M model it waits until roughly 778K tokens. The effective automatic summary trigger is now:
+Window safety and economic efficiency are separate constraints. Automatic
+compaction now defaults to the existing 90%-of-usable-window safety trigger
+(roughly 778K on a 1M route with the standard reserves). A positive, explicitly
+configured economic working set selects:
 
 ```text
 min(window_safety_threshold, working_set_tokens)
 ```
 
-The fallback working set is 128K and includes live tool schemas. When the active provider/model rate card declares context tiers, the default instead uses 90% of the first boundary followed by a higher effective input, output, cache-write, or cache-read rate. For example, a 272K price boundary yields a 244,800-token working set. Flat, unknown, or cross-currency tiers retain 128K; an explicit request/environment value remains authoritative. On neutral/subscription routes the result controls local Layer-2 preservation; on verified public OpenAI/Anthropic routes it controls provider-rendered input while local L2 waits for the hard window/reactive fallback. Local L1, manual compaction, archives and receipts remain active.
+The default working set is zero: neither a fixed 128K target nor a pricing tier
+implicitly authorizes early lossy compaction. An explicit positive value includes
+live tool schemas and retains the economic eligibility checks. The shared local
+compactor owns new rewrites across routes; provider dialect support does not
+enable another automatic summary policy. Local L1, manual compaction, archives
+and receipts remain active. The execution-continuity decision, bounded incident
+measurement and tradeoffs are in [context budgets](CONTEXT_BUDGET_POLICY.md#automatic-compaction-preserves-execution-continuity).
 
 A final fail-closed admission boundary remeasures the rendered request after inbox/tool injection. First and later dispatches use the route-derived physical safety ceiling and requested output reserve, not a fixed 256K first-dispatch cap or the economic target. A bounded L1 candidate is considered before one semantic compaction + recompose. Failed live summaries preserve source and refuse irreducible input; explicit utility recovery remains separate. Complete generated text survives local receipt-shaping faults, and local compaction defects surface as internal errors rather than provider prompt overflow. Each API-round persists a content-free message/schema/total/target/method/action snapshot, separating admitted prompt size, cache reuse and billed internal compaction calls in the cost panel.
 The accepted complete-input count is forwarded only through that round's call stack to the completion-window clamp; absent or invalid evidence keeps the standalone body builder's local estimate instead of reusing stale task state. Compression-first model selection defaults to `aa-cheapest`: token-weighted cost first, highest exact fresh AA within minimum-cost ties, no hidden band, strict same-scope savings; explicit `main`/`disableModelFallback` and missing evidence preserve main. AA is a proxy, not measured summary fidelity or speed. Ownership: [AA-cheapest routing](CONTEXT_BUDGET_POLICY.md#aa-cheapest-compression-first-routing).
@@ -42,9 +51,10 @@ The accepted complete-input count is forwarded only through that round's call st
 Controls:
 
 ```text
-request config: compaction.workingSetTokens=128000
-environment:    TOFU_WORKING_CONTEXT_TOKENS=128000
-opt out:        set either value to 0
+default:        window safety only (workingSetTokens=0)
+explicit opt-in example: compaction.workingSetTokens=128000
+process opt-in example:  TOFU_WORKING_CONTEXT_TOKENS=128000
+request value overrides the environment; 0 restores window safety only
 ```
 
 Unified automatic L2 starts with a one-round ROI horizon, then predicts prefix lifetime from the shortest of the four most recent successful compaction gaps and the current window's already-observed age, capped at six and by the hard remaining API-round budget. Total task age no longer grants a longer horizon. Break-even resolves prices separately for the current and candidate prompt, compares only the observed warm prefix before/after, and records any pricing tier crossing. Manual, reactive and hard-window compaction still bypass the economic gate. There is no separate Adaptive horizon.
