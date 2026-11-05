@@ -204,6 +204,7 @@ __pycache__/
 !/scripts/gen_working_facts_contract.py
 !/scripts/gen_channels_contract.py
 !/scripts/gen_execution_account_frontier.py
+!/scripts/gen_worker_control.py
 !/scripts/gen_native_token_count_abi.py
 !/scripts/gen_native_usage_aggregate.py
 !/scripts/check_native_token_count_abi.py

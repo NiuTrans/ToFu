@@ -519,7 +519,8 @@ def _turn_recover(session: Session, payload: Mapping[str, Any]) -> Any:
         "cp.turn_id=t.turn_id AND cp.conversation_id=t.conversation_id "
         "AND cp.user_id=t.user_id AND cp.attempt_id=t.current_attempt_id "
         "AND cp.projection_revision=t.projection_checkpoint_revision "
-        "WHERE a.status IN ('pending','running')"
+        "WHERE a.status IN ('pending','running') "
+        "AND COALESCE(a.task_id,'') NOT LIKE 'conversation-attempt:%'"
         + (" AND a.created_at < ?" if created_before_ms is not None else ""),
         ((created_before_ms,) if created_before_ms is not None else ()),
     )

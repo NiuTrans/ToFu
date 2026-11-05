@@ -562,6 +562,7 @@ class SynchronousWorkerRunner:
         lease_ms: int = 60_000,
         heartbeat_interval_ms: int = 20_000,
         now_ms: Callable[[], int] | None = None,
+        control_signals=None,
     ) -> None:
         normalized_worker_id = str(worker_id or '').strip()
         if not normalized_worker_id or len(normalized_worker_id) > 256:
@@ -576,6 +577,7 @@ class SynchronousWorkerRunner:
                 raise ValueError(
                     f'duplicate worker task kind: {registration.task_kind}')
             by_kind[registration.task_kind] = registration
+        self._control_signals = control_signals
         self.worker_id = normalized_worker_id
         self.store = store
         self.lease_ms = lease_ms
@@ -712,34 +714,47 @@ class SynchronousWorkerRunner:
     def _start_heartbeat_monitor(
         self, context: WorkerExecutionContext,
     ) -> tuple[threading.Event, threading.Thread]:
-        stop = threading.Event()
+        wake = threading.Event()
+
+        class MonitorStop(threading.Event):
+            def set(self):
+                super().set()
+                wake.set()
+
+        stop = MonitorStop()
+        unsubscribe = (self._control_signals.subscribe(context.claim.task_id, wake)
+                       if self._control_signals is not None else lambda: None)
+        if self._control_signals is not None:
+            # Subscribe before the first refresh so cancellation cannot fall
+            # into the interval between the initial claim proof and this wait.
+            wake.set()
 
         def monitor() -> None:
-            interval_s = self.heartbeat_interval_ms / 1000.0
-            while not stop.wait(interval_s):
-                try:
-                    response = self.store.heartbeat(
-                        context.claim,
-                        now_ms=self._now_ms(),
-                        lease_ms=self.lease_ms,
-                        replay_cursor=context.replay_cursor,
-                    )
-                    context.observe_heartbeat(response)
-                except Exception:
-                    # A worker that cannot prove lease renewal must stop
-                    # producing events/side effects and leave takeover to the
-                    # database deadline.  It must not guess that a failed RPC
-                    # means the old fence is still authoritative.
-                    context.mark_authority_lost()
-                if context.authority_lost:
-                    return
+            try:
+                while True:
+                    wake.wait(self.heartbeat_interval_ms / 1000.0)
+                    wake.clear()
+                    if stop.is_set():
+                        return
+                    try:
+                        response = self.store.heartbeat(
+                            context.claim, now_ms=self._now_ms(), lease_ms=self.lease_ms,
+                            replay_cursor=context.replay_cursor)
+                        context.observe_heartbeat(response)
+                    except Exception:
+                        context.mark_authority_lost()
+                    if context.authority_lost:
+                        return
+            finally:
+                unsubscribe()
 
-        thread = threading.Thread(
-            target=monitor,
-            name=f'durable-worker-heartbeat:{context.claim.task_id[:32]}',
-            daemon=True,
-        )
-        thread.start()
+        thread = threading.Thread(target=monitor,
+            name=f'durable-worker-heartbeat:{context.claim.task_id[:32]}', daemon=True)
+        try:
+            thread.start()
+        except BaseException:
+            unsubscribe()
+            raise
         return stop, thread
 
     def _suspend(

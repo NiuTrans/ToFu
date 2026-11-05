@@ -90,6 +90,12 @@
     "unentered": "A current cancelled claim plus an attempt with no startedAt permits terminal cleanup without model context, prompt hooks, task registration or model/tool execution.",
     "entered": "The original invocation must join and discharge domain/account persistence, or recovery must supply that evidence. Lease ownership alone never authorizes effect replay or completion."
   },
+  "conversationRecoveryOwnership": {
+    "bindingPrefix": "conversation-attempt:",
+    "owner": "Claimed conversation recovery owns both the root and Flow phases sharing its task ID, including queued and expired leases.",
+    "legacyRecovery": "turn.recover and task_results.recover_running never settle these bindings. API process absence and lease expiry grant no physical-exit, effect or accounting evidence.",
+    "derivedIndexes": "Legacy restart indexes contain only legacy recovery candidates. Old worker-owned index entries are verified against their canonical owner and retired without modifying durable execution facts."
+  },
   "leaseAuthority": {
     "clock": "backend-owned UTC-offset high-water plus monotonic elapsed time",
     "lifetime": "native/SQLite: existing shared store epoch; PostgreSQL: random named server-shared clock epoch scoped by database OID; never a Sidecar-local UUID",

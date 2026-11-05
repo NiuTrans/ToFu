@@ -254,9 +254,14 @@ The delivery dependencies and completion evidence are:
    worker death and old-writer refusal. Existing in-process commit callbacks
    alone cannot wake a separate idle process. Startup recovery must respect
    durable ownership rather than retire another process's tasks:
-   `turn.recover` and `task_results.recover_running` still need this separation
-   before process composition is enabled. Lease expiry alone cannot qualify
-   either command to discharge unknown effects or accounting.
+   `turn.recover` and `task_results.recover_running` now exclude these bindings
+   and their Flow phases. Native restart indexes retain only legacy candidates.
+   Lease expiry never qualifies legacy recovery to discharge unknown effects
+   or accounting. The common durable service now has a commit-owned authority
+   watch on all three backends. Empty-queue wake, subscribe/probe gaps, remote
+   Stop, COMMIT acknowledgement loss and joined shutdown have executable
+   specifications. Independent host composition and production admission remain
+   the next cutover boundary.
 4. **Execution facts and read projections.** Keep committed execution facts and
    their accounting authoritative while projection/delivery can drain and
    reconstruct independently. Browser observation, reconnect and transcript

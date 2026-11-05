@@ -124,6 +124,37 @@ fn recover_owner(database: &mut AuthorityDatabase, owner_user_id: u64, now_ms: u
 }
 
 #[test]
+fn old_worker_turn_recovery_index_retires_without_settlement() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+    let accepted = accepted_executor_pair(&mut database, 11, "worker-recovery", 1_000);
+    let attempt_id = accepted["attempt"]["attemptId"].as_str().unwrap();
+    let dispatched = execute(&mut database, &request("turn.attempt.dispatch_worker", 11,
+        json!({"attempt_id":attempt_id,"user_id":11,"now_ms":1_001,
+            "principal":{"kind":"user","subject_id":"owner","owner_user_id":11,
+                         "tenant_id":null,"scopes":[]}}), Some("worker-recovery-dispatch")), 1_001).unwrap();
+    let attempt = &dispatched["attempt"];
+    let mut encoded_key = 1_000_u64.to_be_bytes().to_vec();
+    encoded_key.extend_from_slice(attempt_id.as_bytes());
+    let key = EntityKey::new(7, 11, crate::generated_tofudb_ir::ATTEMPT_RECOVERY_INDEX_NAMESPACE,
+                            &encoded_key).unwrap();
+    let mut transaction = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+    assert!(database.entity_get(&mut transaction, &key).unwrap().is_none());
+    database.entity_put(&mut transaction, key.clone(), serde_json::to_vec(&json!({
+        "attemptId":attempt_id,"conversationId":attempt["conversationId"],
+        "turnId":attempt["turnId"],"taskId":attempt["taskId"],"projectionBytes":0,
+    })).unwrap()).unwrap();
+    database.commit(transaction).unwrap();
+    assert_eq!(recover_owner(&mut database, 11, 2_000)["recovered"], 0);
+    let current = execute(&mut database, &request("turn.attempt.get", 11,
+        json!({"attempt_id":attempt_id,"user_id":11}), None), 2_001).unwrap();
+    assert_eq!(current["status"], "pending");
+    assert_eq!(current["taskId"], attempt["taskId"]);
+    let mut transaction = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+    assert!(database.entity_get(&mut transaction, &key).unwrap().is_none());
+}
+
+#[test]
 fn restart_recovery_retires_the_dispatchable_entry_of_the_attempt_it_settles() {
     let directory = tempfile::tempdir().unwrap();
     let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();

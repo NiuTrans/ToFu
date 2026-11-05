@@ -1192,7 +1192,8 @@ def _task_results_recovery_pending(
     """
     attempt = session.fetch_one(
         "SELECT 1 AS x FROM storage_generation_attempts "
-        "WHERE status IN ('pending','running') LIMIT 1"
+        "WHERE status IN ('pending','running') "
+        "AND COALESCE(task_id,'') NOT LIKE 'conversation-attempt:%' LIMIT 1"
     )
     if attempt is not None:
         return {"pending": True}
@@ -1201,7 +1202,8 @@ def _task_results_recovery_pending(
         else "json_extract(CAST(value_json AS TEXT), '$.status')"
     )
     row = session.fetch_one(
-        "SELECT 1 AS x FROM storage_records WHERE namespace=? AND "
+        "SELECT 1 AS x FROM storage_records WHERE namespace=? "
+        "AND record_key NOT LIKE 'conversation-attempt:%' AND "
         + status_expression + " IN ('pending','running') LIMIT 1",
         ("task_results",),
     )
@@ -1233,12 +1235,19 @@ def _task_results_recover_running(
     recovered: list[dict[str, str]] = []
     exhausted = False
 
+    status_expression = (
+        "value_json->>'status'" if session.backend == 'postgres'
+        else "json_extract(CAST(value_json AS TEXT), '$.status')"
+    )
+
     # Small pages bound peak memory even when one snapshot contains MiB of
     # content/tool state. Repeated calls naturally skip rows already settled.
     while scanned < scan_limit and len(recovered) < max_rows:
         rows = session.fetch_all(
             "SELECT record_key, value_json, version FROM storage_records "
-            "WHERE namespace=? AND record_key>? ORDER BY record_key LIMIT ?",
+            "WHERE namespace=? AND record_key>? "
+            "AND record_key NOT LIKE 'conversation-attempt:%' AND "
+            + status_expression + " IN ('pending','running') ORDER BY record_key LIMIT ?",
             ("task_results", after_key, min(8, scan_limit - scanned)),
         )
         if not rows:

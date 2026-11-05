@@ -16,7 +16,7 @@ ports; backend libraries never import routes or browser owners.
 | Identity, providers, OAuth, billing | `identity.py`, `api_keys/`, `oauth/`, `billing/`, `llm_dispatch/`, `provider/` (was `provider_*`), `byo/` (was `byo_*`), `rate_limit/` (was `rate_limit_*`), `key_stats/` | `docs/modules/auth_providers_billing.md` |
 | API spec and error taxonomy | `openapi/`, `error_envelope/`, `api_response.py` | `docs/contracts/API_CONTRACT.md`, `docs/modules/integrations_api.md` |
 | Log retention, diagnostics, aggregates | `log.py` (core), `logging_pkg/` (was `log_*`), `log_clean/` | `docs/modules/infra_runtime.md`, `docs/LOGGING.md` |
-| Tasks and agent execution | `tasks_pkg/`, `agent_core/`, `agent_loop/` (was `agent_*`), `task_replay/` (was `task_*`), `swarm/`, `agent_verdict/`, `goal_runs/` | `docs/modules/task_engine.md` |
+| Tasks and agent execution | `durable_worker/`, `tasks_pkg/`, `agent_core/`, `agent_loop/` (was `agent_*`), `task_replay/` (was `task_*`), `swarm/`, `agent_verdict/`, `goal_runs/` | `docs/modules/task_engine.md` |
 | Orchestration graphs | `orchestration/`, `orchestration_*.py` | `docs/modules/orchestration_dag.md` |
 | Model I/O | `llm/`, `llm_dispatch/`, `local_serve/`, `model_*`, `pricing/`, `llm_sanitize/`, `mt_provider/` | `docs/modules/llm_io.md` |
 | Tools, MCP, browser, site packs, search | `tools/`, `tool_results/` (was `tool_*`), `search/` (was `search_*`), `mcp/`, `browser/`, `site_packs/`, `site_doctor/`, `site_knowledge/`, `project_mod/`, `repo_map/`, `tool_input_repair/` | `docs/modules/tools_execution.md`, `docs/SITE_PACKS.md` |

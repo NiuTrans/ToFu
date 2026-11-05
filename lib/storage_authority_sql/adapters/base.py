@@ -11,6 +11,7 @@ from lib.storage.generated_worker_job_contract import WorkerLeaseAuthoritySnapsh
 class Session(Protocol):
     event_read_epoch: str
     worker_lease_clock: Any
+    worker_hints: Any
 
     backend: str
     turn_projection_cache: Any | None

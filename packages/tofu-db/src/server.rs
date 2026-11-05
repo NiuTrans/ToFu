@@ -1032,7 +1032,10 @@ pub(crate) fn dispatch_one_request_inner_mode(
     allow_parallel: bool,
 ) -> io::Result<RequestDispatch> {
     if allow_parallel {crate::fsync_stats::note_foreground_request();}
-    let response = if matches!(request.operation.as_str(), crate::daemon_checkpoint::CAPABILITIES | crate::daemon_checkpoint::CONTROL)
+    let response = if request.operation == crate::worker_control::WATCH_OPERATION && stores.worker_control.is_some() {
+        let (control, scope) = stores.worker_control.as_ref().unwrap();
+        control.respond(request, session.negotiated.schema_id, admitted_at_ms, *scope).into()
+    } else if matches!(request.operation.as_str(), crate::daemon_checkpoint::CAPABILITIES | crate::daemon_checkpoint::CONTROL)
         && stores.checkpoint_control.is_some() {
         stores.checkpoint_control.as_ref().unwrap().respond(request, session.negotiated.schema_id, admitted_at_ms).into()
     } else if crate::control_ops::is_control_operation(&request.operation) {
