@@ -914,6 +914,7 @@ def compact_conversation_now(
         logger.debug('[ManualCompact] turn-diff block failed: %s', e)
 
     from lib.tasks_pkg.compaction._continuity import attach_continuity
+    archive_summary_text = summary_text
     summary_text, continuity_digest = attach_continuity(summary_text, old_api, task)
 
     def _settle_aborted_archive(outcome_reason: str, attempts: int) -> dict:
@@ -924,7 +925,7 @@ def compact_conversation_now(
         if archive_id is not None:
             try:
                 store.update_archive_summary(
-                    archive_id, summary_text, int(tokens_before),
+                    archive_id, archive_summary_text, int(tokens_before),
                     int(msgs_before), user_id=user_id, receipt=receipt)
             except Exception as e:
                 logger.debug('[ManualCompact] aborted receipt update skipped: %s',
@@ -1095,7 +1096,7 @@ def compact_conversation_now(
     if archive_id is not None:
         try:
             store.update_archive_summary(
-                archive_id, summary_text, int(tokens_after), int(msgs_after),
+                archive_id, archive_summary_text, int(tokens_after), int(msgs_after),
                 user_id=user_id, receipt=receipt, post_messages=deepcopy(new_messages))
         except Exception as e:
             logger.debug('[ManualCompact] archive row update failed: %s', e)

@@ -5,6 +5,7 @@ import pytest
 
 from tests.compaction.test_dispatch_context_recovery import _task, _round, _archive_fixture
 from tests.compaction.test_compaction_history_wire import tool_round, user
+from tests.compaction.test_unified_continuity import execution
 
 pytestmark = pytest.mark.unit
 
@@ -39,6 +40,10 @@ def compaction_case(monkeypatch):
             pass
 
         def update_archive_summary(self, *a, **k):
+            if failure['stage'] == 'protocol':
+                from lib.storage.errors import StorageError
+                raise StorageError('database_protocol_error', 'archive summary is invalid',
+                                 operation_id='compaction_archive.update_summary')
             if failure['stage'] == 'cancel_post':
                 task['aborted'] = True
                 raise OSError('cancelled during durable write')
@@ -77,6 +82,102 @@ def test_archive_failure_preserves_original_model_input_and_reports_failure(comp
     assert failed[0]['severity'] == 'warning'
     if stage == 'create':
         assert not failed[0].get('archiveId')
+
+
+def test_archive_protocol_failure_keeps_its_nonretryable_typed_cause(compaction_case):
+    from lib.tasks_pkg.compaction._layer2 import _compact as l2
+    from lib.storage.errors import StorageError
+    task, _, _, failure = compaction_case
+    failure['stage'] = 'protocol'
+    messages = [user('Work'), {'role': 'assistant', 'content': 'earlier evidence ' * 5000},
+                user('Continue')]
+    before = deepcopy(messages)
+    with pytest.raises(StorageError) as caught:
+        l2.force_compact_if_needed(messages, task, force=True, preserve_budget_tokens=1)
+    assert caught.value.code == 'database_protocol_error'
+    assert caught.value.retryable is False
+    assert caught.value.operation_id == 'compaction_archive.update_summary'
+    assert caught.value.message == 'archive summary is invalid'
+    assert messages == before
+
+
+@pytest.mark.parametrize('backend', ['sqlite', 'tofudb'])
+def test_large_continuity_archive_commits_narrative_and_restores_full_post(
+        monkeypatch, tmp_path, backend):
+    from pathlib import Path
+    import uuid
+    import lib.agent_core.store
+    from lib.storage import StorageSupervisor
+    from lib.storage.errors import StorageError
+    from lib.tasks_pkg import persistence_store
+    from lib.tasks_pkg.compaction._continuity import read_continuity
+    from lib.tasks_pkg.compaction._handoff import make_compaction_handoff
+    from lib.tasks_pkg.compaction._layer2._compact import _persist_compaction_candidate
+    from lib.tasks_pkg.compaction._layer2._summary_acceptance import accept_summary
+    from lib.tasks_pkg.compaction._resume_projection import restore_compacted_resume
+
+    if backend == 'tofudb':
+        from tests.support.tofudb_binary import ensure_engine_binary
+        engine = ensure_engine_binary(Path(__file__).resolve().parents[2])
+        if engine is None:
+            pytest.skip('explicit native test engine unavailable')
+        monkeypatch.setenv('TOFUDB_BIN', str(engine))
+    supervisor = StorageSupervisor(project_root=tmp_path, backend=backend, startup_timeout=60)
+    supervisor.start()
+    try:
+        monkeypatch.setattr(persistence_store, '_storage_client',
+                            lambda **kwargs: supervisor.client)
+        store = persistence_store.DefaultConversationStore()
+        monkeypatch.setattr(lib.agent_core.store, 'get_conversation_store', lambda: store)
+        supervisor.client.command('conversation.create',
+            {'conv_id': 'conversation', 'user_id': 1}, uuid.uuid4().hex)
+        source = []
+        for index in range(324):
+            source += execution(f'test-{index}', f'pytest tests/example.py::{index}',
+                                f'1 failed; invocation {index} ' + 'evidence ' * 80)
+        accepted = accept_summary(
+            'Model narrative', source, {'convId': 'conversation'}, fallback=False,
+            recent_files_block='', turn_diff_block='', turn_diff_included=False,
+            result_meta={}, log_prefix='', recovery_max_chars=22_000)
+        assert len(accepted.text) > 200_000
+        assert len(read_continuity([
+            make_compaction_handoff(
+                accepted.text, phase='mid_turn',
+                continuity_digest=accepted.continuity_digest)]
+        )['observations']) == 324
+        assert len(accepted.archive_text) <= 200_000
+        messages = [user('preserve objective'), make_compaction_handoff(
+            accepted.text, phase='mid_turn', continuity_digest=accepted.continuity_digest)]
+        task = _task()
+        task['messages'] = messages
+        archive = store.archive_transcript(
+            'conversation', source, user_id=1, task_id='task', trigger='window')
+        assert archive is not None
+        with pytest.raises(StorageError) as rejected:
+            store.update_archive_summary(
+                archive, accepted.text, 100, len(messages), user_id=1,
+                receipt={}, post_messages=messages)
+        assert rejected.value.code == 'database_protocol_error'
+        assert rejected.value.retryable is False
+
+        meta = {'archive_id': archive, 'trigger': 'window', 'round_num': 672,
+                'summary_text': accepted.text,
+                'archive_summary_text': accepted.archive_text,
+                'continuityDigest': accepted.continuity_digest,
+                'handoff_phase': 'mid_turn'}
+        receipt = _persist_compaction_candidate(messages, task, meta)
+        assert receipt['summary']['chars'] == len(accepted.text)
+        saved = store.get_compaction_archive(
+            'conversation', archive, user_id=1, include_messages=False,
+            include_post_messages=True)
+        assert saved['archive']['summary'] == accepted.archive_text
+        assert saved['postMessages'] == messages
+        assert len(read_continuity(saved['postMessages'], task)['observations']) == 324
+        supervisor.stop()
+        supervisor.start()
+        assert restore_compacted_resume(task, task['config'], []) == messages
+    finally:
+        supervisor.stop()
 
 
 def test_loaded_skills_survive_l1_l2_and_durable_resume(compaction_case, monkeypatch):
