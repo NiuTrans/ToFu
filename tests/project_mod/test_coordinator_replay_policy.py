@@ -123,11 +123,45 @@ class Replay:
         return outcome
 
 
+def forwarded_request_config(r, monkeypatch, settings):
+    """The accepted config of an owner request the Global Router forwarded.
+
+    route_to_project submits the owner's words through dispatch_scheduled_turn
+    with no tool config, so only the target conversation's settings shape it.
+    """
+    from types import SimpleNamespace
+    from lib.conversation_sync.execution_identity import capture_execution_identity
+    from lib.scheduler import conversation_dispatch
+    from lib.tasks_pkg.plan_mode import normalize_interaction_mode_runtime_config
+    submitted = []
+
+    def create_turn(conversation_id, owner, request, **kwargs):
+        submitted.append(deepcopy(request['config']))
+        return SimpleNamespace(value={'attempt': {'taskId': 'forwarded-task'}})
+
+    monkeypatch.setattr(conversation_dispatch, 'get_storage_client', lambda: SimpleNamespace(
+        query=lambda operation, payload: {'metadata': {'settings': deepcopy(settings)}}))
+    monkeypatch.setattr(conversation_dispatch, 'conversation_turn_commands',
+                        SimpleNamespace(create_turn=create_turn))
+    forwarded = {'role': 'user', 'content': 'Fully optimize the project.', 'origin': {
+        'initiator': 'human', 'forwardedFrom': {'conversationId': 'router', 'turnId': 'owner-input'}}}
+    outcome = conversation_dispatch.dispatch_scheduled_turn(
+        'coordinator', forwarded, {}, user_id=7, command_id='router-forward:request',
+        log_prefix='[Router]', input_actor='human', inject_mode='steer')
+    assert outcome.disposition == 'started'
+    return capture_execution_identity(
+        normalize_interaction_mode_runtime_config(submitted[0]), 7, r.c.principal)
+
+
 def human_turn(r, monkeypatch, **toolbar):
     """Accept, start and tool-assemble the human request that may delegate."""
+    return request_turn(r, monkeypatch, accepted_human_config(r, **toolbar))
+
+
+def request_turn(r, monkeypatch, accepted):
+    """Start and tool-assemble one accepted Coordinator request."""
     from lib.project_dispatch.delegation import capture_worker_policy
     from lib.project_dispatch.repository import CONTRACT
-    accepted = accepted_human_config(r, **toolbar)
     r.attempts['coordinator-attempt']['config'] = deepcopy(accepted)
     pinned = ingress(monkeypatch, accepted, turn_id='coordinator-turn',
                      attempt_id='coordinator-attempt')
@@ -162,6 +196,43 @@ def test_unchanged_policy_restores_across_human_and_continuation_requests(run, m
     status, drift = replay.request(human_turn(r, monkeypatch))
     assert (status, drift) == ('restored', []), (
         f'next human request cold-rebuilt the continuation prefix: status={status} drift={drift}')
+
+
+@pytest.mark.parametrize('depth, expected', [
+    ('max', ('restored', [])),
+    # The scheduler's thinking-on default beside an unset composer depth is
+    # effort drift only: the text survives, signed reasoning does not.
+    (None, ('restored_portable', ['thinkingEnabled'])),
+])
+@pytest.mark.parametrize('retired_tool_spelling', [False, True])
+def test_forwarded_request_continuations_keep_the_prefix_beside_direct_owner_turns(
+        run, monkeypatch, tmp_path, depth, expected, retired_tool_spelling):
+    """Incident 2026-11-05, conv coordinator-1a390889aa954da2b18551d1b4a32625.
+
+    The request came from the Global Router. Its scheduler-built config states no
+    composer prompt fields or chat mode, so the grant and every continuation omit
+    them, while the owner's direct turns state their defaults; a grant issued
+    before ``toolSearch: auto`` was retired also keeps that spelling. Every
+    alternation logged ``restore=policy_changed drift=chatMode,systemPrompt,
+    systemPromptBlocks,systemPromptMode[,tools]`` and rebuilt 2,068 messages.
+    """
+    from dataclasses import replace
+    r = run
+    forwarded = request_turn(r, monkeypatch, forwarded_request_config(
+        r, monkeypatch, {**SETTINGS, 'thinkingDepth': depth}))
+    if retired_tool_spelling:
+        issued = r.task['_coordinatorWorkerPolicy']
+        r.task['_coordinatorWorkerPolicy'] = replace(issued, config={
+            **issued.config, 'tools': {**issued.config['tools'], 'toolSearch': 'auto'}})
+    resumed = continuation(r, monkeypatch)
+    direct = human_turn(r, monkeypatch, thinkingDepth=depth)
+    replay = Replay(tmp_path, monkeypatch)
+    assert replay.request(direct)[0] == 'checkpoint_missing'
+    for config in (resumed, direct, resumed):
+        assert replay.request(config) == expected
+    # The forwarded turn itself had the scheduler's tools, which no owner turn has.
+    status, drift = replay.request(forwarded)
+    assert status == 'policy_changed' and 'schedulerEnabled' in drift, (status, drift)
 
 
 def test_continuation_runs_under_the_request_selection_and_its_grant(run, monkeypatch):
