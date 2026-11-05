@@ -53,11 +53,9 @@ def test_default_config_is_inert_and_declares_both_policies():
     assert cfg['traffic_percent'] == 10
     assert cfg['arms']['control'] == {
         'mcpToolExposure': 'inline',
-        'workingSetTokens': 0,
     }
     assert cfg['arms']['optimized'] == {
         'mcpToolExposure': 'auto',
-        'workingSetTokens': 128_000,
     }
     assert cfg['contract_version'] == 'tofu.experiment/v1'
     assert len(cfg['spec_digest']) == 64
@@ -85,7 +83,6 @@ def test_low_code_input_cannot_inject_arbitrary_arm_settings():
     }, strict=True)
     assert cfg['arms']['optimized'] == {
         'mcpToolExposure': 'auto',
-        'workingSetTokens': 128_000,
     }
     assert 'model' not in cfg['arms']['optimized']
 
@@ -222,14 +219,14 @@ def test_assignment_is_sticky_and_applies_only_the_selected_arm():
     control_cfg = apply_cost_experiment(
         control_task, {'model': 'kimi-k3'}, experiment_config=exp)
     assert control_cfg['mcpToolExposure'] == 'inline'
-    assert control_cfg['compaction']['workingSetTokens'] == 0
+    assert 'workingSetTokens' not in control_cfg.get('compaction', {})
     assert control_task['_costExperiment']['arm'] == 'control'
 
     optimized_task = {'convId': optimized_id, '_userId': 1}
     optimized_cfg = apply_cost_experiment(
         optimized_task, {'model': 'kimi-k3'}, experiment_config=exp)
     assert optimized_cfg['mcpToolExposure'] == 'auto'
-    assert optimized_cfg['compaction']['workingSetTokens'] == 128_000
+    assert 'workingSetTokens' not in optimized_cfg.get('compaction', {})
     assert optimized_task['_costExperiment']['arm'] == 'optimized'
 
 

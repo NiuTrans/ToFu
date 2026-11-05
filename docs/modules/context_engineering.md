@@ -206,8 +206,9 @@ A bounded launch-probed LRU may retain recursively frozen parsed frontmatter onl
 - Tool call/result pairs remain adjacent and correctly identified.
 - Memory retrieval is owner-scoped and bounded; My Context review uses the latest real user turn, strict optional billing/contention admission, and at most one actual upstream 429; skips and failures cannot erase base context.
 - Prompt-cache decisions stay stable for the lifetime of one task. Explicit zero/floor reads replace the predecessor; missing usage does not. Owner-scoped completed-turn publication uses the task-result checkpoint, never scope teardown; children/transients cannot publish parent facts. Replay and restart semantics are in [`STORAGE.md`](../STORAGE.md).
-- Economic working sets derive from provider/model price tiers without model
-  name checks; explicit overrides remain authoritative.
+- Automatic semantic compaction follows the shared route-window safety
+  boundary with output/recovery reserves; retired economic settings and price
+  tiers cannot move it earlier ([context budgets](../CONTEXT_BUDGET_POLICY.md)).
 - Turn cost aggregates per API round under that round's model/provider/tier,
   and the UI exposes total, uncached, and cache-read tokens together.
 - Required `ContextPlanV2` blocks cannot be evicted by optional evidence.

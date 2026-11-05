@@ -103,6 +103,30 @@ def test_frozen_splits_are_deterministic_disjoint_and_sized():
         seen |= ids
 
 
+@pytest.mark.parametrize('arm', ['tofu-ws64', 'tofu-ws96', 'tofu-ws128'])
+def test_retired_fixed_context_targets_cannot_be_run_as_active_arms(arm):
+    with pytest.raises(ValueError, match='unknown arm'):
+        arm_config(arm)
+
+
+def test_retired_target_in_a_frozen_candidate_requires_regeneration(tmp_path):
+    candidate = tmp_path / 'candidate.json'
+    candidate.write_text(json.dumps({
+        'config': {'compaction': {'workingSetTokens': 128_000}}}))
+    with pytest.raises(ValueError, match='retired compaction'):
+        arm_config('tofu-candidate', candidate)
+
+
+def test_historical_working_set_results_cannot_promote_a_retired_setting():
+    candidate = freeze_candidate({
+        'tofu-control': {'t1': _record('t1', True, cost=1)},
+        'tofu-ws128': {'t1': _record('t1', True, cost=0.1, compactions=3)},
+    })
+    assert candidate['evidence']['tofu-ws128']['selected'] is False
+    assert candidate['evidence']['tofu-ws128']['reason'] == 'retired_fixed_compaction_target'
+    assert 'workingSetTokens' not in candidate['config'].get('compaction', {})
+
+
 def test_arm_config_is_nested_and_candidate_can_be_loaded(tmp_path):
     assert arm_config('tofu-routed')['tools']['nativeExposure'] == 'routed'
     assert arm_config('tofu-prompt-lean')['responses'][

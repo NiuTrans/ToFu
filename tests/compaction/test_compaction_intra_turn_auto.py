@@ -335,7 +335,7 @@ def test_auto_fold_noop_on_small_turn(stub_summary):
 
 
 @pytest.mark.unit
-def test_auto_oversized_eight_round_tail_is_not_clipped_for_unpriced_summary(
+def test_optional_oversized_eight_round_tail_is_not_clipped_for_unpriced_summary(
         monkeypatch, priced_summary_route):
     """Economic pressure cannot silently clip an oversized tool-result tail.
 
@@ -347,7 +347,7 @@ def test_auto_oversized_eight_round_tail_is_not_clipped_for_unpriced_summary(
     monkeypatch.setattr(layer2.logger, 'info',
                         lambda message, *args: diagnostics.append(message % args))
     from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
-    from lib.tasks_pkg.compaction.api import force_compact_if_needed
+    from lib.tasks_pkg.compaction.api import execute_compact_tool
     from lib.tasks_pkg.compaction._constants import _summary_cooldowns
 
     # Shape of the reported second trigger: a previous compact summary is an
@@ -376,13 +376,13 @@ def test_auto_oversized_eight_round_tail_is_not_clipped_for_unpriced_summary(
     original = copy.deepcopy(msgs)
     task = _observed_cache_task(conv_id)
     task['_userId'] = 1
-    import lib.tasks_pkg.compaction._layer2._compact as compact_mod
-    monkeypatch.setattr(compact_mod, '_should_force_compact', lambda *a, **k: True)
     meta = {}
-    result = force_compact_if_needed(msgs, task=task, _result_meta=meta)
+    execute_compact_tool(
+        msgs, task=task, preserve_budget_tokens=40_000,
+        _proactive_economic=True, _result_meta=meta)
 
     assert before > 128_000  # Economic pressure is not physical overflow.
-    assert result is False
+    assert meta['compacted'] is False
     assert meta['reason'] == 'cache_negative'
     assert meta['economics']['summary_cost_known'] is False
     assert meta['economics']['summary_cost_usd'] is None
@@ -402,9 +402,8 @@ def test_auto_oversized_eight_round_tail_is_not_clipped_for_unpriced_summary(
 
 
 @pytest.mark.unit
-def test_auto_economic_decline_hysteresis_waits_for_prompt_growth(monkeypatch):
-    """After a decline, the same hot tail should not be reconsidered on every
-    round. The retry floor is economic only and never masks window safety."""
+def test_growth_past_a_retired_economic_floor_does_not_schedule_a_summary(monkeypatch):
+    """A legacy economic witness cannot create an earlier trigger."""
     import lib.tasks_pkg.compaction._tokens as tokens
 
     messages = [_sys(), _user('x' * 40_000)]
@@ -421,13 +420,12 @@ def test_auto_economic_decline_hysteresis_waits_for_prompt_growth(monkeypatch):
     assert tokens._should_force_compact(messages, task) is False
     assert task['_autoCompactRetryAfterTokens'] == msg_tokens + 8_192
 
-    # Meaningful growth reaches the retry floor and clears the defer marker.
+    # Growth still below window safety retains the evidence.
     messages.append(_user('y' * 40_000))
     monkeypatch.setattr(
         tokens, '_count_tokens_authoritative',
         lambda *args, **kwargs: (140_000, 'test'))
-    assert tokens._should_force_compact(messages, task) is True
-    assert '_autoCompactRetryAfterTokens' not in task
+    assert tokens._should_force_compact(messages, task) is False
 
 
 @pytest.mark.unit
@@ -512,10 +510,10 @@ def test_low_yield_retry_floor_uses_optimistic_reduction_bound():
 
 
 @pytest.mark.unit
-def test_cache_negative_retry_floor_yields_when_cache_witness_cools(
+def test_cold_cache_does_not_schedule_an_early_summary(
     monkeypatch,
 ):
-    """A broken/cold prefix invalidates the prior warm-cache proof at once."""
+    """Losing the warm prefix does not authorize a semantic rewrite."""
     import lib.tasks_pkg.compaction._cache_evidence as cache_state
     import lib.tasks_pkg.compaction._tokens as tokens
 
@@ -546,16 +544,14 @@ def test_cache_negative_retry_floor_yields_when_cache_witness_cools(
 
     measurement = {}
     assert tokens._should_force_compact(
-        messages, task, measurement_out=measurement) is True
-    assert '_autoCompactRetryAfterTokens' not in task
-    assert '_autoCompactRetryWitness' not in task
+        messages, task, measurement_out=measurement) is False
 
 
 @pytest.mark.unit
-def test_cache_negative_retry_floor_holds_while_cache_witness_is_warm(
+def test_warm_cache_keeps_the_shared_window_trigger(
     monkeypatch,
 ):
-    """Unchanged warm-cache evidence keeps the proven retry floor active."""
+    """A legacy economic witness cannot replace the shared window trigger."""
     import lib.tasks_pkg.compaction._cache_evidence as cache_state
     import lib.tasks_pkg.compaction._tokens as tokens
 
@@ -931,9 +927,9 @@ def priced_summary_route(monkeypatch):
 
 
 def _observed_cache_task(conv_id, model='kimi-k3'):
-    """Explicit economic policy with current task/route cache evidence."""
+    """Current task/route cache evidence for optional candidate cost tests."""
     return {'convId': conv_id, 'id': 't', 'provider_id': 'economics-test',
-            'config': {'model': model, 'compaction': {'workingSetTokens': 128_000}},
+            'config': {'model': model},
             '_compactionCacheObservation': {
                 'taskId': 't', 'model': model, 'providerId': 'economics-test',
                 'cacheReadTokens': 100000}}
@@ -1106,7 +1102,7 @@ def test_auto_does_not_reject_paid_summary_on_sunk_summary_cost(
 
 
 @pytest.mark.unit
-def test_auto_realized_low_yield_candidate_is_not_committed(
+def test_optional_realized_low_yield_candidate_is_not_committed(
         monkeypatch, priced_summary_route):
     """Best-case eligibility is only a prefilter.  If the generated summary
     plus its synthetic pair leaves <5% realized savings, proactive L2 must
@@ -1114,9 +1110,8 @@ def test_auto_realized_low_yield_candidate_is_not_committed(
     import lib.context_telemetry as telemetry
     import lib.tasks_pkg.cache_tracking._roi as cache_tracking
     import lib.tasks_pkg.compaction._layer2._compact as layer2
-    import lib.tasks_pkg.compaction._layer2._compact as compact_mod
     import lib.token_counter as token_counter
-    from lib.tasks_pkg.compaction.api import force_compact_if_needed
+    from lib.tasks_pkg.compaction.api import execute_compact_tool
     from lib.tasks_pkg.compaction._constants import _summary_cooldowns
 
     msgs = [
@@ -1137,7 +1132,6 @@ def test_auto_realized_low_yield_candidate_is_not_committed(
     roi_calls = []
     telemetry_calls = []
     invalidations = []
-    monkeypatch.setattr(compact_mod, '_should_force_compact', lambda *a, **k: True)
     monkeypatch.setattr(
         layer2, '_generate_query_aware_summary',
         lambda *a, **k: summary_calls.append((a, k)) or ('summary ' + 'z' * 155_000))
@@ -1154,9 +1148,11 @@ def test_auto_realized_low_yield_candidate_is_not_committed(
         token_counter, 'invalidate', lambda conv: invalidations.append(conv))
 
     meta = {}
-    result = force_compact_if_needed(msgs, task=task, _result_meta=meta)
+    execute_compact_tool(
+        msgs, task=task, preserve_budget_tokens=40_000,
+        _proactive_economic=True, _result_meta=meta)
 
-    assert result is False
+    assert meta['compacted'] is False
     assert meta['reason'] == 'low_yield'
     assert msgs == original
     assert len(summary_calls) == 1, 'priced preflight should permit candidate generation'
@@ -1165,9 +1161,27 @@ def test_auto_realized_low_yield_candidate_is_not_committed(
     assert telemetry_calls == []
     assert invalidations == []
     assert conv_id not in _summary_cooldowns
-    assert '_contextEvidenceLedger' not in task
     assert not any(e.get('type') in ('compaction', 'compaction_done')
                    for e in task.get('events', []))
+
+
+@pytest.mark.unit
+def test_wrapper_releases_attempt_evidence_after_declined_candidate(monkeypatch):
+    from lib.tasks_pkg.compaction._layer2 import _compact as owner
+
+    messages = [_sys(), _user('Keep the source intact.')]
+    original = [dict(message) for message in messages]
+    task = {'id': 'declined-candidate', 'config': {},
+            '_contextEvidenceLedger': {'entries': [{'id': 'temporary'}]}}
+
+    def decline(*args, _result_meta, **kwargs):
+        _result_meta.update(compacted=False, reason='low_yield')
+        return 'declined'
+
+    monkeypatch.setattr(owner, 'execute_compact_tool', decline)
+    assert owner.force_compact_if_needed(messages, task=task, force=True) is False
+    assert messages == original
+    assert '_contextEvidenceLedger' not in task
 
 
 @pytest.mark.unit

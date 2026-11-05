@@ -15,9 +15,8 @@ Four steps, in order:
    fallback from the untouched source messages.
 4. Attach validated prompt-admission evidence and internal task/conversation
    context — the session-stable TTL latch, the prompt-cache lineage scope
-   (``lib/llm/cache_affinity.py``), and the user-approved economic working-set
-   threshold. Protocol converters
-   consume these keys; none reach an upstream wire unchanged.
+   (``lib/llm/cache_affinity.py``). Protocol converters consume these keys;
+   none reach an upstream wire unchanged.
 
 Returns ``(_tools_this_round, body)``: the gated tool list is still
 needed downstream by the round-checkpoint call (slice 20).
@@ -165,25 +164,6 @@ def build_round_request(task, rs, messages, tool_list, *,
         body['_safety_identifier'] = 'tofu_' + hashlib.sha256(
             ('tofu-safety:' + str(_principal)).encode('utf-8')
         ).hexdigest()[:32]
-    try:
-        from lib.tasks_pkg.compaction._tokens import (
-            _compaction_trigger_threshold,
-            _working_set_token_limit,
-        )
-        _working_set = _working_set_token_limit(task)
-        # A positive economic ceiling is additionally clamped by the model's
-        # window-safety threshold.  Sending a 2M operator override verbatim to
-        # a 1M Responses model would make server compaction useless past the
-        # hard limit.  Zero remains an explicit opt-out.
-        body['_working_set_tokens'] = (
-            _compaction_trigger_threshold(task)[0] if _working_set > 0 else 0)
-    except Exception as e:
-        # Request construction must remain available if the optional economic
-        # policy module cannot load; the local compaction gate logs its own
-        # failures and the Responses converter treats a missing value as off.
-        logger.warning('[Task %s] working-set policy lookup failed: %s',
-                       tid, e, exc_info=True)
-
     try:
         from lib.context_telemetry import (
             TOOL_SCHEMA_EVIDENCE_KEY,

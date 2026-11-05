@@ -15,8 +15,8 @@ from typing import Any
 from .registry import StrategyProvider, implementation_digest
 
 
-CONTROL_POLICY = {"mcpToolExposure": "inline", "workingSetTokens": 0}
-OPTIMIZED_POLICY = {"mcpToolExposure": "auto", "workingSetTokens": 128_000}
+CONTROL_POLICY = {"mcpToolExposure": "inline"}
+OPTIMIZED_POLICY = {"mcpToolExposure": "auto"}
 _IMPLEMENTATION_DIGEST = implementation_digest(Path(__file__))
 
 
@@ -33,18 +33,12 @@ def _fixed_policy(expected: Mapping[str, Any]):
 def _request_conflict(config: Mapping[str, Any]) -> str | None:
     if "mcpToolExposure" in config:
         return "request_override"
-    compaction = config.get("compaction")
-    if isinstance(compaction, Mapping) and "workingSetTokens" in compaction:
-        return "request_override"
     return None
 
 
 def _apply_policy(config: Mapping[str, Any], policy: Mapping[str, Any]) -> dict[str, Any]:
     updated = dict(config)
     updated["mcpToolExposure"] = str(policy["mcpToolExposure"])
-    compaction = dict(config.get("compaction") or {})
-    compaction["workingSetTokens"] = int(policy["workingSetTokens"])
-    updated["compaction"] = compaction
     return updated
 
 
@@ -55,7 +49,6 @@ def strategy_providers(plugin_id: str, version: str) -> tuple[StrategyProvider, 
         "additionalProperties": False,
         "properties": {
             "mcpToolExposure": {"enum": ["inline", "auto"]},
-            "workingSetTokens": {"type": "integer", "minimum": 0},
         },
     }
     return (
@@ -66,7 +59,7 @@ def strategy_providers(plugin_id: str, version: str) -> tuple[StrategyProvider, 
         ),
         StrategyProvider(
             plugin_id, "optimized", version, _IMPLEMENTATION_DIGEST,
-            "On-demand MCP disclosure and a 128K economic working set",
+            "On-demand MCP disclosure and window-safety-only compaction",
             schema, _fixed_policy(OPTIMIZED_POLICY), _request_conflict, _apply_policy,
         ),
     )
