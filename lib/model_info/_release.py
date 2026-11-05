@@ -137,6 +137,9 @@ _RULES: tuple[tuple[str, str], ...] = (
     ('doubao-seed-2-0', '2026-02'),
     # ── Tencent Hunyuan ──────────────────────────────────────────
     ('hy4-preview', '2026-07'),
+    # Hy4 (Tencent announcement 2026-11-04; live on TokenHub that day). The
+    # needle is a substring of hy4-preview, so it must follow the preview's.
+    ('hy4', '2026-11-04'),
     ('hy3-preview', '2026-04'),
     # ── YourProvider LongCat ──────────────────────────────────────────
     # 2601/2603 in the flash ids are the vendor iteration stamps.

@@ -80,6 +80,16 @@ describe('Goal progress context', () => {
       { text: 'queued', status: 'pending', phase: 'pending', waitReason: 'capacity', latestTool: 'old_read' },
     ]);
   });
+  it('names a streaming worker from frame evidence once its phase clears', () => {
+    const state = fixture();
+    state.livePhase = null;
+    state.liveContentGrowth = 'reasoning';
+    const [root, , worker] = statuses(state);
+    expect(root?.value.goalProgress?.currentPhase).toMatchObject({ phase: 'thinking_active' });
+    expect(worker?.value).toMatchObject({ phase: 'thinking_active', goalProgress: { rootSummary: false } });
+    state.liveContentGrowth = 'none';
+    expect(statuses(state)[0]?.value.goalProgress?.currentPhase).toBeUndefined();
+  });
   it('gives storage warnings priority and removes all live context on settlement', () => {
     const state = fixture();
     state.pushWithheld = true;

@@ -812,6 +812,14 @@ def _task_results_checkpoint(session: Session, payload: Mapping[str, Any]) -> An
             "database_protocol_error", "Invalid projected task result"
         )
     checkpoint_value = dict(checkpoint_value)
+    if key.startswith('conversation-attempt:') or payload.get('worker_claim') is not None:
+        from ._worker_jobs import _require_conversation_publication_claim
+        _require_conversation_publication_claim(
+            session, attempt_id=key.removeprefix('conversation-attempt:'), task_id=key,
+            user_id=_integer(checkpoint_value, 'user_id', minimum=1),
+            proof=payload.get('worker_claim'),
+            terminal=checkpoint_value.get('status') in ('done', 'error', 'aborted', 'interrupted'),
+            drain_entered=True)
 
     cache_settings_contract = payload.get("cache_settings_contract")
     cache_prefix_hwm_present = (
@@ -1184,7 +1192,8 @@ def _task_results_recovery_pending(
     """
     attempt = session.fetch_one(
         "SELECT 1 AS x FROM storage_generation_attempts "
-        "WHERE status IN ('pending','running') LIMIT 1"
+        "WHERE status IN ('pending','running') "
+        "AND COALESCE(task_id,'') NOT LIKE 'conversation-attempt:%' LIMIT 1"
     )
     if attempt is not None:
         return {"pending": True}
@@ -1193,7 +1202,8 @@ def _task_results_recovery_pending(
         else "json_extract(CAST(value_json AS TEXT), '$.status')"
     )
     row = session.fetch_one(
-        "SELECT 1 AS x FROM storage_records WHERE namespace=? AND "
+        "SELECT 1 AS x FROM storage_records WHERE namespace=? "
+        "AND record_key NOT LIKE 'conversation-attempt:%' AND "
         + status_expression + " IN ('pending','running') LIMIT 1",
         ("task_results",),
     )
@@ -1225,12 +1235,19 @@ def _task_results_recover_running(
     recovered: list[dict[str, str]] = []
     exhausted = False
 
+    status_expression = (
+        "value_json->>'status'" if session.backend == 'postgres'
+        else "json_extract(CAST(value_json AS TEXT), '$.status')"
+    )
+
     # Small pages bound peak memory even when one snapshot contains MiB of
     # content/tool state. Repeated calls naturally skip rows already settled.
     while scanned < scan_limit and len(recovered) < max_rows:
         rows = session.fetch_all(
             "SELECT record_key, value_json, version FROM storage_records "
-            "WHERE namespace=? AND record_key>? ORDER BY record_key LIMIT ?",
+            "WHERE namespace=? AND record_key>? "
+            "AND record_key NOT LIKE 'conversation-attempt:%' AND "
+            + status_expression + " IN ('pending','running') ORDER BY record_key LIMIT ?",
             ("task_results", after_key, min(8, scan_limit - scanned)),
         )
         if not rows:
@@ -1335,6 +1352,7 @@ def _advance_event_read_guard(
 
 def _append_event_row(
     session: Session, payload: Mapping[str, Any], *, advance_read_guard: bool = True,
+    turn_publication_checked: bool = False,
 ) -> dict[str, Any]:
     from lib.task_replay.task_event_contract import TASK_STREAM_KIND
 
@@ -1380,6 +1398,24 @@ def _append_event_row(
         str(event.get("kind") or "")[:128]
         if isinstance(event, Mapping) else ""
     )
+    if not turn_publication_checked and (
+            task_id.startswith('conversation-attempt:') or payload.get('worker_claim') is not None):
+        from ._worker_jobs import _require_conversation_publication_claim, _starts_tool_effect
+        attempt_id = task_id.removeprefix('conversation-attempt:')
+        owner = (_integer(payload, 'user_id', minimum=1)
+                 if payload.get('worker_claim') is not None and task_id.startswith('conversation-attempt:') else 0)
+        try:
+            _require_conversation_publication_claim(
+                session, attempt_id=attempt_id, task_id=task_id,
+                user_id=owner,
+                proof=payload.get('worker_claim'),
+                terminal=event_type in ('done', 'error', 'aborted'),
+                drain_entered=not _starts_tool_effect(event))
+        except StorageError as error:
+            if error.code != 'database_conflict':
+                raise
+            return {'inserted': False, 'rejected': 'worker_claim_stale',
+                    'task_id': task_id, 'sequence': sequence}
     require_live = payload.get("require_attempts_live")
     if require_live is not None:
         # Conversation-attempt fence, enforced inside the append transaction

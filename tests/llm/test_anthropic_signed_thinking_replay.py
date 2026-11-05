@@ -153,6 +153,38 @@ def test_cold_history_reconstruction_replays_the_native_turn():
         'type': 'thinking', 'thinking': '', 'signature': 'SIG_A'}
 
 
+@pytest.mark.parametrize('thinking', [
+    [{'type': 'thinking', 'thinking': '\nplan\n', 'signature': 'SIG_A'}],
+    [{'type': 'thinking', 'thinking': '', 'signature': 'SIG_A'}],
+    [{'type': 'thinking', 'thinking': '\nplan\n', 'signature': 'SIG_A'},
+     {'type': 'thinking', 'thinking': 'next', 'signature': 'SIG_B'}],
+    [{'type': 'redacted_thinking', 'data': 'opaque-replay'}],
+])
+def test_cold_history_chat_replay_uses_exact_native_signed_thinking(thinking):
+    """Display text may be trimmed; signatures still belong to native bytes."""
+    from copy import deepcopy
+    from lib.llm.body import build_body
+    from lib.llm.openai_outbound import openai_body_to_chat
+    native = [*thinking, {'type': 'tool_use', 'id': 'toolu_1',
+                          'name': 'read', 'input': {}}]
+    row = {
+        'toolCallId': 'toolu_1', 'toolName': 'read', 'toolArgs': '{}',
+        'toolContent': 'ok', 'status': 'done', 'llmRound': 0, 'roundNum': 0,
+        'thinking': ''.join(block.get('thinking', '') for block in thinking).strip(),
+        'thinkingSignature': thinking[-1].get('signature', ''),
+        '_anthropicContentBlocks': native,
+    }
+    before = deepcopy(row)
+    rebuilt = _reconstruct_tool_call_messages([row])
+    body = build_body(_WIRE, [{'role': 'user', 'content': 'go'}, *rebuilt],
+                      max_tokens=1000, context_window=128000,
+                      precomputed_input_tokens=100, tools=_TOOLS)
+    wire = openai_body_to_chat(body)
+    assert wire['messages'][1]['reasoning_details'] == thinking
+    assert openai_body_to_anthropic(body)['messages'][1]['content'] == native
+    assert row == before
+
+
 def test_replayed_native_turn_keeps_the_live_wire_bytes():
     """TofuDB (serde_json without ``preserve_order``) returns stored objects
     key-sorted. The live tail keeps the stream's key order, so replaying the

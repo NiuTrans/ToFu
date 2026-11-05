@@ -47,6 +47,42 @@ throughput. PostgreSQL row-lock and native OCC tests cover the publication/claim
 race. Production chat worker admission remains unqualified; see
 [durable worker semantics](STORAGE.md) and [architecture](ARCHITECTURE.md).
 
+The same fixture now covers standalone replay rows, mixed-stream batches,
+Flow phases and task-result checkpoints. Proofs remain request-only; the
+existing task IDs, Turn rows and worker jobs are the retained authorities.
+Queued Stop changes retention eligibility: its one existing conversation job
+remains nonterminal until the domain cancellation receipt commits, instead of
+starting terminal retention while its Turn is still pending. The executable
+measurement asserts that this job remains claimable with `terminalAtMs=0`, then
+settles without executing model/tools; it adds no cancellation queue or ledger.
+Do not purge these pending jobs as transport debris. Unconfirmed domain recovery
+must remain visible rather than being converted into successful completion.
+
+`tests/conversation/test_durable_attempt_execution.py` drives real storage,
+ordinary task registration, the physical worker envelope, event delivery and
+terminal persistence with a controlled provider outcome. It tests Stop with
+pending evidence, missing-local-task Stop, pre-execution cancellation, unknown
+preparation outcomes and terminal durability debt. It measures correctness and
+joined lifetime, not production provider throughput or automatic crash recovery.
+
+Legacy restart indexes no longer retain claimed conversation tasks or Flow
+phases. `test_worker_recovery_ownership.py` measures unchanged snapshots and
+checkpoints across both recovery commands, plus an empty legacy-recovery probe
+when only worker-owned state remains. It separately proves ordinary orphan
+recovery still runs on all three authorities. This removes reconstructible
+index entries; no execution record, effect receipt or account is reclaimed.
+
+Worker wake retention is independent of job history: two generation counters,
+one authority epoch and the task IDs accumulated by currently waiting clients.
+`test_worker_control.py` checks missed-subscription delivery and shutdown;
+`test_worker_service_remote.py` waits from an empty queue, admits a real job,
+observes remote Stop and verifies durable cancellation plus zero retained active
+monitors on SQLite, PostgreSQL and TofuDB. There is no notification table, command
+receipt or durable replay stream. `test_worker_commit_wake.py` injects real SQLite
+COMMIT acknowledgement loss and verifies one effect and a visible generation
+change, while a failed statement publishes no uncommitted hints. These are
+correctness and logical-retention measurements, not a throughput claim.
+
 ## Payment quote retention
 
 Stripe prepares one durable payment quote before provider IO and later binds its
@@ -1008,11 +1044,14 @@ operation in one session and publishes each entry's sync change in order; a
 failure discards that attempt's reconstructible projection-cache baseline.
 Native TofuDB additionally refuses (`database_resource_exhausted`, nothing
 written) a multi-entry batch once its entity delta leaves the overlay envelope
-or its new blobs and rows exceed the WAL-carried ceiling minus the composition
-headroom (`AuthorityDatabase::commits_as_one_ordinary_delta`). Such a commit
-would otherwise drain the authority-wide overlay and synchronize every new
-loose block under the authority. The producer splits the refused batch; a
-single entry is never refused for its size. Rationale and measurements:
+or its new blobs and rows, less the carried payload of its single largest
+entry, exceed the WAL-carried ceiling minus the composition headroom
+(`AuthorityDatabase::carried_payload_bytes` and
+`AuthorityDatabase::commits_as_one_ordinary_delta`). Such a commit would
+otherwise drain the authority-wide overlay and synchronize every new loose
+block under the authority. The producer splits the refused batch; a single
+entry is never refused for its size, and one such entry commits together with
+followers that still fit one ordinary commit. Rationale and measurements:
 [`TOFUDB_EXECUTION_FRAMES.md`](TOFUDB_EXECUTION_FRAMES.md#batched-structural-events-2026-11-01).
 
 Full-fold application commands use that same versioned projection-patch

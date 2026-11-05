@@ -276,6 +276,7 @@ pub struct RelatedAnnounceRequest {
 
 #[derive(Clone, Debug)]
 pub struct VisibleSyncRequest {
+    pub worker_claim: Option<crate::worker_job::PublicationClaim>,
     pub conversation_id: String,
     pub attempt_id: String,
     pub root_turn_id: String,
@@ -966,6 +967,26 @@ fn attempt_is_live(attempt: &Map<String, Value>) -> bool {
     )
 }
 
+fn worker_owned_attempt(attempt: &Map<String, Value>) -> io::Result<bool> {
+    let task_id = attempt.get("taskId").and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("attempt recovery task identity is malformed"))?;
+    Ok(crate::worker_job::owns_conversation_task(task_id))
+}
+
+fn put_legacy_recovery_index(
+    database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    created_at_ms: u64, attempt: &Map<String, Value>, projection_bytes: usize,
+) -> io::Result<()> {
+    let attempt_id = attempt.get("attemptId").and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("attempt recovery identity is malformed"))?;
+    let key = recovery_index_key(transaction, created_at_ms, attempt_id)?;
+    if worker_owned_attempt(attempt)? {
+        database.entity_delete(transaction, key)
+    } else {
+        database.entity_put(transaction, key, recovery_index_value(attempt, projection_bytes)?)
+    }
+}
+
 /// Fenced standalone event appends (`require_attempts_live`) prove inside
 /// the append transaction that every listed attempt still exists with a
 /// live status — the native half of the SQL sidecar fence in
@@ -1001,6 +1022,12 @@ fn update_recovery_index(
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_data("attempt recovery identity is malformed"))?;
     let key = recovery_index_key(transaction, created_at_ms, attempt_id)?;
+    if worker_owned_attempt(next)? {
+        return database.entity_delete(transaction, key);
+    }
+    if worker_owned_attempt(previous)? {
+        return Err(invalid_data("worker attempt cannot enter legacy restart recovery"));
+    }
     match (attempt_is_live(previous), attempt_is_live(next)) {
         (true, true) => {
             let existing = database
@@ -4664,11 +4691,8 @@ pub(crate) fn append_settled_with_receipt_proof(
             .as_object()
             .ok_or_else(|| invalid_data("attempt cannot be indexed"))?;
         if attempt_is_live(attempt_document) {
-            database.entity_put(
-                transaction,
-                recovery_index_key(transaction, request.created_at_ms, attempt_id)?,
-                recovery_index_value(attempt_document, projection_json_len)?,
-            )?;
+            put_legacy_recovery_index(database, transaction,
+                request.created_at_ms, attempt_document, projection_json_len)?;
             set_lane_live_attempt(
                 database,
                 transaction,
@@ -4856,11 +4880,8 @@ fn stage_created_attempt(
     database.entity_put(transaction, count_key, next_count.to_le_bytes().to_vec())?;
     put_attempt_timing_indexes(database, transaction, document)?;
     if attempt_is_live(document) {
-        database.entity_put(
-            transaction,
-            recovery_index_key(transaction, created_at_ms, attempt_id)?,
-            recovery_index_value(document, projection_bytes)?,
-        )?;
+        put_legacy_recovery_index(database, transaction,
+            created_at_ms, document, projection_bytes)?;
     } else if let Some(settled_at_ms) = terminal_attempt_settled_at(document)? {
         database.entity_put(
             transaction,
@@ -5446,11 +5467,8 @@ pub(crate) fn queue_activate(
         .get("createdAt")
         .and_then(Value::as_u64)
         .ok_or_else(|| invalid_data("queued attempt timestamp is malformed"))?;
-    database.entity_put(
-        transaction,
-        recovery_index_key(transaction, created_at_ms, &binding.attempt_id)?,
-        recovery_index_value(&attempt, projection_bytes)?,
-    )?;
+    put_legacy_recovery_index(database, transaction,
+        created_at_ms, &attempt, projection_bytes)?;
     store_attempt_document(
         database,
         transaction,
@@ -5798,8 +5816,8 @@ pub(crate) fn answer_guidance(
                     .map_err(|_| invalid_data("Malformed guidance reply"))?;
                 let projection_bytes = serde_json::to_vec(&reply["turn"]["projection"])
                     .map_err(|_| invalid_data("Guidance projection encoding failed"))?.len();
-                database.entity_put(transaction, recovery_index_key(transaction, created_at, attempt_id)?,
-                    recovery_index_value(&loaded.document, projection_bytes)?)?;
+                put_legacy_recovery_index(database, transaction,
+                    created_at, &loaded.document, projection_bytes)?;
             }
         }
     }
@@ -7356,6 +7374,10 @@ pub(crate) fn visible_sync(
     if root.document.get("turnId").and_then(Value::as_str) != Some(request.root_turn_id.as_str()) {
         return encode_response(&Value::Null);
     }
+    crate::worker_job::require_conversation_publication_claim(
+        database, transaction, &request.attempt_id,
+        attempt.document.get("taskId").and_then(Value::as_str).unwrap_or(""),
+        request.worker_claim.as_ref(), !request.live, true)?;
     let root_base_revision = root
         .document
         .get("projectionRevision")
@@ -7467,11 +7489,8 @@ pub(crate) fn visible_sync(
                     .ok_or_else(|| invalid_data("attempt recovery timestamp is malformed"))?;
                 let projection_bytes = serde_json::to_vec(&projection)
                     .map_err(|_| invalid_data("visible projection cannot be encoded"))?.len();
-                database.entity_put(
-                    transaction,
-                    recovery_index_key(transaction, created_at_ms, &request.attempt_id)?,
-                    recovery_index_value(&attempt.document, projection_bytes)?,
-                )?;
+                put_legacy_recovery_index(database, transaction,
+                    created_at_ms, &attempt.document, projection_bytes)?;
                 root_after = projection;
                 changed = true;
             }
@@ -7556,7 +7575,7 @@ pub(crate) fn visible_sync(
                         database,
                         transaction,
                         &EventRecordRequest {
-                            worker_claim: None, model_continuation: Value::Null,
+                            worker_claim: request.worker_claim.clone(), model_continuation: Value::Null,
                             attempt_id: child_attempt_id.clone(),
                             task_id: String::new(),
                             terminal: true,
@@ -11343,6 +11362,14 @@ fn stage_attempt_turn_transition(
     })
 }
 
+/// Cancellation withdraws new execution; an entered owner still drains evidence.
+pub(crate) fn attempt_has_entered(
+    database: &AuthorityDatabase, transaction: &mut AuthorityTransaction, attempt_id: &str,
+) -> io::Result<bool> {
+    Ok(load_attempt_for_update(database, transaction, attempt_id)?
+        .is_some_and(|attempt| attempt.document.get("startedAt").is_some_and(Value::is_u64)))
+}
+
 pub(crate) fn attempt_get(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -12890,16 +12917,10 @@ pub(crate) fn attempt_create(
             )?,
         )?;
     }
-    database.entity_put(
-        transaction,
-        recovery_index_key(transaction, request.created_at_ms, &request.attempt_id)?,
-        recovery_index_value(
-            &attempt_document,
-            serde_json::to_vec(&projection)
+    put_legacy_recovery_index(database, transaction,
+        request.created_at_ms, &attempt_document, serde_json::to_vec(&projection)
                 .map_err(|_| invalid_data("turn projection cannot be encoded"))?
-                .len(),
-        )?,
-    )?;
+                .len())?;
     let lane_id = raw_turn
         .get("laneId")
         .and_then(Value::as_str)
@@ -13314,7 +13335,7 @@ pub(crate) fn attempt_start_with_automation(
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_data("attempt status is malformed"))?;
     crate::worker_job::require_conversation_publication_claim(
-        database, transaction, attempt_id, task_id, worker_claim, false)?;
+        database, transaction, attempt_id, task_id, worker_claim, false, false)?;
     if status == "running" {
         return encode_response(&public_attempt(&loaded.document)?);
     }
@@ -13637,10 +13658,19 @@ fn load_event_record_state_with_projection(
     if attempt_flow_root != request.flow_root_attempt_id {
         return Ok(None);
     }
+    let mut starts_effect = false;
+    for event in request.task_event.iter().chain(request.preceding_task_events.iter()) {
+        starts_effect |= crate::worker_job::starts_tool_effect(
+            &event.event_type, &event.payload_json)?;
+    }
     if !attempt_flow_root.is_empty() {
         let parent_current_and_live =
             match load_attempt_for_update(database, transaction, attempt_flow_root)? {
                 Some(parent) => {
+                    crate::worker_job::require_conversation_publication_claim(
+                        database, transaction, attempt_flow_root,
+                        parent.document.get("taskId").and_then(Value::as_str).unwrap_or(""),
+                        request.worker_claim.as_ref(), request.terminal && !starts_effect, !starts_effect)?;
                     attempt_is_live(&parent.document)
                         && parent.conversation_id == loaded_attempt.conversation_id
                         && load_current_turn_for_attempt(
@@ -13681,9 +13711,11 @@ fn load_event_record_state_with_projection(
         return Ok(None);
     }
 
-    crate::worker_job::require_conversation_publication_claim(
-        database, transaction, &request.attempt_id, stored_task_id,
-        request.worker_claim.as_ref(), request.terminal)?;
+    if attempt_flow_root.is_empty() {
+        crate::worker_job::require_conversation_publication_claim(
+            database, transaction, &request.attempt_id, stored_task_id,
+            request.worker_claim.as_ref(), request.terminal && !starts_effect, !starts_effect)?;
+    }
 
     Ok(Some((loaded_attempt, loaded_turn)))
 }
@@ -13910,11 +13942,8 @@ fn event_record_with_projection(database: &AuthorityDatabase, transaction: &mut 
             None => serde_json::to_vec(&next_projection)
                 .map_err(|_| invalid_data("turn projection cannot be encoded"))?.len(),
         };
-        database.entity_put(
-            transaction,
-            recovery_index_key(transaction, created_at_ms, &request.attempt_id)?,
-            recovery_index_value(&attempt, projection_bytes)?,
-        )?;
+        put_legacy_recovery_index(database, transaction,
+            created_at_ms, &attempt, projection_bytes)?;
     }
     if starts_attempt {
         attempt.insert("status".to_owned(), Value::String("running".to_owned()));
@@ -14654,7 +14683,8 @@ pub(crate) fn recover(
         if index_key != recovery_index_key(transaction, created_at_ms, &attempt_id)? {
             return Err(invalid_data("attempt recovery key identity differs"));
         }
-        if recovered > 0
+        let worker_owned = crate::worker_job::owns_conversation_task(task_id);
+        if !worker_owned && recovered > 0
             && (recovered >= request.max_rows
                 || projection_bytes.saturating_add(indexed_projection_bytes) > request.max_bytes)
         {
@@ -14675,6 +14705,12 @@ pub(crate) fn recover(
                 != encoded_locator
         {
             return Err(invalid_data("attempt recovery index target differs"));
+        }
+        if worker_owned {
+            // Repair an older derived index without settling another process's
+            // invocation. The verified canonical attempt remains unchanged.
+            database.entity_delete(transaction, index_key)?;
+            continue;
         }
         let loaded_turn = load_current_turn_for_attempt(
             database,

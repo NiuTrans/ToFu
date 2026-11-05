@@ -185,7 +185,8 @@ def source_for_task(repository, task, *, for_budget=False):
     for path in ([] if for_budget else (task.get('config') or {}).get('readOnlyPaths', [])):
         if Path(repository.project).resolve().is_relative_to(Path(path).resolve()):
             raise PermissionError('Read-only project cannot authorize a writing worker')
-    turn = repository.turn_get(scope['conversation_id'], task.get('_turnId'), user_id=repository.owner)
+    turn = repository.turn_get(scope['conversation_id'], task.get('_turnId'), user_id=repository.owner,
+                               include_projection=False)
     attempt = repository.get_attempt(task.get('_attemptId'))
     if (not isinstance(turn, dict) or turn.get('actor') != 'assistant'
             or turn.get('conversationId') != scope['conversation_id']
@@ -194,7 +195,9 @@ def source_for_task(repository, task, *, for_budget=False):
             or attempt.get('attemptId') != task.get('_attemptId') or attempt.get('taskId') != task.get('id')
             or attempt.get('turnId') != turn['turnId'] or attempt.get('conversationId') != turn['conversationId']):
         raise PermissionError('Delegation source is not the current owned Coordinator attempt')
-    human = repository.turn_get(scope['conversation_id'], turn.get('parentTurnId'), user_id=repository.owner)
+    # validate_human_source rereads this Turn with its projection for the human-input fence.
+    human = repository.turn_get(scope['conversation_id'], turn.get('parentTurnId'), user_id=repository.owner,
+                                include_projection=False)
     source = {'conversationId': scope['conversation_id'], 'turnId': human.get('turnId') if human else None,
               'projectionRevision': human.get('projectionRevision') if human else None}
     repository.validate_human_source(source)
@@ -252,7 +255,8 @@ def validate_source(repository, request, *, value=None):
             raise PermissionError('Coordinator continuation differs from its original issued policy')
     elif 'coordinatorWake' in request:
         raise PermissionError('Worker cannot carry a Coordinator continuation')
-    source = repository.turn_get(request['coordinatorId'], delegation['turnId'], user_id=repository.owner)
+    source = repository.turn_get(request['coordinatorId'], delegation['turnId'], user_id=repository.owner,
+                                 include_projection=False)
     attempt = repository.get_attempt(delegation['attemptId'])
     if (not isinstance(source, dict) or source.get('actor') != 'assistant'
             or source.get('conversationId') != request['coordinatorId']

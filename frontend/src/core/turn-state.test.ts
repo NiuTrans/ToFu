@@ -139,6 +139,60 @@ describe('phase evidence after command acknowledgement', () => {
 });
 
 
+describe('content growth evidence for a cleared phase', () => {
+  const waiting = {phase: 'waiting_model', detailKey: 'stream.phase.waitingForModel'};
+  const live = () => reduceTurnState(createTurnState('conversation'), {type: 'snapshot', snapshot: {
+    authoritativeFull: true, conversationRevision: 1,
+    turns: [turn('target', 1, {status: 'running', currentAttemptId: 'attempt', projectionRevision: 1,
+      projection: {content: '', thinking: 'Pl', segments: [
+        {type: 'thinking', blockId: 'thinking:terminal', text: 'Pl'},
+      ]}})],
+    attempts: [{attemptId: 'attempt', turnId: 'target', status: 'running', lastSeq: 1}],
+    activeAttemptPhase: {turnId: 'target', attemptId: 'attempt', projectionRevision: 1, phase: waiting},
+  }});
+  const frame = (
+    seq: number, operations: Array<{op: 'append_text'; path: Array<string | number>; value: string}>,
+    type: 'projection_updated' | 'terminal_settlement' = 'projection_updated',
+  ) => ({
+    type, conversationId: 'conversation', turnId: 'target', attemptId: 'attempt', seq,
+    projectionRevision: seq,
+    payload: {phase: null, status: 'completed' as const, settlement: {},
+      projectionPatch: {version: 1 as const, baseRevision: seq - 1, targetRevision: seq, operations}},
+  });
+  const grow = (field: string, value: string) => ({op: 'append_text' as const, path: [field], value});
+
+  it('names the accumulator the phase-clearing frame appended to', () => {
+    const snapshot = live();
+    expect(snapshot.livePhase).toEqual(waiting);
+    expect(snapshot.liveContentGrowth).toBeUndefined();
+    const reasoning = reduceTurnState(snapshot, {type: 'event', event: frame(2, [grow('thinking', 'an')])});
+    expect(reasoning.livePhase).toBeNull();
+    expect(reasoning.liveContentGrowth).toBe('reasoning');
+    // One coalesced frame grew both; the answer is the newer output.
+    const answer = reduceTurnState(reasoning, {type: 'event', event: frame(3, [
+      grow('content', 'Using the guide.'), grow('thinking', ' more'),
+    ])});
+    expect(answer.liveContentGrowth).toBe('answer');
+    // A segment-text mirror flush (as on tool start) is not new model output.
+    const quiet = reduceTurnState(answer, {type: 'event', event: frame(4, [
+      {op: 'append_text', path: ['segments', 0, 'text'], value: 'an more'},
+    ])});
+    expect(quiet.livePhase).toBeNull();
+    expect(quiet.liveContentGrowth).toBe('none');
+  });
+  it('retires the evidence with its phase on settlement and snapshot reset', () => {
+    const reasoning = reduceTurnState(live(), {type: 'event', event: frame(2, [grow('thinking', 'an')])});
+    const settled = reduceTurnState(reasoning, {type: 'event',
+      event: frame(3, [grow('content', 'Done.')], 'terminal_settlement')});
+    expect(settled.livePhase).toBeNull();
+    expect(settled.liveContentGrowth).toBe('none');
+    const reset = reduceTurnState(reasoning, {type: 'snapshot', snapshot: {
+      authoritativeFull: true, conversationRevision: 2, turns: []}});
+    expect(reset.livePhase).toBeNull();
+    expect(reset.liveContentGrowth).toBeUndefined();
+  });
+});
+
 describe('replacing tail-window snapshot keeps loaded history', () => {
   const loaded = () => {
     const tail = reduceTurnState(createTurnState('conversation'), {type: 'snapshot', snapshot: {

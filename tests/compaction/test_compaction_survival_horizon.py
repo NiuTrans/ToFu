@@ -73,7 +73,7 @@ def test_legacy_adaptive_inputs_cannot_override_observed_horizon():
     assert policy == 'one_round'
 
 
-def test_longer_observed_compaction_window_invalidates_stale_economic_veto(
+def test_longer_observed_horizon_does_not_schedule_early_compaction(
     monkeypatch,
 ):
     import lib.tasks_pkg.compaction._cache_evidence as cache_evidence
@@ -124,9 +124,7 @@ def test_longer_observed_compaction_window_invalidates_stale_economic_veto(
         earned_second_round,
         current_round=4,
         remaining_api_rounds=188,
-    ) is True
-    assert '_autoCompactRetryAfterTokens' not in earned_second_round
-    assert '_autoCompactRetryWitness' not in earned_second_round
+    ) is False
 
 
 def test_three_round_candidate_requires_observed_three_round_window(

@@ -116,6 +116,15 @@ class StorageClient:
             operation, {'owner_user_id': owner, **payload}, timeout=remaining, command_id=None,
             priority='user', deadline_unix_ms=deadline_unix_ms)
 
+    def worker_watch(self, *, cursor, deadline_unix_ms):
+        """Wait for authority-committed queue/control changes without a DB read."""
+        from lib.storage.generated_worker_control import WATCH_OPERATION
+        remaining = deadline_unix_ms / 1000 - time.time()
+        if remaining <= 0:
+            raise StorageError('database_timeout', 'Worker watch deadline elapsed')
+        return self._attempt('query', WATCH_OPERATION, {'cursor': cursor}, timeout=remaining,
+                             command_id=None, priority='maintenance', deadline_unix_ms=deadline_unix_ms)
+
     def native_checkpoint_available(self, *, user_id: int) -> bool:
         return self._checkpoint_port.available(user_id=user_id)
 

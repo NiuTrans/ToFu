@@ -26,42 +26,31 @@ request config: mcpToolExposure=auto|inline|progressive
 request config: mcpActiveToolLimit=8
 ```
 
-### 2. Economic working set
+### 2. Compaction timing
 
-Window safety and economic efficiency are separate constraints. Automatic
-compaction now defaults to the existing 90%-of-usable-window safety trigger
-(roughly 778K on a 1M route with the standard reserves). A positive, explicitly
-configured economic working set selects:
+Automatic semantic L2 compaction uses the existing route-window safety trigger,
+including output and recovery reserves (roughly 778K on a 1M route with the
+standard reserves). Fixed economic working-set settings have been removed;
+there is one production timing policy and no opt-in threshold. The shared local
+compactor owns rewrites across routes.
 
-```text
-min(window_safety_threshold, working_set_tokens)
-```
-
-The default working set is zero: neither a fixed 128K target nor a pricing tier
-implicitly authorizes early lossy compaction. An explicit positive value includes
-live tool schemas and retains the economic eligibility checks. The shared local
-compactor owns new rewrites across routes; provider dialect support does not
-enable another automatic summary policy. Local L1, manual compaction, archives
-and receipts remain active. The execution-continuity decision, bounded incident
-measurement and tradeoffs are in [context budgets](CONTEXT_BUDGET_POLICY.md#automatic-compaction-preserves-execution-continuity).
+“Pays back eventually” is not “now is the best time.” Waiting can reuse a cheap
+warm prefix and fold more material in a single later summary. Compare both
+policies over equal work, including cached reads, summary calls, cache rebuilding
+and post-summary re-reads; the larger absolute reduction at 300K does not by
+itself prove that it beats 128K. The current cost equation cannot predict that
+whole trajectory, so positive ROI alone does not trigger automatic L2. Decision,
+evidence and migration: [context budgets](CONTEXT_BUDGET_POLICY.md#automatic-compaction-preserves-execution-continuity).
 
 A final fail-closed admission boundary remeasures the rendered request after inbox/tool injection. First and later dispatches use the route-derived physical safety ceiling and requested output reserve, not a fixed 256K first-dispatch cap or the economic target. A bounded L1 candidate is considered before one semantic compaction + recompose. Failed live summaries preserve source and refuse irreducible input; explicit utility recovery remains separate. Complete generated text survives local receipt-shaping faults, and local compaction defects surface as internal errors rather than provider prompt overflow. Each API-round persists a content-free message/schema/total/target/method/action snapshot, separating admitted prompt size, cache reuse and billed internal compaction calls in the cost panel.
 The accepted complete-input count is forwarded only through that round's call stack to the completion-window clamp; absent or invalid evidence keeps the standalone body builder's local estimate instead of reusing stale task state. Compression-first model selection defaults to `aa-cheapest`: token-weighted cost first, highest exact fresh AA within minimum-cost ties, no hidden band, strict same-scope savings; explicit `main`/`disableModelFallback` and missing evidence preserve main. AA is a proxy, not measured summary fidelity or speed. Ownership: [AA-cheapest routing](CONTEXT_BUDGET_POLICY.md#aa-cheapest-compression-first-routing).
 
-Controls:
-
-```text
-default:        window safety only (workingSetTokens=0)
-explicit opt-in example: compaction.workingSetTokens=128000
-process opt-in example:  TOFU_WORKING_CONTEXT_TOKENS=128000
-request value overrides the environment; 0 restores window safety only
-```
-
-Unified automatic L2 starts with a one-round ROI horizon, then predicts prefix lifetime from the shortest of the four most recent successful compaction gaps and the current window's already-observed age, capped at six and by the hard remaining API-round budget. Total task age no longer grants a longer horizon. Break-even resolves prices separately for the current and candidate prompt, compares only the observed warm prefix before/after, and records any pricing tier crossing. Manual, reactive and hard-window compaction still bypass the economic gate. There is no separate Adaptive horizon.
+Optional candidate economics still resolve current/candidate prices separately,
+count the observed warm prefix and preserve summary-cost provenance. Those checks
+can reject an optional rewrite, but are not an automatic L2 scheduling rule.
+Mandatory window recovery and explicit manual compaction keep their own authority.
 
 Default L1 request projection is bounded by both 40 results and 48K estimated tokens. The newest complete tool-call batch always survives even if it alone exceeds the token budget; older results become placeholders only in the current model request, either outside the previously sent request or in its last tool step when the next-request price admits the edit ([section 8](#8-l1-edits-of-the-previously-sent-request)). Settled Turn projections remain byte-identical: L1 performs no transcript-authority read or write. This slows working-set growth before an expensive L2 prefix rewrite without deleting durable user history.
-
-On 2026-08-27, nine distinct long tasks' earliest declines projected 1.18–3.89 rounds to repay; all ran past break-even, a rough 70.3M prompt-token exposure upper bound. This is not billed savings: cache discounts, prompt evolution and behavioral effects require actual receipts. Retry witnesses record their horizon; a longer observed compaction window or a cooler cache witness invalidates them and reruns exact economics.
 
 Each `[CacheRoundRecord]` log line carries `lane` (`conversation` for the root agent, `isolated` for a child or transient invocation, or `unscoped`), `tools` (the task's logical tool count), `wire_tools` and `wire_tool_name_bytes` (the provider-visible surface actually sent, `sum(len(name) + 1)`), and `cold_group` while the round belongs to the cold side of a live split. `lib/tasks_pkg/cache_tracking/_health.py` owns the split: per model it compares read share across lane, tool-surface size (`<=16`, `17-32`, `33-64`, `>64`) and sent name bytes (`<=128` … `>1024`), and flags a model whose worst group (at least 20 rounds) reads back less than half of its best group's share. `scripts/cache_waste_report.py`, the in-process monitor (one `[CacheHealth]` WARNING per model per hour over a rolling 60-minute window, an INFO line when it clears) and the nightly optimizer evidence (see section 6) all use that one rule. A gateway can serve requests with the same key, URL and beta header from caches that behave differently by request shape, even for byte-identical prefixes: when root agents and sub-agents diverge, check whether the split follows the tool surface rather than the lane before attributing a miss to request bytes or to orchestration. `tools` counts definitions only; for Claude on the Sankuai Anthropic face the measured discriminator is the joined byte length of the tool names ([section 6](#6-gateway-tool-name-budget)).
 
@@ -337,15 +326,17 @@ and exact OpenAI/Responses/Anthropic request text.
 
 Settings → Advanced exposes **Cost Optimization A/B Experiment**, off by default: unchanged request config, no task metadata. First enablement uses a 10% conversation canary, evenly split between arms; the other 90% keeps its configuration.
 
-| Arm | MCP exposure | Automatic L2 working set |
-|---|---|---:|
-| `control` | `inline` | `0` (window-safety trigger only) |
-| `optimized` | `auto` | `128000` tokens |
+| Arm | MCP exposure | Automatic L2 timing |
+|---|---|---|
+| `control` | `inline` | Shared route-window safety |
+| `optimized` | `auto` | Shared route-window safety |
 
 Only enrollment, optimized share, experiment ID and minimum sample are editable;
 policies are not arbitrary JSON. SHA-256 bucketing over experiment + conversation
 ID keeps conversations in one arm. Requests explicitly setting `mcpToolExposure`
-or `compaction.workingSetTokens` are excluded. Saves use the atomic server-config
+are excluded. The context-cost plugin is version 2.0.0; prior resolved specs keep
+their version/digest and require a new experiment ID, preventing old fixed-target
+results from being silently reused as new exposure. Saves use the atomic server-config
 writer and `server_config_change` audit event.
 
 An experiment ID locks enrollment and arm percentages; changing either requires a new ID to prevent silent rebucketing. Enablement and report sample gates remain editable without changing assignment.

@@ -42,7 +42,9 @@ logger = get_logger(__name__)
 # own side effects (its distinct poll_log table + entity-row UPDATE), so the
 # reconciliation/promotion logic MUST stay side-effect-free to serve both.
 # Single-shot Timer consumers disable promotion: negative agreements cannot
-# validate a future positive edge. Proactive scheduling retains its policy.
+# validate a future positive edge. Proactive scheduling retains its policy, but
+# a scheduled agent with a predicate starts `code` and reaches `hybrid` only by
+# demotion (see ``derive_scheduled_condition_kind``).
 
 # Sentinel for "predicate result unknown" (not run, or ambiguous/errored). Kept
 # distinct from True/False so an ambiguous predicate NEVER reads as ready.
@@ -331,6 +333,19 @@ def reconcile_and_decide(kind: str, predicate: PredicateResult | None,
     )
 
 
+def validate_condition_regex(condition_command: str, condition_regex: str) -> None:
+    """Refuse a readiness regex that could never decide: it needs a predicate
+    whose stdout it reads, and it must compile. Timers and agents share it."""
+    if not condition_regex:
+        return
+    if not str(condition_command or '').strip():
+        raise ValueError('condition_regex requires condition_command')
+    try:
+        _re.compile(condition_regex)
+    except _re.error as exc:
+        raise ValueError(f'invalid condition_regex: {exc}') from exc
+
+
 def derive_condition_kind(check_instruction: str, condition_command: str) -> str:
     """Infer condition_kind from the caller's parameter combination.
 
@@ -344,6 +359,24 @@ def derive_condition_kind(check_instruction: str, condition_command: str) -> str
     if has_cmd and has_instr:
         return 'hybrid'
     if has_cmd:
+        return 'code'
+    return 'llm'
+
+
+def derive_scheduled_condition_kind(task_type: str, condition_command: str) -> str:
+    """Infer a ``schedule_create`` task's condition_kind (creation or type change).
+
+    A scheduled agent's ``command`` is the instruction it executes when ready,
+    never a readiness check, so only the predicate selects the tier:
+      • agent + predicate command → 'code' (decisive, zero LLM polls)
+      • agent without a predicate → 'llm'
+      • any other task type       → 'llm' (never polled)
+    'hybrid' is reached only by code-tier ambiguity demotion in
+    ``reconcile_and_decide``; its poll LLM reads ``command`` as the standing
+    instruction. Timers use ``derive_condition_kind``: their check instruction
+    and continuation are separate fields.
+    """
+    if task_type == 'agent' and (condition_command or '').strip():
         return 'code'
     return 'llm'
 

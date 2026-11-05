@@ -87,6 +87,9 @@ def _mark_worker_started_locked(
     if str(task.get('status') or '') in terminal:
         return False
     abort_event = task.get('abort_event')
+    if task.get('_conversationWorkerContext') is not None:
+        from lib.tasks_pkg.invocation import invocation_abort_requested
+        invocation_abort_requested(task)
     if task.get('aborted') or (abort_event is not None and abort_event.is_set()):
         from lib.llm.llm_errors import AbortedError
         raise AbortedError('Task cancelled before worker admission')
@@ -98,6 +101,7 @@ def _mark_worker_started_locked(
     if attempt_id:
         from lib.tasks_pkg.manager._registry import task_user_id
         from lib.turn_lifecycle import mark_task_started
+        from lib.tasks_pkg.worker_binding import publication_arguments
 
         started = mark_task_started(
             attempt_id,
@@ -105,6 +109,7 @@ def _mark_worker_started_locked(
             user_id=task_user_id(task),
             **({'automation_context': task['_automationStartContext']}
                if task.get('_automationStartContext') is not None else {}),
+            **publication_arguments(task),
         )
         if started is None or str(started.get('status') or '') != 'running':
             raise RuntimeError('bound attempt rejected physical worker entry')
@@ -401,13 +406,12 @@ def agent_scheduling_snapshot(task_id: str | None = None) -> dict:
     return dict(snapshot(task_id))
 
 
-def spawn_task(task: dict, *, runner=None, executor=None):
-    """Submit one registered chat task through the authoritative worker lane."""
+def _prepare_task_worker(task, runner):
+    """One domain admission/error envelope for inline and submitted workers."""
     if runner is None:
         from lib.tasks_pkg.orchestrator.api import run_task
         runner = run_task
 
-    from lib.tasks_pkg.manager.runtime import chat_task_runtime
     worker_started = threading.Event()
     scheduling_phase_lock = threading.Lock()
     owned = _owned_task_callable(
@@ -421,6 +425,29 @@ def spawn_task(task: dict, *, runner=None, executor=None):
             logger.error('[Spawn] Task %s failed after worker entry: %s',
                          task.get('id', '?')[:8], error, exc_info=True)
 
+    return owned, failed, worker_started, scheduling_phase_lock
+
+
+def run_task_inline(task: dict, *, runner=None):
+    """Keep the existing physical worker until invocation and cleanup exit."""
+    from contextlib import nullcontext
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    owned, failed, _, _ = _prepare_task_worker(task, runner)
+    control = task.get('_invocationAbortCheck')
+    watch = (control.watch(task) if task.get('_conversationWorkerContext') is not None
+             else nullcontext())
+    try:
+        with watch:
+            return chat_task_runtime.run_owned_worker(task, owned)
+    except BaseException as error:
+        failed(error)
+        raise
+
+
+def spawn_task(task: dict, *, runner=None, executor=None):
+    """Submit one registered chat task through the authoritative worker lane."""
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    owned, failed, worker_started, scheduling_phase_lock = _prepare_task_worker(task, runner)
     if executor is not None:
         # Embeddings retain their own executor and inspect its original Future.
         return chat_task_runtime.submit_owned_worker(
@@ -441,5 +468,6 @@ __all__ = [
     'cancel_queued_task',
     'set_agent_executor',
     'set_serving_loop',
+    'run_task_inline',
     'spawn_task',
 ]

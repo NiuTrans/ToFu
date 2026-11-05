@@ -342,6 +342,32 @@ Together and Chutes self-host open weights, which Moonshot will publish by
 `tests/model_routing/test_kimi_k31_pro_registration.py` and
 `bundles/yourprovider/tests/test_yourprovider_gateway_protocol_faces.py`.
 
+Tencent Hy4 exact knowledge (checked 2026-11-05): Tencent's
+[announcement](https://www.tencent.com/zh-cn/tencent-launches-hy4-joining-the-ranks-of-the-worlds-leading-open-source-ai-models/)
+releases Hy4 on 11月4日, live on Tencent Cloud TokenHub that day; OpenRouter's
+Tencent-served `tencent/hy4-20261104` endpoint fixes the year. Hy4 adds image
+understanding over Hy4 Preview and keeps its list price: ¥6/¥18 input/output
+and ¥0.3 cache hit per million, recorded like the preview row at the shared
+7.24 rate as $0.829/$2.486 with a 5% cache read. The international
+[price table](https://intl.cloud.tencent.com/zh/document/product/1300/78937)
+lists the same price as $0.834/$2.501/$0.042. TokenHub bills 50% of list until
+2026-12-31; the discount is not the list price. The TokenHub
+[model list](https://intl.cloud.tencent.com/zh/document/product/1300/78934)
+gives the `hy4` API id, a 1M window (960k max input, 64k max output), image
+understanding, structured output and function calling. The
+[deep-thinking guide](https://intl.cloud.tencent.com/zh/document/product/1300/80637)
+turns thinking on by default and documents `reasoning_effort` `high` (default)
+and `no_think`, so `no_think` is the in-ladder `disabled_effort` and every
+enabled depth resolves to `high`. The
+[tool-call guide](https://intl.cloud.tencent.com/zh/document/product/1300/80638)
+asks callers to return `reasoning_content` within a tool-call loop and accepts
+only `auto` and `none` for `tool_choice`, so the profile declares
+`preserve_history: replay` (see "Declared inference profiles"). `hy4` is a substring of
+`hy4-preview`, so the Hy4 release and context needles follow the preview's;
+the preview's own reasoning profile stays unregistered. OpenRouter's public
+catalogue lists `tencent/hy4`, and the dynamic feed carries that wire.
+Specification: `tests/model_routing/test_hy4_registration.py`.
+
 The Models settings projection shows `ready` rows and legacy unmarked rows
 awaiting migration, not persisted `pending_*` or `disabled` drafts. Drafts
 remain in authority for research/admission and provider diagnostics; hiding
@@ -676,6 +702,26 @@ Provider settings can stage differing reasoning fields on an Offering or
 restore Model inheritance; other profile sections and providers remain intact.
 Both forms edit the existing Settings draft and use its owner CAS save.
 
+Reasoning history (checked 2026-11-05). `reasoning.preserve_history` declares
+whether a destination needs an assistant turn's `reasoning_content` passed
+back on later requests: `replay` sends it back verbatim (DeepSeek V4 thinking
+mode rejects a blanked trace with HTTP 400; Tencent Hy4's tool-call guide
+requires it within a tool loop), `clear_thinking_false` and `keep_all` replay
+it plus the GLM or Kimi retention flag the request compiler sends, and `none`
+lets callers drop it. `lib.model_info.model_requires_reasoning_content_replay`
+reads the selected route's profile, then the Model's maintained defaults;
+DeepSeek's family rule applies only when neither declares the fact (gateway
+spellings outside maintained identities). Compaction `strip_thinking`,
+history reconstruction and request repair all use that predicate. Problem:
+the predicate was `is_deepseek(model)`, so compaction blanked Hy4's tool-loop
+reasoning and ignored the GLM-5.2/5.3 and Kimi K2.7 Code profiles that already
+declared preserved thinking. Decision: the declared profile is the authority,
+and intake records the fact for every reasoning model. Alternatives rejected:
+extending a model-name list (a second place every registration must
+remember), and replaying every trace (it keeps tokens no vendor asked for in
+every request). Specification:
+`tests/model_routing/test_reasoning_history_replay.py`.
+
 DeepSeek V4 Pro on the Baidu wire (checked 2026-11-03): the creator's
 [thinking-mode guide](https://api-docs.deepseek.com/guides/thinking_mode/)
 documents `thinking: {"type": "enabled/disabled"}`. Baidu's
@@ -750,6 +796,21 @@ the declared default rung when known. Specifications:
 The bounded exact-identity defaults catalogue accepts at most eight
 `previous_profiles` per group. Corrections replace only exact prior shipped
 profiles; any different owner field or `source=configured` remains authoritative.
+
+Problem: rereading the maintained JSON after a checkout update pairs newer
+inference vocabulary with a running server's older schema and can prevent
+every route from loading. Decision: `lib/model_info/model_inference_defaults.json`
+remains the authored catalogue; `scripts/gen_api_v1_model_routing_contract.py`
+also derives `lib/model_routing/generated_inference_defaults.py`. Runtime
+normalization reads that imported snapshot, so the existing boot source pin
+keeps defaults with the schema and compiler until restart, including first use
+after a merge. Owner configuration still follows its repository revision.
+Run the generator and its `--check` mode whenever the catalogue changes.
+Alternatives rejected: hot-reloading only the schema leaves the compiler on
+its old vocabulary; catching validation errors and dropping defaults hides
+invalid metadata; restarting on every merge interrupts active tasks.
+Specification: `tests/model_routing/test_inference_defaults_snapshot.py`.
+
 Claude profiles for models whose API default is `display: "omitted"` (Opus
 4.7/4.8/5/5.5, Sonnet 5/5.5, Haiku 5.5, Fable/Mythos 5.x) declare
 `reasoning.display: "summarized"` ([controlling thinking display](https://platform.claude.com/docs/en/build-with-claude/thinking)):
@@ -1275,6 +1336,13 @@ own projection) that only a live public catalogue supplies; a
 repository-authored template row is owner-authored supply, not a release. The
 first report records the current candidates as a baseline and reports none; a
 catalogue first seen later contributes its standing listings the same way.
+The state also records each catalogue's first observation: the fetch time of
+the first snapshot the watch classified. A lead is standing when its catalogue
+is first observed in that report or its upstream listing time
+(`catalog_feed.listed_at`, the feed row's `created`) predates that first
+observation; a candidate whose every lead is standing joins the baseline
+automatically and is never new. A missing, zero or invalid listing time is
+unknown, never old: such a candidate is new when it appears after the baseline.
 Reviews record `deferred` or `declined` with reason, date and checked HTTPS
 sources, only for a currently listed identity, so an announced but unlisted
 model cannot be pre-suppressed. Deferred candidates appear in every report;
@@ -1284,9 +1352,37 @@ new candidates, 1 none, 2 no cached live catalogue or unreadable state (never
 evidence that nothing shipped); `--review` and `--baseline` are commands, not
 predicates, and exit 0 once done or 2 when refused.
 `data/config/model_release_watch.json` is
-deployment maintainer state (one baseline list plus one review per decided
-identity), not owner data; a corrupt file fails closed instead of
-re-baselining, and a deleted one re-baselines on the next report.
+deployment maintainer state (one baseline list, each catalogue's first
+observation, and one review per decided identity), not owner data. A version-1
+file upgrades on its next report or review, keeping its baseline and reviews
+and taking `initialized_at` as every known catalogue's first observation; a
+corrupt file (including a version-1 file without `initialized_at`) fails
+closed instead of re-baselining, and a deleted one re-baselines on the next
+report.
+
+**Rotated listings.** Problem: OpenRouter lists far more models than the feed
+keeps. The projection sorts rows newest-first by `created` and keeps 256 seeds
+per source, so whenever a newer model leaves that window an older one enters
+it. Compared only with the identities seen at first observation, the old row
+looked like a release: on 2026-10-30 the watch reported `openai/gpt-5-nano`
+(listed 2025-08-07) as new, and each false alarm costs a full scheduled agent
+run. Decision: the feed cache keeps every projected seed's upstream listing
+time per source, the template merge surfaces it only as
+`catalog_feed.listed_at`, and the watch classifies each lead by it against the
+recorded first observation of its catalogue, as above. The cut-off is the
+snapshot's fetch time, not the report time: a model listed between that fetch
+and the first report was in no baseline, so it must be new. Listing times are
+optional at the same feed cache version, so a cache written before them reads
+as unknown times (the previous behaviour) until its next refresh. Alternatives
+rejected: a recency window or age threshold (a tuning knob that still misfires
+on any rotation older than it and hides any release younger than it); a wider
+feed window (moves the rotation boundary without removing it, and the window
+bounds onboarding seeds, not the watch); declining each rotated listing by
+review or a per-model exception (pays the agent run the watch exists to save,
+once per rotation); listing times inside offering recipes (recipes compile
+into owner bundles, which would then carry catalogue evidence no Offering
+owns); a new feed cache version (today's cache would become unreadable and the
+predicate would exit 2 until the next 08:30 refresh).
 
 **Schedule.** The owner runs it as one `schedule_create` agent task after the
 08:30 update (`17 9 * * *`): `condition_command` runs the watch from the
@@ -1305,7 +1401,8 @@ target conversation refuses the turn; the candidate stays new for the next run.
 2. Take facts only from the creator's official pages (model, pricing,
    reasoning guide, changelog or news): API availability date, list prices per
    million with cache rates and tiers, context, maximum output, modalities,
-   reasoning support/wire/efforts/default/disable behavior and sampling
+   reasoning support/wire/efforts/default/disable behavior, whether prior
+   reasoning must be passed back (`preserve_history`) and sampling
    restrictions. Feed and relay values are leads; never copy a sibling's facts.
 3. If a required fact or a public API is missing, record `deferred` with the
    gap and the checked URLs.
@@ -1319,7 +1416,9 @@ target conversation refuses the turn; the candidate stays new for the next run.
 5. Add relay or gateway recipes only with served evidence: a public catalogue
    listing, or a live 200/429 probe through the existing probe tooling (an
    unserved gateway id answers 400).
-6. Run the focused test, `tests/model_routing/test_world_catalog_sync.py`,
+6. Regenerate the inference-defaults snapshot with
+   `python3 scripts/gen_api_v1_model_routing_contract.py`, then run its `--check`
+   mode. Run the focused test, `tests/model_routing/test_world_catalog_sync.py`,
    `test_model_info_release.py`, `test_model_registration_admission.py`,
    `tests/providers/test_provider_template_recipes.py` and
    `tests/context/test_context_profile_contract.py`; the watch must stop listing
@@ -1330,11 +1429,11 @@ target conversation refuses the turn; the candidate stays new for the next run.
 
 Alternatives rejected: letting daily research publish feed-only Models into
 owner storage (bypasses maintained knowledge and tests; one extraction proves
-provenance, not correctness); a recency window (the feed cache keeps no listing
-dates, and a window is a tuning knob); triaging the 128 standing listings found
-at introduction (mostly old relay rows); a new scheduler task type (the
-proactive agent already owns clock-gated full-tool turns). Specification:
-`tests/model_catalog/test_release_watch.py`.
+provenance, not correctness); triaging the 128 standing listings found at
+introduction (mostly old relay rows); a new scheduler task type (the proactive
+agent already owns clock-gated full-tool turns). Specification:
+`tests/model_catalog/test_release_watch.py`; listing-time retention:
+`tests/providers/test_provider_template_feed.py`.
 
 ## Browser projection
 

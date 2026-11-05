@@ -776,9 +776,8 @@ mod tests {
     fn create_temporary_block_file(vfs: &DeterministicVfs, block_id: BlockId) {
         let shard = block_id.to_hex()[..2].to_owned();
         let shard_path = Path::new("/data/blocks").join(shard);
-        let temporary_path = shard_path.join(format!(
-            ".new-{}",
-            uuid::Uuid::from_bytes([0x3c; 16]).simple()
+        let temporary_path = shard_path.join(crate::block::temporary_block_file_name(
+            uuid::Uuid::from_bytes([0x3c; 16]),
         ));
         let mut file = vfs
             .open(

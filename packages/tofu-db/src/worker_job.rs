@@ -26,6 +26,11 @@ const GLOBAL_BLOB_OWNER_USER_ID: u64 = TENANT_GLOBAL_OWNER_ID;
 const SUMMARY_MAGIC: &[u8; 8] = b"WJQSUM01";
 const PRIORITY_COUNT: usize = MAX_WORKER_JOB_PRIORITY + 1;
 
+/// These task identities retain domain recovery ownership after lease loss.
+pub(crate) fn owns_conversation_task(task_id: &str) -> bool {
+    task_id.starts_with("conversation-attempt:")
+}
+
 fn invalid_input(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
@@ -410,6 +415,7 @@ fn put_queued_index(
     transaction: &mut AuthorityTransaction,
     job: &Job,
 ) -> io::Result<()> {
+    transaction.note_worker_queue_change();
     database.entity_put(
         transaction,
         queued_key(transaction, job)?,
@@ -891,9 +897,20 @@ impl PublicationClaim {
 
 /// Read the bound job inside the publishing transaction so its version joins
 /// OCC validation. A heartbeat/claim read in another transaction is not a fence.
+pub(crate) fn starts_tool_effect(event_type: &str, payload: &[u8]) -> io::Result<bool> {
+    if event_type != "tool_effect" { return Ok(false); }
+    let event: Value = serde_json::from_slice(payload)
+        .map_err(|_| invalid_input("tool effect event is not JSON"))?;
+    let effect = &event["executionEffect"];
+    Ok(effect.get("state").and_then(Value::as_str) == Some("entered")
+        && effect.get("reconciliation").is_none_or(Value::is_null))
+}
+
+/// Cancellation drainage never admits a new tool effect, even in a terminal frame.
 pub(crate) fn require_conversation_publication_claim(
     database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
     attempt_id: &str, task_id: &str, proof: Option<&PublicationClaim>, terminal: bool,
+    drain_entered: bool,
 ) -> io::Result<()> {
     if task_id != format!("conversation-attempt:{attempt_id}") {
         return if proof.is_none() { Ok(()) }
@@ -908,7 +925,8 @@ pub(crate) fn require_conversation_publication_claim(
         || job.payload.get("attemptId").and_then(Value::as_str) != Some(attempt_id)
         || !live_claim_matches(database, &job, &proof.worker_id, proof.fencing_token,
                                database.worker_lease_now_ms()?)
-        || (!terminal && job.cancel_requested_at_ms > 0) {
+        || (!terminal && job.cancel_requested_at_ms > 0
+            && !(drain_entered && crate::turn::attempt_has_entered(database, transaction, attempt_id)?)) {
         return Err(conflict("worker claim cannot publish this attempt"));
     }
     Ok(())
@@ -1126,11 +1144,12 @@ pub(crate) fn request_cancel(
         .map(Some);
     }
     let suspended = job.status == "suspended";
-    if job.status == "queued" {
+    let domain_cancel = job.status == "queued" && job.task_kind == "conversation-attempt";
+    if job.status == "queued" && !domain_cancel {
         remove_queued_index(database, transaction, &job)?;
         job.status = "cancelled".to_owned();
         job.terminal_at_ms = now_ms;
-    } else if suspended {
+    } else if suspended || domain_cancel {
         remove_queued_index(database, transaction, &job)?;
         job.available_at_ms = now_ms;
     }
@@ -1141,8 +1160,10 @@ pub(crate) fn request_cancel(
     job.cancel_requested_at_ms = now_ms;
     job.cancel_reason = reason.to_owned();
     job.updated_at_ms = now_ms;
+    transaction.note_worker_queue_change();
+    transaction.note_worker_cancellation(task_id);
     put_job(database, transaction, &job)?;
-    if suspended {
+    if suspended || domain_cancel {
         put_queued_index(database, transaction, &job)?;
     }
     encoded_json_bytes(&json!({
@@ -1293,7 +1314,7 @@ mod tests {
         let mut publication = db.begin_with_identity_claim_scopes(7, 41).unwrap();
         require_conversation_publication_claim(&db, &mut publication,
             "publishing", task_id, Some(&PublicationClaim {
-                worker_id: "old".into(), fencing_token: 1 }), false).unwrap();
+                worker_id: "old".into(), fencing_token: 1 }), false, false).unwrap();
         // A domain write disjoint from the job: only the fence's read dependency
         // can prevent this otherwise valid transaction from committing late.
         let visible = EntityKey::new(7, 41, "publication_test", b"visible").unwrap();
@@ -1310,7 +1331,7 @@ mod tests {
         assert!(db.entity_get(&mut current, &visible).unwrap().is_none());
         require_conversation_publication_claim(&db, &mut current,
             "publishing", task_id, Some(&PublicationClaim {
-                worker_id: "new".into(), fencing_token: 2 }), false).unwrap();
+                worker_id: "new".into(), fencing_token: 2 }), false, false).unwrap();
         db.entity_put(&mut current, visible, b"new".to_vec()).unwrap();
         db.commit(current).unwrap();
     }

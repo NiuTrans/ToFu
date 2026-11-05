@@ -97,9 +97,23 @@ def _live_claim(row, worker_id, fence, epoch, now):
             and int(row['lease_deadline_ms']) > now)
 
 
+def _starts_tool_effect(event: Any) -> bool:
+    """Initial effect ACK is admission; later reconciliation is draining evidence.
+
+    The common tool owner emits this exact write-ahead event before invoking a
+    handler. Reconciliation references only attach to an already entered effect.
+    Ordinary progress never pays a history read or acquires effect authority.
+    """
+    if not isinstance(event, Mapping) or event.get('type') != 'tool_effect':
+        return False
+    effect = event.get('executionEffect')
+    return (isinstance(effect, Mapping) and effect.get('state') == 'entered'
+            and effect.get('reconciliation') is None)
+
+
 def _require_conversation_publication_claim(
     session: Session, *, attempt_id: str, task_id: str, user_id: int,
-    proof: Any, terminal: bool = False,
+    proof: Any, terminal: bool = False, drain_entered: bool = False,
 ) -> None:
     """Fence publication under the domain transaction, never a preceding RPC.
 
@@ -125,8 +139,14 @@ def _require_conversation_publication_claim(
     epoch, now, _ = _lease_authority(session)
     if (not _live_claim(row, proof['worker_id'], proof['fencing_token'], epoch, now)
             or row['task_kind'] != 'conversation-attempt'
-            or (_load(row['payload_json']) or {}).get('attemptId') != attempt_id
-            or (not terminal and int(row['cancel_requested_at_ms']) > 0)):
+            or (_load(row['payload_json']) or {}).get('attemptId') != attempt_id):
+        raise StorageError('database_conflict', 'Worker claim cannot publish this attempt')
+    if not terminal and int(row['cancel_requested_at_ms']) > 0 and not (
+            drain_entered and session.fetch_one(
+                'SELECT 1 AS entered FROM storage_generation_attempts a '
+                'JOIN storage_conversation_turns t ON t.turn_id=a.turn_id '
+                'WHERE a.attempt_id=? AND t.user_id=? AND a.started_at IS NOT NULL',
+                (attempt_id, user_id)) is not None):
         raise StorageError('database_conflict', 'Worker claim cannot publish this attempt')
 
 
@@ -249,6 +269,7 @@ def _worker_job_enqueue_owned(session: Session, payload: Mapping[str, Any]) -> A
             now_ms, now_ms,
         ),
     )
+    session.worker_hints.queue_changed = True
     created = _job_row(session, task_id)
     if created is None:  # pragma: no cover - transaction invariant
         raise StorageError('database_internal', 'Worker job insert was not visible')
@@ -461,6 +482,7 @@ def _worker_job_defer(session: Session, payload: Mapping[str, Any]) -> Any:
     )
     if not count:
         return {"ok": False, "error": "stale_fence"}
+    session.worker_hints.queue_changed = True
     return {
         "ok": True,
         "replayed": False,
@@ -478,6 +500,7 @@ def _worker_job_wake_owned(session: Session, task_id: str, owner: int, tenant: s
     sequence = int(row['wake_sequence']) + 1
     if sequence > _MAX_CLOCK_MS:
         raise StorageError('database_integrity', 'Worker wake sequence overflows')
+    session.worker_hints.queue_changed = True
     wake_at = _lease_authority(session).utc_now_ms
     session.execute('UPDATE storage_worker_jobs SET wake_sequence=?, '
                     'available_at_ms=?, updated_at_ms=? WHERE task_id=?',
@@ -571,8 +594,11 @@ def _worker_job_request_cancel(
         }
 
     queued = str(row["status"]) == "queued"
-    next_status = "cancelled" if queued else str(row["status"])
-    terminal_at_ms = now_ms if queued else 0
+    # Conversation cancellation still owes a terminal Turn. Keep its queued
+    # job claimable for the domain cancel handler; transport is not settlement.
+    domain_cancel = queued and row['task_kind'] == 'conversation-attempt'
+    next_status = "cancelled" if queued and not domain_cancel else str(row["status"])
+    terminal_at_ms = now_ms if queued and not domain_cancel else 0
     session.execute(
         "UPDATE storage_worker_jobs SET status=?, cancel_sequence=?, "
         "cancel_requested_at_ms=?, cancel_reason=?, updated_at_ms=?, "
@@ -585,12 +611,14 @@ def _worker_job_request_cancel(
             now_ms,
             terminal_at_ms,
             now_ms
-            if str(row["status"]) == "suspended"
+            if str(row["status"]) == "suspended" or domain_cancel
             else int(row["available_at_ms"]),
             task_id,
             user_id,
         ),
     )
+    session.worker_hints.queue_changed = True
+    session.worker_hints.cancelled_tasks.add(task_id)
     updated = _job_row(session, task_id)
     return {"accepted": True, "alreadyRequested": False, "job": _job_document(updated)}
 

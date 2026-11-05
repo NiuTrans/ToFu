@@ -135,6 +135,24 @@ pub(crate) fn sync_directory_barrier(vfs: &dyn Vfs, path: &Path) -> io::Result<(
     vfs.sync_directory(path)
 }
 
+/// Names the staging file a rename-publishing writer fills and syncs beside
+/// its destination: `prefix` then `identifier` in canonical lowercase
+/// hyphenated form. A crash before the rename leaves this exact name for the
+/// collectors, which recognize it with [`is_hyphenated_temporary_name`].
+pub(crate) fn hyphenated_temporary_name(prefix: &str, identifier: uuid::Uuid) -> String {
+    format!("{prefix}{}", identifier.hyphenated())
+}
+
+/// Whether `name` is exactly what [`hyphenated_temporary_name`] mints for
+/// `prefix`. Other spellings of a UUID (simple, braced, uppercase) are not
+/// recognized, so a collector removes only files an engine writer created.
+pub(crate) fn is_hyphenated_temporary_name(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix).is_some_and(|identifier| {
+        uuid::Uuid::parse_str(identifier)
+            .is_ok_and(|parsed| parsed.hyphenated().to_string() == identifier)
+    })
+}
+
 /// Independently observed filesystem dimensions; unknown accounting is explicit.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FilesystemCapacity {

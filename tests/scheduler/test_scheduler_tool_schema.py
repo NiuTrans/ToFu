@@ -44,11 +44,13 @@ def test_schedule_create_keeps_cadence_execution_and_cost_contracts():
     assert "agent=clock-triggered independent polls" in desc
     assert "full-tool turn" in desc and "target conversation" in desc
 
-    assert "trigger and action" in command
-    assert "pure-code agent" in command and "empty string" in command
+    assert "agent" in command and "required" in command
+    assert "never empty" in command and "executes when ready" in command
+    assert "empty string" not in command and "pure-code" not in command
     assert "agent-only" in predicate and "exit 0" in predicate
     assert "condition_regex" in predicate and "zero-llm" in predicate
-    assert "hybrid" in predicate and "auto-promotes" in predicate
+    assert "runs command" in predicate and "never act" in predicate
+    assert "hybrid" in predicate and "auto-promotes" not in predicate
     assert "deterministic" in predicate
     for key in (
         "searchMode", "fetchEnabled", "projectPath", "codeExecEnabled",

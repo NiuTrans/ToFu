@@ -474,7 +474,8 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
     # through the module at call time so tests/deployments can retune.
     import lib.llm._transport as _tp
     _resp_holder = {}
-    _progress = _tp.StreamProgress(0, started_at=plan.t0)
+    _progress = _tp.StreamProgress(
+        0, started_at=plan.t0, on_tool_call_open=on_stream_wait)
     _watchdog = StreamIdleWatchdog(
         heartbeat_interval=_tp.IDLE_HEARTBEAT_S,
         on_beat=on_first_byte_wait,

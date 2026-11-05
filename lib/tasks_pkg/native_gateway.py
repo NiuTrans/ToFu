@@ -142,6 +142,8 @@ class NativeGateway:
         self._command_lock = threading.Lock()
         self._response_round = None
         self._response_prepared = {}
+        # Model call ID -> the published sibling occurrence its callback runs.
+        self._sibling_occurrences = {}
         self.response_retained_bytes = 0
         self._progress = None
         self._recovery_effects = None
@@ -296,16 +298,27 @@ class NativeGateway:
         plan.settle(call_id, approved)
 
     async def execute(self, request: ToolRequest):
-        self._identity(request)
-        if self._concurrent:
-            return await self._execute_callback(request)
-        if request.name in self.parallel_names:
-            from lib.tasks_pkg.tool_dispatch.api import parallel_tool_names
-            if request.name not in parallel_tool_names(self.task, [request.name]):
-                raise ValueError('native parallel tool classification changed')
-            return await self._execute_callback(request)
-        async with self._lock:
-            return await self._execute_callback(request)
+        try:
+            self._identity(request)
+            if self._concurrent:
+                return await self._execute_callback(request)
+            if request.name in self.parallel_names:
+                from lib.tasks_pkg.tool_dispatch.api import parallel_tool_names
+                if request.name not in parallel_tool_names(self.task, [request.name]):
+                    raise ValueError('native parallel tool classification changed')
+                return await self._execute_callback(request)
+            async with self._lock:
+                return await self._execute_callback(request)
+        finally:
+            # Its execution is joined here. A callback that failed before its
+            # pipeline handed the occurrence to a worker never runs it, so later
+            # siblings must not wait for it; an adopted one is unaffected.
+            with self._pending_lock:
+                occurrence = self._sibling_occurrences.get(
+                    request.model_call_id or request.call_id)
+            if occurrence is not None:
+                from lib.tasks_pkg.tool_dispatch.api import release_gateway_siblings
+                release_gateway_siblings(self.task, [occurrence])
 
     async def _execute_callback(self, request):
         self._identity(request)
@@ -385,9 +398,14 @@ class NativeGateway:
             self.response_retained_bytes = 0
             self._command_dirs, self._command_ids = [], {}
             self._decided_commands, self._entered_commands = set(), set()
+            siblings = list(self._sibling_occurrences.values())
+            self._sibling_occurrences = {}
             if self._recovery_effects is not None:
                 self._recovery_effects.close()
                 self._recovery_effects = None
+        # Callbacks are joined: a published occurrence no worker adopted never runs.
+        from lib.tasks_pkg.tool_dispatch.api import release_gateway_siblings
+        release_gateway_siblings(self.task, siblings)
         if self._progress is not None:
             self._progress.close()
 
@@ -466,11 +484,18 @@ class NativeGateway:
             assistant,[call[:5]+call[6:] for call in parsed])) if parsed else 0
         if charge>self.pending_bytes:
             raise ValueError('native sibling declaration exceeds the owned pending-byte bound')
-        publish_prepared_response_siblings(self.task,parsed,result.request.round)
+        # Native admission dispatches an admitted read call without a host
+        # decision; a write or approval call runs only after one, never when
+        # denied. Only occurrences the runtime will run take a sibling place.
+        dispatched={model:item for item,model in zip(parsed,model_ids)
+                    if self.permissions.get(item[1])=='read'}
+        publish_prepared_response_siblings(self.task,parsed,result.request.round,
+                                           gateway_calls=list(dispatched.values()))
         with self._pending_lock:
             if self._pending:raise ValueError('native sibling declaration overlaps pending approval')
             self._response_round=result.request.round
             self._response_prepared=dict(prepared)
+            self._sibling_occurrences=dispatched
             self.response_retained_bytes=charge
             self._command_dirs,self._command_ids=command_dirs,command_ids
             self._decided_commands,self._entered_commands=set(),set()

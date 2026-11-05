@@ -57,7 +57,7 @@ fn request(revision: u64, index: usize) -> EventRecordRequest {
             ]}).as_object().unwrap().clone()), projection_segments_stable:false,
         settlement:Map::new(), error:Map::new(), event_type:"projection_updated".into(),
         event_payload:Map::from_iter([("phase".into(), json!(index))]), background_command_ack:None,
-        task_event:Some(IndexedStreamAppendItem { task_id:TASK.into(), application_sequence:index as u64,
+        task_event:Some(IndexedStreamAppendItem { worker_claim:None, task_id:TASK.into(), application_sequence:index as u64,
             event_type:"phase".into(), payload_json:serde_json::to_vec(&json!({"type":"phase","ordinal":index})).unwrap(),
             created_at_ms:2000+index as i64, require_attempts_live:Vec::new() }),
         preceding_task_events:Vec::new(), flow_root_attempt_id:String::new(), now_ms:2000+index as u64 }

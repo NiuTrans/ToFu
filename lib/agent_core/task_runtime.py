@@ -1630,6 +1630,15 @@ class TaskRuntime:
         worker = self._runtime_worker(task_id, task, fn, args, kwargs)
         return submitter(task_id, owner_user_id, worker)
 
+    def run_owned_worker(self, task: dict, fn: Callable):
+        """Run on the caller's worker with the shared context/join observation.
+
+        Durable claim owners already have a physical execution thread. They
+        must retain it until domain settlement instead of submitting detached
+        work and returning a transport completion ahead of that settlement.
+        """
+        return self._build_worker_callable(str(task.get('id') or ''), task, fn)()
+
     def submit_owned_worker(
         self, task: dict, submitter: Callable, fn: Callable, *,
         on_error: Callable[[BaseException], None],

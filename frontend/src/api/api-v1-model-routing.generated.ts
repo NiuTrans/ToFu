@@ -26,7 +26,7 @@ export type ModelRoutingInferenceProfile = {
   "effort_map"?: {
   [key: string]: string;
 };
-  "preserve_history"?: "none" | "clear_thinking_false" | "keep_all";
+  "preserve_history"?: "none" | "replay" | "clear_thinking_false" | "keep_all";
   "display"?: "summarized" | "omitted";
   "min_budget_tokens"?: number;
   "max_budget_tokens"?: number;

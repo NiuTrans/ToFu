@@ -21,6 +21,8 @@ def test_canonical_ids_resolve_to_vendor_dates() -> None:
     assert release_date('gemini-3.7-flash') == '2026-08'
     assert release_date('gemini-3.8-flash') == '2026-09'
     assert release_date('gemini-4-argon') == '2026-10'  # model page, Oct 2026
+    assert release_date('hy4') == '2026-11-04'
+    assert release_date('hy4-preview') == '2026-07'  # not Hy4's 2026-11-04
 
     assert release_date('muse-spark-1.3') == '2026-09-02'  # listed 2026-09-02
 
@@ -37,6 +39,7 @@ def test_wire_respellings_hit_the_trained_model_rule() -> None:
 
     # Relay namespace prefix.
     assert release_date('moonshotai/kimi-k3.1-pro') == '2026-10-23'
+    assert release_date('tencent/hy4') == '2026-11-04'
 
     # Contributor SKU rides the same-day listing rule.
     assert release_date('muse-spark-1.3-contributor') == '2026-09-02'

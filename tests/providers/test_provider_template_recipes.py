@@ -135,6 +135,39 @@ def test_each_provider_price_stays_on_its_own_offering(monkeypatch):
                       'vendor/gpt-test-price-pool-v2': (70, 700)}
 
 
+def test_every_shipped_offering_price_is_its_own_recipes_price():
+    """The same binding invariant over every shipped template: an Offering's
+    price is the declared price of the recipe whose wire its Deployment serves."""
+    from lib.model_routing.model_defaults import official_model_directory
+    from lib.provider.provider_template_recipes import load_provider_templates
+
+    templates = load_provider_templates()
+    directory = official_model_directory(templates)
+    checked = 0
+    for template in templates:
+        if template.get('category') == 'local':
+            continue
+        declared = {}
+        for recipe in template['offering_recipes']:
+            if recipe.get('pricing'):
+                for wire in (recipe.get('request_ids')
+                             or [recipe['model_id'], *recipe.get('aliases', [])]):
+                    declared[wire] = recipe['pricing']
+        bundle = compile_provider_template_bundle(
+            template['key'], official_directory=directory, _templates=templates)
+        offerings = {row['offering_id']: row for row in bundle['offerings']}
+        for deployment in bundle['deployments']:
+            price = offerings[deployment['offering_id']].get('actual_pricing')
+            if price is None:
+                continue
+            wire = deployment['wire_model_id']
+            assert wire in declared, (template['key'], wire)
+            assert (price['input'], price['output']) == (
+                declared[wire]['input'], declared[wire]['output']), (template['key'], wire)
+            checked += 1
+    assert checked
+
+
 def test_official_operator_hosting_other_creators_cannot_set_their_list_prices(monkeypatch):
     import lib.provider.provider_template_recipes as recipes
     price = {'input': 2, 'output': 5, 'currency': 'USD'}

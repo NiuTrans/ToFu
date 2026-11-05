@@ -598,7 +598,13 @@ imports.
 Not covered: a merge that lands while the boot imports and the sweep are still
 running (seconds) can still mix revisions; a package first imported late is
 pinned at that import; namespace-package portions and non-Python files read
-through `__file__` load from the checkout; the Supervisor and lifecycle manager
+through `__file__` load from the checkout. Schema-coupled model inference defaults
+are therefore generated into a Python module and consumed through the same pin
+([model registration](MODEL_REGISTRATION.md#declared-inference-profiles)); editing
+their source JSON does not hot-reload a running server's defaults.
+The generated defaults add 57,970 source bytes (3,531 compressed bytes) to the
+boot pin in the measured catalogue, with no per-request or uptime growth.
+The Supervisor and lifecycle manager
 processes do not install the finder. Verify `tests/runtime_pinned_import_source/`.
 
 ## An empty catch names what it swallows

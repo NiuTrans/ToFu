@@ -1294,9 +1294,10 @@ Problem: a history read validated each complete record/assignment and then
 repeated the same nested request and model-attempt schema walks. Decision:
 the canonical record/assignment schema is the single structural validation pass;
 ownership, profile, derived admission, occurrence uniqueness, budgets and graph
-checks still run on every read. No validation result or authority is cached.
+checks still run on every read. No authority is cached; only the structural verdict
+of exact unchanged stored content is reused (see "Stored-row schema verdicts" below).
 Alternatives rejected: skipping whole-record validation loses durable integrity;
-caching permission or shape verdicts adds invalidation and retention obligations.
+caching permission verdicts needs an invalidation protocol.
 The complete in-memory history-page benchmark
 `benchmarks/project_dispatch_history_validation.py` retains 28 assignments with
 100 model occurrences each. Fresh-process ABBA medians were 699.1/705.6 ms before
@@ -1521,11 +1522,20 @@ unreviewed predecessor and its accepted successor, then advances the association
 to that successor. The accepted `_resumeSource` also restores the assignment's
 conserved model account: its last ordinal, cumulative usage and original nonce
 continue once, never restart at one or fabricate another occurrence account.
-A background-command completion uses this same Continue path;
-its receipts stay durable and are replayed into the resumed Worker turn. The
+A background-command completion for an eligible unfinished execution uses this
+same Continue path; its receipts stay durable and are replayed into the resumed
+Worker turn. The
 ordinary settlement hook now observes the successor's status, result and delivery,
 and wakes the Coordinator. A completed/reviewed execution never resumes; exact
-command replay is read-only. Stop, a live predecessor, changed source or lost
+command replay is read-only. Late background evidence for a completed or reviewed
+execution attaches once to its exact settled Turn with a CAS fence, then
+acknowledges the inbox receipt; it neither starts a model nor changes the review.
+Problem: treating that evidence as Continue caused a permanent `database_conflict`
+retry loop because the settled execution correctly disallowed continuation.
+Decision: use the existing closed-execution evidence settlement path, including
+revoked assignments. Alternative rejected: allowing Continue on a reviewed or
+completed assignment would reopen accepted work. Stop, a live predecessor,
+changed source or lost
 workspace/lineage evidence refuses recovery rather than starting a second writer.
 
 `blocked: task_background_commands_running` means that durable publication was
@@ -1810,6 +1820,58 @@ CPU of 17.5 instead of 7.4 ms. These are host observations of one component.
 ten authority faults in every mode (the former admission passed the same table),
 and that one decision reads exactly one validation's ports plus the bound executor,
 with a row equal to a fresh validation and reread.
+
+### Stored-row schema verdicts and metadata Turn reads
+
+Problem: a live py-spy GIL profile of the server spent 20.8% of all samples in
+jsonschema `is_valid`, mostly `_check_record` re-walking every stored assignment,
+request-budget and Coordinator-settlement row on each dispatch load: per Worker
+round (`coordinator_scope` → `validate_task`), tool admission, Coordinator timed
+wake and settlement recovery. Separately, `delegation.source_for_task` (every
+Coordinator model dispatch), `delegation.validate_source`, the background-completion
+resume fence in `message_queue.dispatch_completed_background_batch`, the resume
+model-switch probe `command_service._resume_model_switch_from` and
+`validate_publication` read whole Turns (tens of MB live) for identity, actor,
+parent and `projectionRevision` only.
+
+Decision: schema validity is a pure function of (definition, exact JSON value).
+`repository._validate_stored_row` keeps, per definition and stored row identity
+(assignment `id`, request budget `id`, settlement `sourceAttemptId`, the repository
+key for a legacy whole record), the SHA-256 of the canonical JSON (sorted keys,
+compact, unescaped UTF-8, finite) that last passed a full walk. An equal digest skips
+the walk; other content is walked in full, and only a completed validation records
+its digest, so a race can repeat a validation but never skip changed content. A
+value that differs from its decoded canonical JSON (a tuple or a non-string key
+encodes like a list or string key but validates differently) is always walked.
+Retention is one digest per row identity the process has checked, replaced on
+change, with no size, age or flag; mutation checks reuse it for their unchanged
+rows. Caller-supplied request, batch, source, profile, admission and Stop
+validation, the derived admission projection, the finite JSON checks and every
+ownership, occurrence, budget, graph, Stop, binding and source check still run on
+every read: the memo states only that exact stored content is well-formed and
+caches no row or authority. The listed Turn reads use
+`include_projection=False`, the same public metadata normalization as the
+prerequisite-evidence decision; `validate_human_source` and the resume probe's
+parent `contextSnapshot` keep their body reads. A malformed metadata record now
+fails closed as a permanent storage error instead of an identity mismatch.
+
+Alternatives rejected: skipping stored-row validation loses integrity; caching rows
+or admission verdicts (owner decision above); an LRU or TTL bound adds a tuning
+knob where an absent entry only costs one walk; plain `hashlib` releases the GIL per
+row above 2 KiB, so digests use `sha256_holding_gil`.
+`benchmarks/project_dispatch_record_validation.py` checks 100 delegated Worker rows
+(20 model and 20 tool occurrences each, one shared request budget and settlement,
+1.38 MB). Fresh-process ABBA medians of 21 checks were 582.6/577.6 ms before and
+77.3/81.1 ms after with unchanged rows, and 611.5/581.3 ms before and 83.8/86.8 ms
+after when one more row had advanced. Beside four CPU-bound Python threads they were
+3,132/3,225 ms before and 389/369 ms after (checking-thread CPU 633/662 and 84/80
+ms). The remainder is mostly each assignment's profile and admission-projection
+walks. These are host observations of one component with identical snapshot digests.
+Specifications: `test_project_dispatch_record_validation.py` (unchanged rows skip
+the walk; changed, invalid, tuple-valued and other-definition rows are walked),
+`test_coordinator_workers.py` (source and background-completion reads),
+`test_project_dispatch_dependencies.py::test_publication_validation_reads_the_result_turn_as_metadata`
+and `test_turn_lifecycle.py::test_resume_model_switch_reads_the_submitted_turn_as_metadata`.
 
 ## Atomic bounded conversation batches
 

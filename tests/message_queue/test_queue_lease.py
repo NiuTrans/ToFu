@@ -41,8 +41,9 @@ def _storage_client(*, write: bool = False):
 def _stub_dispatch(monkeypatch, *, error: Exception | None = None):
     recorded = {'attempts': [], 'commands': [], 'conversations': []}
 
-    def submit(conversation_id, user_id, command):
+    def submit(conversation_id, user_id, command, *, trusted_dispatch=None):
         assert user_id == USER_ID
+        assert trusted_dispatch is None
         if error is not None:
             raise error
         attempt_id = f'attempt-{len(recorded["attempts"])}-{time.time_ns()}'

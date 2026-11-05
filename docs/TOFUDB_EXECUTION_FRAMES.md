@@ -315,8 +315,9 @@ and K rows as K sequential calls.
 Native execution also refuses (`database_resource_exhausted`, nothing written)
 a multi-entry batch as soon as it no longer fits one ordinary commit: its
 entity delta must fit the overlay envelope that `prepare_commit` uses, and its
-new blobs and rows must fit the WAL-carried ceiling minus the composition
-headroom already published as `resourceBudget.eventBatchComposition`. Without
+new blobs and rows, less the carried payload of its single largest entry
+(below), must fit the WAL-carried ceiling minus the composition headroom
+already published as `resourceBudget.eventBatchComposition`. Without
 that test, a 500-entry batch of small frames (about 4.6 KiB of new pages and
 blobs per entry) drained every conversation's overlay through the tree path,
 then synchronized about 1,300 loose blocks one by one under the authority:
@@ -326,6 +327,66 @@ authority-wedge threshold and the 5 s deadline of every concurrent request.
 256 entries with 4 KiB tool results spilled the same way (6.8 s), while 136 of
 them committed in 252 ms. A single entry is an ordinary record and is never refused
 for its size. SQL has no such representation and commits the whole run.
+
+*One large entry (2026-11-05).* Problem: on long-running Turns the first
+structural event after streamed text retires the text tail and writes the whole
+projection as one checkpoint; a 53 MB projection compresses to about 15 MB.
+Every multi-entry batch containing that entry failed the test above, so the
+producer's bisection repeated the full materialization and checkpoint
+compression (about 1 s of authority hold each) about log2(K) times before the
+entry committed alone on the same spill path. Over 37 minutes the server
+logged 554 refused `turn.event.record_batch` calls, mean 957 ms (about 530 s
+of authority time, 24% of all batch time); their `authority_hold` records show
+`blob_codec_compress` of 115-148 ms and no WAL journal.
+
+Decision: a batch may exceed one ordinary commit by at most one entry's own
+carried payload. Execution records each applied step's increment of
+`carried_payload_bytes` (staged blob bytes plus stream bytes, the measurement
+of the test above) and refuses only when the total less the largest single
+increment exceeds the ordinary carried budget, or when the whole transaction's
+entity delta leaves the overlay envelope (unchanged). Alone that entry is never
+refused for its size, and the rest still fits one ordinary commit, so no
+composite can accumulate the many-small-entries spill above. The total less the
+largest increment never decreases as steps are added, so refusal still comes at
+the first step that makes it certain. All-or-nothing outcomes, per-entry
+results, receipts, outbox capture, attempt fences, the producer and the SQL
+authority are unchanged; no constant or setting is added. An admitted
+composite whose total exceeds the WAL-carried ceiling spills the rest's new
+blocks together with the large entry's instead of carrying them in a separate
+record: at most one ordinary commit's carried payload, never the tree path.
+
+Measurement: one large entry plus three small entries, recorded through the
+producer's bisection rule on disposable authorities (debug build, exact
+process counters, three identical repetitions). For the streamed-text
+checkpoint shape, a patch folded into a checkpoint and a 2.5 MiB blob-carried
+row, the run took 2 refused attempts and 3 commits before and 1 commit after;
+blob compressions fell from 12, 18 and 9 to 4, 6 and 3 (about 172, 234 and
+146 ms to 58, 77 and 50 ms of compression) and checkpoint materialization of
+the streamed-text shape from 15.7 MB to 9.4 MB, with unchanged spills (one,
+one, none). Specs:
+`turn_event_record_batch_commits_one_entry_beyond_one_ordinary_commit_with_its_small_followers`
+(results and state equal sequential records, also after reopen, and the
+preparation lane admits the composite beyond the ordinary budget);
+`turn_event_record_batch_exempts_at_most_one_entry_beyond_one_ordinary_commit`
+(two large entries, or one beside small entries that alone exceed the budget,
+are refused with nothing written);
+`turn_event_record_batch_failure_after_the_exempt_entry_writes_nothing` and
+`turn_event_record_batch_commit_faults_beside_the_exempt_entry_recover_all_or_nothing`
+(a later failing entry, and faults at the first and last durability barrier of
+each kind in the spilling commit, leave nothing or the whole batch). The
+many-small-entries spec uses 64 rows of 32 KiB, which exceed the budget even
+without their largest row.
+
+Alternatives considered: the authority names the oversized entry so the
+producer isolates it (one refused attempt still materializes and compresses
+the checkpoint, and three commits replace one); the producer predicts native
+size (the measured 2.6-7.5x wire factor makes any prediction a magic factor);
+exempt only an entry that alone exceeds the budget (a second condition that
+keeps re-executing medium entries beside small ones, to avoid a spill already
+bounded by one ordinary commit); keep the prepared checkpoint across refused
+attempts (a cross-request cache of private preparation bytes and its
+invalidation, for work that need not repeat at all); a larger carried ceiling
+or headroom (it bounds WAL records and replay memory).
 
 `turn_lifecycle.record_task_events(task, entries)` is the producer. It projects
 each durable wire once in FIFO order and chains K patches from the cached

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from lib.storage_authority_sql.worker_control import WorkerCommitHints, WorkerControl
+
 from collections import deque
 from collections.abc import Callable as Callable, Mapping, Sequence as Sequence
 from dataclasses import dataclass, field
@@ -153,6 +155,7 @@ class SQLiteSession:
     ) -> None:
         self.event_read_epoch = event_read_epoch
         self.worker_lease_clock = worker_lease_clock
+        self.worker_hints = WorkerCommitHints()
         self.connection = connection
         self.turn_projection_cache = turn_projection_cache
 
@@ -236,6 +239,7 @@ class _WriteJob:
     # Group-commit scratch slot: the op's return value between SAVEPOINT
     # release and the segment's COMMIT (the job resolves only on commit).
     result_pending: Any = None
+    worker_hints: Any = None
     # Raw jobs run on the writer thread WITHOUT a transaction wrapper (the
     # fastpath shipper's TRUNCATE checkpoint cannot execute inside one).
     raw: bool = False
@@ -296,6 +300,7 @@ class _FairWriter:
     ) -> None:
         self._event_read_epoch = event_read_epoch
         self._worker_lease_clock = worker_lease_clock
+        self.worker_control = None
         self._connection = connection
         self._transaction_timeout_s = transaction_timeout_s
         self._stall_grace_s = max(0.05, float(stall_grace_s))
@@ -845,8 +850,11 @@ class _FairWriter:
                 try:
                     self._connection.execute('SAVEPOINT tofu_gc')
                     try:
-                        result = job.operation(SQLiteSession(
-                            self._connection, self._turn_projection_cache, self._event_read_epoch, self._worker_lease_clock))
+                        session = SQLiteSession(
+                            self._connection, self._turn_projection_cache, self._event_read_epoch, self._worker_lease_clock)
+                        session.worker_hints.publisher = self.worker_control.publish if self.worker_control else None
+                        job.worker_hints = session.worker_hints
+                        result = job.operation(session)
                     except BaseException as op_exc:
                         try:
                             self._set_phase('rollback')
@@ -918,7 +926,12 @@ class _FairWriter:
         commit_started = time.monotonic()
         try:
             self._set_phase('commit')
-            self._connection.commit()
+            try:
+                self._connection.commit()
+            finally:
+                for job in segment_work:
+                    if job.worker_hints is not None:
+                        job.worker_hints.publish()
         except BaseException as exc:
             raise _BatchFailed(
                 _map_sqlite_error(exc, segment_deadline),
@@ -1001,8 +1014,10 @@ class _FairWriter:
                 self._connection.execute('BEGIN IMMEDIATE')
                 phase = 'execute'
                 self._set_phase('execute')
-                result = job.operation(SQLiteSession(
-                    self._connection, self._turn_projection_cache, self._event_read_epoch, self._worker_lease_clock))
+                session = SQLiteSession(
+                    self._connection, self._turn_projection_cache, self._event_read_epoch, self._worker_lease_clock)
+                session.worker_hints.publisher = self.worker_control.publish if self.worker_control else None
+                result = job.operation(session)
                 if time.monotonic() >= transaction_deadline:
                     raise StorageError(
                         'database_timeout', 'Storage transaction exceeded its watchdog',
@@ -1010,7 +1025,10 @@ class _FairWriter:
                 commit_started = time.monotonic()
                 phase = 'commit'
                 self._set_phase('commit')
-                self._connection.commit()
+                try:
+                    self._connection.commit()
+                finally:
+                    session.worker_hints.publish()
                 phase = 'post_commit'
                 self._note_commit(commit_started)
                 self._set_phase('post_commit')
@@ -1221,6 +1239,7 @@ class SQLiteBackend(Backend):
     ) -> None:
         self.config = config
         self._event_read_epoch = uuid.uuid4().hex
+        self.worker_control = WorkerControl()
         from lib.storage_authority_sql.worker_lease_clock import WorkerLeaseClock
         self._worker_lease_clock = WorkerLeaseClock()
         self._startup_progress = startup_progress
@@ -1521,6 +1540,7 @@ class SQLiteBackend(Backend):
                 'shadow_dir': str(self._fastpath_decision.shadow_dir),
             })
         self._preflight = report.as_dict()
+        self._writer.worker_control = self.worker_control
         self._reads_started = True
         try:
             from lib.storage_authority_sql.turn_search_projection import (

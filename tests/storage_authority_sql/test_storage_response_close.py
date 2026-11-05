@@ -12,6 +12,23 @@ from tofu_db._loopback import create_connection
 pytestmark = pytest.mark.unit
 
 
+def test_bind_failure_does_not_close_the_existing_authority_watch(monkeypatch):
+    import time
+    from lib.storage_authority_sql.worker_control import WorkerControl
+    backend = SimpleNamespace(worker_control=WorkerControl())
+    first = _StorageTCPServer(('127.0.0.1', 0), _StorageHandler, backend=backend,
+        token='isolated-test', rpc_capacity=2, read_only_preview=False)
+    try:
+        monkeypatch.setattr('lib.storage_authority_sql.server.bind_ephemeral_loopback',
+                            lambda sock: sock.bind(first.server_address))
+        with pytest.raises(OSError):
+            _StorageTCPServer(first.server_address, _StorageHandler, backend=backend,
+                token='isolated-test', rpc_capacity=2, read_only_preview=False)
+        assert backend.worker_control.watch({'cursor': None}, time.monotonic() + 5)['cursor']
+    finally:
+        first.server_close()
+
+
 @pytest.mark.parametrize('size', [30000, 2 * 1024 * 1024])
 def test_complete_real_response_is_received_before_accepted_socket_teardown(monkeypatch, size):
     content = 'A' * size
@@ -19,7 +36,9 @@ def test_complete_real_response_is_received_before_accepted_socket_teardown(monk
     # accepted socket, partial sendall, worker and teardown are production code.
     monkeypatch.setattr(_StorageHandler, '_dispatch', lambda self, request, request_id:
                         {'request_id': request_id, 'content': content})
-    server = _StorageTCPServer(('127.0.0.1', 0), _StorageHandler, backend=None,
+    from lib.storage_authority_sql.worker_control import WorkerControl
+    server = _StorageTCPServer(('127.0.0.1', 0), _StorageHandler,
+        backend=SimpleNamespace(worker_control=WorkerControl()),
         token='isolated-test', rpc_capacity=2, read_only_preview=False)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()

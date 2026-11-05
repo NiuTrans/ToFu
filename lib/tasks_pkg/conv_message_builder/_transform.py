@@ -74,6 +74,9 @@ def _transform_messages(
             return None
         return max(0, _agg_cap - _images_used)
 
+    # One replay decision per destination model for this whole projection.
+    replay_memo: dict[str, bool] = {}
+
     # Determine source slice — exclude last message if requested
     src = raw_messages[:-1] if (exclude_last and raw_messages) else raw_messages
     # Retired endpoint-runner markers are accepted only at this historical
@@ -209,7 +212,7 @@ def _transform_messages(
         elif role == 'assistant':
             # May expand to multiple messages: assistant(tool_calls) +
             # tool(result) per round — see _build_assistant_messages.
-            built_asst = _build_assistant_messages(msg, model=model)
+            built_asst = _build_assistant_messages(msg, model=model, replay_memo=replay_memo)
             if (not built_asst and len(messages) > retained_count
                     and messages[-1].get('role') == 'user'):
                 # The dropped reply leaves this request adjacent to the next
@@ -560,7 +563,17 @@ def _build_user_message(msg: dict, *, model: str = '',
         return result
 
 
-def _build_assistant_messages(msg: dict, *, model: str = '') -> list[dict]:
+def _replays_reasoning(model: str, memo: dict | None) -> bool:
+    from lib.model_info import model_requires_reasoning_content_replay
+    if memo is None:
+        return model_requires_reasoning_content_replay(model)
+    if model not in memo:
+        memo[model] = model_requires_reasoning_content_replay(model)
+    return memo[model]
+
+
+def _build_assistant_messages(msg: dict, *, model: str = '',
+                              replay_memo: dict | None = None) -> list[dict]:
     """Build assistant message(s) for the API from a stored conversation row.
 
     Returns a *list* because a single stored assistant message with tool
@@ -596,8 +609,7 @@ def _build_assistant_messages(msg: dict, *, model: str = '') -> list[dict]:
     final_thinking = raw_thinking if isinstance(raw_thinking, str) else ''
     final_reasoning = {}
     if final_thinking:
-        from lib.model_info import model_requires_reasoning_content_replay
-        if model_requires_reasoning_content_replay(model or msg.get('model') or ''):
+        if _replays_reasoning(model or msg.get('model') or '', replay_memo):
             # Stored `thinking` is the terminal round's projection; tool-round
             # thinking has its own per-round owner. Keep both when required by
             # the destination, including a final answer with no tool calls.

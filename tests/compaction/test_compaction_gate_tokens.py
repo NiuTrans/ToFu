@@ -22,7 +22,6 @@ from lib.tasks_pkg.compaction._tokens import (
     _compaction_trigger_threshold,
     _count_tokens_authoritative,
     _estimate_total_tokens,
-    _working_set_token_limit,
 )
 
 pytestmark = pytest.mark.unit
@@ -266,77 +265,34 @@ def test_gate_no_tool_schema_key_is_safe():
 
 
 @pytest.mark.unit
-def test_default_compaction_uses_the_route_window_not_a_fixed_working_set(monkeypatch):
-    monkeypatch.delenv('TOFU_WORKING_CONTEXT_TOKENS', raising=False)
-    effective, window_safety, working_set = _compaction_trigger_threshold(
-        {'config': {'model': 'kimi-k3'}}, context_limit=1_000_000)
-    assert working_set == 0
-    assert effective == window_safety
-    assert effective > 150_000
-
-
-@pytest.mark.unit
-def test_price_cliff_does_not_implicitly_enable_lossy_compaction(monkeypatch):
-    monkeypatch.delenv('TOFU_WORKING_CONTEXT_TOKENS', raising=False)
-
-    assert _working_set_token_limit({
-        'config': {'model': 'gpt-5.6-sol'},
-    }) == 0
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize('invalid', ['not-a-number', '', None])
-def test_invalid_working_set_falls_back_to_window_safety(monkeypatch, invalid):
-    monkeypatch.delenv('TOFU_WORKING_CONTEXT_TOKENS', raising=False)
-    effective, window_safety, working_set = _compaction_trigger_threshold(
-        {'config': {'compaction': {'workingSetTokens': invalid}}},
+@pytest.mark.parametrize('model', ['kimi-k3', 'gpt-5.6-sol'])
+@pytest.mark.parametrize('legacy_target', [None, 0, 128_000, 300_000, 2_000_000])
+def test_window_policy_does_not_accept_a_second_economic_target(
+        monkeypatch, model, legacy_target):
+    # Old presets/environment must not silently reactivate early summaries.
+    monkeypatch.setenv('TOFU_WORKING_CONTEXT_TOKENS', '96000')
+    effective, safety, economic = _compaction_trigger_threshold(
+        {'config': {'model': model,
+                    'compaction': {'workingSetTokens': legacy_target}}},
         context_limit=1_000_000)
-    assert working_set == 0
-    assert effective == window_safety
+    assert effective == safety
+    assert safety > 300_000
+    assert economic == 0
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(('prompt_tokens', 'working_set', 'expected'), [
-    (150_000, None, False),
-    (150_000, 128_000, True),
-    (900_000, None, True),
+@pytest.mark.parametrize(('prompt_tokens', 'expected'), [
+    (150_000, False), (300_000, False), (900_000, True),
 ])
-def test_automatic_gate_preserves_evidence_until_window_pressure_or_opt_in(
-        monkeypatch, prompt_tokens, working_set, expected):
+def test_waiting_uses_window_pressure_even_with_a_legacy_economic_override(
+        monkeypatch, prompt_tokens, expected):
     from lib.tasks_pkg.compaction import _tokens as owner
 
-    monkeypatch.delenv('TOFU_WORKING_CONTEXT_TOKENS', raising=False)
+    monkeypatch.setenv('TOFU_WORKING_CONTEXT_TOKENS', '128000')
     monkeypatch.setattr(owner, '_get_context_limit', lambda task: 1_000_000)
     monkeypatch.setattr(owner, '_count_tokens_authoritative',
                         lambda *a, **k: (prompt_tokens, 'provider_exact'))
-    config = {} if working_set is None else {
-        'compaction': {'workingSetTokens': working_set}}
     assert owner._should_force_compact(
         [{'role': 'user', 'content': 'Continue the authorized task.'}],
-        {'id': 'window-pressure-test', 'convId': 'window-pressure-test',
-         'config': config}) is expected
-
-
-@pytest.mark.unit
-def test_explicit_working_set_still_overrides_price_tier_policy(monkeypatch):
-    monkeypatch.setenv('TOFU_WORKING_CONTEXT_TOKENS', '99000')
-    task = {'config': {
-        'model': 'gpt-5.6-sol',
-        'compaction': {'workingSetTokens': 180_000},
-    }}
-    assert _working_set_token_limit(task) == 180_000
-
-
-@pytest.mark.unit
-def test_working_set_request_override_and_zero_opt_out(monkeypatch):
-    monkeypatch.setenv('TOFU_WORKING_CONTEXT_TOKENS', '96000')
-    assert _working_set_token_limit(None) == 96_000
-
-    task = {'config': {'compaction': {'workingSetTokens': 256_000}}}
-    assert _working_set_token_limit(task) == 256_000
-
-    disabled = {'config': {'compaction': {'workingSetTokens': 0}}}
-    effective, window_safety, working_set = _compaction_trigger_threshold(
-        disabled, context_limit=1_000_000)
-    assert working_set == 0
-    assert effective == window_safety
+        {'id': 'timing-test', 'convId': 'timing-test',
+         'config': {'compaction': {'workingSetTokens': 128_000}}}) is expected

@@ -495,7 +495,8 @@ pub(crate) fn write_indexes(
             )?;
         }
     }
-    if matches!(header.status.as_str(), "pending" | "running") {
+    if matches!(header.status.as_str(), "pending" | "running")
+        && !crate::worker_job::owns_conversation_task(&header.task_id) {
         database.entity_put(
             transaction,
             live_key(transaction, &header.task_id)?,
@@ -589,7 +590,17 @@ pub(crate) fn checkpoint(
     expected_version: u64,
     updated_at_ms: u64,
     guard: Option<&CheckpointGuard>,
+    worker_claim: Option<&crate::worker_job::PublicationClaim>,
 ) -> io::Result<Vec<u8>> {
+    if task_id.starts_with("conversation-attempt:") || worker_claim.is_some() {
+        let value: Value = serde_json::from_slice(&value_json)
+            .map_err(|_| invalid_input("invalid task result worker checkpoint"))?;
+        crate::worker_job::require_conversation_publication_claim(
+            database, transaction, task_id.strip_prefix("conversation-attempt:").unwrap_or(""),
+            task_id, worker_claim,
+            matches!(value.get("status").and_then(Value::as_str),
+                     Some("done" | "error" | "aborted" | "interrupted")), true)?;
+    }
     checkpoint_inner(
         database,
         transaction,
@@ -1203,6 +1214,13 @@ pub(crate) fn recover_running(
             {
                 return Err(invalid_data("task result live index is stale"));
             }
+            // Older versions indexed every live task. Retire only this
+            // derived restart entry; the claim/domain retains durable state.
+            last_task_id = task_id.to_owned();
+            if crate::worker_job::owns_conversation_task(task_id) {
+                database.entity_delete(transaction, live_key(transaction, task_id)?)?;
+                continue;
+            }
             header.version = header
                 .version
                 .checked_add(1)
@@ -1594,6 +1612,7 @@ mod tests {
                 cache_prefix_hwm: None,
                 last_turn_cache_read: None,
             }),
+            None,
         )
         .unwrap();
 
@@ -1644,6 +1663,7 @@ mod tests {
             0,
             2_000,
             None,
+            None,
         )
         .unwrap();
         database.commit(transaction).unwrap();
@@ -1663,6 +1683,33 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::OutOfMemory);
+    }
+
+    #[test]
+    fn old_worker_recovery_index_retires_without_changing_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let mut transaction = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        let task_id = "conversation-attempt:old-worker";
+        // Seed an older-version document; current public admission requires a live claim.
+        checkpoint_inner(&database, &mut transaction, task_id,
+            serde_json::to_vec(&json!({"task_id":task_id,"user_id":11,
+                "conv_id":"","status":"running","content":"paid evidence"})).unwrap(),
+            0, 2_001, None, false).unwrap();
+        let live = live_key(&transaction, task_id).unwrap();
+        assert!(database.entity_get(&mut transaction, &live).unwrap().is_none());
+        database.entity_put(&mut transaction, live.clone(), 11_u64.to_le_bytes().to_vec()).unwrap();
+        database.commit(transaction).unwrap();
+        let mut transaction = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        let key = document_key(&transaction, task_id).unwrap();
+        let before = database.entity_get(&mut transaction, &key).unwrap();
+        let result: Value = serde_json::from_slice(&recover_running(&database, &mut transaction,
+            &RecoverRunningRequest {interrupted_reason:"server_restart".into(),
+                maximum_rows:32, scan_limit:10_000, updated_at_ms:3_000}).unwrap()).unwrap();
+        assert!(result["recovered"].as_array().unwrap().is_empty());
+        assert_eq!(database.entity_get(&mut transaction, &key).unwrap(), before);
+        assert!(database.entity_get(&mut transaction, &live).unwrap().is_none());
+        database.commit(transaction).unwrap();
     }
 
     #[test]
@@ -1696,6 +1743,7 @@ mod tests {
             0,
             2_000,
             None,
+            None,
         )
         .unwrap();
         checkpoint(
@@ -1712,6 +1760,7 @@ mod tests {
             .unwrap(),
             0,
             2_001,
+            None,
             None,
         )
         .unwrap();
@@ -1801,6 +1850,7 @@ mod tests {
             .unwrap(),
             1,
             3_100,
+            None,
             None,
         )
         .unwrap();

@@ -19,7 +19,9 @@ physical worker observation. Decision: chat supplies its existing durable
 admission callable, failure settlement and queue observer to TaskRuntime.
 `spawn_owned_worker` owns background serving-loop/default-executor/thread
 submission; `submit_owned_worker` returns an embedding's original executor
-Future, preserving its exception and cancellation. Both use the same envelope
+Future, preserving its exception and cancellation. `run_owned_worker` executes
+on an already-owned worker thread and returns only after physical exit. All
+three use the same envelope
 as ordinary `spawn` and owner-aware `submit_worker`: an explicit carrier,
 inert request correlation, fresh Context and unconditional worker exit.
 Async wrappers and queue observers also start without request resources.
@@ -30,11 +32,27 @@ Chat still owns birth/CAS, workspace binding, cooperative Stop, native terminal
 acknowledgement and its existing terminal finalizer. A submission/entry failure
 uses rejected-start settlement; failures after committed entry remain runner
 owned. No new registry, executor, thread, retry or admission limit is added.
-Every accepted job crosses one executor submission and one worker envelope.
+Every accepted job crosses one physical worker envelope; a durable claim owner
+does not submit a second detached task.
 Automatic generic crash settlement compares the captured carrier under the
 existing `finish` claim lock (`expected_task`); a retired worker cannot finish
 a new carrier reusing its ID. Alternative rejected: retaining parallel wrappers
 with matching tests leaves isolation, lifecycle and failure ownership divergent.
+
+Claimed conversation execution is composed through
+`lib/conversation_sync/worker_execution.py` and `lib/tasks_pkg/worker_binding.py`.
+The exact claimed identity and principal are injected before task birth;
+configuration cannot install worker authority. Root, child and tool cancellation
+reuse the invocation control scope, joined before returning to the durable
+runner. Publication carries the claim through single/batched/coalesced events,
+Flow phases and task checkpoints. Stop withdraws new work but permits the current
+entered owner to drain accepted evidence, preserving FIFO terminal settlement.
+An entered Attempt is never restarted just because its lease was reclaimed.
+Terminal outcome requires both canonical persistence receipts and physical exit;
+unknown process/effect/account outcomes remain with recovery. This adapter is
+not production kind registration or independent process composition. Specs:
+`test_durable_attempt_execution.py`, `test_conversation_worker_binding.py`,
+`test_conversation_worker_publication.py` and worker/event-delivery neighbors.
 Generic thread/executor/async-wrapper rejection settles that same original
 carrier and preserves the launch exception. Background completion retrieves
 and logs failures before the Future can become unobserved; a cancelled worker
@@ -64,7 +82,7 @@ The required terminal port may prepare bounded opaque domain context for the own
 
 Automatic translation is triggered only after Turn authority settles. Its already-target skip is a whole-document identity decision: dominant-language classification of the raw buffer is insufficient because a target-language opening may hide foreign-language sections later, and because technical Chinese is often identifier-heavy (inline code, URLs, API names). Terminal root, Flow-visible child, and incremental segment paths share the conservative `lib/translate/skip_policy.py` predicate, which inspects prose after masking markup/code/URLs; mixed English prose proceeds to translation, while symbols, bare paths/URLs, and genuinely monolingual target prose may be committed as an explicit no-op. Literal `<think>` mentions in source or translated text are document content, not MiniMax reasoning wrappers, and must not truncate the rest of the message.
 
-Pending task binding alone does not prove queue residence: cold/live presentation uses `executor_preparing` until the executor publishes explicit queue evidence. A committed running attempt retires a stale `executor_queued` phase even if the next phase write failed. Startup stage histograms distinguish persistence and context preparation from real executor wait. Best-effort birth/running diagnostics retain their shared 500 ms budget. Required admission uses bounded per-RPC windows and the same task-scoped persistence wait as terminal writes, retaining exact receipt/payload across storage pressure instead of rejecting accepted work. Terminal event debt drains before release; explicit finite diagnostic probes retain their timeout verdict. Version/status witnesses use owner-scoped compact `task_results.replay_get`, avoiding cumulative-result blob hydration, while the atomic checkpoint preserves abort tombstones and owner/parent/status fences.
+Pending task binding alone does not prove queue residence: cold/live presentation uses `executor_preparing` until the executor publishes explicit queue evidence. The queue frame is the attempt's first recorded event and already marks it running, so presentation shows `executor_queued` while it is the latest frame; the worker's first phase replaces it, and a storage wedge withholding later frames presents `storage_wedged`. Startup stage histograms distinguish persistence and context preparation from real executor wait. Best-effort birth/running diagnostics retain their shared 500 ms budget. Required admission uses bounded per-RPC windows and the same task-scoped persistence wait as terminal writes, retaining exact receipt/payload across storage pressure instead of rejecting accepted work. Terminal event debt drains before release; explicit finite diagnostic probes retain their timeout verdict. Version/status witnesses use owner-scoped compact `task_results.replay_get`, avoiding cumulative-result blob hydration, while the atomic checkpoint preserves abort tombstones and owner/parent/status fences.
 
 Worker entry publishes an existing `working` phase immediately after the durable running transition: all tasks start with `workerStarting`. Canonical roots execute directly by default; only actual opted-in checkout creation emits `workspacePreparing`, then `workerStarting` when binding succeeds. Execution selection (`workspace_policy.py`; process `TOFU_WORKSPACE_MODE` overrides repository-local `tofu.workspaceMode`) is independent of linear Git publication. Existing registered workspaces keep their ownership regardless of the new default. Tools and the runner still cannot enter until every workspace binds; failed binding reaches ordinary rejected-start settlement. Correlated startup start/complete anchors separate dispatch, worker-entry and nested workspace-binding durations under the existing metrics/log owners; see [logging](../LOGGING.md#task-startup-timing-anchors). Completion uses paired `[TaskCompletionTiming]` anchors and `tofu_task_completion_stage_seconds` for persistence, workspace delivery/evidence and terminal listeners, with success/error/deferred outcomes. Spans are inclusive, not additive; identity stays in logs, never metric labels. Diagnostic failures cannot change receiver returns, exceptions or delivery-before-listener ordering; verify `tests/observability/test_task_completion_metrics.py` and `tests/tasks_pkg/test_finalize_persist_before_autopilot.py`.
 

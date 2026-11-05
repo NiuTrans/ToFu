@@ -7,6 +7,7 @@ use std::sync::RwLock;
 pub(super) struct ReadOptions {
     event_read_epoch: Uuid,
     worker_lease_clock: Arc<crate::worker_lease_clock::WorkerLeaseClock>,
+    worker_control: Arc<crate::worker_control::WorkerControl>,
     foreground_admissions: Arc<std::sync::atomic::AtomicU64>,
     canonical_json_cache: Arc<crate::canonical_json_bytes::cache::CanonicalProofCache>,
     decoded_chunk_cache: Arc<crate::blob::decode_cache::DecodedChunkCache>,
@@ -18,6 +19,7 @@ impl ReadOptions {
         Self {
             event_read_epoch: database.event_read_epoch,
             worker_lease_clock: Arc::clone(&database.worker_lease_clock),
+            worker_control: Arc::clone(&database.worker_control),
             foreground_admissions: Arc::clone(&database.foreground_admissions),
             canonical_json_cache: Arc::clone(&database.canonical_json_cache),
             decoded_chunk_cache: Arc::clone(&database.decoded_chunk_cache),
@@ -30,6 +32,7 @@ impl ReadOptions {
             entities,
             event_read_epoch: self.event_read_epoch,
             worker_lease_clock: Arc::clone(&self.worker_lease_clock),
+            worker_control: Arc::clone(&self.worker_control),
             foreground_admissions: Arc::clone(&self.foreground_admissions),
             canonical_json_cache: Arc::clone(&self.canonical_json_cache),
             decoded_chunk_cache: Arc::clone(&self.decoded_chunk_cache),

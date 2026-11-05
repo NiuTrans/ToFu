@@ -7,6 +7,8 @@ platform; application startup validates but never migrates the schema.
 
 from __future__ import annotations
 
+from lib.storage_authority_sql.worker_control import WorkerCommitHints, WorkerControl
+
 from collections.abc import Mapping, Sequence
 import json
 import math
@@ -64,6 +66,7 @@ class PostgresSession:
     ) -> None:
         self.event_read_epoch = event_read_epoch
         self.worker_lease_clock = worker_lease_clock
+        self.worker_hints = WorkerCommitHints()
         self.connection = connection
         self.turn_projection_cache = turn_projection_cache
 
@@ -315,6 +318,7 @@ class PostgresBackend(Backend):
     def __init__(self, config: SidecarConfig) -> None:
         self.config = config
         self._event_read_epoch = uuid.uuid4().hex
+        self.worker_control = WorkerControl()
         # Production leases read one server-shared clock, never a local clock.
         self._worker_lease_clock = None
         self._read_pool: _PgPool | None = None
@@ -395,14 +399,19 @@ class PostgresBackend(Backend):
                         (str(remaining_ms),),
                     )
                 phase = 'execute'
-                result = operation(PostgresSession(
-                    connection, self._turn_projection_cache, self._event_read_epoch, self._worker_lease_clock))
+                session = PostgresSession(
+                    connection, self._turn_projection_cache, self._event_read_epoch, self._worker_lease_clock)
+                session.worker_hints.publisher = self.worker_control.publish
+                result = operation(session)
                 if readonly:
                     phase = 'rollback'
                     connection.rollback()
                 else:
                     phase = 'commit'
-                    connection.commit()
+                    try:
+                        connection.commit()
+                    finally:
+                        session.worker_hints.publish()
                 phase = 'post_commit'
                 return result
             except BaseException as exc:

@@ -2592,6 +2592,8 @@ fn compile_turn(
             (
                 vec![TransactionIrStep::TurnVisibleSync {
                     request: Box::new(crate::turn::VisibleSyncRequest {
+                        worker_claim: crate::worker_job::PublicationClaim::parse(payload.get("worker_claim"))
+                            .map_err(|_| SemanticExecutionError::InvalidPayload)?,
                         conversation_id,
                         attempt_id,
                         root_turn_id,
@@ -6896,6 +6898,8 @@ fn compile_event_item(
     };
     Ok(IndexedStreamAppendItem {
         task_id,
+        worker_claim: crate::worker_job::PublicationClaim::parse(payload.get("worker_claim"))
+            .map_err(|_| SemanticExecutionError::InvalidPayload)?,
         application_sequence,
         event_type: event
             .as_object()
@@ -6935,6 +6939,7 @@ fn compile_event(
                     payload_json: item.payload_json,
                     created_at_ms: item.created_at_ms,
                     require_attempts_live: item.require_attempts_live,
+                    worker_claim: item.worker_claim,
                     slot: 0,
                 }],
                 TransactionIrResult::SlotOrLiteral {
@@ -8930,6 +8935,8 @@ fn compile_task_result(
             }))?);
             (
                 vec![TransactionIrStep::TaskResultCheckpoint {
+                    worker_claim: crate::worker_job::PublicationClaim::parse(payload.get("worker_claim"))
+                        .map_err(|_| SemanticExecutionError::InvalidPayload)?,
                     task_id,
                     value_json,
                     expected_version,

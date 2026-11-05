@@ -77,7 +77,7 @@ def create_task(conv_id, messages, config, *, user_id=None, principal=None,
                 execution_clock=None,
                 require_durable_cancellation=False, birth_checkpoint_budget_seconds=None,
                 automation_chain=(), automation_project_id=None, model_routing_repository=None,
-                execution_profile=None):
+                execution_profile=None, worker_context=None):
     """Register an ordinary chat task, applying prompt hooks exactly once."""
     return _create_chat_task(conv_id, messages, config, user_id=user_id,
                             principal=principal, supersede=supersede,
@@ -87,7 +87,7 @@ def create_task(conv_id, messages, config, *, user_id=None, principal=None,
                             birth_checkpoint_budget_seconds=birth_checkpoint_budget_seconds,
                             automation_chain=automation_chain, automation_project_id=automation_project_id,
                             model_routing_repository=model_routing_repository,
-                            execution_profile=execution_profile)
+                            execution_profile=execution_profile, worker_context=worker_context)
 
 
 def _create_chat_task(
@@ -108,6 +108,7 @@ def _create_chat_task(
     automation_project_id=None,
     model_routing_repository=None,
     execution_profile=None,
+    worker_context=None,
 ):
     """Create (and register) a chat task.
 
@@ -160,6 +161,13 @@ def _create_chat_task(
     if prepared_task_id is None and '_projectDispatchWorkspaceTaskId' in config:
         prepared_task_id = config['_projectDispatchWorkspaceTaskId']
     task_id = prepared_task_id or str(uuid.uuid4())
+    if worker_context is not None:
+        from lib.tasks_pkg.worker_binding import worker_task_identity
+        identity = worker_task_identity(worker_context, conversation_id=conv_id,
+            attempt_id=config.get('_attemptId'), turn_id=config.get('_turnId'), principal=principal)
+        if prepared_task_id is not None and prepared_task_id != identity:
+            raise ValueError('prepared task identity differs from conversation worker')
+        task_id = identity
     # ── Extract the user's original question from the last user message ──
     # This is passed to the content filter alongside the search query so
     # the filter can assess relevance against the ORIGINAL intent, not just
@@ -276,6 +284,13 @@ def _create_chat_task(
         # '_force_rotate_pair' is set transiently by analyse_stream_result
         # and consumed (cleared) by stream_llm_response on the next call.
     })
+    if worker_context is not None:
+        from lib.tasks_pkg.worker_binding import bind_conversation_worker
+        try:
+            bind_conversation_worker(task, worker_context)
+        except BaseException:
+            chat_task_runtime.discard(task_id)
+            raise
     mark_task(task, execution_profile)
     # Turn-native browser commands carry the same structured model reference
     # as the native API. Bind one owner-scoped v2 candidate group before any

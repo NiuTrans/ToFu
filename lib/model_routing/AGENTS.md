@@ -6,6 +6,12 @@ This package owns the `tofu.model-routing/v2` aggregate, owner-aware repository,
 legacy import, runtime candidate compilation, health scopes, and route snapshots.
 `contracts/model_routing_v2.schema.json` is the field-level authority.
 
+Built-in inference defaults are authored in `lib/model_info/model_inference_defaults.json`.
+Run `scripts/gen_api_v1_model_routing_contract.py` to derive the package-local
+`generated_inference_defaults.py`; runtime reads the imported snapshot pinned
+with its schema/compiler. Verify `test_inference_defaults_snapshot.py` and
+`test_inference_defaults_generation.py`, plus the generator's `--check` mode.
+
 ## Boundaries
 
 - Persist one revisioned aggregate per explicit owner through semantic Sidecar

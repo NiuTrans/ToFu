@@ -7,7 +7,7 @@ import pytest
 from lib.identity import PrincipalContext
 from lib.project_dispatch import admission
 from lib.project_dispatch.repository import (
-    NAMESPACE, ProjectDispatchError, record_stop,
+    NAMESPACE, ProjectDispatchError, PublicationResultChanged, record_stop,
 )
 from lib.project_dispatch.service import ProjectDispatchService
 from lib.storage.errors import StorageError
@@ -235,6 +235,21 @@ def test_prerequisite_evidence_reads_turn_metadata_never_bodies(dependency_conte
     assert {turn for kind, turn in c.evidence_reads if kind == 'turn' and turn in c.turns} == {
         'turn-first', 'turn-middle'}
     assert prerequisite_body_reads(c) == []
+
+
+def test_publication_validation_reads_the_result_turn_as_metadata(dependency_context):
+    c = dependency_context
+    prior = completed(c, files=True, reviewed=True)
+    c.repo.request_publication(prior['id'], principal=c.principal, expected_revision=1,
+                               result_revision=5, expected_checkpoint_sha='exact-checkpoint')
+    binding = c.repo.admission(prior['id'])
+    c.evidence_reads.clear(); c.turn_body_reads.clear()
+    assert c.repo.validate_publication(binding, 'task-prerequisite')['id'] == prior['id']
+    assert ('turn', 'turn-prerequisite') in c.evidence_reads
+    assert prerequisite_body_reads(c) == [] and 'human-turn' in c.turn_body_reads
+    c.turns['turn-prerequisite']['projectionRevision'] = 6
+    with pytest.raises(PublicationResultChanged):
+        c.repo.validate_publication(binding, 'task-prerequisite')
 
 
 @pytest.mark.parametrize('change,expected', [

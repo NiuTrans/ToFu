@@ -1,5 +1,14 @@
 """lib/scheduler/tool_defs.py — LLM tool schema definitions for the scheduler."""
 
+# The task types a model may create or switch a row among. Built-in types
+# (system maintenance) and service types (the Router Watchdog review) are
+# created by their owning service and never change type: their handlers run
+# system-scoped or deployment-wide work.
+SCHEDULABLE_TASK_TYPES = ('command', 'python', 'prompt', 'agent')
+# The fields schedule_manage 'update' may set. Poll/execution bookkeeping,
+# conversation routing and agent tool settings stay with their writers.
+TOOL_UPDATABLE_FIELDS = ('name', 'schedule', 'command', 'task_type', 'description', 'max_runtime')
+
 SCHEDULE_TOOL_CREATE = {
     "type": "function",
     "function": {
@@ -33,14 +42,14 @@ SCHEDULE_TOOL_CREATE = {
                 "command": {
                     "type": "string",
                     "description": (
-                        "Shell/Python/prompt payload; for agent, the standing "
-                        "trigger and action instruction. For a pure-code agent with "
-                        "condition_command, pass an empty string."
+                        "Shell/Python/prompt payload. For agent: required, never "
+                        "empty; the instruction its turn executes when ready. Without "
+                        "condition_command the poll LLM also decides readiness from it."
                     )
                 },
                 "task_type": {
                     "type": "string",
-                    "enum": ["command", "python", "prompt", "agent"],
+                    "enum": list(SCHEDULABLE_TASK_TYPES),
                     "description": (
                         "command (default), python, prompt, or proactive agent."
                     )
@@ -83,11 +92,11 @@ SCHEDULE_TOOL_CREATE = {
                 "condition_command": {
                     "type": "string",
                     "description": (
-                        "Agent-only decisive shell predicate: exit 0 acts, or "
-                        "condition_regex matches stdout. With empty command it is "
-                        "zero-LLM code polling; with a standing instruction it is "
-                        "hybrid and auto-promotes to code after agreement. Prefer "
-                        "for deterministic triggers."
+                        "Agent-only decisive shell predicate, zero-LLM polls: exit 0 "
+                        "(and a condition_regex stdout match, if set) runs command; "
+                        "exit 1 or no match waits; other errors never act, and "
+                        "sustained errors hand readiness to the poll LLM (hybrid). "
+                        "Prefer for deterministic triggers."
                     )
                 },
                 "condition_regex": {
@@ -143,7 +152,7 @@ SCHEDULE_TOOL_MANAGE = {
                 },
                 "updates": {
                     "type": "object",
-                    "description": "Fields to update (for 'update' action): name, schedule, command, task_type, description, max_runtime"
+                    "description": "Fields to update (for 'update' action): " + ", ".join(TOOL_UPDATABLE_FIELDS)
                 }
             },
             "required": ["action"]

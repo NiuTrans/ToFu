@@ -499,6 +499,17 @@ pub struct EncryptingVfs {
     key: AtRestKey,
 }
 
+/// `rename_reencrypt` stages the destination's ciphertext under this prefix
+/// beside it. A crash before its rename leaves the name in a block shard or
+/// the payload-segment directory, whose collectors reclaim it through
+/// [`is_reencrypt_temporary_name`].
+const REENCRYPT_TEMPORARY_PREFIX: &str = ".new-ren-";
+
+/// Whether `name` is exactly a staging name `rename_reencrypt` mints.
+pub(crate) fn is_reencrypt_temporary_name(name: &str) -> bool {
+    crate::vfs::is_hyphenated_temporary_name(name, REENCRYPT_TEMPORARY_PREFIX)
+}
+
 impl EncryptingVfs {
     /// Builds an encrypting VFS rooted at `data_dir`. Only files under that
     /// directory are eligible for wrapping; anything else passes through.
@@ -624,7 +635,10 @@ impl EncryptingVfs {
                 "at-rest rename target has no parent",
             )
         })?;
-        let temporary = parent.join(format!(".new-ren-{}", uuid::Uuid::new_v4()));
+        let temporary = parent.join(crate::vfs::hyphenated_temporary_name(
+            REENCRYPT_TEMPORARY_PREFIX,
+            uuid::Uuid::new_v4(),
+        ));
         let result = (|| {
             // Encrypt directly under the destination identity, writing the
             // ciphertext to a plaintext inner temporary. The intermediate

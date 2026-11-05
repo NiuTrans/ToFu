@@ -163,7 +163,7 @@ def _turn_event_record(session: Session, payload: Mapping[str, Any], *,
         return {"applied": False}
     if flow_root:
         parent = session.fetch_one(
-            "SELECT a.status,t.current_attempt_id,t.user_id,a.conversation_id "
+            "SELECT a.status,a.task_id,t.current_attempt_id,t.user_id,a.conversation_id "
             "FROM storage_generation_attempts a JOIN storage_conversation_turns t "
             "ON t.turn_id=a.turn_id WHERE a.attempt_id=?", (flow_root,))
         if (parent is None or int(parent["user_id"]) != user_id
@@ -184,11 +184,18 @@ def _turn_event_record(session: Session, payload: Mapping[str, Any], *,
     if (turn is None or int(turn["user_id"]) != user_id
             or turn["current_attempt_id"] != attempt_id):
         return {"applied": False}
-    from ._worker_jobs import _require_conversation_publication_claim
+    from ._worker_jobs import _require_conversation_publication_claim, _starts_tool_effect
+    task_event = payload.get('task_event')
+    starts_effect = isinstance(task_event, Mapping) and (
+        _starts_tool_effect(task_event.get('event')) or any(
+            isinstance(row, Mapping) and _starts_tool_effect(row.get('event'))
+            for row in (task_event.get('preceding_events') or ())))
     _require_conversation_publication_claim(
-        session, attempt_id=attempt_id, task_id=str(attempt['task_id'] or ''),
+        session, attempt_id=flow_root or attempt_id,
+        task_id=str((parent if flow_root else attempt)['task_id'] or ''),
         user_id=user_id, proof=payload.get('worker_claim'),
-        terminal=bool(payload.get('terminal')))
+        terminal=bool(payload.get('terminal')) and not starts_effect,
+        drain_entered=not starts_effect)
     now = int(payload.get("now") or time.time() * 1000)
     old_revision = int(turn["projection_revision"])
     new_revision = old_revision + 1
@@ -627,8 +634,8 @@ def _turn_event_record(session: Session, payload: Mapping[str, Any], *,
             if sum(len(canonical_json(row['event'])) for row in [*preceding, task_event]) > PROGRESS_BATCH_MAX_WIRE_BYTES:
                 raise StorageError('database_protocol_error', 'Progress event batch exceeds wire budget')
             for row in preceding:
-                _append_event_row(session, row)
-        task_event_result = _append_event_row(session, task_event)
+                _append_event_row(session, row, turn_publication_checked=True)
+        task_event_result = _append_event_row(session, task_event, turn_publication_checked=True)
     if cache is not None:
         if terminal or (not slim and not projection_is_mapping):
             cache.discard(cache_key)
@@ -667,6 +674,7 @@ def _turn_event_record(session: Session, payload: Mapping[str, Any], *,
             if (_load(child["config_json"]) or {}).get("flowRootAttemptId") != attempt_id:
                 continue
             child_result = _turn_event_record(session, {
+                'worker_claim': payload.get('worker_claim'),
                 "attempt_id": child["attempt_id"], "user_id": user_id,
                 "flow_root_attempt_id": attempt_id,
                 "terminal": True, "status": status,

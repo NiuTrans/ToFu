@@ -265,6 +265,7 @@ impl LoopbackServer {
         let mut terminal_error = None;
         let stopping = Arc::new(AtomicBool::new(false));
         let authority_admission = Arc::new(crate::authority_admission::AuthorityAdmission::default());
+        let worker_control = database.lock().map_err(|_| io::Error::other("authority poisoned"))?.worker_control.clone();
         let checkpoint_control = crate::daemon_checkpoint::DaemonCheckpointControl::new(
             database.clone(), authenticator.scope(), stopping.clone());
         loop {
@@ -322,6 +323,7 @@ impl LoopbackServer {
                     let rotation_barrier = Arc::clone(&rotation_barrier);
                     let connection_stopping = Arc::clone(&stopping);
                     let checkpoint_control = checkpoint_control.clone();
+                    let worker_control = worker_control.clone();
                     let worker = thread::Builder::new()
                         .name("tofu-db-v2-connection".to_owned())
                         .stack_size(self.config.connection_stack_bytes)
@@ -340,6 +342,7 @@ impl LoopbackServer {
                                     .with_authority_admission(authority_admission)
                                     .with_control_observers(control_observers)
                                     .with_checkpoint_control(checkpoint_control)
+                                    .with_worker_control(worker_control, authenticator.scope())
                                     .with_rotation_barrier(rotation_barrier);
                                     let stores = match published_queries { Some(view) => stores.with_published_queries(view), None => stores };
                                     match &wal_barrier {
@@ -380,6 +383,7 @@ impl LoopbackServer {
         let observer = self.observer();
         drop(self.listener);
         stopping.store(true, Ordering::Release);
+        worker_control.close();
         // Waking a blocked read does not interrupt an admitted commit or its
         // response write. Every worker still joins before authority teardown.
         for connection in &workers {

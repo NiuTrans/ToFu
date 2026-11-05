@@ -1034,6 +1034,16 @@ in [CONVERSATION_SYNC_V3.md](contracts/CONVERSATION_SYNC_V3.md#background-comman
 
 **Problem:** selecting a conversation refreshed queue state by downloading the whole snapshot again, while collapsed historical rounds still constructed Markdown, highlighted code and tool/media subtrees before hiding them. **Decision:** cold selection uses one coalesced snapshot containing queue items; warm selection resumes its ordered stream from the existing cursor. Explicit queue commands retain their authoritative refresh. Collapsed rounds mount stable block shells for ordering and ARIA targets; their content renders on disclosure using the latest view model. First paint also sizes the existing block tail window to two visible viewport heights (64 px estimated per block, at least 20, at most the configured block window); hosts without viewport geometry keep the existing default. The mounted Turn window likewise follows two viewport heights (160 px estimated per Turn, at least eight, capped by the existing 80-Turn budget), shared across expanded lanes. Larger viewports receive more content. Earlier-block controls expand the same authoritative presentation without dropping historical Turns. Live, background and attention rounds keep their existing expansion policy. Revealed content retains keyed nodes and reader state. Rich-card reconciliation captures reader state only for connected, populated subtrees: new cards cannot own focus or selection, and querying those facts while inserting each card forced repeated synchronous layout. **Alternatives rejected:** caching another transcript would duplicate authority; a loading animation would leave duplicate reads and hidden rendering costs. Verification: `tests/conversation_composer_switch.test.cjs`, `tests/frontend/test_frontend_round_outline.py` and `tests/visual/test_visual_round_outline.py`.
 
+**Retained-node movement:** a live Chromium profile attributed 214.5 ms of a
+15-second capture to reading every descendant's scroll offsets during native
+Surface moves. Native `moveBefore` retains those offsets, so that path captures
+focus and selection without scanning descendant layout. `insertBefore` fallback
+and rich-content edits retain the full scroll transaction. The real-browser
+reconciliation specs assert unchanged focus, selected text and two-axis scroll
+for both paths, and zero scroll-offset reads for native movement. Skipping the
+entire reader transaction was rejected because native Chromium moves can still
+clear DOM selection. No reader-state cache or sampling policy is introduced.
+
 ## Tool-group render ownership and indexing
 
 **Problem:** retained tool UI combined batch chrome, rich-row routing, inspector anchors, narration and bounded panel tails. Every timeline batch scanned full context groups to recover its first matching occurrence; identity-only title memoization also hid same-array edits in legacy full-turn rendering. **Decision:** `conversation/ui/tool-groups/` has eight typed owners, at most 48 lines each. A synchronous render session indexes context groups once by object and call identity and derives title suffixes from those existing batches. First-match ordering includes repeated provider call IDs; it does not silently prefer an object match over an earlier matching ID. Narration keeps translated prose before its batch, and inspector references retain producing task/turn identity. Settled panels keep the existing 100-round threshold and 50-round initial tail; live panels retain all active rows. Sessions always see current inputs and expire with the render. Standalone modern rows keep the existing weak index for immutable canonical sibling arrays; a legacy append invalidates its length stamp. No timer, listener, request or durable projection is added. Sibling cluster keys use `(toolName, query)` tuples, avoiding ambiguous string concatenation. For 1,000 singleton batches, indexed membership reads 6,000 call identities instead of 500,500 former context-group probes. **Alternatives rejected:** a second grouping policy would drift across attempts; a page-global mutable context would retain stale titles; removing immutable projection memoization would make modern per-row rendering quadratic again. `tests/tool-group-presentation.test.cjs` covers repeated identities, title-cache lifetimes, tuple collisions, counts/tails, narration and inspector authority. Tool-row intent now uses the shared 13px UI scale and primary text, with a neutral token-based hover surface; the text clears 4.5:1 in each theme. The former mixed 618-line stylesheet has 12 semantic owners (one strict row owner and 11 exact frozen copies); changed row rules are removed rather than overridden. Code and evidence keep their own monospace typography. The browser gate exercises Enter/Space disclosure, nested inspector controls, focus and selected text during append in all themes at 390px and 1180px.
@@ -1151,19 +1161,48 @@ timeline row.
 
 A running Turn with no live phase does not prove worker startup or transport
 recovery: older snapshots omit phases and semantic deltas clear them. The row
-first reports the Turn's own projected activity (`projectLiveActivity` in
+first reports the Turn's own activity (`projectLiveActivity` in
 `presentation/view-model/live-turns.ts`). Calls that the projection marks
 active read “Running {tool}: {intent}” (or the active tool list) with an
 elapsed clock from the earliest backend `tStart`; this also decorates a
 `tool_exec` frame, which is sent once per batch and goes stale as parallel calls
-finish. Unsettled reasoning reads as the client-derived `thinking_active`.
-Only without such evidence does the fallback say “Waiting for an execution
-status update…”; it never claims a resynchronization and never uses
+finish. Otherwise the frame that cleared the phase names the stream: the
+reducer records, beside `livePhase`, which projection accumulator that frame's
+patch appended to (`TurnState.liveContentGrowth`: `thinking` → `reasoning`,
+`content` → `answer`, neither → `none`; a coalesced frame growing both is
+`answer`, the newer output of one response). Segment-text mirror flushes are
+not growth. The row then reads the client-derived `thinking_active`
+(“Thinking…”) or `responding` (“Generating response…”). A phase installed by a
+snapshot carries no frame evidence; only then does unsettled reasoning in the
+projection stand in for it. Goal rows keep their joined context and take only
+the frame evidence, which also names a Goal root's current worker phase. Only
+without such evidence does the fallback say “Waiting for an execution status
+update…”; it never claims a resynchronization and never uses
 `workerStarting`, which requires an explicit worker-entry phase. Every other
 reported phase is shown as sent. The row is omitted only when it would restate
-the streaming block directly above it: an answer tail under the bare fallback,
-or reasoning that is the reply's last part. Pending task binding still
-distinguishes scheduler preparation from executor queue residence.
+the streaming block directly above it: `responding` under its answer tail,
+`thinking_active` when the reasoning is the reply's last part, or (snapshot
+phase only) the bare fallback under an unsettled answer tail. Pending task
+binding still distinguishes scheduler preparation from executor queue
+residence. An `executor_queued` phase is shown as sent while it is the latest
+frame: the queue frame is the attempt's first recorded event, which already
+marks the attempt running with `startedAt`, so a running Turn proves no worker
+entry; the worker's first phase replaces it, and a storage wedge that
+withholds later frames has its own `storage_wedged` override.
+
+Backend phases keep the row current where no content frame can. A tool call
+has no visible frame while its arguments stream, so the provider stream
+announces each call the moment it opens: `llm_thinking` with
+`stream.phase.preparingToolCall` (“Preparing a tool call ({elapsed}s):
+{tool}”) and the call's `toolCallId`; that call's `tool_start` retires the
+phase and the row names the announced call. A compaction runs inside another
+activity, so its `compaction_done` resumes the phase it interrupted (for
+example “Analyzing results and planning next step…”) instead of leaving no
+phase until the next one arrives. Wait labels whose `detailArgs.elapsed`
+counts up between sampled frames (`waitingForResponse`, `waitingQuotaReset`,
+`preparingToolCall`) tick locally once per second; the renderer locates the
+counter by composing the label with a marker in place of `elapsed`, so locales
+that place `{model}` or `{tool}` first never tick a digit inside that name.
 
 **Problem (owner report 2026-11-03):** a 435-round slides reply showed only
 “Waiting for an execution status update…” under its failed work-unit card and
@@ -1181,13 +1220,52 @@ client stopwatch restarts on every reload, unlike the backend `tStart`.
 Specs: `presentation/view-model/live-turns.test.ts` and
 `ui/renderers/text-blocks.test.ts`.
 
+**Problem (owner report 2026-11-05):** while reasoning streamed, the row read
+“Waiting for an execution status update…”. Streaming was inferred from block
+position (unsettled reasoning had to be the reply's last content block), but a
+round's live `thinking:terminal` accumulator precedes its `text:terminal`
+accumulator, so narration, one coalesced frame growing both channels, or a
+system note after the reasoning closed it and dropped the row to the fallback;
+an answer streaming in the `terminal`-stamped accumulator also kept the
+fallback under it. **Decision:** derive streaming activity from the frame that
+cleared the phase, recorded by the reducer; projection position remains only
+for snapshot phases. Replaying a 16,498-frame live capture through the reducer
+and view model shows every reasoning frame as `thinking_active`. **Alternatives rejected:** a backend phase per channel
+switch registers client-derived states as wire phases and adds a write per
+switch to restate what the frame already proves; treating any visible
+reasoning or prose as live would label post-compaction and post-request gaps
+as streaming. Specs: `core/turn-state.test.ts`,
+`presentation/view-model/live-turns.test.ts`, `goal-progress.test.ts`.
+
+**Problem (2026-11-05 follow-up):** the same capture still showed the fallback
+in 26 gaps of 0.2–0.9 s after each compaction, because `compaction_done`
+folded the compacting phase to none; the row read “Thinking…” while the model
+wrote a long tool call's arguments, since the backend reported
+`preparing_tool_call` only for a response with no reasoning or text and only
+on the 20 s heartbeat; the queue frame of every queued task read as stale; and
+the wait-label tick rewrote a digit inside the model name in ja/ko/de/fr/ru.
+**Decision:** the manager resumes the interrupted phase on `compaction_done`;
+the provider stream classifies by its latest output channel and announces
+each opened tool call at once through the existing wait-status port
+(announcements bypass the per-round wait sampler, repeated beats keep it);
+the queue phase is trusted while it is the latest frame; the tick anchors on
+the template, not on digits. **Alternatives rejected:** a frontend grace timer
+before showing the fallback is a tuning knob that still guesses; a periodic
+backend heartbeat while arguments stream adds writes that restate one
+transition; matching the preparing phase's `tool_start` by tool name would
+clear the next call's phase when the previous call completes as it opens.
+Specs: `tests/tasks_pkg/test_phase_terminal_clear.py`,
+`tests/llm/test_stream_interruption_visibility.py`,
+`presentation/live-phase.test.ts`, `ui/renderers/text-blocks.test.ts`.
+
 `llm_thinking` denotes an opened model-generation round, not evidence of
 reasoning-channel output. Its live row preserves localized `detailKey` and
 `detailArgs` (generating a reply or analyzing tool results), then raw detail or
 label; a bare phase falls back to localized “Generating response…”. It never
 gets a thinking character counter or thinking-specific styling. The distinct
 `thinking_active` content-stream status uses the same “Thinking…” wording as
-an active reasoning disclosure.
+an active reasoning disclosure; `responding` (main replies and the Autopilot
+virtual user alike) uses “Generating response…”.
 
 When an authored Flow role tier resolves to a model other than the one selected
 for the conversation, every producer phase carries the structured

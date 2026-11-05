@@ -1047,27 +1047,95 @@ and an explicit `PrincipalContext`, never projections or request-local provider
 handles. Lost acknowledgements resolve the same job; legacy `@dispatching` or
 another executor binding fails closed instead of creating a second authority.
 
-Durably bound Attempts require `worker_claim` at `turn.attempt.start` and
-`turn.event.record` (including every batch entry), as defined by
+Durably bound Attempts require `worker_claim` at `turn.attempt.start`,
+`turn.event.record` (including every batch entry), `turn.visible.sync`,
+`task_results.checkpoint` and standalone task `event.append{,_batch}`, as defined by
 [worker publication authority](../contracts/worker_job_lifecycle_v1.json).
 The stored binding selects the authority; an omitted proof cannot bypass it.
 Publication validates the current holder/token, user, kind, Attempt and
 backend-owned lease clock/epoch in the same transaction. SQL holds the job row
 until commit; native TofuDB retains its exact OCC dependency. A refusal raises
 `database_conflict` and rolls back Turn changes, task events, replay and
-settlement, including a batch's previously applied entries. Cancellation
-permits only current-claim terminal domain cleanup. Legacy in-process bindings
+settlement, including a Turn batch's previously applied entries. Standalone
+replay batches retain independent sibling results: a stale row returns
+`worker_claim_stale` and is never acknowledged or pushed. Flow phases borrow
+their immutable root Attempt's claim. Cancellation refuses start; an entered
+Attempt's current holder may still drain evidence and checkpoints. Without
+durable `startedAt`, only terminal cleanup is permitted. Lost/expired holders
+cannot drain. Legacy in-process bindings
 need no additional job read and accept no worker proof. The context's
 `publication_claim()` provides explicit evidence, never an effect capability.
-This establishes publication fencing only: executor reconstruction, external
-effect admission, API dispatch/Stop cutover and crash-replay qualification are
-still required by the [architecture migration](ARCHITECTURE.md).
+**Problem:** refusing all nonterminal writes after Stop stranded an already
+accepted event at the FIFO head, preventing the terminal behind it from
+settling. **Decision:** cancellation withdraws new execution while current
+ownership retains its duty to commit received evidence. **Alternative rejected:**
+discarding or bypassing the FIFO head loses accounting/effect evidence; allowing
+an expired claim to drain would defeat fencing. Backend entry evidence, not a
+caller flag, selects the cancellation drain rule.
+
+**Effect admission:** the common tool owner requires the initial `tool_effect`
+`entered` event's exact durable ACK before handler entry. That frame has no
+reconciliation reference and therefore requires an uncancelled claim inside
+the publication transaction. Turn wrappers (including terminal and batched
+frames), Flow phases and standalone replay enforce the same rule. Later
+reconciliation references and returned/unknown evidence may drain. Treating
+every entered Attempt write as drainage would allow a new effect after Stop;
+checking cancellation only in the caller leaves a race with its durable commit.
+This closes root tool admission only; it does not qualify provider or child
+admission, or turn a receipt into permission to replay an unknown effect.
+
+For `conversation-attempt`, queued cancellation keeps the existing job claimable
+until its domain handler commits the terminal Turn; transport cancellation alone
+cannot orphan a pending Attempt. `abort_attempt` commits this control intent
+before local signalling and never invents a terminal writer on registry miss.
+Internal cancellation carries its cause and provenance in the versioned
+conversation cancellation envelope within the existing reason field. Both
+local and remote carriers consume the first acknowledged cause; later Stop
+requests cannot overwrite it. Oversized control messages are refused by the
+existing wire contract, never truncated into misleading attribution.
+`conversation_sync/worker_execution.py` reconstructs the common executor from
+accepted state and joins it in the claim owner's thread. An entered Attempt or
+unconfirmed physical/account settlement is not replayable from a lease alone.
+Legacy `turn.recover` and `task_results.recover_running` exclude every
+`conversation-attempt:` binding, including Flow phases and expired leases.
+The native restart indexes omit these bindings; old index entries are verified
+against canonical identities and removed without changing execution state.
+Problem: API startup previously treated another process's live task as an
+orphan. Decision: recovery follows durable execution ownership. Alternative
+rejected: excluding only currently live leases would misclassify unknown
+effects after a lease expires. Ordinary legacy recovery remains enabled.
+Production kind registration, effect/crash recovery and independent process
+composition remain unqualified; see the [architecture migration](ARCHITECTURE.md).
+
+**Problem:** process-local commit callbacks strand an idle execution process when a
+producer commits elsewhere or exits before delivering its acknowledgement.
+**Decision:** [worker transport control](../contracts/worker_control_v1.json)
+provides an authenticated, receipt-free authority watch. SQLite/PostgreSQL stage
+queue/cancellation hints in the operation's session and publish at the adapter's
+COMMIT boundary, including ambiguous delivery. Native TofuDB publishes from the
+committed authority transaction. A cursor read precedes the queue probe; the next
+wait compares its epoch and independent queue/cancel generations before sleeping.
+This closes the subscribe/probe race without polling the job table. Pending waits
+retain only cancellation IDs received during that wait; a response gap refreshes
+active claim proofs. Restart changes the epoch. Shutdown wakes and joins waiters.
+**Alternative rejected:** a caller-side wake after RPC success loses committed
+work after producer death; a timer scanning an empty queue adds recurring storage
+work and command receipts without fixing ownership.
+
+`lib/durable_worker/service.py` owns demand execution, read-only claim horizons,
+lease supervision and joined shutdown once. The automation service supplies its
+existing policy. `StorageWorkerWakeSource` is the cross-process transport port;
+its deadlines/retry cadence reuse the existing worker heartbeat/failure contracts.
+Queue changes wake the coordinator only; cancellation wakes matching monitors,
+which re-read authority rather than treating a notification as permission. No
+worker ceiling, new timing knob, notification journal or second task registry is
+introduced. Production conversation registration remains separately qualified.
 
 [Worker lifecycle](../contracts/worker_job_lifecycle_v1.json) owns the states.
 Live-fenced `worker_job.defer` sets `suspended`, releases the lease and indexes
 availability. Resume advances the fence. Exact replay cannot extend the wait;
-migration rebuilds the same queue and priority summary. Queued cancellation
-settles immediately; running work acknowledges it. Suspended cancellation wakes
+migration rebuilds the same queue and priority summary. Other queued kinds
+settle cancellation immediately; running work acknowledges it. Suspended cancellation wakes
 domain cleanup and remains nonterminal while external effects are unknown. PostgreSQL
 locks the current job through cancel/defer/progress publication; claimers skip it.
 Cancellation racing deferral forces immediate availability unless the domain
@@ -1075,7 +1143,7 @@ already acknowledged that sequence; acknowledged cleanup can wait without a busy
 The native application adapter omits owner injection for this strict
 lease-fenced request; session authority remains authenticated.
 
-`lib/durable_worker.py` registers no production kinds. Claimable kinds must prove
+`lib/durable_worker/` registers no production kinds. Claimable kinds must prove
 durable replay, billing/admission settlement, cooperative cancellation and effect
 fences; declarations alone are not proof. Domain cleanup/accounting settles before
 worker completion; unconfirmed cleanup leaves the job reclaimable after lease

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Overlay/navigation cleanup matches component class names only: the
+  bracketed part of a class token (Tailwind arbitrary values such as
+  `pt-[calc(10rem+var(--banner-height))]`) is a CSS value, not a name. The
+  old match removed Mintlify's whole content wrapper as a "banner", left
+  `<main>` empty and classified server-rendered docs as application shells.
+- A received HTML page that yields no content (application shell, empty
+  extract, raw or extracted bot/JS wall) now reads the text representation it
+  declares: the first same-origin `<link rel="alternate">` or HTTP `Link`
+  alternate typed `text/markdown`, `text/x-markdown` or `text/plain`. One GET
+  through the anonymous gate, page budget, byte limit and the document's TLS
+  transport runs before Playwright and the host browser; only a text answer is
+  accepted and it is never searched for further alternates. Success is cached
+  under the requested URL and recorded as `diag['strategy'] ==
+  'declared_alternate'` with `diag['alternate_url']`; a failed alternate leaves
+  the previous chain and diagnostics unchanged. Readable pages make no extra
+  request. Mintlify release notes (docs.z.ai, docs.bigmodel.cn) previously
+  failed as `spa_shell`.
 - Declare the license as the SPDX expression `MIT` (PEP 639) and build with
   setuptools>=77; setuptools deprecated the `project.license` table and
   schedules its removal for 2027-02-18.

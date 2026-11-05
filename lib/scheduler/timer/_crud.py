@@ -61,20 +61,13 @@ def create_timer(*, user_id: int,
     Returns:
         Timer record dict.
     """
-    from lib.scheduler._shared import derive_condition_kind
-    import re
+    from lib.scheduler._shared import derive_condition_kind, validate_condition_regex
 
     if not str(continuation_message or '').strip():
         raise ValueError('continuation_message is required')
     if not str(check_instruction or '').strip() and not str(condition_command or '').strip():
         raise ValueError('a readiness instruction or predicate is required')
-    if condition_regex:
-        if not str(condition_command or '').strip():
-            raise ValueError('condition_regex requires condition_command')
-        try:
-            re.compile(condition_regex)
-        except re.error as exc:
-            raise ValueError(f'invalid condition_regex: {exc}') from exc
+    validate_condition_regex(condition_command, condition_regex)
 
     timer_id = 'tmr_' + str(uuid.uuid4())[:8]
     now = datetime.now().isoformat()

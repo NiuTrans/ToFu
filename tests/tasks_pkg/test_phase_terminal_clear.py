@@ -137,6 +137,66 @@ def test_compaction_done_keeps_unrelated_phase(_no_persist):
     assert task['phase'] and task['phase']['phase'] == 'tool_exec'
 
 
+def test_compaction_done_resumes_the_phase_it_interrupted(_no_persist):
+    """Compaction runs inside the round being prepared; its own terminal
+    resumes that phase. Folding to None blanked the status row until the next
+    phase frame (a 16,498-frame capture showed 26 post-compaction gaps of
+    0.2–0.9 s reading 'Waiting for an execution status update…')."""
+    from lib.tasks_pkg.manager import append_event
+    task = _mk_task()
+    _phase(task, 'llm_thinking', detailKey='stream.phase.analyzingRound',
+           detailArgs={'round': 7})
+    interrupted = dict(task['phase'])
+    _phase(task, 'compacting', detailKey='stream.phase.compactingWindow')
+    # A repeated compacting beat must not replace the interrupted activity.
+    _phase(task, 'compacting', detailKey='stream.phase.compactingWindow')
+    append_event(task, _compaction_start_ev())
+    append_event(task, _compaction_done_ev())
+    resumed = task['phase']
+    assert resumed['phase'] == 'llm_thinking'
+    assert resumed['detailKey'] == 'stream.phase.analyzingRound'
+    assert resumed['detailArgs'] == {'round': 7}
+    assert resumed['emittedAt'] >= interrupted['emittedAt']
+    if 'seq' in interrupted:
+        assert resumed.get('seq') != interrupted['seq']
+
+
+def test_compaction_resumes_only_the_latest_activity(_no_persist):
+    """A phase published during compaction becomes the activity a later
+    compaction resumes; a delta in between leaves nothing to resume."""
+    from lib.tasks_pkg.manager import append_event
+    task = _mk_task()
+    _phase(task, 'llm_thinking', detailKey='stream.phase.analyzingRound')
+    _phase(task, 'compacting', detailKey='stream.phase.compactingWindow')
+    _phase(task, 'retrying', detail='Retrying…')
+    _phase(task, 'compacting', detailKey='stream.phase.compactingWindow')
+    append_event(task, _compaction_done_ev())
+    assert task['phase']['phase'] == 'retrying'
+    _phase(task, 'compacting', detailKey='stream.phase.compactingWindow')
+    append_event(task, {'type': 'delta', 'content': 'x'})
+    append_event(task, _compaction_done_ev())
+    assert task['phase'] is None
+
+
+def test_tool_start_retires_only_its_own_preparing_phase(_no_persist):
+    """The preparing-tool-call phase ends when that call is announced; another
+    call's announcement (the previous call completing as this one opens) keeps
+    it."""
+    from lib.agent_core.events import EventType, build_event
+    from lib.tasks_pkg.manager import append_event
+    task = _mk_task()
+    _phase(task, 'llm_thinking', detailKey='stream.phase.preparingToolCall',
+           detailArgs={'model': 'm', 'tool': 'write_file', 'elapsed': 0},
+           toolCallId='call_2')
+    assert task['phase']['toolCallId'] == 'call_2'
+    append_event(task, build_event(EventType.TOOL_START, roundNum=1, toolCallId='call_1',
+                                   toolName='read_files', query='a.py'))
+    assert task['phase']['toolCallId'] == 'call_2'
+    append_event(task, build_event(EventType.TOOL_START, roundNum=1, toolCallId='call_2',
+                                   toolName='write_file', query='b.py'))
+    assert task['phase'] is None
+
+
 def test_compaction_start_keeps_phase(_no_persist):
     """Guard: the compaction START event (archive row inserted, summary still
     running) must NOT fold the phase — the HUD is honestly in progress."""

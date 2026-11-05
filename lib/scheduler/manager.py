@@ -82,6 +82,44 @@ def _validated_scheduler_process_principal(
 _CODE_EXEC_TASK_TYPES = frozenset({"command", "python"})
 
 
+def _require_agent_command(command) -> None:
+    """A scheduled agent's command is the instruction it executes when ready."""
+    if not str(command or "").strip():
+        raise ValueError(
+            "task_type='agent' requires a non-empty command: it is the "
+            "instruction the agent executes when ready (condition_command "
+            "only decides when), so an agent without one could never act."
+        )
+
+
+def _require_code_exec_allowed(task_type) -> None:
+    """task_type='command'/'python' schedule unattended arbitrary code; the
+    SCHEDULER_ALLOW_CODE_EXEC flag can disable that seam entirely."""
+    if task_type in _CODE_EXEC_TASK_TYPES:
+        import lib as _lib
+
+        if not getattr(_lib, "SCHEDULER_ALLOW_CODE_EXEC", True):
+            raise ValueError(
+                f"task_type='{task_type}' is disabled on this deployment "
+                "(SCHEDULER_ALLOW_CODE_EXEC is off). Use task_type='prompt' "
+                "or 'agent' for LLM-driven tasks."
+            )
+
+
+def _require_schedulable_type_change(current_type, new_type) -> None:
+    """A row switches only among the schedulable types; built-in and service
+    rows keep their type, because their handlers run system-scoped work."""
+    from lib.scheduler.tool_defs import SCHEDULABLE_TASK_TYPES
+
+    if current_type not in SCHEDULABLE_TASK_TYPES or new_type not in SCHEDULABLE_TASK_TYPES:
+        raise ValueError(
+            f"task_type cannot change from '{current_type}' to '{new_type}': only "
+            f"{', '.join(SCHEDULABLE_TASK_TYPES)} are interchangeable; built-in and "
+            "service tasks keep the type their owner created."
+        )
+    _require_code_exec_allowed(new_type)
+
+
 def _application_managed_storage_backups_enabled() -> bool:
     """Personal storage is app-owned; distributed PostgreSQL is platform-owned."""
     from runtime_guards import resolve_deployment_mode
@@ -265,7 +303,8 @@ class ScheduledTaskManager:
             principal: Authenticated owner authorizing the standing task
             name: Human-readable task name
             schedule: Cron expression ('*/5 * * * *') or 'once:YYYY-MM-DD HH:MM'
-            command: Shell command, Python code, LLM prompt, or agent instruction
+            command: Shell command, Python code, LLM prompt, or the agent's
+                     instruction executed when ready (required for 'agent')
             task_type: 'command' (shell), 'python' (Python code), 'prompt' (LLM),
                        'agent' (proactive agentic task with tools + SSE)
             description: What this task does
@@ -291,19 +330,14 @@ class ScheduledTaskManager:
             raise PermissionError(
                 'scheduled task creation requires agents:scheduler scope')
 
-        # ── Code-execution gate ──
-        # task_type='command'/'python' schedule unattended arbitrary code.
-        # Lock them behind the SCHEDULER_ALLOW_CODE_EXEC feature flag so a
-        # deployment can disable the persistent code-exec seam entirely.
-        if task_type in _CODE_EXEC_TASK_TYPES:
-            import lib as _lib
+        _require_code_exec_allowed(task_type)
 
-            if not getattr(_lib, "SCHEDULER_ALLOW_CODE_EXEC", True):
-                raise ValueError(
-                    f"task_type='{task_type}' is disabled on this deployment "
-                    "(SCHEDULER_ALLOW_CODE_EXEC is off). Use task_type='prompt' "
-                    "or 'agent' for LLM-driven tasks."
-                )
+        # ── Agent instruction and predicate ──
+        if task_type == "agent":
+            _require_agent_command(command)
+            from lib.scheduler._shared import validate_condition_regex
+
+            validate_condition_regex(condition_command, condition_regex)
 
         # ── Schedule validation ──
         if schedule.startswith("once:"):
@@ -335,17 +369,11 @@ class ScheduledTaskManager:
 
         task_id = task_id or str(uuid.uuid4())[:12]
         now = datetime.now().isoformat()
-        # Predicate condition paradigm (shared with timer_watchers): a proactive
-        # agent (task_type='agent') can carry a shell PREDICATE that reconciles
-        # against the poll LLM and auto-promotes to zero-cost `code`. The kind is
-        # derived from the parameter combination, NEVER exposed as an LLM knob.
-        from lib.scheduler._shared import derive_condition_kind
+        # A proactive agent's shell PREDICATE decides from creation (zero-cost
+        # `code`). The kind is derived, NEVER exposed as an LLM knob.
+        from lib.scheduler._shared import derive_scheduled_condition_kind
 
-        condition_kind = (
-            derive_condition_kind(command, condition_command)
-            if task_type == "agent"
-            else "llm"
-        )
+        condition_kind = derive_scheduled_condition_kind(task_type, condition_command)
 
         payload = {
             "task_id": task_id,
@@ -493,6 +521,22 @@ class ScheduledTaskManager:
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return False
+        if "command" in updates or "task_type" in updates:
+            current = self.get_task(task_id, user_id=user_id)
+            if current is None:
+                return False
+            task_type = updates.get("task_type", current["task_type"])
+            if task_type != current["task_type"]:
+                _require_schedulable_type_change(current["task_type"], task_type)
+            if task_type == "agent":
+                _require_agent_command(updates.get("command", current["command"]))
+            # The predicate is not updatable, so only a real type change can
+            # alter the kind creation would derive; stored kinds stay otherwise.
+            if task_type != current["task_type"]:
+                from lib.scheduler._shared import derive_scheduled_condition_kind
+
+                updates["condition_kind"] = derive_scheduled_condition_kind(
+                    task_type, current.get("condition_command", ""))
 
         updates["updated_at"] = datetime.now().isoformat()
 
@@ -1114,7 +1158,7 @@ class ScheduledTaskManager:
         if kind == "code":
             # Pure predicate — ZERO LLM. Ambiguous/errored predicate → NOT act
             # (never a false-positive trigger); a sustained ambiguity run demotes
-            # back to hybrid so the LLM re-takes the wheel (self-healing).
+            # to hybrid so the LLM takes the wheel with `command` (self-healing).
             outcome = apply_reconcile_poll(
                 task, pred, llm_ready=None, llm_available=False
             )

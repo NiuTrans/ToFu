@@ -13,7 +13,7 @@ import type {
   TurnStatus,
 } from '../api/conversation-sync.generated';
 import type { LiveRoundUsage, ProjectionTurn } from './turn-projection';
-import { applyProjectionPatch } from './projection-patch';
+import { applyProjectionPatch, type ProjectionPatchOperation } from './projection-patch';
 import { editEntityRecord, entityRecordEntries, type EntityRecordDraft } from './entity-record';
 
 type UnknownRecord = Record<string, unknown>;
@@ -27,6 +27,10 @@ export type AttemptRecord = Partial<ContractAttemptRecord> & {
 export type ConversationQueueItem = ContractConversationQueueItem;
 
 export type TurnEvent = ContractAttemptEvent;
+
+/** `reasoning` / `answer`: the frame appended to the projection's `thinking` /
+ * `content` accumulator; `none`: it grew neither. */
+export type LiveContentGrowth = 'reasoning' | 'answer' | 'none';
 
 export interface TurnSnapshotInput extends UnknownRecord {
   conversationRevision?: number;
@@ -92,6 +96,12 @@ export interface TurnState {
    * attempt log reconstructs the latest phase deterministically.
    */
   livePhase?: unknown;
+  /**
+   * Content channel the frame that last set `livePhase` appended to. Semantic
+   * deltas clear the phase, so this frame evidence (not block position) names
+   * what is streaming. Absent when a snapshot set the phase.
+   */
+  liveContentGrowth?: LiveContentGrowth;
   /**
    * Delivery-wedge flag: the live task's authoritative frames are being
    * withheld server-side (durable-before-visible, storage write wedge).
@@ -337,6 +347,32 @@ function hasDeferredTerminalProjection(turn: ProjectionTurn): boolean {
     round && typeof round === 'object' && '_snapshotToolResult' in round);
 }
 
+/** A coalesced frame can grow both accumulators. A response emits reasoning
+ * before its answer, so the answer is the newer output; the next frame names
+ * its channel again. A full-projection frame carries no operation evidence. */
+function frameContentGrowth(patch: unknown): LiveContentGrowth | undefined {
+  const operations = patch && typeof patch === 'object'
+    ? (patch as { operations?: unknown }).operations : undefined;
+  if (!Array.isArray(operations)) return undefined;
+  let reasoning = false;
+  for (const operation of operations as Array<Partial<ProjectionPatchOperation> | null>) {
+    const field = operation?.op === 'append_text' && operation.value
+      && Array.isArray(operation.path) && operation.path.length === 1
+      ? operation.path[0] : undefined;
+    if (field === 'content') return 'answer';
+    if (field === 'thinking') reasoning = true;
+  }
+  return reasoning ? 'reasoning' : 'none';
+}
+
+function recordLivePhase(
+  next: TurnState, phase: unknown, growth: LiveContentGrowth | undefined,
+): void {
+  next.livePhase = phase ?? null;
+  if (growth) next.liveContentGrowth = growth;
+  else delete next.liveContentGrowth;
+}
+
 function reduceEvent(
   draft: TurnStateDraft,
   event: TurnEvent | null | undefined,
@@ -390,7 +426,7 @@ function reduceEvent(
     // including explicit null, without replaying an already installed patch.
     // Older revisions must never roll presentation back after a newer snapshot.
     if (incomingRevision === Number(turn.projectionRevision || 0) && 'phase' in payload) {
-      next.livePhase = payload.phase ?? null;
+      recordLivePhase(next, payload.phase, frameContentGrowth(payload.projectionPatch));
     }
     draft.attemptChanged(event.attemptId);
     draft.record('attemptsById')[event.attemptId] = {
@@ -483,13 +519,11 @@ function reduceEvent(
   // Phase frames from the CURRENT attempt only (all guards above passed).
   // `null` is meaningful — it folds the stage text exactly when v1 would
   // (first content delta / terminal frame).
-  if ('phase' in payload) {
-    next.livePhase = (payload as UnknownRecord).phase ?? null;
+  if ('phase' in payload || adoptsAttempt) {
+    recordLivePhase(next, (payload as UnknownRecord).phase,
+      frameContentGrowth(payload.projectionPatch));
   }
-  if (event.type === 'terminal_settlement' || adoptsAttempt) {
-    next.livePhase = event.type === 'terminal_settlement' ? null
-      : (payload as UnknownRecord).phase ?? null;
-  }
+  if (event.type === 'terminal_settlement') recordLivePhase(next, null, 'none');
   if (event.turnId in next.commandPending) delete draft.record('commandPending')[event.turnId];
 }
 
@@ -647,7 +681,7 @@ export function reduceTurnState(
     if (snapshot.authoritativeFull) {
       draft.reset = true;
 
-      next.livePhase = null;
+      recordLivePhase(next, null, undefined);
       next.liveRoundUsageByTurn = Object.create(null) as Record<string, LiveRoundUsage>;
       next.turnsById = Object.create(null) as Record<string, ProjectionTurn>;
       next.laneOrder = Object.create(null) as Record<string, string[]>;
@@ -687,7 +721,7 @@ export function reduceTurnState(
           && turn.currentAttemptId === active.attemptId
           && attempt?.turnId === turn.turnId && attempt.status === 'running'
           && active.projectionRevision <= Number(turn.projectionRevision || 0)) {
-        next.livePhase = active.phase;
+        recordLivePhase(next, active.phase, undefined);
       }
     }
     const pageWindow = snapshot.turnWindow;

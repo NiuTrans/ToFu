@@ -139,8 +139,9 @@ def test_lazy_tool_result_http_reads_exact_bytes_and_rejects_wrong_owner_and_sta
 
 @pytest.mark.api
 @pytest.mark.auth_mode('open')
+@pytest.mark.parametrize('status', ['completed', 'interrupted', 'truncated', 'failed'])
 def test_refs_view_edit_round_trip_keeps_server_only_evidence(
-    flask_client, chat_sidecar, monkeypatch,
+    flask_client, chat_sidecar, monkeypatch, status,
 ):
     """A whole-projection edit built from the slim browser view loses nothing."""
     import uuid
@@ -176,11 +177,12 @@ def test_refs_view_edit_round_trip_keeps_server_only_evidence(
         }
         client.command('turn.append_settled', {'conversation_id': cid, 'user_id': 1,
                        'command_id': cid + '-append', 'actor': 'assistant', 'kind': 'fixture',
-                       'projection': projection, 'created_at': 2}, cid + '-append')
+                       'projection': projection, 'status': status, 'created_at': 2}, cid + '-append')
         root = f'/api/v4/conversations/{cid}'
         snapshot = flask_client.get(root + '/sync', query_string={
             'segmentPayload': 'refs', 'toolPayload': 'lazy'}).get_json()
         turn = snapshot['turns'][0]
+        assert turn['status'] == status
         browser = turn['projection']
         assert 'signature' not in json.dumps(browser['segments'])
         assert 'thinkingSignature' not in browser['toolRounds'][0]

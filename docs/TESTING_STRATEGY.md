@@ -53,6 +53,12 @@ successful report. Synthetic and frozen-input differential checks preserve all
 v2 metric values, CLI thresholds and error outcomes while a payload-retention
 test guards the large-history case.
 
+The source-matched TofuDB build helper reports the first primary compiler error
+and its location within its existing diagnostic budget. Warning-heavy tails
+previously hid the actionable failure. The original subprocess exception retains
+full output; source builds still refuse stale binaries and retire all toolchain
+descendants on interruption. Verify `test_tofudb_source_build_retirement.py`.
+
 ## Test layers
 
 Turn delivery tests import their shared fixture functions explicitly from

@@ -139,6 +139,7 @@
             "preserve_history": {
               "enum": [
                 "none",
+                "replay",
                 "clear_thinking_false",
                 "keep_all"
               ]

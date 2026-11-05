@@ -175,7 +175,8 @@ short-lived daemon refresh when any source is missing or past its TTL
 (default 24 h, `TOFU_TEMPLATE_FEED_TTL_S`, clamped 1 h–7 days). The daily
 model-intelligence task also refreshes these sources before world-catalog
 sync. No HTTP runs in the picker read. Version-1 cross-provider caches are
-ignored; each source carries its own fetched timestamp and allowlisted URL.
+ignored; each source carries its own fetched timestamp, allowlisted URL and
+the upstream listing times of its seeds.
 
 Safety and resource bounds:
 
@@ -205,6 +206,18 @@ Safety and resource bounds:
   binding once put 232 of 236 OpenRouter prices on another model's Offering.
   Insert-only install and convergence never rewrite a stored price, so an
   Offering installed before that fix keeps its misbound price until edited.
+- Each source keeps its seeds' upstream listing times beside the recipes
+  (`sources.<key>.listed_at`: wire ID to the row's `created`, epoch seconds).
+  A missing, zero or invalid time stays absent, meaning unknown, never old; a
+  duplicated ID keeps its newest time. The seed budget bounds the map (13 KB
+  for the 270 seeds cached on 2026-11-05, inside the 4 MiB cache limit). It is
+  optional at the same cache version: a cache written without it still loads,
+  and a failed source keeps its last-good map. Merging surfaces the merged seeds' times only in the
+  template's `catalog_feed.listed_at` metadata, never in offering recipes, so
+  compiled bundles and owner documents never carry them. The consumer is the
+  model release watch, which uses them to tell a release from an old listing
+  rotating into the bounded seed window
+  ([intake workflow](MODEL_REGISTRATION.md#new-model-intake-workflow)).
 - `retired_model_ids` remains the authored kill-switch. Cross-template
   authored retirement consistency and world-catalog pruning are pinned by
   `tests/model_routing/test_world_catalog_sync.py`; removing a stale provider seed is not

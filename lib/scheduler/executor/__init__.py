@@ -24,6 +24,7 @@ from lib.scheduler.executor._timer import (
     _execute_timer_manage,
 )
 from lib.scheduler.manager import get_scheduler
+from lib.scheduler.tool_defs import SCHEDULABLE_TASK_TYPES, TOOL_UPDATABLE_FIELDS
 
 logger = get_logger(__name__)
 
@@ -46,6 +47,10 @@ def execute_scheduler_tool(fn_name, fn_args):
     if fn_name == 'schedule_create':
         try:
             task_type = fn_args.get('task_type', 'command')
+            if task_type not in SCHEDULABLE_TASK_TYPES:
+                return (f'Error: task_type must be one of '
+                        f'{", ".join(SCHEDULABLE_TASK_TYPES)}; built-in and '
+                        'service tasks are created by their owning service.')
 
             # For agent tasks, resolve 'current' conv_id from the calling context
             target_conv_id = fn_args.get('target_conv_id', '')
@@ -194,7 +199,15 @@ def execute_scheduler_tool(fn_name, fn_args):
             updates = fn_args.get('updates', {})
             if not updates:
                 return 'Error: No updates provided'
-            changed = mgr.update_task(task_id, user_id=user_id, **updates)
+            refused = [key for key in updates if key not in TOOL_UPDATABLE_FIELDS]
+            if refused:
+                return (f'Error: schedule_manage update cannot set {", ".join(refused)}; '
+                        f'updatable fields: {", ".join(TOOL_UPDATABLE_FIELDS)}.')
+            try:
+                changed = mgr.update_task(task_id, user_id=user_id, **updates)
+            except ValueError as e:
+                logger.warning('[Scheduler] schedule_manage update validation failed: %s', e, exc_info=True)
+                return f'Error: {e}'
             return (f'Task {task_id} updated: {", ".join(updates.keys())}'
                     if changed else 'Error: Task not found')
 

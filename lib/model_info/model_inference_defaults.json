@@ -71,6 +71,45 @@
       "checked_at": "2026-10-27"
     },
     {
+      "creator_id": "tencent",
+      "model_ids": [
+        "hy4"
+      ],
+      "inference_profile": {
+        "source": "official",
+        "reasoning": {
+          "support": "supported",
+          "wire_format": "reasoning_effort",
+          "can_disable": true,
+          "supported_efforts": [
+            "no_think",
+            "high"
+          ],
+          "default_effort": "high",
+          "disabled_effort": "no_think",
+          "preserve_history": "replay"
+        }
+      },
+      "evidence_url": "https://intl.cloud.tencent.com/zh/document/product/1300/80637",
+      "checked_at": "2026-11-05",
+      "previous_profiles": [
+        {
+          "source": "official",
+          "reasoning": {
+            "support": "supported",
+            "wire_format": "reasoning_effort",
+            "can_disable": true,
+            "supported_efforts": [
+              "no_think",
+              "high"
+            ],
+            "default_effort": "high",
+            "disabled_effort": "no_think"
+          }
+        }
+      ]
+    },
+    {
       "creator_id": "moonshot",
       "model_ids": [
         "kimi-k2.7-code",
@@ -1036,11 +1075,32 @@
             "xhigh": "high",
             "ultra": "max",
             "minimal": "low"
-          }
+          },
+          "preserve_history": "replay"
         }
       },
       "evidence_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
       "previous_profiles": [
+        {
+          "source": "official",
+          "reasoning": {
+            "support": "supported",
+            "wire_format": "thinking_type",
+            "can_disable": true,
+            "supported_efforts": [
+              "low",
+              "high",
+              "max"
+            ],
+            "default_effort": "high",
+            "effort_map": {
+              "medium": "high",
+              "xhigh": "high",
+              "ultra": "max",
+              "minimal": "low"
+            }
+          }
+        },
         {
           "source": "official",
           "reasoning": {

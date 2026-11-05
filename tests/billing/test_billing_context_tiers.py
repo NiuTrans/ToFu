@@ -33,7 +33,8 @@ def test_complete_prompt_selects_one_qwen_tier_for_every_component():
     assert snap['rates']['input'] == 2.0
     assert snap['rates']['output'] == 12.0
     assert cost['cacheWriteCostCny'] == pytest.approx(0.2, abs=1e-6)
-    assert cost['cacheReadCostCny'] == 0.0
+    # The same tier's input rate at the model row's declared 10% cache hit.
+    assert cost['cacheReadCostCny'] == pytest.approx(0.02, abs=1e-6)
 
 
 def test_gpt56_long_context_multiplier_applies_to_the_whole_request():

@@ -2218,7 +2218,7 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                         'signature': {'description': 'Opaque provider signature of '
                                                                      'this reasoning. Never '
                                                                      'rendered; refs views of '
-                                                                     'completed Turns omit it.',
+                                                                     'terminal Turns omit it.',
                                                       'type': 'string'},
                                         'taskId': {'type': 'string'},
                                         'terminal': {'type': 'boolean'},
@@ -2598,7 +2598,7 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                   'thinkingSignature': {'description': 'Opaque provider replay '
                                                                        'evidence. Model requests '
                                                                        'read it from storage; refs '
-                                                                       'views of completed Turns '
+                                                                       'views of terminal Turns '
                                                                        'omit it.',
                                                         'type': 'string'},
                                   'toolArgs': {},
@@ -3037,7 +3037,7 @@ OPENAPI_PATHS = {'/api/v4/attempts/{attemptId}/abort': {'post': {'operationId': 
                                                                                         'segment/round '
                                                                                         'authorities. '
                                                                                         'On '
-                                                                                        'completed '
+                                                                                        'terminal '
                                                                                         'Turns it '
                                                                                         'also '
                                                                                         'omits '

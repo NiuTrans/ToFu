@@ -938,8 +938,8 @@ def dispatch_completed_background_batch(conv_id: str, *, user_id: int) -> str | 
             # Normalize even already-durable receipts from before this fix;
             # their frozen publication identity and bytes remain untouched.
             config = completion_delivery_config(receipts[0].get('config'))
-            from lib.background_command_delivery import settle_revoked_dispatch_completion
-            if settle_revoked_dispatch_completion(config, receipts, conv_id=conv_id, user_id=user_id):
+            from lib.background_command_delivery import settle_closed_dispatch_completion
+            if settle_closed_dispatch_completion(config, receipts, conv_id=conv_id, user_id=user_id):
                 return None
             if '_projectDispatchAdmission' in config:
                 from lib.project_dispatch.admission import TrustedDispatch
@@ -948,7 +948,8 @@ def dispatch_completed_background_batch(conv_id: str, *, user_id: int) -> str | 
                 if assignment['execution'] is not None:
                     from lib.conversation_sync.runtime import conversation_turn_commands
                     latest = trusted.repository.turn_get(
-                        conv_id, assignment['execution']['turnId'], user_id=user_id)
+                        conv_id, assignment['execution']['turnId'], user_id=user_id,
+                        include_projection=False)
                     outcome = conversation_turn_commands.resume_turn(
                         conv_id, assignment['execution']['turnId'], user_id, {
                             'commandId': 'project-dispatch-background:' + queue_id,
@@ -1004,7 +1005,7 @@ def drain_idle_background_batches() -> list[str]:
                 spawned.append(attempt_id)
         except Exception as exc:
             logger.warning('[Queue] background batch drain failed conv=%s: %s',
-                           conv_id[:8], exc)
+                           conv_id, exc, exc_info=True)
     return spawned
 
 
@@ -1335,11 +1336,11 @@ def _dispatch_queued_turn(
     _stamp_queued_turn_initiator(user_msg, payload)
     if item.get('kind') == KIND_WORKFLOW and payload.get('_backgroundBatchWake'):
         from lib.background_command_delivery import (
-            completion_delivery_config, settle_revoked_dispatch_completion,
+            completion_delivery_config, settle_closed_dispatch_completion,
         )
         config = completion_delivery_config(config)
         receipts = _background_receipts(conv_id, user_id=user_id, max_items=None)
-        if settle_revoked_dispatch_completion(config, receipts, conv_id=conv_id, user_id=user_id):
+        if settle_closed_dispatch_completion(config, receipts, conv_id=conv_id, user_id=user_id):
             _finalize_queue_dispatch(conv_id, item['queueId'], user_id=user_id)
             return None
 

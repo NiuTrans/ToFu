@@ -576,6 +576,9 @@ and selected view, never substituting pre data or reconstructing old snapshots f
 `model`/`taskModel` names the task model, not the summary model. `trigger` distinguishes
 `working_set`, `window`, `force`, `reactive`, `manual`; older automatic runs may say `force`.
 `tokensAfter` estimates the complete compaction-stage messages, not the summary or later request.
+The archive `summary` field contains the narrative. The complete accepted handoff,
+including the source-derived continuity packet when present, lives in `postMessages`;
+receipt `summary.chars` counts that complete handoff, not only the narrative.
 
 The selected archive's summary/full projection carries a bounded `receipt` governed by [`contracts/compaction_receipt_v1.schema.json`](../../contracts/compaction_receipt_v1.schema.json).
 It records status, strategy/implementation, continuation, retention (at most eight recent paths), summary duration/usage/route, economics/evidence, context-budget evidence and deterministic recovery.
