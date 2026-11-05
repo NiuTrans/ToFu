@@ -13,7 +13,9 @@ pytestmark = pytest.mark.unit
 
 def task_app(tasks):
     app = Quart(__name__)
-    app.config['TESTING'] = True
+    # Quart 0.22 answers a view exception with its debug traceback page in
+    # TESTING mode; PROPAGATE_EXCEPTIONS alone re-raises it to the test client.
+    app.config['PROPAGATE_EXCEPTIONS'] = True
 
     @app.before_request
     async def grant():

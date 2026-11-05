@@ -19,7 +19,7 @@ from lib.storage.protocol import (
 )
 from lib.storage.v2_semantics import request_payload
 from tests.turn_lifecycle.test_task_event_delivery import (
-    _task, _discard, storage as storage, turn_service as turn_service,
+    _task, _discard, owner as owner, storage as storage, turn_service as turn_service,
 )
 from tofu_db.wire import _payload_bytes
 

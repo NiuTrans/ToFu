@@ -956,8 +956,10 @@ def _task_results_checkpoint(session: Session, payload: Mapping[str, Any]) -> An
                     )
                 parent_settings = dict(loaded_settings)
     # Match task_results.abort's per-key lock so concurrent checkpoint CAS
-    # writers serialize before reading the witnessed version (PostgreSQL).
+    # writers serialize before reading the record's birth ancestry or its
+    # witnessed version (PostgreSQL); the root worker_job lock follows it.
     # SQLite treats lock_key as a no-op: its single writer already serializes.
+    session.lock_key("task_result", key)
     from ._invocations import worker_root_for_task, starts_new_tool_effect
     worker_root = worker_root_for_task(session, key, user_id=checkpoint_value.get('user_id'))
     if tool_effect_intent is not None and (worker_root is None or worker_root == key):
@@ -972,7 +974,6 @@ def _task_results_checkpoint(session: Session, payload: Mapping[str, Any]) -> An
             proof=payload.get('worker_claim'),
             terminal=(not new_effect and checkpoint_value.get('status') in (
                 'done', 'error', 'aborted', 'interrupted')), drain_entered=not new_effect)
-    session.lock_key("task_result", key)
     current = session.fetch_one(
         "SELECT value_json, version, updated_at_ms FROM storage_records "
         "WHERE namespace = ? AND record_key = ?",

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from .builtin_context_cost import (
+    PLUGIN_ID as CONTEXT_COST_PLUGIN_ID,
+    PLUGIN_VERSION as CONTEXT_COST_PLUGIN_VERSION,
+)
 from .long_agent_strategy import LONG_AGENT_POLICIES, strategy_providers
 from .registry import ExperimentPlugin
 
@@ -79,22 +83,23 @@ def long_agent_spec(*, experiment_id: str, candidate_strategy: str,
             },
         ],
         "metrics": [
-            {"pluginId": "tofu.context-cost", "metricId": "cost.usd",
-             "pluginVersion": "1.1.0"},
-            {"pluginId": "tofu.context-cost",
-             "metricId": "quality.oracle_passed", "pluginVersion": "1.1.0"},
-            {"pluginId": "tofu.context-cost", "metricId": "latency.ms",
-             "pluginVersion": "1.1.0"},
-            {"pluginId": "tofu.context-cost",
+            {"pluginId": CONTEXT_COST_PLUGIN_ID, "metricId": "cost.usd",
+             "pluginVersion": CONTEXT_COST_PLUGIN_VERSION},
+            {"pluginId": CONTEXT_COST_PLUGIN_ID,
+             "metricId": "quality.oracle_passed",
+             "pluginVersion": CONTEXT_COST_PLUGIN_VERSION},
+            {"pluginId": CONTEXT_COST_PLUGIN_ID, "metricId": "latency.ms",
+             "pluginVersion": CONTEXT_COST_PLUGIN_VERSION},
+            {"pluginId": CONTEXT_COST_PLUGIN_ID,
              "metricId": "health.terminal_without_error",
-             "pluginVersion": "1.1.0"},
+             "pluginVersion": CONTEXT_COST_PLUGIN_VERSION},
         ],
         "primaryMetric": {
-            "pluginId": "tofu.context-cost", "metricId": "cost.usd"},
+            "pluginId": CONTEXT_COST_PLUGIN_ID, "metricId": "cost.usd"},
         "analyzer": {
-            "pluginId": "tofu.context-cost",
+            "pluginId": CONTEXT_COST_PLUGIN_ID,
             "analyzerId": "clustered-bootstrap-v1",
-            "pluginVersion": "1.1.0",
+            "pluginVersion": CONTEXT_COST_PLUGIN_VERSION,
         },
         "analysis": {
             "minimumSampleSizePerArm": int(minimum_sample_size),

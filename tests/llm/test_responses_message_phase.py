@@ -160,12 +160,24 @@ def test_explicit_handback_is_not_overridden_by_commentary(reason):
     assert _analyse(message)[0]['action'] == 'break'
 
 
-@pytest.mark.parametrize('finish', ['length', 'error'])
-def test_commentary_does_not_override_truncation_or_error(finish):
-    decision, history, _ = _analyse(_receive([_item('Partial.')], False), finish=finish)
+def test_commentary_does_not_override_an_error_finish():
+    decision, history, _ = _analyse(_receive([_item('Partial.')], False), finish='error')
     assert decision['action'] == 'break'
-    assert decision['last_finish_reason'] == finish
+    assert decision['last_finish_reason'] == 'error'
     assert len(history) == 1
+
+
+def test_truncated_commentary_resumes_through_output_limit_recovery():
+    """Output-limit recovery, not commentary continuation, owns a cut response
+    (docs/modules/task_engine.md, "Output-token limits"); the replayed cut item
+    keeps its phase."""
+    items = [_item('Partial.')]
+    decision, history, _ = _analyse(_receive(items, False), finish='length')
+    assert decision['action'] == 'continue'
+    assert decision['last_finish_reason'] == 'length'
+    assert len(history) == 3
+    assert _wire(history[1]) == items
+    assert history[2]['content'].startswith('[SYSTEM: OUTPUT LIMIT RECOVERY]')
 
 
 def test_phase_sidecar_budget_is_bounded_and_preserves_display_text_on_overflow():

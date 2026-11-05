@@ -1016,9 +1016,13 @@ registration wait is not synchronous (`await_device`), and an approval-policy
 TTL is not a wait (`set_approval_delegate`); neither gains this allowance.
 An expired occurrence requests its own runtime cancellation immediately and
 closes result publication; longer siblings continue and retained receipts
-stay unchanged. Worker waits and poll waits observe the same per-call
-cancellation through their existing interruption loops and unsubscribe their
-notifications. This abandons only the wait: no Worker, swarm agent or
+stay unchanged. The collector sets that per-call cancellation and runs the
+call's registered resource callbacks on their own thread (on the collector only
+if the host refuses the thread), so a noncooperative callback cannot hold
+sibling collection or the round's return
+(`tests/tools/test_tool_pool_cancellation.py`). Worker waits and poll waits
+observe the same per-call cancellation through their existing interruption
+loops and unsubscribe their notifications. This abandons only the wait: no Worker, swarm agent or
 background command is restarted or cancelled by its timeout.
 Alternatives rejected: reducing the advertised wait would break the one-long-
 wait contract; another fixed per-tool deadline can again drift from its schema;

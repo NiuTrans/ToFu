@@ -18,6 +18,7 @@ from lib.storage.errors import StorageError
 from lib.storage.client import StorageClient
 from lib.storage.protocol import PROTOCOL_VERSION, recv_frame
 from lib.storage_authority_sql.server import create_server
+from lib.storage_authority_sql.worker_control import WorkerControl
 
 pytestmark = pytest.mark.unit
 
@@ -109,6 +110,9 @@ def _wait_for_active_handlers(server, *, timeout: float = 1.0) -> None:
 
 class _Backend:
     """Minimal health/command authority for admission tests."""
+
+    def __init__(self):
+        self.worker_control = WorkerControl()
 
     @staticmethod
     def health():

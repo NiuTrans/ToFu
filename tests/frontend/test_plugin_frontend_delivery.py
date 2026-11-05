@@ -42,7 +42,9 @@ def plugin_page_app(monkeypatch):
     from tofu_trading import web
 
     monkeypatch.setattr(web, 'trading_enabled', lambda: True)
-    app = create_base_app('plugin-delivery', {'TESTING': True})
+    # Quart 0.22's TESTING-mode traceback page cannot tokenize Jinja template
+    # frames, which hid page failures behind a TokenError; propagate instead.
+    app = create_base_app('plugin-delivery', {'PROPAGATE_EXCEPTIONS': True})
     from lib.http_transport.plugin_frontend import register_plugin_frontend
     register_plugin_frontend(app)
     app.register_blueprint(web.trading_pages_bp)

@@ -8,6 +8,14 @@ replay state) through build_body, selected-slot adaptation and stream ingress
 on Chat, Messages (plain, Claude subscription cloak, CatPaw) and Responses
 (default and Codex) wires, plus the non-stream transport.
 
+Receipts are re-recorded only for an intended, documented wire change, never
+for an input write: the frozen-input tests below must yield the same receipt.
+Re-recorded wire changes: Claude system and tool breakpoints are bare
+5-minute markers under the default-off ``cache_extended_ttl``
+(docs/LLM_COST_OPTIMIZATION.md, "Stable-head cache TTL"), and Responses
+requests carry no server ``context_management`` compaction trigger
+(docs/CONTEXT_COMPACTION.md, "One provider-independent compaction owner").
+
 Purity: every protocol converter, slot helper and whole preparation runs on a
 deep-frozen input (``settle``), where any in-place write raises
 ``SettledRowMutation``, and must produce the bytes of a mutable copy.
@@ -278,10 +286,10 @@ def receipts(monkeypatch):
 PINNED = {
     'chat-claude-markers': {
         'adapted': '453a5ea3262296f4aa5a2710c94e27eb1fc84d44adaa4e23a86e13c2fcc8ec41',
-        'payload': 'd0baaf0ca9463f728a3a8d25e8708b9f749c359a3d9681cf8733af391918f019',
-        'semantic': '6fac8b15a4e394b4af88ca914444ea3822b6be58862463c85e1c62af342464d5',
-        'prefix': '352103061b9bd1f5e29bf5dc8a4fa996714a057bd63f34a2f5184cdda25bb2fc',
-        'tokens': 932,
+        'payload': 'dd029b04113c9f2755097dfd4637529f47d2eeba74953d2261dec0ab1699e7da',
+        'semantic': '9b3b5b86780fa409f25862ddde06de8589876c05502feccba4c3696c98cccef6',
+        'prefix': 'f4f539ef535d5eadc34ff807e6302ab6a81af33ff71a3c6b9ac8ed3375db80fc',
+        'tokens': 925,
         'diagnostics': 'd507f4a1effd818274150692e8df3507691e68d9d38483aa3eb37631c9d8e2df',
     },
     'chat-gemini-signatures': {
@@ -309,28 +317,28 @@ PINNED = {
         'diagnostics': 'f6dae1db69ca0849decaea5a488638604ace041b1581e84f255e5ddd0f9d911b',
     },
     'direct-chat-replay': {
-        'payload': '3e2adc3997828bd1c2c096e8da98a441a52b7dbd2c07e7fc260bbbcc328700b0',
-        'semantic': 'c193872af2e59d8db26fe3fefafd3bbb9fafda5b71dc0e11d7d20e46d5e1e0a9',
-        'prefix': 'c0242f29965af273ceea053ad97590d6ce74f53436b483fe1bd0a251f0be2af8',
-        'tokens': 627,
+        'payload': '374e40e9fcc40ad5bf24dba17631b0c70ff1eccc82f4e6bac1a7931a8b3c0002',
+        'semantic': '1988a4b3909a78e08da484bc2d9b59a75909fa5818a8c08af5d5298bf4053e2d',
+        'prefix': '08271b4566f3d265f65afca2df6d5f044a2d2e49f7f90339c87b367acd0806da',
+        'tokens': 621,
         'diagnostics': 'ce90a5ffa3f78e86230d5a9adce887caeb40c46fc191a3b1a9766e1b6d3ff3c0',
     },
     'direct-messages-replay': {
-        'payload': '5a4c132a3937a668f0b11b426b9b7d10a0fb2c4978efcefee528b3b8150f9a37',
-        'semantic': '19e4332fa77a2d5fa56f773dee626d28532efd7fa7b3ff38c7c39da22752cf23',
-        'prefix': 'fd9854e3fbd9e1471a22af650d21d55e5b62d7e8382ffacd09b63f9817f65a6c',
-        'tokens': 535,
+        'payload': 'f4263352782888fecbf759a562124ddbe377a73c5a57c4c40c136fada85bfed1',
+        'semantic': 'f3768547b812af0b9a6d70bf5af4febb3d600776b83813079c05ce5b8ad8a174',
+        'prefix': '07c8f3bd763a5d7088077709b09fe7df122f86fa6bfe3cc8cb209bc4196e2580',
+        'tokens': 529,
         'diagnostics': '8b0a49cf929d130731e9b8de7f4598e3c7b32ed2961cddff19258b50d6abfded',
     },
     'direct-messages-replay-cloak': {
-        'payload': 'e71188ad50bc806b46136e6381463dec8b86ba69fd240e9d74f82b3f2e3dd0bd',
-        'semantic': '19e4332fa77a2d5fa56f773dee626d28532efd7fa7b3ff38c7c39da22752cf23',
-        'prefix': '908d81eb371c3e932ef9f1bc757416b3fa8703c6fad8ea2f44aad22a453af3a8',
-        'tokens': 2254,
+        'payload': '803e327095b30ab501a324eef133b7c1ca05772545fe1ee465cf711980cbd96a',
+        'semantic': 'f3768547b812af0b9a6d70bf5af4febb3d600776b83813079c05ce5b8ad8a174',
+        'prefix': '3fee5fb7f0fb2cdac10ee6e04bfe115144039a349f87191329bfe0cbc8833f07',
+        'tokens': 2248,
         'diagnostics': 'd595ba10c0d4f0b608731aaa94717624a678450d12b96b840dfad8d0983f900d',
     },
     'direct-responses-replay': {
-        'payload': '673f424c115ec3fc241c4f88b12791f732452494d375a2c1b4a657f7825852d4',
+        'payload': 'e66abdc2e5ee6b121abc88bd8ccf6e20b2eac72e44bfa959819ea97d7a9ef4ee',
         'semantic': 'd33f5df27252b227f4141ecc758db1a315f0dea8afaff98d16c8fd114a9d0b0f',
         'prefix': '2a43ac7c5e0b322817b6ceeef0b4d9ec495b9139c5ae993a47287caecb4c7bf0',
         'tokens': 508,
@@ -346,25 +354,25 @@ PINNED = {
     },
     'messages-claude': {
         'adapted': '23a8b67178a1801be057c10b2fe30b70b108dbba9cd67fadd8b91b5b8533e59b',
-        'payload': '44948922416d0a08b18f02f0f02249102d1c0458cf45a5ac40392b0d4edc9955',
-        'semantic': '6fac8b15a4e394b4af88ca914444ea3822b6be58862463c85e1c62af342464d5',
-        'prefix': 'bea77f60ff720b3b4fd8e7dd6d9edf0ff0e9af9e007433253abfcf89671ebc76',
-        'tokens': 728,
+        'payload': '749f8def2667241b8b50d3c9e0103dad4e14595f1e15236596224fde1748334d',
+        'semantic': '9b3b5b86780fa409f25862ddde06de8589876c05502feccba4c3696c98cccef6',
+        'prefix': '6c8c510ecca880856afafa62327a09f945cc86741e90b45180988f77d32c9c3d',
+        'tokens': 721,
         'diagnostics': 'e9d7b829580146f94746813b84306d1b1d417d367db74fb839af193408936cdd',
     },
     'messages-claude-cloak': {
         'adapted': '23a8b67178a1801be057c10b2fe30b70b108dbba9cd67fadd8b91b5b8533e59b',
-        'payload': '78a5135c5174c2152f0b8c000dd60e6eac37bb80bd991747c51add35a69e3d4f',
-        'semantic': '6fac8b15a4e394b4af88ca914444ea3822b6be58862463c85e1c62af342464d5',
-        'prefix': '9e0cee4223d95d238ff120f34d13b7c7ead70805890e4a40c8e30f6cd6aa6ffb',
-        'tokens': 2447,
+        'payload': '9b8823ad68c0cff798fbea3248870b7c40b442162d0a9eeb6e2f9833894dd0ec',
+        'semantic': '9b3b5b86780fa409f25862ddde06de8589876c05502feccba4c3696c98cccef6',
+        'prefix': 'a5db3fb8c7def24700145871a917a539bc4debaa69e5f2b275c5d55fb343b4e9',
+        'tokens': 2440,
         'diagnostics': 'ed074e934f719269258a30914f81bb8aa6b1da26dbe43a105357e85f0a6c0425',
     },
     'nonstream-chat': {
         'payload': '0239ef3ae3f3f0f2a5200463ab974aef391dd2c804c3e32c1c531b85816a61f8',
     },
     'nonstream-messages-cloak': {
-        'payload': 'f3fb2b18f795945d7bb5830d4df33fd7e1a73e3124d5f23fb05e8f7dce47a94d',
+        'payload': '6a69abd19d9ae50affbc6cdd806a456a33b5aa7b73a9a7cdd6a134d285c54675',
     },
     'nonstream-responses': {
         'payload': 'e2b96d129df00eb590571ac3f417e709e41a5959513c8e8dda840c303f5c9175',
@@ -387,10 +395,10 @@ PINNED = {
     },
     'swap-gpt-to-claude': {
         'adapted': '4d7967431b90d5e96520721d3b52079f965d2b1cd5e2d063d920974fac292bfb',
-        'payload': '31a45f2e8b59f5b4fb4ada0fce820bd0e5d4d18b2d381a36bde3d5e8f7189d96',
-        'semantic': '8b51d273534828d13f43e55202b6419b48600abaa11550666dde5c08b07cbacd',
-        'prefix': '196b39b9d28f25f326b2e205b7139303c8a5923daa8474076d2f4ed8a372fa4a',
-        'tokens': 855,
+        'payload': 'a6a21a997b698ef1e9ca98baa75b3c824e2b42717362e4e27a487ef15a2e6b15',
+        'semantic': '2b3ac024deb1063e4a813ecc7ec5e61059c8f042a107c6dfe3f434514b394b79',
+        'prefix': '58681cb06a9d3f6f25ab633a1ce7038519b20630d759d8c0d5a7d95cb85be1c8',
+        'tokens': 849,
         'diagnostics': 'd507f4a1effd818274150692e8df3507691e68d9d38483aa3eb37631c9d8e2df',
     },
 }

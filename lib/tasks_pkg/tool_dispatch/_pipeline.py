@@ -264,7 +264,20 @@ def _expire_collected_tool(task: dict[str, Any], expiry: _ToolCollectionExpiry,
     context = active_context_for_call(
         task, round_num=item[4], tool_call_id=fut_tc_id, round_entry=item[5])
     if context is not None:
-        context.request_resource_cancellation()
+        # Request cancellation without draining the resource owner: a
+        # noncooperative callback must not hold sibling collection or this
+        # round's return. Waits observe the event before the verdict settles.
+        context.resource_cancel_event.set()
+        canceller = threading.Thread(
+            target=context.request_resource_cancellation,
+            name=f'tool-expiry-cancel-{tid}', daemon=True)
+        try:
+            canceller.start()
+        except RuntimeError as error:
+            logger.warning('[Task %s] expiry cancellation thread for %s could not '
+                           'start (%s); cancelling on the collector',
+                           tid, fut_tc_id, error)
+            context.request_resource_cancellation()
     from lib.tasks_pkg.executor._effects import tool_timeout_result
     content = tool_timeout_result(task, fut_fn_name, item[5])
     tool_results[fut_tc_id] = (content, False)
