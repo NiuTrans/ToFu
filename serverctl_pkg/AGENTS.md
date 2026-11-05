@@ -40,6 +40,9 @@ Every module the manager imports unconditionally belongs to
 `supervisor_protocol.SUPERVISOR_SOURCE_FILES`, its generation identity;
 otherwise an update to it never reloads the manager. The real re-exec test in
 `tests/server/test_supervisor.py` starts the manager from exactly that closure.
+A running manager hashes disk with its own loaded list; the client reloads to
+that digest, so extending the list re-execs in place. A refused reload is a
+typed error, never a signal: manager exit drains its resident hosts.
 
 `execution_service.py` / `execution_host.py` own the resident headless
 application process. `execution_lifespan.py` awaits the existing BootRunner

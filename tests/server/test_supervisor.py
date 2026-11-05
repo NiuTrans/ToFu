@@ -7,6 +7,7 @@ stop.sh scripts, so no real Tofu server is spawned.
 Run: pytest -p no:napari tests/server/test_supervisor.py
 """
 
+import contextlib
 import json
 import os
 import signal
@@ -576,8 +577,7 @@ def test_http_health_no_auth(live_server):
         os.path.dirname(supervisor.__file__))
 
 
-@pytest.mark.serial
-def test_real_supervisor_reexec_loads_new_generation_with_same_pid(tmp_path):
+def _closure_project(tmp_path):
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     project = tmp_path / 'reload-project'
     project.mkdir()
@@ -593,6 +593,12 @@ def test_real_supervisor_reexec_loads_new_generation_with_same_pid(tmp_path):
     (project / 'stop.sh').write_text(
         '#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
     os.chmod(project / 'stop.sh', 0o755)
+    return project
+
+
+@contextlib.contextmanager
+def _real_supervisor(project):
+    """Run *project*'s supervisor.py on a private loopback port."""
     with socket.socket() as probe:
         bind_ephemeral_loopback(probe)
         port = int(probe.getsockname()[1])
@@ -605,19 +611,18 @@ def test_real_supervisor_reexec_loads_new_generation_with_same_pid(tmp_path):
         'TOFU_SUPERVISOR_PYTHON': sys.executable,
     }
     startup_log = project / 'logs' / 'supervisor-startup.log'
-    startup_output = startup_log.open('wb')
-    # -S: an editable install's finder would otherwise satisfy a missing
-    # module from the checkout the environment was installed from.
-    process = subprocess.Popen(
-        [sys.executable, '-S', 'supervisor.py'],
-        cwd=project,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=startup_output,
-        start_new_session=True,
-    )
-    startup_output.close()
+    with startup_log.open('wb') as startup_output:
+        # -S: an editable install's finder would otherwise satisfy a missing
+        # module from the checkout the environment was installed from.
+        process = subprocess.Popen(
+            [sys.executable, '-S', 'supervisor.py'],
+            cwd=project,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=startup_output,
+            start_new_session=True,
+        )
     base = f'http://127.0.0.1:{port}'
     try:
         before = None
@@ -630,7 +635,26 @@ def test_real_supervisor_reexec_loads_new_generation_with_same_pid(tmp_path):
             if status == 200:
                 break
         assert before and before['managerPid'] == process.pid, startup_log.read_text()[-2000:]
+        yield process, base, env, before
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            process.wait(timeout=5)
 
+
+@pytest.mark.serial
+def test_real_supervisor_reexec_loads_new_generation_with_same_pid(tmp_path):
+    project = _closure_project(tmp_path)
+    with _real_supervisor(project) as (process, base, _environment, before):
         policy = project / 'runtime_guards.py'
         policy.write_text(
             policy.read_text(encoding='utf-8') + '\n# next generation\n',
@@ -663,19 +687,102 @@ def test_real_supervisor_reexec_loads_new_generation_with_same_pid(tmp_path):
         assert after is not None
         assert after['managerPid'] == process.pid
         assert after['startedAt'] >= before['startedAt']
+
+
+def test_real_supervisor_reloads_in_place_when_its_closure_definition_changes(tmp_path):
+    """A generation that extends SUPERVISOR_SOURCE_FILES still re-execs in place.
+
+    The running manager can only hash disk with its own, older closure list,
+    so it never agrees with the newer client's fingerprint. Treating that
+    refusal as a pre-protocol manager signalled it instead (2026-11-05), and
+    the manager-bound storage host drained under the preserved worker.
+    """
+    project = _closure_project(tmp_path)
+    protocol = project / 'supervisor_protocol.py'
+    current = protocol.read_text(encoding='utf-8')
+    previous = current.replace("    'bootstrap_pkg/process_roles.py',\n", '', 1)
+    assert previous != current
+    protocol.write_text(previous, encoding='utf-8')
+    with _real_supervisor(project) as (process, base, environment, before):
+        protocol.write_text(current, encoding='utf-8')
+
+        refreshed = supervisor_protocol.refresh_supervisor(
+            str(project), environment=environment, timeout=20.0)
+
+        assert refreshed['reloaded'] is True
+        assert refreshed['managerPid'] == process.pid
+        assert process.poll() is None, 'the manager must re-exec, never be signalled'
+        status, after = _req(base + '/health')
+        assert status == 200
+        assert after['managerPid'] == process.pid
+        assert after['startedAt'] >= before['startedAt']
+        assert after['sourceFingerprint'] == supervisor_protocol.supervisor_source_fingerprint(
+            str(project))
+
+
+@pytest.mark.parametrize(('refusal', 'detail'), [
+    ({'ok': False, 'httpStatus': 409, 'message': 'Supervisor reload is already in progress.'},
+     'already in progress'),
+    ({'ok': False, 'httpStatus': 403, 'message': 'Lifecycle control refused.'},
+     'Lifecycle control refused'),
+    (supervisor_protocol.SupervisorRefreshError('timed out'), 'timed out'),
+])
+def test_refresh_never_signals_a_manager_that_speaks_the_reload_protocol(
+        tmp_path, monkeypatch, refusal, detail):
+    project = tmp_path / 'protocol-project'
+    project.mkdir()
+    # A process whose identity passes the pre-protocol retirement checks.
+    manager = subprocess.Popen(
+        [sys.executable, '-c', 'import time; time.sleep(60)', 'supervisor.py'],
+        cwd=project)
+    try:
+        health = {
+            'ok': True, 'protocolVersion': supervisor_protocol.SUPERVISOR_PROTOCOL_VERSION,
+            'managerPid': manager.pid, 'projects': [os.path.realpath(project)],
+            'sourceFingerprint': '0' * 64,
+        }
+
+        def request(_base_url, path, body=None, *, timeout=5.0):
+            if path == '/health':
+                return dict(health)
+            if isinstance(refusal, Exception):
+                raise refusal
+            return dict(refusal)
+
+        monkeypatch.setattr(supervisor_protocol, 'request_supervisor_json', request)
+        with pytest.raises(supervisor_protocol.SupervisorRefreshError, match=detail):
+            supervisor_protocol.refresh_supervisor(
+                str(project), environment={'TOFU_SUPERVISOR_PORT': '9'}, timeout=1.0)
+        assert manager.poll() is None
     finally:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except OSError:
-            pass
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            process.wait(timeout=5)
+        manager.kill()
+        manager.wait(timeout=5)
+
+
+def test_refresh_retires_only_a_verified_pre_protocol_manager(tmp_path, monkeypatch):
+    project = tmp_path / 'legacy-project'
+    project.mkdir()
+    legacy = subprocess.Popen(
+        [sys.executable, '-c', 'import time; time.sleep(60)', 'supervisor.py'],
+        cwd=project)
+    try:
+        health = {'ok': True, 'managerPid': legacy.pid,
+                  'projects': [os.path.realpath(project)]}
+
+        def request(_base_url, path, body=None, *, timeout=5.0):
+            if path == '/health':
+                return dict(health)
+            return {'ok': False, 'error': 'not found', 'httpStatus': 404}
+
+        monkeypatch.setattr(supervisor_protocol, 'request_supervisor_json', request)
+        with pytest.raises(supervisor_protocol.SupervisorRefreshError, match='did not load'):
+            supervisor_protocol.refresh_supervisor(
+                str(project), environment={'TOFU_SUPERVISOR_PORT': '9'}, timeout=1.0)
+        assert legacy.wait(timeout=5) == -signal.SIGTERM
+    finally:
+        if legacy.poll() is None:
+            legacy.kill()
+            legacy.wait(timeout=5)
 
 
 def test_http_status_no_auth(live_server):
