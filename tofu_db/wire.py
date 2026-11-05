@@ -923,6 +923,13 @@ class StorageV2Session:
             retryable=bool(message.get(FIELD_RETRYABLE)),
         )
 
+    def interrupt(self) -> None:
+        """Wake an exclusively owned blocking exchange; the session is retired."""
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
     def close(self) -> None:
         try:
             self._sock.close()

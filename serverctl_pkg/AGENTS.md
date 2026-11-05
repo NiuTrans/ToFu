@@ -44,6 +44,10 @@ retain the launch lease through physical cleanup. Verify
 `tests/server/test_execution_service.py` and `test_execution_lifespan.py`.
 `execution_plan.py` prepares a source/configuration digest before host admission;
 it uses the existing pinned-source discovery boundary and never copies an app.
+The manager prepares both resident generations before drain, preserves unchanged
+execution across API restarts, and charges execution recovery to its existing
+failure budget. Verify `test_execution_composition.py` and the real headless
+`test_execution_application.py`; readiness must include execution ownership.
 SQL hosts publish their existing v1 handoff; verify
 `tests/server/test_sql_storage_service.py` without relaxing distributed admission.
 

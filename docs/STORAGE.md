@@ -1143,8 +1143,9 @@ Problem: API startup previously treated another process's live task as an
 orphan. Decision: recovery follows durable execution ownership. Alternative
 rejected: excluding only currently live leases would misclassify unknown
 effects after a lease expires. Ordinary legacy recovery remains enabled.
-Production kind registration, effect/crash recovery and independent process
-composition remain unqualified; see the [architecture migration](ARCHITECTURE.md).
+Conversation registration now joins the shared application worker composition;
+ordinary admission and whole-system qualification remain tracked by the
+[architecture migration](ARCHITECTURE.md).
 
 **Problem:** process-local commit callbacks strand an idle execution process when a
 producer commits elsewhere or exits before delivering its acknowledgement.
@@ -1157,18 +1158,25 @@ wait compares its epoch and independent queue/cancel generations before sleeping
 This closes the subscribe/probe race without polling the job table. Pending waits
 retain only cancellation IDs received during that wait; a response gap refreshes
 active claim proofs. Restart changes the epoch. Shutdown wakes and joins waiters.
+Client shutdown interrupts the request's exclusively borrowed socket and joins
+its watch immediately. Cancellation detaches before ownership returns; native
+pooled sessions cancelled during an exchange are retired even if the response
+arrived concurrently. This avoids waiting for a heartbeat deadline without
+interrupting another request or adding polling.
 **Alternative rejected:** a caller-side wake after RPC success loses committed
 work after producer death; a timer scanning an empty queue adds recurring storage
 work and command receipts without fixing ownership.
 
 `lib/durable_worker/service.py` owns demand execution, read-only claim horizons,
-lease supervision and joined shutdown once. The automation service supplies its
-existing policy. `StorageWorkerWakeSource` is the cross-process transport port;
+lease supervision and joined shutdown once. `lib/durable_worker/runtime.py`
+composes automation and conversation kinds under the existing timing policy in
+`contracts/durable_worker_runtime_v1.json`. Automation's old runtime entry points
+delegate to that owner. `StorageWorkerWakeSource` is the cross-process transport port;
 its deadlines/retry cadence reuse the existing worker heartbeat/failure contracts.
 Queue changes wake the coordinator only; cancellation wakes matching monitors,
 which re-read authority rather than treating a notification as permission. No
 worker ceiling, new timing knob, notification journal or second task registry is
-introduced. Production conversation registration remains separately qualified.
+introduced. The idle service now receives commits from independent producers.
 
 [Worker lifecycle](../contracts/worker_job_lifecycle_v1.json) owns the states.
 Live-fenced `worker_job.defer` sets `suspended`, releases the lease and indexes

@@ -8,8 +8,9 @@ generated contract bindings. Read `contracts/conversation_sync_v3.yaml` and
 
 `worker_execution.py` rebuilds claimed attempts through the common task start
 path and joins execution before reporting settlement. Entered effects require
-recovery evidence; the adapter grants no automatic replay or production kind
-registration. Verify `tests/conversation/test_durable_attempt_execution.py` and
+recovery evidence; the adapter grants no automatic replay. Its typed registration
+joins the common durable service; ordinary admission cutover is separate. Verify
+`tests/conversation/test_durable_attempt_execution.py` and
 the cross-authority worker publication contract in `docs/STORAGE.md`.
 `worker_control.py` carries the first acknowledged cancellation cause and
 provenance between Stop and the shared invocation cancellation owner.

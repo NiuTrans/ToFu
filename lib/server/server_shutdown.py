@@ -340,11 +340,11 @@ async def shutdown_production_runtime(
         log.warning('[Server] cgroup monitor stop failed: %s', exc)
     if app is not None:
         try:
-            automation_runtime = sys.modules.get('lib.automations.runtime')
-            if automation_runtime is not None:
-                await asyncio.to_thread(automation_runtime.stop_workers, app)
+            worker_runtime = sys.modules.get('lib.durable_worker.runtime')
+            if worker_runtime is not None:
+                await asyncio.to_thread(worker_runtime.stop_workers, app)
         except Exception as exc:
-            log.warning('[Server] automation worker stop failed: %s', exc)
+            log.warning('[Server] durable worker stop failed: %s', exc)
             # Closing the authority while an effect still owns a context would
             # violate quiescence. Leave it live for the process shutdown backstop.
             raise
