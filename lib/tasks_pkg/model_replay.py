@@ -76,14 +76,51 @@ def policy_witness(config):
     return _digest(_policy_fields(config))
 
 
+def _effective_policy_fields(fields):
+    """Witnessed values as every runtime consumer resolves them.
+
+    Producers spell one policy differently: the browser composer states an
+    empty prompt, append mode and chat mode; scheduler-built turns and the
+    dispatch grants derived from them omit those keys; a grant frozen before a
+    normalizer change keeps a retired tool spelling. Only a representation that
+    every consumer resolves identically is unified: any value a consumer could
+    treat differently stays verbatim and still drifts.
+    """
+    from lib.context_experiment_flags import normalize_context_experiment_flags
+    from lib.tasks_pkg.chat_mode import chat_mode_defaults, normalize_chat_mode
+    from lib.tasks_pkg.context_composer import disabled_context_blocks
+    effective = dict(fields)
+    # The message builder sends only a nonempty prompt, and context composition
+    # treats every mode except 'replace' as the default 'append'.
+    effective['systemPrompt'] = fields.get('systemPrompt') or ''
+    effective['systemPromptMode'] = fields.get('systemPromptMode') or 'append'
+    effective['systemPromptBlocks'] = sorted(disabled_context_blocks(fields))
+    # Chat mode only overrides the everyday flags (model_config.apply_chat_mode),
+    # so an unlabelled config already at those values runs identically.
+    mode = normalize_chat_mode(fields)
+    if mode is None and all(fields.get(key) == value
+                            for key, value in chat_mode_defaults('chat').items()):
+        mode = 'chat'
+    effective['chatMode'] = mode
+    tools = fields.get('tools')
+    if tools is None or isinstance(tools, dict):
+        # A preference mapping reaches execution only through the normalizer;
+        # a caller's tool-schema list is authority and stays verbatim.
+        effective['tools'] = {**(tools or {}),
+                              **normalize_context_experiment_flags({'tools': tools})['tools']}
+    return effective
+
+
 def policy_witness_drift(cached, config):
     """Name the policy fields that differ between checkpoint and request.
 
     A refused restore used to log only ``policy_changed`` — an opaque digest
     mismatch — so every R1 cold rebuild left no evidence about WHICH setting
     moved. The witness now also carries its canonical field map; comparing two
-    maps names the exact drifted fields without leaking their content. Legacy
-    checkpoints without the map report only the digest mismatch.
+    maps names the exact drifted fields without leaking their content. Values
+    are compared as their consumers resolve them, so a spelling difference is
+    not drift. Legacy checkpoints without the map report only the digest
+    mismatch.
     """
     if not isinstance(cached, dict):
         return []
@@ -96,6 +133,7 @@ def policy_witness_drift(cached, config):
         drift.append('replayVersion')
     old_map, new_map = fields[2], current[2]
     if isinstance(old_map, dict) and isinstance(new_map, dict):
+        old_map, new_map = _effective_policy_fields(old_map), _effective_policy_fields(new_map)
         for key in sorted(set(old_map) | set(new_map)):
             if old_map.get(key) != new_map.get(key):
                 drift.append(key)
@@ -341,6 +379,13 @@ def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=
         same_effort_policy = bool(effort_policy and cached.get('effortPolicy') == effort_policy)
         same_prefix_policy = same_policy or same_effort_policy
         drift = [] if same_prefix_policy else policy_witness_drift(cached, config)
+        if not same_prefix_policy and not drift:
+            # The digests differ, yet the field maps resolve to one effective
+            # policy: only the spelling changed. A legacy checkpoint without a
+            # field map always reports digest drift and never reaches here.
+            same_policy = same_prefix_policy = True
+            logger.info('[ModelReplay] conv=%s policy=equivalent (witness spellings differ)',
+                        str(conversation_id)[:8])
         if drift:
             config['_modelReplayPolicyDrift'] = drift
         # Route/effort drift keeps the checkpoint's portable text and rebuilds

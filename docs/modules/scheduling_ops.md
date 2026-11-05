@@ -118,7 +118,9 @@ owner preferences; copying the whole parent config would carry attended
 capabilities and internal carriers into an unattended turn; equating an absent
 witness field with an explicit value was rejected for replay ingress
 (`docs/CONTEXT_COMPACTION.md`), so server-built turns state explicit values
-instead. Contract: `tests/scheduler/test_timer_continuation_policy.py`.
+instead. Replay treats only spellings every consumer resolves alike as equal
+("Equivalent witness spellings" there), so a captured nondefault prompt,
+chat expansion or tool preference must still be stated. Contract: `tests/scheduler/test_timer_continuation_policy.py`.
 
 **Problem:** separate swarm defaults invalidated identical strict/portable replay policy.
 **Decision:** only `swarm_autocontinue_reply` uses inactive `resolve_conv_config`, sharing human prompt/route/depth defaults.

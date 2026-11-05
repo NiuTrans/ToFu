@@ -282,7 +282,8 @@ def test_route_and_effort_drift_reuse_portable_text(replay_store, change):
 @pytest.mark.parametrize('change', [
     {'grantedToolPermissions': ['delegate', 'write']},            # permissions
     {'projectPath': '/another-project'}, {'projectEnabled': False},  # project scope
-    {'tools': {'programmaticCalling': 'on'}}, {'enabledTools': ['run_command']},
+    # The shipped default is 'on', so only 'off' changes the tool surface.
+    {'tools': {'programmaticCalling': 'off'}}, {'enabledTools': ['run_command']},
     {'disabledTools': ['web_search']}, {'mcpServers': ['github']},
     {'codeExecEnabled': True}, {'browserEnabled': True},           # tool authority
     {'planMode': True}, {'delegateMode': True}, {'autopilot': True},  # interaction mode
@@ -302,6 +303,72 @@ def test_authority_drift_still_refuses(replay_store, change):
                                  conversation_id='c', user_id=1) == ([], 0)
     assert cfg['_modelReplayStatus'] == 'policy_changed'
     assert cfg['_modelReplayPolicyDrift']
+
+
+_EVERYDAY = {'model': 'claude-opus-5', 'thinkingEnabled': True, 'thinkingDepth': 'medium',
+             'projectPath': '/project', 'searchMode': 'multi', 'fetchEnabled': True,
+             'codeExecEnabled': True, 'memoryEnabled': True}
+
+
+# One effective policy, spelled by different producers: the browser composer
+# states the defaults, scheduler-built turns and the grants derived from them
+# omit them, and a grant frozen before a normalizer change keeps a retired value.
+@pytest.mark.parametrize('stored, requested', [
+    ({'systemPrompt': None}, {'systemPrompt': ''}),
+    ({'systemPromptMode': None}, {'systemPromptMode': 'append'}),
+    ({'systemPromptBlocks': None}, {'systemPromptBlocks': {}}),
+    ({'systemPromptBlocks': {}}, {'systemPromptBlocks': {'disabled': []}}),
+    ({'systemPromptBlocks': {'disabled': ['b', 'a']}}, {'systemPromptBlocks': {'disabled': ['a', 'b']}}),
+    ({'chatMode': None}, {'chatMode': 'chat'}),
+    ({'chatMode': 'studio'}, {'chatMode': 'chat'}),
+    ({'tools': None}, {'tools': {'toolSearch': 'local', 'programmaticCalling': 'on'}}),
+    ({'tools': {'toolSearch': 'auto', 'programmaticCalling': 'off'}},
+     {'tools': {'toolSearch': 'local', 'programmaticCalling': 'off'}}),
+])
+@pytest.mark.parametrize('reverse', [False, True])
+def test_equivalent_policy_spellings_restore_the_full_prefix(replay_store, stored, requested, reverse):
+    from lib.tasks_pkg import model_replay as replay
+    if reverse:
+        stored, requested = requested, stored
+    rows = [_turn('u1', 'human', 'work', 1), _turn('a1', 'assistant', 'done', 2)]
+    original = {**_EVERYDAY, **stored}
+    messages = [{'role': 'user', 'content': 'work'},
+                {'role': 'assistant', 'content': 'done', 'reasoning_content': 'signed',
+                 'thinking_signature': 'sig'}]
+    _put_policy_checkpoint(replay_store, replay, rows, original, copy.deepcopy(messages),
+                           toolLatch={'latched': True})
+    cfg = {**_EVERYDAY, **requested}
+    assert replay.policy_witness(cfg) != replay.policy_witness(original)
+    restored, covered = replay.restore_prefix(rows + [_turn('a2', 'assistant', '', 3)], cfg,
+                                              conversation_id='c', user_id=1)
+    assert (cfg['_modelReplayStatus'], covered) == ('restored', 2)
+    assert '_modelReplayPolicyDrift' not in cfg
+    assert restored[-1]['thinking_signature'] == 'sig'
+    assert cfg['_modelReplayToolLatch'] == {'latched': True}
+
+
+@pytest.mark.parametrize('stored, requested, field', [
+    ({'systemPrompt': None}, {'systemPrompt': 'Answer tersely.'}, 'systemPrompt'),
+    ({'systemPromptMode': None}, {'systemPromptMode': 'replace'}, 'systemPromptMode'),
+    ({'systemPromptBlocks': None}, {'systemPromptBlocks': {'disabled': ['memory_guidance']}},
+     'systemPromptBlocks'),
+    # Chat expansion would turn code execution back on: another tool surface.
+    ({'chatMode': None, 'codeExecEnabled': False}, {'chatMode': 'chat', 'codeExecEnabled': False},
+     'chatMode'),
+    ({'tools': None}, {'tools': {'toolSearch': 'off'}}, 'tools'),
+    ({'tools': {'toolSearch': 'local'}},
+     {'tools': [{'type': 'function', 'function': {'name': 'read_files'}}]}, 'tools'),
+])
+def test_policy_values_consumers_distinguish_still_refuse(replay_store, stored, requested, field):
+    from lib.tasks_pkg import model_replay as replay
+    rows = [_turn('u1', 'human', 'work', 1), _turn('a1', 'assistant', 'done', 2)]
+    _put_policy_checkpoint(replay_store, replay, rows, {**_EVERYDAY, **stored},
+                           [{'role': 'assistant', 'content': 'done'}])
+    cfg = {**_EVERYDAY, **requested}
+    assert replay.restore_prefix(rows + [_turn('a2', 'assistant', '', 3)], cfg,
+                                 conversation_id='c', user_id=1) == ([], 0)
+    assert cfg['_modelReplayStatus'] == 'policy_changed'
+    assert field in cfg['_modelReplayPolicyDrift']
 
 
 def test_interaction_mode_witness_keeps_standard_digests():

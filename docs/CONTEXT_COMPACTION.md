@@ -285,6 +285,36 @@ Opus effort witness keeps them). Specs:
 `tests/model_routing/test_model_continuation_policy.py`,
 `tests/project_mod/test_coordinator_replay_policy.py`.
 
+**Equivalent witness spellings — Problem:** producers spell one effective policy
+differently. The browser composer states an empty system prompt, `append` mode,
+`{}` or `{disabled: []}` blocks and `chatMode: chat`; scheduler-built turns
+(`build_task_config`: Global Router forwards, relays, channel events) omit those
+keys, and every Coordinator continuation of a forwarded request inherits the
+omission from its frozen grant. Grants issued before `toolSearch: auto` was
+retired also keep that spelling, which the normalizer reads as `local`. The raw
+field maps drifted on every alternation between the owner's direct turns and
+those continuations (2026-11-05: `drift=chatMode,systemPrompt,systemPromptBlocks,
+systemPromptMode,tools`, 2,068 messages rebuilt and recompacted each time).
+**Decision:** when the digests differ, `policy_witness_drift` compares both field
+maps as their consumers resolve them (`_effective_policy_fields`): a falsy prompt
+is `''`, a falsy mode is `append`, blocks are their disabled set, legacy chat
+aliases normalize, an unlabelled config whose everyday flags already equal the
+chat defaults is `chat`, and an absent or mapping tool preference is its
+normalized tool block plus any unknown keys. A caller's tool-schema list, every
+boolean and every other field compare exactly, so absent never equals false. No
+effective drift restores like an identical policy (signed prefix and tool
+latch). Digests are unchanged, so no checkpoint is invalidated, and a legacy
+checkpoint without a field map keeps the digest comparison. **Rejected:**
+stating defaults at every producer (cannot reach grants already frozen without
+them, and the browser itself sends both block spellings); re-normalizing grants
+at admission (the dispatch fence compares grant tools exactly); removing these
+fields from the witness (a custom prompt, `replace` mode, a disabled block, a chat
+expansion that changes a flag or another tool preference must still refuse).
+Real differences keep refusing: scheduler-built turns run with
+`schedulerEnabled: true`, which the owner's turns in a Coordinator do not. Specs:
+`test_model_continuation_policy.py` (equivalent spellings / distinguished
+values) and `test_coordinator_replay_policy.py::test_forwarded_request_continuations_keep_the_prefix_beside_direct_owner_turns`.
+
 **Settled reasoning on restore — Problem:** a checkpoint keeps its publishing
 Turn's rounds exactly as sent live, without the settled-Turn mark that a cold
 rebuild derives from `_turnStatus`. The next Turn restored that signed Claude
