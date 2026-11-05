@@ -95,7 +95,7 @@ def _read_pin(path: str) -> _Pin | None:
     return _Pin(after, source)
 
 
-def _importable_sources(directory: str, *, recurse: bool) -> Iterator[str]:
+def _importable_sources(directory: str, *, recurse: bool, ignore_errors: bool = True) -> Iterator[str]:
     """Yield the ``.py`` files the import system can load from ``directory``.
 
     With ``recurse``, a subdirectory is entered only when it holds
@@ -108,6 +108,8 @@ def _importable_sources(directory: str, *, recurse: bool) -> Iterator[str]:
             with os.scandir(current) as entries:
                 names = {entry.name for entry in entries}
         except OSError:
+            if not ignore_errors:
+                raise
             # Removed or unreadable since it was found: it contributes no pins.
             continue
         for name in names:

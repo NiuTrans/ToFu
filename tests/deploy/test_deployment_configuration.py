@@ -936,7 +936,7 @@ def test_distributed_rejects_plaintext_redis(tmp_path):
         load_deployment_configuration(environment)
 
 
-@pytest.mark.parametrize('role', ['api', 'worker', 'scheduler', 'all'])
+@pytest.mark.parametrize('role', ['api', 'worker', 'scheduler', 'execution', 'all'])
 def test_distributed_accepts_declared_process_roles(tmp_path, role):
     environment = _distributed_environment(tmp_path)
     environment['TOFU_PROCESS_ROLE'] = role
@@ -944,9 +944,16 @@ def test_distributed_accepts_declared_process_roles(tmp_path, role):
     assert load_deployment_configuration(environment).process_role == role
 
 
-def test_personal_rejects_split_role_and_distributed_secrets(tmp_path):
-    with pytest.raises(RuntimeError, match='requires TOFU_PROCESS_ROLE=all'):
-        load_deployment_configuration({'TOFU_PROCESS_ROLE': 'api'})
+@pytest.mark.parametrize('role', ['all', 'api', 'execution'])
+def test_personal_accepts_local_process_owners(role):
+    config = load_deployment_configuration({'TOFU_PROCESS_ROLE': role})
+    assert config.mode == 'personal'
+    assert config.process_role == role
+
+
+def test_personal_rejects_partial_execution_role_and_distributed_secrets(tmp_path):
+    with pytest.raises(RuntimeError, match='personal mode requires'):
+        load_deployment_configuration({'TOFU_PROCESS_ROLE': 'worker'})
 
     secret = tmp_path / 'secret'
     secret.write_text('unused', encoding='utf-8')

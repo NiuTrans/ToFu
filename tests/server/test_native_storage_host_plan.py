@@ -56,6 +56,11 @@ def plan_identity(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize('module', [
+    'runtime_guards.py',
+    'runtime_path_policy.py',
+    'bootstrap_pkg/process_roles.py',
+    'bootstrap_pkg/resource_policy_generated.py',
+    'serverctl_pkg/resident_service.py',
     'lib/storage_authority_sql/native_fastpath_auto.py',
     'lib/storage_authority_sql/projection_paths.py',
     'serverctl_pkg/local_placement.py',

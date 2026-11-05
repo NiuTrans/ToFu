@@ -2081,6 +2081,19 @@ class StorageSupervisor:
         from lib.runtime.runtime_paths import data_root
         return Path(data_root()).resolve()
 
+    def connection_document(self, *, service_id: str) -> dict:
+        """Export the selected ready authority through its existing handoff."""
+        from lib.storage.connection_file import CONNECTION_FILE_FORMAT
+        with self._lock:
+            if self._ready_backend == 'tofudb':
+                return self.native_connection_document(service_id=service_id)
+            if (not self.ready or self._process is None or self._connection_file is not None
+                    or self._ready_backend not in {'sqlite', 'postgres'}):
+                raise RuntimeError('storage service has no ready owned generation')
+            return {'format': CONNECTION_FILE_FORMAT, 'protocol': PROTOCOL_VERSION,
+                    'backend': self._ready_backend, 'host': '127.0.0.1',
+                    'port': self._endpoint_port, 'token': self._token}
+
     def native_connection_document(self, *, service_id: str) -> dict:
         """Export one ready native generation to its private lifecycle owner."""
         from lib.storage.connection_file import NATIVE_CONNECTION_FILE_FORMAT

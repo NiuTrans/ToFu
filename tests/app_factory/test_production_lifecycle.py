@@ -157,6 +157,26 @@ def test_distributed_preview_starts_no_optional_service(monkeypatch):
     assert result == ({}, False)
 
 
+@pytest.mark.parametrize('owns_inbound', [False, True])
+def test_only_execution_owner_connects_inbound_bot(monkeypatch, owns_inbound):
+    from lib.production_lifecycle import _start_network_integrations
+    calls = []
+    monkeypatch.setattr('lib.mcp.config.migrate_legacy_config', lambda **_: None)
+    monkeypatch.setattr('lib.mcp.config.load_mcp_config', lambda **_: {})
+    monkeypatch.setattr('lib.mcp.startup.start_mcp_auto_connect', lambda *_, **__: None)
+    monkeypatch.setattr('lib.llm_dispatch.health_local.start_local_health_checker', lambda: None)
+    monkeypatch.setattr('lib.fs_keepalive.start_fs_keepalive', lambda: None)
+    monkeypatch.setattr('lib.code_server_excludes.start_code_server_excludes_sync', lambda: None)
+    monkeypatch.setattr('lib.cross_dc.init_cross_dc_detection', lambda: None)
+    monkeypatch.setattr('lib.feishu.startup.start_bot_from_saved_config',
+                        lambda: calls.append('inbound') or True)
+    _, connected = _start_network_integrations(
+        logger=logging.getLogger('test.inbound-owner'), boot=lambda _: None,
+        owns_inbound=owns_inbound)
+    assert connected is owns_inbound
+    assert calls == (['inbound'] if owns_inbound else [])
+
+
 def test_inline_phase_failure_uses_native_rollback_cleanup():
     """A listener-critical (inline) phase failure still fails startup fast."""
     app = create_base_app('production-lifecycle-rollback', {'TESTING': True})

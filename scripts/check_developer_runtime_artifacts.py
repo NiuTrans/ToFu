@@ -19,6 +19,7 @@ import zipfile
 
 
 REQUIRED_MEMBERS = frozenset({
+    'bootstrap_pkg/process_roles.py',
     'contracts/swarm_messages_v1.json',
     'contracts/paper_build_v1.schema.json',
     'contracts/resource_policy_v1.json',

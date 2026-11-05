@@ -39,6 +39,11 @@ that selection and its existing data: a failure is repaired within the selected
 backend, never by silently opening an old SQLite file or creating another store.
 The native direction remains supported; SQL backends remain separate explicit deployment choices.
 Drivers, physical paths, schema work and SQL stay inside the selected implementation; there is no in-process fallback or runtime store switching. A missing or unhealthy selected authority revokes readiness.
+Linux lifecycle-managed source deployments retain the selected SQL Sidecar in
+the same manager-owned resident host used for native daemons. API detach only
+closes its client; the authority and its crash budget remain alive. SQL keeps
+the authenticated v1 connection handoff, native keeps v2, and the distributed
+preview fence is unchanged. See [resident storage lifecycle](NATIVE_STORAGE_LIFECYCLE.md).
 See [native storage](STORAGE_TOFUDB.md) for its launch and certification contract.
 With the native authority selected, `TOFUDB_TRANSPORT` (default `auto`)
 chooses how the application reaches the engine: `auto` resolves at launch

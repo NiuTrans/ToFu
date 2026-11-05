@@ -27,12 +27,25 @@ approval and task-interruption policy.
 manager preparation share native_engine's subprocess cleanup owner; verify
 real descendant cancellation and manager/CLI roundtrips when changing it.
 
-`native_storage_service.py` is the manager's process/lease controller;
-`native_storage_host.py` owns the existing native `StorageRuntime` across Web
+`resident_service.py` owns manager-bound PID identity, the inherited process
+lease, launch and joined stop. Resource policies specialize its preparation
+and identity ports. `native_storage_service.py` supplies the storage policy;
+`native_storage_host.py` owns the selected `StorageRuntime` across Web
 restarts. Preserve configured data roots, v2 identity admission, manager exec
 retention, terminal crash budgets and drained upgrades. The full contract and
 real-process verification are in `docs/NATIVE_STORAGE_LIFECYCLE.md` and
 `tests/server/test_native_storage_service.py`.
+
+`execution_service.py` / `execution_host.py` own the resident headless
+application process. `execution_lifespan.py` awaits the existing BootRunner
+and application shutdown; it never runs an agent loop. Both resident hosts
+borrow the manager's inherited EOF channel, verified by pipe identity, and
+retain the launch lease through physical cleanup. Verify
+`tests/server/test_execution_service.py` and `test_execution_lifespan.py`.
+`execution_plan.py` prepares a source/configuration digest before host admission;
+it uses the existing pinned-source discovery boundary and never copies an app.
+SQL hosts publish their existing v1 handoff; verify
+`tests/server/test_sql_storage_service.py` without relaxing distributed admission.
 
 ## Editing rules
 

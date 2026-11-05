@@ -482,7 +482,7 @@ def _default_boot(message: str, *args: Any) -> None:
 
 
 def _start_network_integrations(
-    *, logger: logging.Logger, boot: Callback,
+    *, logger: logging.Logger, boot: Callback, owns_inbound: bool,
 ) -> tuple[dict[str, Any], bool]:
     """Start integrations used by API or task-worker processes."""
     boot('Configuring MCP auto-connect…')
@@ -531,6 +531,8 @@ def _start_network_integrations(
         logger.warning('Cross-DC detection failed: %s', exc)
 
     feishu_ok = False
+    if not owns_inbound:
+        return mcp_config, feishu_ok
     try:
         # GUI-saved credentials (server_config.json) are applied before the
         # enable check so a bot configured without env vars still starts.
@@ -590,7 +592,8 @@ def start_optional_production_services(
         CAPABILITY_TASK_WORKERS,
     )):
         mcp_config, feishu_ok = _start_network_integrations(
-            logger=logger, boot=boot)
+            logger=logger, boot=boot,
+            owns_inbound=process_role_has(process_role, CAPABILITY_TASK_WORKERS))
 
     # Retention is eager even when no new task emits an event. The event
     # writer itself remains lazy and both owners are stopped by shutdown.

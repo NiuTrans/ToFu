@@ -2826,7 +2826,7 @@ def test_serverctl_process_roundtrip(tmp_path, entry):
         (project / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(root / name, project / name)
     (project / 'bootstrap_pkg').mkdir()
-    for name in ('__init__.py', 'resource_policy_generated.py', 'server_entry.py'):
+    for name in ('__init__.py', 'resource_policy_generated.py', 'process_roles.py', 'server_entry.py'):
         shutil.copy(root / 'bootstrap_pkg' / name, project / 'bootstrap_pkg' / name)
     shutil.copy(root / 'server.py', project / 'server-entry.py')
     (project / 'server.py').write_text(_WORKER)
