@@ -74,6 +74,13 @@ def render_worker(contract: dict, worker: dict) -> tuple[str, str]:
         f'WORKER_SERVER_CLOCK_FIELDS = frozenset({server_clock["fields"]!r})',
         f'WORKER_SERVER_CLOCK_MAX_STATE_BYTES = {server_clock["maximumStateBytes"]}',
         f'POSTGRES_WORKER_CLOCK_MIN_MAJOR = {server_clock["minimumPostgresMajor"]}',
+        f'WORKER_EXECUTION_WITNESS_FORMAT = {worker["conversationExecutionWitness"]["format"]!r}',
+        f'WORKER_EXECUTION_CONFIG_KEY = {worker["conversationExecutionWitness"]["configKey"]!r}',
+        f'WORKER_EXECUTION_PROCESS_FIELDS = frozenset({worker["conversationExecutionWitness"]["processFields"]!r})',
+        f'WORKER_EXECUTION_EXIT_FORMAT = {worker["conversationExecutionExit"]["format"]!r}',
+        f'WORKER_EXECUTION_EXIT_KEY = {worker["conversationExecutionExit"]["metadataKey"]!r}',
+        f'WORKER_EXECUTION_EXIT_PROOFS = frozenset({worker["conversationExecutionExit"]["proofs"]!r})',
+        f'WORKER_EXECUTION_EXIT_SETTLEMENTS = frozenset({worker["conversationExecutionExit"]["settlements"]!r})',
 
         '',
         'class WorkerLeaseAuthoritySnapshot(NamedTuple):',

@@ -193,6 +193,9 @@ def build_result_meta(task):
                            '(non-fatal): %s', _xe, exc_info=True)
 
     meta = {'contentEpoch': int(task.get('_contentEpoch') or 0)}
+    if task.get('_conversationWorkerExit'):
+        from lib.storage.generated_worker_job_contract import WORKER_EXECUTION_EXIT_KEY
+        meta[WORKER_EXECUTION_EXIT_KEY] = dict(task['_conversationWorkerExit'])
     if is_conversation_attempt(task):
         # Startup's legacy task-result recovery must settle this executor row
         # but must not merge it back into the archived messages JSON. The

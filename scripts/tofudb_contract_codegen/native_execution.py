@@ -17,6 +17,9 @@ def render_execution(tables, worker, inputs) -> list[str]:
     )
     return [
         f'pub const WORKER_JOB_STATES: &[&str] = &{json.dumps(worker["states"])};',
+        f'pub const WORKER_EXECUTION_WITNESS_FORMAT: &str = {json.dumps(worker["conversationExecutionWitness"]["format"])};',
+        f'pub const WORKER_EXECUTION_CONFIG_KEY: &str = {json.dumps(worker["conversationExecutionWitness"]["configKey"])};',
+        f'pub const WORKER_EXECUTION_PROCESS_FIELDS: &[&str] = &{json.dumps(worker["conversationExecutionWitness"]["processFields"])};',
         *(f'pub const AUTOMATION_{name.upper()}_NAMESPACE: &str = {json.dumps(value)};'
           for name,value in sorted(inputs.contract('automation_storage_v1.schema.json')['x-namespaces'].items())),
         *(f'pub const MAX_AUTOMATION_{name}: {kind} = {inputs.contract('automation_v1.schema.json')["x-limits"][key]};'

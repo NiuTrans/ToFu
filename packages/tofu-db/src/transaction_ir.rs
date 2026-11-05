@@ -94,12 +94,14 @@ fn execute_fenced_indexed_append(
     require_attempts_live: &[String],
     worker_claim: Option<&crate::worker_job::PublicationClaim>,
 ) -> io::Result<Vec<u8>> {
-    if request.task_id.starts_with("conversation-attempt:") || worker_claim.is_some() {
-        let attempt_id = request.task_id.strip_prefix("conversation-attempt:").unwrap_or("");
+    let worker_root = crate::task_result::worker_root_for_task(database, transaction, &request.task_id)?;
+    if worker_root.is_some() || worker_claim.is_some() {
+        let root = worker_root.as_deref().unwrap_or(&request.task_id);
+        let attempt_id = root.strip_prefix("conversation-attempt:").unwrap_or("");
         let starts_effect = crate::worker_job::starts_tool_effect(
             &request.event_type, &request.payload_json)?;
         if let Err(error) = crate::worker_job::require_conversation_publication_claim(
-            database, transaction, attempt_id, &request.task_id, worker_claim,
+            database, transaction, attempt_id, root, worker_claim,
             matches!(request.event_type.as_str(), "done" | "error" | "aborted"), !starts_effect) {
             if error.kind() != io::ErrorKind::AlreadyExists { return Err(error); }
             return serde_json::to_vec(&json!({"inserted": false,
@@ -510,6 +512,7 @@ pub enum TransactionIrStep {
     },
     TaskResultCheckpoint {
         worker_claim: Option<crate::worker_job::PublicationClaim>,
+        tool_effect_intent: Option<String>,
         task_id: String,
         value_json: Vec<u8>,
         expected_version: u64,
@@ -908,6 +911,7 @@ pub enum TransactionIrStep {
         task_id: String,
         automation_context: Option<crate::automation_events::TaskStartedContext>,
         worker_claim: Option<crate::worker_job::PublicationClaim>,
+        worker_process: Option<Value>,
         committed_at_ms: u64,
         slot: usize,
     },
@@ -1905,6 +1909,7 @@ impl TransactionIr {
                 }
                 TransactionIrStep::TaskResultCheckpoint {
                     worker_claim,
+                    tool_effect_intent,
                     task_id,
                     value_json,
                     updated_at_ms,
@@ -1915,6 +1920,13 @@ impl TransactionIr {
                     slot,
                     ..
                 } => {
+                    if let Some(intent) = tool_effect_intent {
+                        if intent.is_empty() || !*guarded || !*require_parent {
+                            return Err(invalid_input("invalid child tool effect admission"));
+                        }
+                        literal_bytes = literal_bytes.checked_add(intent.len())
+                            .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
+                    }
                     if let Some(claim) = worker_claim {
                         claim.validate()?;
                         literal_bytes = literal_bytes.checked_add(claim.worker_id.len())
@@ -4734,10 +4746,17 @@ impl TransactionIr {
                     task_id,
                     automation_context,
                     worker_claim,
+                    worker_process,
                     committed_at_ms,
                     slot,
                 } => {
                     if let Some(context) = automation_context { context.validate()?; }
+                    if let Some(process) = worker_process {
+                        let witness = crate::worker_job::execution_witness(process, worker_claim.as_ref())?;
+                        literal_bytes = literal_bytes.checked_add(serde_json::to_vec(&witness)
+                            .map_err(|_| invalid_input("worker execution witness cannot be encoded"))?.len())
+                            .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
+                    }
                     if let Some(claim) = worker_claim {
                         claim.validate()?;
                         literal_bytes = literal_bytes.checked_add(claim.worker_id.len())
@@ -6040,15 +6059,10 @@ fn prepare_transaction_ir_mode(
         // recovery sizing; ordinary settled projection edits retain their scope.
         TransactionIrStep::TurnProjectionUpdate { human_guidance_answer_json, .. } =>
             human_guidance_answer_json.is_some(),
-        // A fenced stream append resolves attempt identity claims in the
-        // tenant-global namespace, like the turn steps above.
-        TransactionIrStep::IndexedStreamAppend {
-            require_attempts_live, task_id, worker_claim,
-            ..
-        } => !require_attempts_live.is_empty() || task_id.starts_with("conversation-attempt:") || worker_claim.is_some(),
-        TransactionIrStep::IndexedStreamAppendBatch { items, .. } => items
-            .iter()
-            .any(|item| !item.require_attempts_live.is_empty() || item.task_id.starts_with("conversation-attempt:") || item.worker_claim.is_some()),
+        // Every stream resolves immutable task ancestry before deciding whether
+        // it is fenced. Omitting a caller claim cannot select a weaker scope.
+        TransactionIrStep::IndexedStreamAppend { .. }
+        | TransactionIrStep::IndexedStreamAppendBatch { .. } => true,
         _ => false,
     });
     // Only document IR admits its shared capacity namespace. Unrelated semantic
@@ -7580,6 +7594,7 @@ fn prepare_transaction_ir_mode(
                 task_id,
                 automation_context,
                 worker_claim,
+                worker_process,
                 committed_at_ms,
                 slot,
             } => {
@@ -7591,6 +7606,7 @@ fn prepare_transaction_ir_mode(
                     *committed_at_ms,
                     automation_context.as_ref(),
                     worker_claim.as_ref(),
+                    worker_process.as_ref(),
                 )?));
             }
             TransactionIrStep::TurnEventsList {
@@ -7839,6 +7855,7 @@ fn prepare_transaction_ir_mode(
             }
             TransactionIrStep::TaskResultCheckpoint {
                 worker_claim,
+                tool_effect_intent,
                 task_id,
                 value_json,
                 expected_version,
@@ -7850,6 +7867,7 @@ fn prepare_transaction_ir_mode(
                 slot,
             } => {
                 let guard = guarded.then_some(crate::task_result::CheckpointGuard {
+                    tool_effect_intent: tool_effect_intent.clone(),
                     require_parent: *require_parent,
                     cache_prefix_hwm: *cache_prefix_hwm,
                     last_turn_cache_read: *last_turn_cache_read,
@@ -8627,10 +8645,19 @@ fn prepare_transaction_ir_mode(
                 )?));
             }
             TransactionIrStep::IndexedStreamAppendBatch { items, slot } => {
-                if items
+                let mut fenced = items
                     .iter()
-                    .any(|item| !item.require_attempts_live.is_empty() || item.task_id.starts_with("conversation-attempt:") || item.worker_claim.is_some())
-                {
+                    .any(|item| !item.require_attempts_live.is_empty() || item.task_id.starts_with("conversation-attempt:") || item.worker_claim.is_some());
+                if !fenced {
+                    for item in items {
+                        if crate::task_result::worker_root_for_task(database, &mut transaction,
+                                &item.task_id)?.is_some() {
+                            fenced = true;
+                            break;
+                        }
+                    }
+                }
+                if fenced {
                     // Fenced items need a per-row verdict, so run the same
                     // single-append path per item and rebuild the aggregate
                     // response shape of `indexed_stream::append_batch`.

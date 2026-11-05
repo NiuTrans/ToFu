@@ -11,6 +11,13 @@ WORKER_SERVER_CLOCK_FORMAT = 'tofu.worker-lease-clock/v1'
 WORKER_SERVER_CLOCK_FIELDS = frozenset(['format', 'epoch', 'nowMs', 'utcMs', 'stateBytes'])
 WORKER_SERVER_CLOCK_MAX_STATE_BYTES = 128
 POSTGRES_WORKER_CLOCK_MIN_MAJOR = 17
+WORKER_EXECUTION_WITNESS_FORMAT = 'tofu.conversation-worker-execution/v1'
+WORKER_EXECUTION_CONFIG_KEY = '_conversationWorkerExecution'
+WORKER_EXECUTION_PROCESS_FIELDS = frozenset(['host', 'boot', 'pid_namespace', 'pid', 'started'])
+WORKER_EXECUTION_EXIT_FORMAT = 'tofu.conversation-worker-exit/v1'
+WORKER_EXECUTION_EXIT_KEY = 'conversationWorkerExit'
+WORKER_EXECUTION_EXIT_PROOFS = frozenset(['joined', 'process_dead'])
+WORKER_EXECUTION_EXIT_SETTLEMENTS = frozenset(['confirmed', 'unknown'])
 
 class WorkerLeaseAuthoritySnapshot(NamedTuple):
     epoch: str

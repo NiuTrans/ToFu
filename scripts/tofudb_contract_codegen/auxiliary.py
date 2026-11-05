@@ -15,6 +15,18 @@ def load_worker(inputs: ContractInputs) -> dict:
             or document.get('claimableStates') != ['queued', 'suspended']):
         raise ValueError('invalid canonical worker lifecycle')
     lease = document.get('leaseAuthority', {})
+    witness = document.get('conversationExecutionWitness', {})
+    exit_receipt = document.get('conversationExecutionExit', {})
+    if (exit_receipt.get('format') != 'tofu.conversation-worker-exit/v1'
+            or exit_receipt.get('metadataKey') != 'conversationWorkerExit'
+            or exit_receipt.get('proofs') != ['joined', 'process_dead']
+            or exit_receipt.get('settlements') != ['confirmed', 'unknown']):
+        raise ValueError('invalid conversation execution exit contract')
+    if (witness.get('format') != 'tofu.conversation-worker-execution/v1'
+            or witness.get('configKey') != '_conversationWorkerExecution'
+            or witness.get('processField') != 'worker_process'
+            or witness.get('processFields') != ['host', 'boot', 'pid_namespace', 'pid', 'started']):
+        raise ValueError('invalid conversation execution witness contract')
     if (not isinstance(lease, dict) or lease.get('leaseIndexMarker') != 255
             or lease.get('epochCharacters') != 32 or lease.get('maximumLeaseProbesPerKind') != 4
             or any(not isinstance(lease.get(key), str) or not lease[key]

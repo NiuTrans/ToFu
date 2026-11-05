@@ -647,6 +647,14 @@ the timeout sentinel out of tool messages (stops guarding real wire changes).
 
 ### Tests never encode host speed
 
+Generic native worker-queue tests use their own task kind. The reserved
+`conversation-attempt` kind keeps queued cancellation claimable until its
+domain handler settles the Turn (`worker_job_lifecycle_v1.json`); using that
+kind in a transport-only fixture and expecting immediate cancellation tests
+the wrong lifecycle. Verify
+`worker_jobs_preserve_idempotency_priority_leases_fencing_and_cancellation`
+alongside the conversation worker cancellation specifications.
+
 **Problem:** the loaded full unit gate failed tests that pass alone. A writer
 thread that waited at most 5 s for a snapshot's fenced read gave up while the
 snapshot's optimistic git captures were still running, so the snapshot saw no

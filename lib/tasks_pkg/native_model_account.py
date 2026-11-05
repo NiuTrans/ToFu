@@ -165,8 +165,12 @@ class NativeModelAccountPolicy:
                 self._check(request)
                 if request.cancelled.is_set() or self.task['abort_event'].is_set():
                     raise asyncio.CancelledError
-            self.dispatch_entered = True
             self.lease.mark_dispatched()
+            # The control callback may have been entered without the shared
+            # account admitting a send. Preserve that proven-unsent distinction.
+            # A lease already marked dispatched still retains unknown usage if
+            # a later account observer fails before returning its acknowledgement.
+            self.dispatch_entered = True
             return prepared
         return await self._call(request,dispatch)
 

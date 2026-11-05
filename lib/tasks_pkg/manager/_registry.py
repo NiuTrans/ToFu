@@ -239,6 +239,7 @@ def _create_chat_task(
     task.update({
         'convId': conv_id, 'messages': messages, 'config': config,
         '_userId': owner_user_id,
+        '_tenant_id': principal.tenant_id or '',
         '_profileScope': str(owner_user_id),
         '_automationStartContext': automation_context,
         # Stable assistant message id, minted CLIENT-SIDE before the send

@@ -46,6 +46,11 @@ def validate_records(records) -> None:
         != "tofu.task-results.checkpoint.guard/v1"
         or records.get("taskResultCacheSettingsContract")
         != "tofu.task-results.checkpoint.cache-settings/v1"
+        or records.get("taskResultToolEffectAdmission") != {
+            "requestField": "tool_effect_intent", "responseField": "tool_effect_intent",
+            "type": "string", "minLength": 1, "requiresGuardedParent": True,
+            "workerScope": "registered-descendant", "revalidateOnReplay": True,
+        }
         or records.get("taskResultCacheFactMaximum") != 2_147_483_647
     ):
         raise ValueError("Tofu-DB records table must be owner scoped")
