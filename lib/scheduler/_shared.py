@@ -333,6 +333,19 @@ def reconcile_and_decide(kind: str, predicate: PredicateResult | None,
     )
 
 
+def validate_condition_regex(condition_command: str, condition_regex: str) -> None:
+    """Refuse a readiness regex that could never decide: it needs a predicate
+    whose stdout it reads, and it must compile. Timers and agents share it."""
+    if not condition_regex:
+        return
+    if not str(condition_command or '').strip():
+        raise ValueError('condition_regex requires condition_command')
+    try:
+        _re.compile(condition_regex)
+    except _re.error as exc:
+        raise ValueError(f'invalid condition_regex: {exc}') from exc
+
+
 def derive_condition_kind(check_instruction: str, condition_command: str) -> str:
     """Infer condition_kind from the caller's parameter combination.
 
