@@ -2731,7 +2731,7 @@
                     "task_id": task_id,
                     "user_id": owner,
                     "tenant_id": "tenant-a",
-                    "task_kind": "conversation-attempt",
+                    "task_kind": "queue-contract-test",
                     "idempotency_key": key,
                     "payload": {"value": value},
                     "priority": priority,
@@ -2749,7 +2749,7 @@
                     "worker_id": worker,
                     "now_ms": now_ms,
                     "lease_ms": 60_000,
-                    "task_kinds": ["conversation-attempt"]
+                    "task_kinds": ["queue-contract-test"]
                 }),
                 Some(command),
             )
@@ -3033,7 +3033,7 @@
             json!({
                 "task_id": "worker-future-clock",
                 "user_id": 41,
-                "task_kind": "conversation-attempt",
+                "task_kind": "queue-contract-test",
                 "idempotency_key": "future-clock-key",
                 "payload": {},
                 "now_ms": 86_461_508_u64
@@ -3050,7 +3050,7 @@
             json!({
                 "task_id": "worker-oversized",
                 "user_id": 41,
-                "task_kind": "conversation-attempt",
+                "task_kind": "queue-contract-test",
                 "idempotency_key": "oversized-key",
                 "payload": {"blob": "x".repeat(MAX_WORKER_JOB_PAYLOAD_BYTES)},
                 "now_ms": 61_507
