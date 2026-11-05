@@ -646,6 +646,14 @@ accepted attempt config already is the durable authority). Cost: one source
 attempt read per continuation admission. Spec:
 `tests/project_mod/test_coordinator_replay_policy.py`.
 
+Background completion resumes read both predecessor and successor attempts
+through the repository's owner-scoped `get_attempt` port. Its default resolves
+the selected lifecycle store lazily, just as an injected test reader does.
+Calling the optional injected reader directly was rejected: ordinary production
+repositories omit it, so a durable successor could be created but never bound
+back to its assignment. The worker continuation specification exercises both
+reader configurations and preserves the exact predecessor/successor fences.
+
 A continuation that ends without changed work/review/delivery evidence (including
 a failed Coordinator turn) is retried after `stallRetrySeconds` backoff
 (30 s, 2 min, 10 min, 30 min, 60 min); only after `maxStalledTurns` (6) such turns
@@ -946,6 +954,13 @@ messages. Owner, project, Coordinator identity and binding revision are checked;
 replacement withdraws pending transport while preserving old conversation history.
 Reports can be ingested during the ordinary Coordinator attempt without replacing
 that attempt or preventing its settlement.
+
+The attention head is a projection, not an independent transcript. If its Turn
+has been deleted, reads return empty attention after rechecking the binding;
+they do not rewrite history or the read watermark. Storage failures and a
+present Turn with mismatched identity still fail visibly. Treating a missing
+Turn as an internal error was rejected because a legitimate history deletion
+would break every subsequent report poll.
 
 Model view. Problem: a report Turn is ingested after the still-running reply
 that published it. Replaying it as one more assistant message after that reply

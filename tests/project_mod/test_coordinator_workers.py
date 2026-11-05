@@ -150,7 +150,9 @@ def test_workers_have_no_spend_or_concurrency_ceiling(runtime, monkeypatch):
     assert len(r.created) == len(r.calls) == 12
 
 
-def test_background_completion_continues_same_assignment_and_moves_result_to_new_turn(runtime, monkeypatch):
+@pytest.mark.parametrize('attempt_lookup', ['injected', 'default'])
+def test_background_completion_continues_same_assignment_and_moves_result_to_new_turn(
+        runtime, monkeypatch, attempt_lookup):
     from lib.message_queue import dispatch_completed_background_batch
     from lib.tasks_pkg import background_commands
     r = runtime
@@ -218,6 +220,9 @@ def test_background_completion_continues_same_assignment_and_moves_result_to_new
         return SimpleNamespace(value={'attempt': r.attempts[new_attempt]})
     from lib.conversation_sync.runtime import conversation_turn_commands
     monkeypatch.setattr(conversation_turn_commands, 'resume_turn', create)
+    if attempt_lookup == 'default':
+        monkeypatch.setattr('lib.turn_lifecycle.get_attempt', r.c.repo.attempt_get)
+        monkeypatch.setattr(r.c.repo, 'attempt_get', None)
     assert dispatch_completed_background_batch(assignment['request']['recipientId'], user_id=7) == 'continuation-attempt'
     continued = r.c.repo.read(assignment['id'])['execution']
     assert continued['turnId'] == old['turnId'] and continued['attemptId'] == 'continuation-attempt'

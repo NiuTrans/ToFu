@@ -225,15 +225,21 @@ class CoordinatorReports:
         if not row or row['value']['scope'] != scope:
             return result
         head = row['value']; pointer = head['latest']
+        from lib.turn_lifecycle import LifecycleNotFound
         get_turn = self.get_turn
         if get_turn is None:
             from lib.turn_lifecycle import get_turn
-        turn = get_turn(scope['coordinatorId'], pointer['turnId'], user_id=self.owner)
-        if (not turn or turn['conversationId'] != scope['coordinatorId']
+        try:
+            turn = get_turn(scope['coordinatorId'], pointer['turnId'], user_id=self.owner)
+        except LifecycleNotFound:
+            turn = None
+        self._scope(scope)  # A read racing replacement must not show old-team content.
+        if turn is None:
+            return result
+        if (turn['conversationId'] != scope['coordinatorId']
                 or turn['actor'] != 'assistant' or turn['ordinal'] != pointer['ordinal']
                 or turn['kind'] != 'coordinator_report.' + pointer['kind']):
             raise StorageError('database_integrity', 'Coordinator report message is unavailable')
-        self._scope(scope)  # A read racing replacement must not show old-team content.
         result['latest'] = {**pointer, 'content': turn['projection'].get('content', '')}
         result['unread'] = pointer['ordinal'] > head['readOrdinal']
         validate_report(result, 'reportState')

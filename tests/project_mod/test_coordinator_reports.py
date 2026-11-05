@@ -143,6 +143,56 @@ def test_reads_spend_nothing_and_report_owner_and_scope_are_exact(reports):
         r.factory(path='/other').publish(r.scope, r.request)
 
 
+@pytest.mark.parametrize('missing_result', ['none', 'not_found'])
+def test_deleted_report_projects_empty_attention_without_mutating_history(
+        reports, monkeypatch, missing_result):
+    from lib.turn_lifecycle import LifecycleNotFound
+
+    r = reports
+    r.repo.publish(r.scope, r.request)
+    before = deepcopy(r.store.rows)
+
+    def missing(conv, turn_id, *, user_id):
+        assert (conv, user_id) == ('coordinator', 7)
+        if missing_result == 'not_found':
+            raise LifecycleNotFound('Turn not found')
+        return None
+
+    monkeypatch.setattr(r.repo, 'get_turn', missing)
+    state = r.repo.read()
+    assert state['latest'] is None and state['unread'] is False
+    assert r.store.rows == before
+
+
+def test_report_storage_failure_is_not_treated_as_deleted(reports, monkeypatch):
+    r = reports
+    r.repo.publish(r.scope, r.request)
+    failure = StorageError('database_unavailable', 'offline', retryable=True)
+
+    def unavailable(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(r.repo, 'get_turn', unavailable)
+    with pytest.raises(StorageError) as caught:
+        r.repo.read()
+    assert caught.value is failure
+
+
+def test_deleted_report_read_rechecks_coordinator_binding(reports, monkeypatch):
+    from lib.turn_lifecycle import LifecycleNotFound
+
+    r = reports
+    r.repo.publish(r.scope, r.request)
+
+    def replaced(*args, **kwargs):
+        r.binding.update(conversationId='replacement', revision=2)
+        raise LifecycleNotFound('Turn not found')
+
+    monkeypatch.setattr(r.repo, 'get_turn', replaced)
+    with pytest.raises(PermissionError):
+        r.repo.read()
+
+
 def test_concurrent_identical_reports_commit_one_turn_and_one_attention_position(reports):
     from concurrent.futures import ThreadPoolExecutor
     r = reports
