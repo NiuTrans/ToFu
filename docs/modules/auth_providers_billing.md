@@ -267,6 +267,18 @@ HTTP stack; only an explicit online refresh owns that lazy dependency.
 
 Model-id lookups must go through `lib.pricing.pricing_for_model` (or `lookup_pricing`), never a raw `MODEL_PRICING.get`: the seam folds one trailing dated-checkpoint stamp (`-MMDD` / `-YYYYMMDD`) so a pinned snapshot (`deepseek-v4-pro-0813`) inherits its rolling alias's row. A dated pin therefore needs no pricing row of its own — add the alias it folds to instead.
 
+A resolved context tier carries only the rates its source declares; every
+other rate is inherited from the model's declared row, then the documented
+defaults (cache read 0.10, cache write 1.25 of input). Problem: the legacy CNY
+tier table declares only input/output per context, and its translator wrote
+`cacheReadMul` 0.0 over the model row, so declared cache hits (hy4-preview's
+¥0.3, every Qwen row's 10%) were billed as free. Decision: tiers inherit, and
+the CNY table may declare its own cache rates per row (the two rows without a
+model row keep the 1.0 write rate the translator always applied).
+Alternative rejected: copying cache rates into every tier row, a second
+declaration of the same fact that drifts. Specification:
+`tests/pricing/test_declared_cache_rates.py`.
+
 For billed requests, `lib/billing/request_flow.py` owns the full sequence:
 
 1. estimate and reserve before dispatch;
