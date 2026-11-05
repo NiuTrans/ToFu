@@ -63,7 +63,7 @@ export function presentLivePhaseLabel(value: TransientTurnPresentation, text: Li
   else if (phase === 'tool_exec' && value.tools?.length && !localizedDetail) label = value.detail || value.tools.join(', ');
   else if (phase === 'retrying' && !localizedDetail && !value.detail) label = text('stream.phase.retrying', 'Retrying…');
   else if (phase === 'waiting' && !localizedDetail && !value.detail) label = text('stream.phase.waitingWorkerStatus', 'Waiting for an execution status update…');
-  else if (phase === 'responding' && !value.detail) label = text('autopilot.warming', 'Autopilot is responding…');
+  else if (phase === 'responding' && !value.detail) label = text('stream.phase.generatingResponse', 'Generating response…');
   if (!label && phase === 'waiting_model') label = text('stream.phase.waitingModel', 'Sent to the model, waiting for it to start replying…');
   const route = value.modelRoute;
   if (route?.selectedModel && route.resolvedModel && route.selectedModel !== route.resolvedModel

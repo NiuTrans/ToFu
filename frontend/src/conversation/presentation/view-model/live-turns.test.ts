@@ -1,7 +1,7 @@
 /** The running reply's live row reports its own projected activity. */
 import { describe, expect, it } from 'vitest';
 import type { AttemptRecord, TurnRecord } from '../../../api/conversation-sync.generated';
-import { createTurnState } from '../../domain/turn-store';
+import { createTurnState, type LiveContentGrowth } from '../../domain/turn-store';
 import { selectConversationViewModel } from '../conversation-view-model';
 
 const STARTED = 1_793_693_000_000;
@@ -13,7 +13,10 @@ const call = (id: string, status: string, toolArgs: Record<string, unknown> = {}
 });
 const receipt = { blockId: 'file-changes', count: 1, state: 'applied', files: [{ path: 'lib/slides/recipe.py' }] };
 
-function liveStatus(segments: unknown[], livePhase: unknown = null, extra: Record<string, unknown> = {}) {
+function liveStatus(
+  segments: unknown[], livePhase: unknown = null, extra: Record<string, unknown> = {},
+  contentGrowth?: LiveContentGrowth,
+) {
   const state = createTurnState('conv');
   state.turnsById.reply = {
     turnId: 'reply', conversationId: 'conv', laneId: 'main', ordinal: 1, actor: 'assistant', kind: 'reply',
@@ -23,6 +26,7 @@ function liveStatus(segments: unknown[], livePhase: unknown = null, extra: Recor
   state.attemptsById.attempt = { attemptId: 'attempt', turnId: 'reply', status: 'running', taskId: 'task' } as AttemptRecord;
   state.laneOrder.main = ['reply'];
   state.livePhase = livePhase;
+  if (contentGrowth) state.liveContentGrowth = contentGrowth;
   const turn = selectConversationViewModel(state).mainLane.turns[0]!;
   return { kinds: turn.blocks.map(block => block.kind),
     value: turn.blocks.find(block => block.kind === 'live-status')?.value };
@@ -87,5 +91,42 @@ describe('projected live activity', () => {
       .toMatchObject({ phase: 'waiting', detailKey: 'stream.phase.waitingWorkerStatus' });
     expect(liveStatus([]).value).toMatchObject({ phase: 'waiting', detailKey: 'stream.phase.waitingWorkerStatus' });
     expect(liveStatus([]).value?.startedAt).toBeUndefined();
+  });
+});
+
+describe('frame evidence for a cleared phase', () => {
+  // Wire shape: the round's live accumulators are thinking:terminal followed
+  // by text:terminal, which the producer stamps terminal.
+  const narration = { type: 'text', blockId: 'text:terminal', text: 'Using the guide.', terminal: true,
+    deliverable: true, llmRound: 0 };
+  // The live accumulator renders the projection's `content`.
+  const answer = { content: narration.text };
+
+  it('reads reasoning that streams above narration as thinking, not waiting', () => {
+    const { kinds, value } = liveStatus([thinking('terminal'), narration], null, answer, 'reasoning');
+    expect(kinds).toEqual(['thinking', 'text', 'live-status']);
+    expect(value).toMatchObject({ phase: 'thinking_active' });
+    expect(value?.detailKey).toBeUndefined();
+  });
+
+  it('lets a streaming answer tail stand alone and names it below other blocks', () => {
+    expect(liveStatus([thinking('terminal'), narration], null, answer, 'answer').kinds).toEqual(['thinking', 'text']);
+    const { kinds, value } = liveStatus([thinking('a'), narration, call('c1', 'done')], null, answer, 'answer');
+    expect(kinds).toEqual(['thinking', 'text', 'tool', 'live-status']);
+    expect(value).toMatchObject({ phase: 'responding' });
+  });
+
+  it('keeps active calls first and never revives settled-looking reasoning after a frame that grew nothing', () => {
+    expect(liveStatus([thinking('a'), call('c1', 'running')], null, {}, 'reasoning').value)
+      .toMatchObject({ phase: 'tool_exec', tools: ['run_command'] });
+    const quiet = liveStatus([thinking('a')], null, {}, 'none');
+    expect(quiet.kinds).toEqual(['thinking', 'live-status']);
+    expect(quiet.value).toMatchObject({ phase: 'waiting', detailKey: 'stream.phase.waitingWorkerStatus' });
+  });
+
+  it('never overrides an explicit phase', () => {
+    const waiting = { phase: 'waiting_model', detailKey: 'stream.phase.waitingForModel', detailArgs: { model: 'm' }, model: 'm' };
+    expect(liveStatus([thinking('a'), narration], waiting, answer, 'reasoning').value)
+      .toMatchObject({ phase: 'waiting_model', detailKey: 'stream.phase.waitingForModel' });
   });
 });

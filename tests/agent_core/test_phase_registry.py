@@ -190,13 +190,14 @@ _NON_PHASE_EVENT_VALUES: dict[str, str] = {
 # Frontend ``.phase === "x"`` values that are NOT pushed PHASE values.
 _FRONTEND_PHASE_EXEMPTIONS: dict[str, str] = {
     'pending': 'client-local context provenance disclosure status',
-    # Derived CLIENT-side from thinking deltas (sse_pipeline.js /
-    # streaming_render.js → setStreamPhase) — never pushed by the backend.
+    # Derived CLIENT-side from the projection accumulator the phase-clearing
+    # frame grew (TurnState.liveContentGrowth; Autopilot VU deltas likewise)
+    # — never pushed by the backend.
     'thinking_active': 'client-local derived phase state',
+    'responding': 'client-local derived phase state',
     # Autopilot VU presentation states and the no-frame fallback are created
     # by the typed conversation projection, not pushed by the backend.
     'warming': 'client-local autopilot virtual-user presentation',
-    'responding': 'client-local autopilot virtual-user presentation',
     'waiting': 'client-local missing-phase fallback presentation',
     # The durable Turn/Attempt join derives these dispatch states when no
     # transient worker phase exists. ``executor_queued`` also has a canonical

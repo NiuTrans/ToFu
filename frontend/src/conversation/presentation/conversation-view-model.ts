@@ -473,6 +473,8 @@ function composeSelection(
             phaseSource,
             turn.status,
           );
+          const contentGrowth = turn.turnId === mainLiveTurnId
+            ? state.liveContentGrowth : undefined;
           liveStatus.goalProgress = goalProgressByTurn.get(turn.turnId);
           /* A withheld-push wedge means no newer frame can arrive, so any
            * livePhase on record is stale. Present the honest storage-wedge
@@ -490,13 +492,13 @@ function composeSelection(
             delete liveStatus.toolContext;
             delete liveStatus.toolContextTools;
           } else {
-            projectLiveActivity(liveStatus, blocks);
+            projectLiveActivity(liveStatus, blocks, contentGrowth);
           }
           /* A row that only restates the streaming block directly above it
            * is noise. Real phases (waiting_model / retrying / tool_exec /…)
            * and projected calls never match; the wedge override above must
            * always render. */
-          if (!waitingPlaceholderRedundant(liveStatus, blocks)) {
+          if (!waitingPlaceholderRedundant(liveStatus, blocks, contentGrowth)) {
             blocks.push({
               blockId: 'live-status',
               kind: 'live-status',
