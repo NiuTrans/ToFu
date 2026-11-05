@@ -27,8 +27,6 @@ import {
   formatDuration,
 } from './localized-copy';
 
-import { renderReasoningStatus } from './reasoning-status';
-
 export function initiatorRoleLabel(
   origin: ConversationTurnViewModel['metadata']['origin'],
 ): string {
@@ -36,7 +34,7 @@ export function initiatorRoleLabel(
   const initiatedLabels: Partial<Record<NonNullable<typeof initiator>, string>> = {
     autopilot: 'Autopilot', proactive: 'Proactive Agent', timer: 'Timer',
     brain: 'Project Brain', peer: 'Peer', operator: 'Operator',
-    swarm: 'Auto-continued',
+    swarm: 'Auto-continued', channel: 'Channel',
   };
   return initiator ? initiatedLabels[initiator] ?? '' : '';
 }
@@ -157,8 +155,7 @@ export function renderTurnHeader(
     time.setAttribute('aria-label', timestampPresentation.exact);
   }
   const badge = orchestrationBadge(turn, ports, node.ownerDocument);
-  const reasoning = renderReasoningStatus(node, turn, ports);
-  node.replaceChildren(role, time, ...(badge ? [badge] : []), ...(reasoning ? [reasoning] : []));
+  node.replaceChildren(role, time, ...(badge ? [badge] : []));
   appendTaskTimePresentations(node, turn);
 }
 

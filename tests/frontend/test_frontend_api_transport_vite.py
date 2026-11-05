@@ -10,6 +10,7 @@ import subprocess
 import pytest
 
 from tests._runtime_sections import native_module_path
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -21,12 +22,9 @@ CONVERSATION_SYNC_ENTRY = os.path.join(
     ROOT, 'frontend/src/api/conversation-sync.generated.ts')
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD),
-    reason='node + vite test bundler unavailable',
-)
 @pytest.mark.parametrize('v4', [True, False])
 def test_transport_resolves_main_admin_and_proxy_paths(tmp_path, v4):
+    require_node_modules('vite')
     built = tmp_path / 'api-transport.js'
     compiled = subprocess.run(
         [ESBUILD, ENTRY, '--bundle', '--format=cjs', '--platform=node',
@@ -81,11 +79,8 @@ console.log(JSON.stringify({
     assert json.loads(proc.stdout.strip().splitlines()[-1]) == expected
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD),
-    reason='node + vite test bundler unavailable',
-)
 def test_transport_keeps_failure_channels_and_request_ids_distinct(tmp_path):
+    require_node_modules('vite')
     entry = tmp_path / 'api-transport-errors-entry.ts'
     entry.write_text(
         f'export * from {json.dumps(ENTRY)};\n'
@@ -336,7 +331,7 @@ async function rejected(promise) {
 
 def test_main_and_admin_publish_one_shared_transport():
     transport = open(ENTRY, encoding='utf-8').read()
-    main = open(os.path.join(ROOT, 'frontend/src/main.ts'), encoding='utf-8').read()
+    main = open(os.path.join(ROOT, 'frontend/src/application.ts'), encoding='utf-8').read()
     admin = open(os.path.join(ROOT, 'frontend/src/admin.ts'), encoding='utf-8').read()
     runtime = open(os.path.join(
         ROOT, 'frontend/src/runtime/app-runtime.js'), encoding='utf-8').read()
@@ -350,8 +345,7 @@ def test_main_and_admin_publish_one_shared_transport():
 
 def test_idempotent_turn_commands_retry_contract_transients_with_same_command_id():
     node = shutil.which('node')
-    if not node:
-        pytest.skip('node is required for the API retry contract')
+    require_node_modules('vite')
     api_path = native_module_path(
         'conversation-sync-api-browser.js', CONVERSATION_SYNC_ENTRY)
     harness = r'''
@@ -411,7 +405,7 @@ global.fetch = async (_url, init) => {
     return response(503, {
       ok: false,
       error: {
-        kind: 'server_busy', message: 'Storage is temporarily busy',
+        kind: 'storage_unavailable', message: 'Storage is temporarily busy',
         retryable: true, storageCode: 'database_timeout',
       },
       storageCode: 'database_timeout', retryAfterMs: 1,

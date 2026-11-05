@@ -29,6 +29,21 @@ commutative/probabilistic hashes can hide changes; an additional event log or
 mutable transcript duplicates authority; suppressing catalog/terminal callbacks
 or delaying correctness checks to improve a timing changes behavior.
 
+The composer callback (`updateSendButton`) runs only for the active
+conversation, the only one it projects; every other conversation's stream used
+to repaint it several times a second. Repaints write a DOM attribute only when
+its value changes (`setStableData` in `renderers/stable-dom.ts`): the composer
+controls, the Agent-mode lock, and what the Turn renderer, `RoundOutline` and
+tool summaries re-patch on every commit of a live Turn (block, Turn and
+tool-panel datasets, part visibility). An equal rewrite still queues a mutation
+and restyles the node (2026-10-28 owner report of continuous change in an idle
+conversation). Rejected: skipping the re-patch of an unchanged block, because
+its outline state (process edge, action state) follows its siblings. Specs:
+`composer-send-controls.test.ts`, `turn-projection.test.ts`,
+`tests/agent_core/test_agent_mode_selector.py` and
+`test_unchanged_rerender_rewrites_no_block_attribute` in
+`tests/frontend/test_frontend_conversation_surface_vite.py`.
+
 The browser fixture in `tests/support/turn_pipeline_browser.ts` sends valid wire
 events through the actual sync coordinator, TurnRuntime, scheduled controller,
 selector, rich Markdown renderers and Surface. The real Chromium MutationObserver
@@ -77,6 +92,30 @@ separate runtime-shell change reduced the already optimized 4096-Turn burst's
 observed dispatch work from about 37 ms to 5 ms. These local diagnostics establish
 scope and tradeoffs, not a device-independent latency promise or startup claim.
 
+## Reference-safe streaming Markdown
+
+**Problem:** blank-line boundaries do not isolate Markdown link definitions.
+Reusing an independently parsed prefix can leave early links or images unresolved
+when their definitions arrive in a later frame, or lose definitions needed by a
+later reference. Comparing against the same stateful streaming renderer can also
+produce a false oracle.
+
+**Decision:** `markdown/streaming-prefix.ts` stops the reusable prefix before the
+first bracket outside fenced code. Plain leading prose still reuses its existing
+HTML; reference-capable content and its definitions parse together through the
+normal sanitizer and link-policy pipeline. Inline links, escaped brackets and
+inline code may conservatively opt out too. This adds no cache, timer, transport
+or storage state. Terminal rendering remains independent of streaming reuse.
+**Alternatives rejected:** parsing definitions in a second registry duplicates
+parser policy; preserving stale links until settlement violates exact rendering;
+disabling all prefix reuse needlessly discards the plain-prose optimization.
+
+Specs: `tests/markdown-streaming-prefix.test.cjs` uses an independent full-render
+oracle without terminal calls clearing the candidate between frames, including
+late/early definitions, repeated frames, Unicode references, images and changed
+sources. The real-browser reader parity/interaction tests cover retained DOM,
+selection and typing. No end-to-end latency improvement is claimed by this guard.
+
 ## Swarm receipt projection work
 
 Problem: each mirrored agent receipt reparsed every tool output; cross-Turn
@@ -98,6 +137,145 @@ transcript cache, transport or durable state is introduced.
 Alternatives rejected: throttling rendering leaves synchronous ingress blocked;
 dropping history/receipts loses evidence; caching serialized transcripts retains
 large duplicated bodies without removing the repeated work.
+
+Presentation copies are copy-on-write. `rebase`, `compose` and
+`selectCandidates` clone, in one batch per Turn, only rounds that rebase or
+receipt projection may write (swarm launches and agents, senders, rounds whose
+run id comes from tool output); segments, text, signatures and all other rounds
+stay shared immutable TurnStore values. Push-frame `update` and `advance` keep a
+full deep copy because retained reducers mutate arbitrary projection fields.
+Before, every Surface commit's background-agent dock read `candidates` twice and
+deep-cloned each assistant projection: 33-80 ms per commit for a 2 MB tool loop,
+before first paint and again on every later render. Spec:
+`swarm-receipt-pressure.test.ts` (identity sharing, clone count, unmutated input).
+
+The retained dock composition selects these candidates and summarizes activity
+once per update, then passes the same values to agent and run-message projection.
+Adding run communication had introduced a second candidate read, repeating the
+copy-on-write preparation described above. The retained composition specification
+now observes exactly one read on a Surface commit (previously two), alongside
+the existing switch, disclosure, error and disposal checks. Sharing one input
+value costs no additional clone or cache; each typed projection keeps its own
+display policy. A cross-update cache was rejected because its ownership and
+invalidation would duplicate the canonical presentation owner.
+
+Run communication uses the same one-pass rule. Problem:
+`presentation/swarm-messages-projection.ts` rebuilt and merged its complete
+receipt/participant output after every historical wave. Decision: one local Map
+per run accumulates incoming identities with `mergeMessageReceipt`, then emits
+the existing snapshot once. First-seen order, confirmed/unconfirmed precedence,
+first accepted timestamps, last participant evidence and exact run isolation
+remain unchanged. The Maps expire with the call; no invalidation or retained
+cache is needed. Rejected: coalescing only the final array leaves quadratic work
+in ingress; the general receipt collector also filters states and therefore
+cannot replace this projection's existing admission policy.
+
+The focused specification measures 128 independent receipts across one run:
+identity-key construction falls from 8,256 to 128. Alternating production-minified
+Vite owner graphs (Safari 15 target, Node 24.14.1;
+baseline/optimized/optimized/baseline, nine samples after four warmups) measure
+256 receipts at 75.2–78.9 ms versus 1.0 ms, with identical complete output
+digests. One receipt stays within 0.03–0.05 ms noise; eight falls from
+0.16 ms to 0.06–0.10 ms. Heap growth from a forced-GC start to return is
+4.0–4.2 MiB versus 0.8 MiB at 256 receipts; this is a call-return diagnostic,
+not a peak-memory measurement. Temporary accumulation remains linear in unique
+incoming receipt/participant identities. These are local projection clocks,
+not browser paint or network latency claims. Specs:
+`swarm-messages-projection.test.ts`, `agent-message-receipts.test.ts` and
+`ui/swarm-messages.test.ts`.
+
+Dock assignment matching follows the same input boundary. Problem: every
+canonical assignment scanned all activity, and every activity scanned all
+assignments and peers again. Decision: `agent-sidebar-dock-projection.ts` resolves
+evidence using call-local agent/run and agent/session indexes plus exact activity
+scope groups. Indexes only select candidates: the existing producer, attempt,
+Turn, worker-stamp and terminal predicates still decide compatibility. Missing
+stamps never choose between competing executions; source-order binding and
+authority-aware merging remain unchanged. Matching truly ambiguous shared
+scopes still examines their complete evidence. Deferred renderer closures are
+created outside the resolver, so they cannot retain its temporary index context.
+Rejected: reusing an index across calls needs a second invalidation owner;
+greedily accepting the first index match would change ambiguity and Stop rights.
+
+At 64 independent assignments/activity rows, including repeated agent IDs across
+distinct runs, run-identity reads fall from 20,608 to 128; at 256, from 328,192 to
+512. Production-minified paired probes under the conditions above measure 256
+rows at 55.1–55.9 ms versus 5.7–5.9 ms. A separate warmed small-input probe
+(1,024 warmups, nine batches of 256 calls) places one row within overlapping
+0.024–0.031 ms median ranges and improves eight rows from 0.167–0.175 ms to
+0.145–0.152 ms. Complete output digests match; 800 deterministic mixed
+run/session/producer/worker/terminal cases also match all output and action
+availability without mutating inputs. The 256-row call-return heap delta drops
+from about 6.5 MiB to 4.6 MiB. A WeakRef/forced-GC diagnostic retains all 128 lazy
+row renderers while releasing all 264 Maps created during their projection.
+These memory diagnostics do not measure browser-wide or peak allocation.
+The isolated owning-module graphs add 300 gzip bytes together; the complete
+frontend entry remains within its existing budget. Specs:
+`agent-sidebar-dock-projection.test.ts`, `agent-sidebar-dock.test.ts`, the retained
+`test_background_activity_chip.py`, and real Chromium
+`test_visual_agent_sidebar_dock.py` preserve disclosures, focus, exact Stop
+authority, switching and disposal in three themes, two languages and two widths.
+
+## Sidebar conversation switch
+
+`tests/visual/test_visual_conversation_switch_paint.py` drives the shipped app
+and Chromium against isolated storage. It seeds 2 MB, 0.7 MB and 24-Turn
+synthetic histories, clicks each sidebar row cold, changes another conversation
+and revalidates the catalog (as busy agents, tab return and reconnect do), then
+clicks each row again. It records trusted pointerdown to the committed transcript
+DOM and to the next task after that frame, `/sync` requests, long tasks and
+long-animation frames, and post-paint Surface commits. With
+`TOFU_SWITCH_PAINT_CAPTURED=<dir>` it serves locally captured `/sync`/history
+documents (never committed) inside the isolated server's own cursor, revision,
+scope and catalog counts. `TOFU_SWITCH_PAINT_OUTPUT`, `_ITERATIONS`, `_PROFILE`
+and `_TRACE` retain samples, CPU profiles and traces. Its assertions are work
+budgets only: a warm revisit issues no snapshot and residency never remounts
+Turns it retired.
+
+Root causes found with CPU profiles, traces and DOM mutation logs:
+
+- Hydration overwrote the shell's catalog Turn count with the tail-window size,
+  so every later catalog merge re-armed a full snapshot for each visited large
+  conversation; the next click downloaded the window again and re-rendered it
+  ([sync contract](contracts/CONVERSATION_SYNC_V3.md)).
+- The swarm presentation copies above.
+- A tail window that residency had shrunk was re-expanded to the Turn budget on
+  every render and retired again by the next residency frame
+  ([geometric residency](RENDER_CONTRACT.md#geometric-residency)).
+
+One alternating base/optimized/optimized/base run of the complete change
+(Chromium 151, captured 0.75-2.2 MB production snapshots, 6 samples per cell,
+medians; the isolated server answered `/sync` in 60-150 ms) measured:
+
+| Switch | Base | Optimized |
+|---|---:|---:|
+| Warm coordinator (1.2 MB) or 0.75 MB reply, snapshots per click | 1 | 0 |
+| Warm coordinator, click to paint | 141 ms | 82 ms |
+| Warm coordinator, long tasks within 1.5 s after paint | 218 ms | 0 ms |
+| Warm coordinator, Surface commits after paint | 9 | 3 |
+| Warm 2.2 MB tool loop, click to paint | 125 ms | 77 ms |
+| Cold 2.2 MB tool loop, long tasks within 1.5 s after paint | 60 ms | 0 ms |
+| Cold coordinator, click to paint | 304 ms | 300 ms |
+
+The synthetic histories agree (24-Turn warm revisit 81 to 47 ms and one
+snapshot to none); cold first paint is otherwise unchanged within run-to-run
+noise, where tasks near the 50 ms long-task threshold are counted in some runs
+only. A production warm revisit also skips the snapshot read itself, which takes
+hundreds of milliseconds to seconds on a loaded server.
+
+After the snapshot response, the cold coordinator profile is dominated by
+Markdown for visible blocks (about 40 ms) and the single forced layout of the
+new transcript (about 80 ms); schema validation took 4-15 ms per snapshot. With 200 sidebar rows a
+catalog reload costs about 30 ms of main-thread work and no long task; no
+selection path awaits it or reads the conversation detail
+(`GET /api/v4/conversations/<id>`). Production server latency (the snapshot, catalog and
+change-suffix reads) is outside this client measurement.
+
+Alternatives rejected: skipping schema validation or cloning less of the wire
+snapshot removes a small, contract-owned cost; a browser transcript cache would
+become a second authority; spacer virtualization or a guessed smaller first
+window changes scroll geometry, and a retired window that never refills could
+show a gap after a settled process collapses.
 
 One local paired replay of the same historical snapshot preserved the complete
 projection and reduced a full browser event callback from 5,197 ms to 116 ms.

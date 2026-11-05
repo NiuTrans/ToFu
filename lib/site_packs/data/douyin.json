@@ -1,0 +1,190 @@
+{
+  "pack": "tofu.site-pack/v1",
+  "id": "douyin",
+  "name": "抖音",
+  "version": 1,
+  "routing_hint": "video/note keywords",
+  "domains": [
+    "douyin.com"
+  ],
+  "aliases": [
+    "dy",
+    "抖音"
+  ],
+  "auth": {
+    "login_url": "https://www.douyin.com/",
+    "label": "Douyin",
+    "access_strategy": "browser_first",
+    "risk_notice": "读取带节奏控制；遇到验证码、登录弹窗或连续空结果时应退避。",
+    "fields": [
+      {
+        "name": "sessionid",
+        "importance": "required"
+      },
+      {
+        "name": "sid_guard",
+        "importance": "recommended"
+      },
+      {
+        "name": "ttwid",
+        "importance": "optional"
+      }
+    ]
+  },
+  "operations": [
+    {
+      "name": "search",
+      "description": "站内综合搜索，读取首屏视频/图文卡片（作者、发布时间、点赞、时长、链接）",
+      "access": "read",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Native keywords, not web operators or a general question."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "output_schema": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      },
+      "timeout": 35,
+      "min_interval_s": 12,
+      "cooldown_s": 300,
+      "steps": [
+        {
+          "do": "navigate",
+          "url": "https://www.douyin.com/search/{query}?type=general"
+        },
+        {
+          "do": "ensure_auth"
+        },
+        {
+          "do": "wait",
+          "selector": "[id^=\"waterfall_item_\"]",
+          "timeout": 12,
+          "optional": true
+        },
+        {
+          "do": "extract",
+          "js": "(() => {\n  const out = [], seen = new Set();\n  const clock = /^\\d{1,2}:\\d{2}(?::\\d{2})?$/, count = /^\\d+(?:\\.\\d+)?[万亿wW]?$/;\n  for (const card of document.querySelectorAll('[id^=\"waterfall_item_\"]')) {\n    const id = (/^waterfall_item_(\\d{6,})$/.exec(card.id) || [])[1];\n    if (!id || seen.has(id)) continue;\n    const lines = (card.innerText || '').split('\\n').map(x => x.trim()).filter(Boolean);\n    let kind = 'video', duration = '', likes = '', author = '', published = '';\n    if (lines[0] === '图文') { kind = 'note'; lines.shift(); }\n    else if (clock.test(lines[0] || '')) duration = lines.shift();\n    if (count.test(lines[0] || '')) likes = lines.shift();\n    let end = lines.length;\n    for (let i = lines.length - 1; i >= 0; i--) {\n      if (/^·\\s*/.test(lines[i])) { published = lines[i].replace(/^·\\s*/, ''); end = i; break; }\n    }\n    if (end > 0 && lines[end - 1].startsWith('@') && lines[end - 1].length > 1) { author = lines[end - 1].slice(1).trim(); end -= 1; }\n    else if (end > 1 && lines[end - 2] === '@') { author = lines[end - 1]; end -= 2; }\n    const desc = lines.slice(0, end).join(' ').trim();\n    if (!desc || !(author || published)) continue;\n    seen.add(id);\n    const meta = [author && '@' + author, published, likes && '赞 ' + likes, duration && '时长 ' + duration,\n      kind === 'note' ? '图文' : '视频'].filter(Boolean).join(' · ');\n    out.push({id, title: desc.slice(0, 200),\n      snippet: (meta + (desc.length > 200 ? ' | ' + desc.slice(200, 1000) : '')).slice(0, 1200),\n      url: 'https://www.douyin.com/' + (kind === 'note' ? 'note/' : 'video/') + id});\n    if (out.length >= 30) break;\n  }\n  return out;\n})()",
+          "into": "candidates"
+        },
+        {
+          "do": "normalize",
+          "kind": "search_records",
+          "query_from_param": "query",
+          "limit_from_param": "limit",
+          "limit_max": 30,
+          "source_name": "Douyin"
+        }
+      ]
+    },
+    {
+      "name": "detail",
+      "description": "读取视频/图文详情：文案、作者、发布时间、互动数、话题、视频章节要点、可见评论",
+      "access": "read",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "maxLength": 8192,
+            "pattern": "^https?://"
+          },
+          "max_chars": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 80000
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      },
+      "timeout": 35,
+      "min_interval_s": 12,
+      "cooldown_s": 300,
+      "steps": [
+        {
+          "do": "navigate",
+          "url": "{url|raw}"
+        },
+        {
+          "do": "ensure_auth"
+        },
+        {
+          "do": "wait",
+          "selector": "[data-e2e=\"user-info\"]",
+          "timeout": 12,
+          "optional": true
+        },
+        {
+          "do": "extract",
+          "js": "(() => {\n  const el = (k) => document.querySelector('[data-e2e=\"' + k + '\"]');\n  const lines = (node) => (node ? node.innerText || '' : '').split('\\n').map(x => x.trim()).filter(Boolean);\n  const num = (k) => { const t = lines(el(k)).join(''); return /^\\d+(?:\\.\\d+)?[万亿wW]?$/.test(t) ? t : ''; };\n  const kind = location.pathname.startsWith('/note/') ? 'note' : 'video';\n  const ui = el('user-info');\n  const uiText = lines(ui).join(' ');\n  const author = (ui ? Array.from(ui.querySelectorAll('a[href*=\"/user/\"]')).map(a => (a.innerText || '').trim().split('\\n')[0].trim()).find(Boolean) : '') || '';\n  const stats = /粉丝\\s*([\\d.]+[万亿wW]?)\\s*获赞\\s*([\\d.]+[万亿wW]?)/.exec(uiText);\n  const info = el('detail-video-info');\n  let desc = lines(info && info.querySelector('h1')).join('\\n');\n  let published_at = lines(el('detail-video-publish-time')).join(' ').replace(/^发布时间[：:]?\\s*/, '');\n  let image_count = '';\n  if (kind === 'note') {\n    const note = lines(el('note-detail'));\n    const at = note.findIndex(x => x.startsWith('发布时间'));\n    let i = author ? note.indexOf(author) : -1;\n    if (i >= 0) { i += 1; while (i < at && uiText.includes(note[i])) i++; }\n    if (!desc && at >= 0 && i >= 0) desc = note.slice(i, at).join('\\n');\n    if (!published_at && at >= 0) published_at = note[at].replace(/^发布时间[：:]?\\s*/, '');\n    const pager = note.map(x => /^\\d+\\/(\\d+)$/.exec(x)).find(Boolean);\n    image_count = pager ? pager[1] : '';\n  }\n  const player = lines(el('player-container'));\n  const mark = player.lastIndexOf('章节要点');\n  const chapters = [];\n  for (let i = mark + 1; mark >= 0 && i + 1 < player.length; i++) {\n    if (/^\\d{1,2}:\\d{2}(?::\\d{2})?$/.test(player[i]) && !/^\\d{1,2}:\\d{2}/.test(player[i + 1])) { chapters.push(player[i] + ' ' + player[i + 1]); i++; }\n  }\n  const top_comments = Array.from(document.querySelectorAll('[data-e2e=\"comment-item\"]')).slice(0, 20)\n    .map(c => lines(c).filter(x => !/^(\\d+|分享|回复|\\.\\.\\.|展开|收起)$/.test(x)).join(' ')\n      .replace(/\\s*\\d*\\s*分享\\s*回复(?:\\s*展开\\d+条回复)?\\s*$/, '')).filter(Boolean);\n  const hashtags = Array.from(new Set(desc.match(/#[^\\s#@]+/g) || [])).slice(0, 30);\n  return {kind, author, author_stats: stats ? '粉丝 ' + stats[1] + ' · 获赞 ' + stats[2] : '',\n    desc, published_at, image_count, likes: num('video-player-digg'), comments: num('feed-comment-icon'),\n    collects: num('video-player-collect'), shares: num('video-player-share'), hashtags, chapters, top_comments};\n})()",
+          "into": "fields"
+        },
+        {
+          "do": "normalize",
+          "kind": "detail",
+          "max_chars_from_param": "max_chars",
+          "fields": {
+            "kind": 16,
+            "author": 256,
+            "author_stats": 128,
+            "desc": 4096,
+            "published_at": 64,
+            "image_count": 16,
+            "likes": 32,
+            "comments": 32,
+            "collects": 32,
+            "shares": 32,
+            "hashtags": {
+              "type": "list",
+              "max_items": 30,
+              "max_length": 128
+            },
+            "chapters": {
+              "type": "list",
+              "max_items": 30,
+              "max_length": 256
+            },
+            "top_comments": {
+              "type": "list",
+              "max_items": 20,
+              "max_length": 1000
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

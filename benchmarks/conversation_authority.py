@@ -171,6 +171,7 @@ class ConversationAuthority:
         if self.backend == 'tofudb':
             keep = {self.engine._data_dir, self.engine._projection_dir.parent}
             self.engine._dirs = [p for p in self.engine._dirs if p not in keep]
+            self.engine.retain_logs()
         else:
             keep = {self.engine._project_root.parent}
             self.engine._project_root = None

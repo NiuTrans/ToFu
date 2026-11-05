@@ -7,8 +7,11 @@ from lib.api_response import api_not_found
 
 from lib.api_v4 import raw_success_response
 from lib.artifacts.core import ArtifactNotFoundError
+from lib.error_envelope import BadRequest
 from lib.openapi import api_meta, media_responses
 from lib.response_assets import load_asset
+from lib.storage.errors import StorageError
+from lib.turn_lifecycle import LifecycleNotFound
 from routes.api_v1.auth import request_user_id, require_auth
 
 from lib.log import get_logger
@@ -76,14 +79,15 @@ async def response_resources():
             logger.debug('response_resources failure handled: %s', type(diagnostic_error).__name__)
             pass
         raise
-    except PermissionError:
+    except (PermissionError, LifecycleNotFound):
         return api_not_found('not_found')
-    except (ValueError, KeyError):
+    except BadRequest:
         return api_bad_request('Invalid surface context or data')
-    except Exception as error:
-        from lib.storage.errors import StorageError
-        if isinstance(error, StorageError) and error.code == 'not_found':
+    except StorageError as error:
+        if error.code == 'not_found':
             return api_not_found('not_found')
+        return api_error('Live resources are unavailable; retry or check provider configuration', status=503, kind='resource_unavailable')
+    except Exception:
         # Provider messages can contain transport details; keep this projection inert.
         return api_error('Live resources are unavailable; retry or check provider configuration', status=503, kind='resource_unavailable')
     response = Response(json.dumps(result, ensure_ascii=False, allow_nan=False), content_type='application/json')
@@ -106,12 +110,13 @@ async def response_providers():
         return api_bad_request('Invalid surface query')
     try:
         result = await asyncio.to_thread(available_providers, dict(request.args), user_id=request_user_id())
-    except (PermissionError, KeyError):
+    except (PermissionError, LifecycleNotFound):
         return api_not_found('not_found')
-    except Exception as error:
-        from lib.storage.errors import StorageError
-        if isinstance(error, StorageError) and error.code == 'not_found':
+    except StorageError as error:
+        if error.code == 'not_found':
             return api_not_found('not_found')
+        return api_error('Resource providers are unavailable; retry', status=503, kind='resource_unavailable')
+    except Exception:
         return api_error('Resource providers are unavailable; retry', status=503, kind='resource_unavailable')
     response = Response(json.dumps(result), content_type='application/json')
     response.headers['Cache-Control'] = 'private, no-store'

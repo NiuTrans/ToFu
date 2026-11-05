@@ -64,6 +64,31 @@ INTERNAL_FENCE_ABORT_REASONS = frozenset({
     'turn_attempt_stale_fence',
     'conversation_attempt_stale_fence',
 })
+# ``_abort_reason`` stamps recording that project-dispatch authority ended a
+# dispatch task (lib.project_dispatch.admission). They halt work through the
+# same abort lane as a Stop, but no person stopped this conversation: its grant
+# was revoked (or withdrawn by a Stop elsewhere), or its admission carrier or
+# authority could no longer be re-established.
+DISPATCH_GRANT_REVOKED = 'dispatch_grant_revoked'
+DISPATCH_AUTHORITY_LOST = 'dispatch_authority_lost'
+DISPATCH_AUTHORITY_ABORT_REASONS = frozenset({
+    DISPATCH_GRANT_REVOKED,
+    DISPATCH_AUTHORITY_LOST,
+})
+
+
+def dispatch_authority_stop_detail(reason: str, provenance: str = '') -> str:
+    """One explanation of a dispatch authority stop for every terminal surface.
+
+    ``provenance`` (the task's ``_abortReasonDetail``) names who withdrew the
+    authority and through which path, so the stop can be traced to its
+    Coordinator conversation without searching logs.
+    """
+    detail = ('Project dispatch authority stopped this task before its next model '
+              f'or tool call ({reason}); this was not a manual stop.')
+    return f'{detail} {provenance}' if provenance else detail
+
+
 _FAILED_STREAM_STATES = frozenset({
     ProviderStreamState.PREMATURE_CLOSE,
     ProviderStreamState.MALFORMED_STREAM,
@@ -84,6 +109,15 @@ _FAILED_SETTLEMENT_EVIDENCE = frozenset({
     TurnTerminationEvidence.MISSING_COMPLETION_EVIDENCE.value,
 })
 
+# A ``content_filter`` finish settles ``truncated`` with one of these causes.
+# The producer stamps ``{'cause', 'error'}`` under this task key instead of
+# ``task['error']``: an error would make the verdict ``failed`` and turn an
+# adapter's ``200 finish_reason=content_filter`` into a server error.
+CONTENT_FILTER_SETTLEMENT_KEY = '_contentFilterSettlement'
+MODEL_REFUSAL_CAUSE = 'model_refusal'
+GATEWAY_CONTENT_FILTER_CAUSE = 'content_filter'
+CONTENT_FILTER_CAUSES = frozenset({MODEL_REFUSAL_CAUSE, GATEWAY_CONTENT_FILTER_CAUSE})
+
 
 @dataclass(frozen=True, slots=True)
 class TurnTerminalEvidence:
@@ -94,11 +128,15 @@ class TurnTerminalEvidence:
     aborted: bool
     task_status: str
     # The internal ``_abort_reason`` stamp, when one was planted. Only the
-    # INTERNAL_FENCE_ABORT_REASONS subset changes verdict attribution; every
-    # other value keeps the historic user_abort reading.
+    # INTERNAL_FENCE_ABORT_REASONS, DISPATCH_AUTHORITY_ABORT_REASONS and
+    # ``server_shutdown`` stamps change verdict attribution; every other value
+    # keeps the historic user_abort reading.
     abort_reason: str = ''
 
     invocation_stop_reason: str = ''
+    # Cause stamped under CONTENT_FILTER_SETTLEMENT_KEY; only a
+    # ``content_filter`` finish consults it.
+    content_filter_cause: str = ''
 
 @dataclass(frozen=True, slots=True)
 class TurnVerdict:
@@ -182,6 +220,15 @@ def derive_turn_verdict(evidence: TurnTerminalEvidence) -> TurnVerdict:
             'internal_fence_abort',
             TurnTerminationEvidence.EXTERNAL_AUTHORITY,
         )
+    if evidence.abort_reason in DISPATCH_AUTHORITY_ABORT_REASONS:
+        # The dispatch authority that admitted this task ended it before any
+        # further model or tool call. The cause names which authority ended.
+        return TurnVerdict(
+            TurnStatus.FAILED,
+            TurnOutcome.FAILED,
+            evidence.abort_reason,
+            TurnTerminationEvidence.EXTERNAL_AUTHORITY,
+        )
     if evidence.abort_reason == 'server_shutdown':
         return TurnVerdict(
             TurnStatus.INTERRUPTED,
@@ -224,10 +271,14 @@ def derive_turn_verdict(evidence: TurnTerminalEvidence) -> TurnVerdict:
             TurnTerminationEvidence.GENERATION_ERROR,
         )
     if finish in _TRUNCATED_FINISH_REASONS:
+        cause = finish
+        if (finish == 'content_filter'
+                and evidence.content_filter_cause in CONTENT_FILTER_CAUSES):
+            cause = evidence.content_filter_cause
         return TurnVerdict(
             TurnStatus.TRUNCATED,
             TurnOutcome.TRUNCATED,
-            finish,
+            cause,
             TurnTerminationEvidence.PROVIDER_LIMIT,
         )
     if (stream_state is ProviderStreamState.PROVIDER_FINISHED
@@ -313,6 +364,10 @@ def task_terminal_evidence(
         if raw_stream_state is None:
             raw_stream_state = task.get('stream_state')
 
+    content_filter_settlement = task.get(CONTENT_FILTER_SETTLEMENT_KEY)
+    content_filter_cause = (
+        str(content_filter_settlement.get('cause') or '')
+        if isinstance(content_filter_settlement, Mapping) else '')
     terminal_error = event.get('error') or task.get('error')
     durable_invocation_reason = ''
     if (isinstance(terminal_error, Mapping)
@@ -330,6 +385,7 @@ def task_terminal_evidence(
         abort_reason=str(task.get('_abort_reason') or ''),
 
         invocation_stop_reason=str(task.get('_invocationStopReason') or durable_invocation_reason),
+        content_filter_cause=content_filter_cause,
     )
 
 
@@ -474,7 +530,14 @@ def normalize_turn_settlement(
 
 
 __all__ = [
+    'CONTENT_FILTER_CAUSES',
+    'CONTENT_FILTER_SETTLEMENT_KEY',
+    'DISPATCH_AUTHORITY_ABORT_REASONS',
+    'DISPATCH_AUTHORITY_LOST',
+    'DISPATCH_GRANT_REVOKED',
+    'GATEWAY_CONTENT_FILTER_CAUSE',
     'INTERNAL_FENCE_ABORT_REASONS',
+    'MODEL_REFUSAL_CAUSE',
     'TurnOutcome',
     'TurnStatus',
     'TerminalTaskFailure',
@@ -484,6 +547,7 @@ __all__ = [
     'derive_task_verdict',
     'derive_provider_stream_verdict',
     'derive_turn_verdict',
+    'dispatch_authority_stop_detail',
     'normalize_turn_settlement',
     'parse_provider_stream_state',
     'require_deliverable_task',

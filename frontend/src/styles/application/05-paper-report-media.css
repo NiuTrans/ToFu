@@ -314,32 +314,7 @@
 .sw-note-reason-err{color:var(--chip-err-color);background:var(--chip-err-bg);border-color:var(--chip-err-border)}
 .sw-note-reason-info{color:var(--chip-info-color);background:var(--chip-info-bg);border-color:var(--chip-info-border)}
 [data-theme="tofu"] .sw-note-reason{border-radius:var(--radius)}
-/* ═══ Merged context-injection group — the session-start context stack (or
-   several notes injected together mid-turn) collapsed into ONE row. The
-   count pill replaces the per-note sibling rows; each member keeps its own
-   header + body card inside the single disclosure. */
-.sw-note-group .sw-inbox-row-header .ptool-icon{color:var(--accent, #34d399)}
-.sw-note-group-count{font-size:10px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;padding:1px 7px;border-radius:9px;background:var(--bg-tertiary);border:1px solid var(--border);white-space:nowrap}
-.sw-note-group-body{display:flex;flex-direction:column;gap:var(--space-3)}
-
-/* Closed details must hide the flex list as well as each item's text. */
-.sw-note-group:not([open])>.sw-note-group-body{display:none}
-/* Each member is ONE card (header + provenance meta + verbatim text) so an
-   expanded group reads as a stack of uniform boxes instead of two mismatched
-   sub-boxes. The .sw-card base supplies the border/background; gap here keeps
-   the header, provenance and verbatim body breathing apart. */
-.sw-note-group-item{display:flex;flex-direction:column;gap:var(--space-2);min-width:0;overflow-wrap:anywhere}
-/* Provenance folded INSIDE the member card must not look like a competing
-   box — strip its own border/background so it reads as in-card meta. */
-.sw-note-group-item .sw-note-provenance-item{border:none;background:transparent;padding:0;margin:0}
-.sw-note-group-item .sw-note-provenance{margin:0}
-.sw-note-group-item-head{display:flex;align-items:center;gap:var(--space-2);color:var(--text-secondary)}
-.sw-note-group-item-head .ptool-text{font-size:var(--font-size-sm);font-weight:600}
-.sw-note-group-item-head .ptool-icon{display:flex;align-items:center;opacity:0.8}
-/* Compact summaries and long registry reason ids must remain readable on phones. */
-.sw-note-group>.sw-inbox-row-header,.sw-note-group-item-head{flex-wrap:wrap;min-width:0}
-.sw-note-group-body,.sw-note-group-item{min-width:0}
-.sw-note-group-item-head .sw-note-reason{max-width:100%;white-space:normal;overflow-wrap:anywhere}
+/* Context-note folds (group, lone note, receipts): 23-reading-context.css. */
 .sw-stall-reason{font-size:var(--font-size-xs);color:var(--text-secondary);line-height:1.5;padding:2px 0}
 .sw-stall-bound{font-size:10px;color:var(--text-tertiary);line-height:1.5;padding:0 0 var(--space-1)}
 /* ═══════════════════════════════════════════
@@ -438,7 +413,7 @@
 /* Preset badge in topbar */
 /* preset-badge removed — model-badge in topbar is the single source of truth */
 /* Effort tag in message finish info */
-.finish-tag.preset{font-size:9px;font-weight:700;letter-spacing:.03em;padding:1px 6px;max-width:220px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+.finish-tag.preset{font-size:9px;font-weight:700;letter-spacing:.03em;padding:1px 6px;max-width:100%;white-space:normal;overflow-wrap:anywhere;vertical-align:middle}
 .finish-tag.preset[data-preset="off"]{color:var(--text-tertiary);background:var(--bg-tertiary);border-color:var(--border)}
 .finish-tag.preset[data-preset="opus"]{color:#e8a55d;background:rgba(232,165,93,0.08);border-color:rgba(232,165,93,0.2)}
 .finish-tag.preset[data-preset="qwen"]{color:#a78bfa;background:rgba(167,139,250,0.08);border-color:rgba(167,139,250,0.2)}

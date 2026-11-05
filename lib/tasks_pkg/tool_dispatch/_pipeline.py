@@ -1,29 +1,28 @@
 # HOT_PATH
-"""Tool-execution pipeline — approval → parallel dispatch → result-append.
+"""Shared tool admission and ordered result projection.
 
-The public entry-point is :func:`execute_tool_pipeline`, the big orchestrator
-extracted from the inner loop of ``orchestrator.run_task``.  Also houses the
-``_append_screenshot_message`` multimodal-result helper.
+execute_tool_pipeline binds one invocation's canonical settlement carriers,
+performs authority/approval checks and delegates worker ownership to _execution.
+_reuse owns freshness-checked cache delivery. Replay and aggregate budgeting
+retain provider order after per-occurrence completion has been published.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, wait
+from functools import partial
 from lib.observability import InstrumentedThreadPoolExecutor
 import uuid
-# concurrent.futures.TimeoutError only became an alias of builtin
-# TimeoutError in 3.11 — on 3.10 it is a DISTINCT class, so
-# ``except TimeoutError`` does NOT catch an as_completed/fut.result timeout
-# and the pool-timeout lane never fires (3.10 CI leg, 2026-08-06).
-from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from typing import Any
 
 from lib.agent_core.execution_clock import task_execution_time_ms
 from lib.agent_core.events import EventType, build_event
 from lib.log import get_logger
+from lib.logging_pkg.log_record_values import text_value
 from lib.model_info import model_supports_vision
 from lib.tasks_pkg.compaction.api import (
     budget_tool_result,
@@ -36,12 +35,14 @@ from lib.tasks_pkg.compaction.api import (
 from lib.tasks_pkg.executor import _execute_tool_one, _finalize_tool_round
 from lib.tasks_pkg.manager import append_event
 from lib.tasks_pkg.tool_hooks import run_post_hooks, run_pre_hooks
-from lib.tasks_pkg.tool_search_projection import cached_tool_search_projection
 from lib.tool_results.tool_rejection import (
     stamp_tool_rejection,
     tool_rejection_descriptor,
 )
-from lib.tools.gateway import EXECUTE_TOOLS_NAME, GATEWAY_TOOL_NAMES, SEARCH_TOOLS_NAME
+from lib.tool_results.tool_round_status import FAILED_TOOL_ROUND_STATUSES
+from lib.tool_input_repair import contract_rejection_text
+from lib.tools.contracts import ToolContractError
+from lib.tools.gateway import EXECUTE_TOOLS_NAME, GATEWAY_TOOL_NAMES
 from lib.tools.result_projection import (
     TOOL_RESULT_PRODUCER_METADATA_KEY,
     TOOL_RESULT_PROJECTION_ITEMS_KEY,
@@ -49,12 +50,12 @@ from lib.tools.result_projection import (
 from lib.tools.result_surfaces import requires_canonical_budget
 
 from lib.tasks_pkg.tool_dispatch._approval import _handle_approval
-from lib.tasks_pkg.tool_dispatch._prefetch import discard_prefetch, has_prefetch, remap_prefetch
+from lib.tasks_pkg.tool_dispatch._prefetch import discard_prefetch, remap_prefetch
 from lib.tasks_pkg.tool_dispatch._flags import (
     ORDERED_STATE_TOOLS as _ORDERED_STATE_TOOLS,
+    SEARCH_EVIDENCE_TOOLS,
     _cache_entry_producer_metadata,
     _cache_entry_projection_items,
-    _project_cache_entry_is_current,
     _build_cache_hit_meta,
     _call_id_signature,
     _ensure_tool_call_id_receipts,
@@ -62,19 +63,21 @@ from lib.tasks_pkg.tool_dispatch._flags import (
     _discard_tool_result_cache_entry,
     _tool_receipt_lock,
     _publish_execute_gateway_direct_siblings,
-    _invalidate_project_cache,
     _make_cache_key,
     _safe_count_tokens,
     _store_tool_result_cache_entry,
     _store_tool_call_id_receipt,
     _task_confirmation_tools,
     _task_partitions,
-    _unpack_cache_entry,
 )
 from lib.tasks_pkg.tool_dispatch._heartbeat import (
     _SERIAL_BLOCKING_TOOLS,
     _execute_tool_one_in_pool,
+    _is_exempt_wait,
     _start_tool_heartbeat,
+)
+from lib.tasks_pkg.tool_dispatch._ordering import (
+    call_predecessors, plan_command_working_dirs, restore_command_sticky_cwd,
 )
 from lib.tasks_pkg.tool_dispatch._unchanged import (
     UnchangedProjection,
@@ -83,27 +86,15 @@ from lib.tasks_pkg.tool_dispatch._unchanged import (
     remember_full_result,
 )
 
+from lib.tasks_pkg.tool_dispatch._execution import (
+    AdmittedCall, ToolExecutionBatch, ToolExecutionPorts, UnexecutedCall,
+    execute_admitted_tools,
+    _ToolCollectionExpiry as _ToolCollectionExpiry,
+    _WRITE_SENSITIVE_READ_TOOLS as _WRITE_SENSITIVE_READ_TOOLS,
+)
+from lib.tasks_pkg.tool_dispatch._reuse import try_reuse_tool_result
+
 logger = get_logger(__name__)
-
-
-# In-memory protocol tools whose calls are order-sensitive inside one model
-# response.  They are deliberately separate from ``_write_tools``: updating a
-# task-local checklist must be serial, but it is not an external mutation and
-# therefore must not trigger Manual-mode write approval or project-cache
-# invalidation.  Keep this list narrow; the serial lane preserves
-# ``parsed_tcs`` order exactly.
-
-
-# Read tools whose dedup-cache entry a same-round WRITE can make stale. When a
-# read executes CONCURRENTLY with the serial write lane (see the read-pool
-# dispatch in execute_tool_pipeline), its result may capture pre-write bytes.
-# Caching that result after the write's _invalidate_project_cache already ran
-# would leave a stale entry that a later FreshGate-checked hit serves verbatim
-# (the freshness token now matches the post-write disk, so FreshGate cannot see
-# it). These are exactly the filesystem-state reads a write can move.
-_WRITE_SENSITIVE_READ_TOOLS = frozenset({
-    'read_files', 'list_dir', 'grep_search', 'find_files', 'inspect_image',
-})
 
 
 def _tool_result_recovery_policy(task: dict[str, Any], tool_name: str) -> str:
@@ -219,6 +210,76 @@ def _mint_fresh_call_id(
             return candidate
 
 
+def _reject_by_dispatch_contract(item: tuple, refusal: ToolContractError,
+                                 tid: str) -> tuple:
+    """Turn a file-scope argument-shape refusal into this call's contract rejection."""
+    tc, fn_name, tc_id, fn_args, rn, round_entry, _parse_error = item
+    reason = contract_rejection_text(fn_name, refusal, fn_args)
+    contract_error = refusal.to_dict()
+    if isinstance(round_entry, dict):
+        round_entry['status'] = 'rejected'
+        round_entry['_contractError'] = contract_error
+        stamp_tool_rejection(round_entry, {
+            'kind': 'tool_contract_invalid', 'tool': fn_name,
+            'code': contract_error['code'], 'path': contract_error['path'],
+            'reason': reason, 'retryable': contract_error['retryable'],
+        }, tool_name=fn_name, reason=reason)
+    logger.warning('[Task %s] project dispatch rejected %s arguments before '
+                   'execution: %s', tid, fn_name, refusal)
+    return tc, fn_name, tc_id, fn_args, rn, round_entry, reason
+
+
+def _admit_dispatch_tool_calls(task: dict[str, Any], parsed_tcs: list,
+                               project_path: str | None, tid: str) -> None:
+    """Admit every still-executable call of a project dispatch before any runs.
+
+    One authority refusal therefore fails the turn ahead of all sibling
+    effects. A call already rejected at parse/contract validation never
+    executes: its rejection, with the next_action, is its result. A file-scope
+    argument-shape refusal becomes that call's contract rejection in place.
+    """
+    from lib.project_dispatch.scope import admit_tool
+    for admission_index, item in enumerate(parsed_tcs):
+        if item[6]:
+            continue
+        try:
+            admit_tool(task, item[1], item[3], project_path=project_path)
+        except ToolContractError as refusal:
+            parsed_tcs[admission_index] = _reject_by_dispatch_contract(
+                item, refusal, tid)
+
+
+def _expire_collected_tool(task: dict[str, Any], expiry: _ToolCollectionExpiry,
+                           *, futures: dict, parallel_by_id: dict,
+                           tool_results: dict, tool_verdicts: dict,
+                           settle_current, idempotent_tools, cache, tid: str,
+                           round_num: int) -> None:
+    """Publish the timeout verdict of one occurrence past its own deadline."""
+    fut = expiry.future
+    fut_tc_id, fut_fn_name, _generation = futures[fut]
+    fut.cancel()
+    from lib.tasks_pkg.tool_runtime import active_context_for_call
+    item = parallel_by_id[fut_tc_id]
+    context = active_context_for_call(
+        task, round_num=item[4], tool_call_id=fut_tc_id, round_entry=item[5])
+    if context is not None:
+        context.request_resource_cancellation()
+    from lib.tasks_pkg.executor._effects import tool_timeout_result
+    content = tool_timeout_result(task, fut_fn_name, item[5])
+    tool_results[fut_tc_id] = (content, False)
+    tool_verdicts[fut_tc_id] = 'error'
+    logger.warning(
+        '[Task %s] Tool %s (tc_id=%s) exceeded its collection deadline',
+        tid, fut_fn_name, fut_tc_id)
+    # Publish/revoke now, while longer siblings continue.
+    # A late handler cannot replace this timeout verdict.
+    settle_current(
+        task, fut_fn_name, fut_tc_id, item[3], item[4], item[5],
+        content, idempotent_tools=idempotent_tools,
+        cache=cache, tid=tid, round_num=round_num,
+        terminal_status='error')
+
+
 def _repair_current_tool_call_identity(
     task: dict[str, Any],
     messages: list[dict[str, Any]],
@@ -243,9 +304,11 @@ def _repair_current_tool_call_identity(
     remains a fresh action; receipts describe it but never replay it.
     """
     tc, fn_name, tc_id, fn_args, rn, round_entry, parse_error = item
-    call_signature = _call_id_signature(fn_name, fn_args)
-    receipt = receipts.get(tc_id)
     if tc_id in historical_used_ids:
+        # Fresh IDs need no receipt comparison. Avoid serializing large tool
+        # arguments here when settlement will create their signature later.
+        call_signature = _call_id_signature(fn_name, fn_args)
+        receipt = receipts.get(tc_id)
         exact_reemit = isinstance(receipt, dict) and (
             receipt.get('signature') == call_signature
             and receipt.get('name') == fn_name)
@@ -314,8 +377,8 @@ def _bounded_tool_env_int(name: str, default: int, minimum: int,
     return max(minimum, min(value, maximum))
 
 
-def _completed_tools_until_cancel(futures, task, deadline):
-    """Bound each wait so Stop is observed even when no worker produces output."""
+def _completed_tools_until_cancel(futures, task, deadlines):
+    """Observe Stop and expire each occurrence without shortening its siblings."""
     pending = set(futures)
     while pending:
         if task.get('aborted'):
@@ -325,9 +388,21 @@ def _completed_tools_until_cancel(futures, task, deadline):
             yield from completed
             yield None
             return
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _FuturesTimeoutError()
+        # Already-returned receipts win over collection delay. Expiry revokes
+        # only still-running calls; a deadline is armed at handler entry.
+        completed = {future for future in pending if future.done()}
+        pending.difference_update(completed)
+        yield from completed
+        if not pending:
+            return
+        now = time.monotonic()
+        expired = {future for future in pending if deadlines[future] <= now}
+        if expired:
+            pending.difference_update(expired)
+            for future in expired:
+                yield _ToolCollectionExpiry(future)
+            continue
+        remaining = min(deadlines[future] for future in pending) - now
         done, pending = wait(
             pending, timeout=min(0.1, remaining), return_when=FIRST_COMPLETED)
         for future in done:
@@ -343,8 +418,11 @@ def _harvest_completed_tool_results(futures, task, tool_results, tool_verdicts,
         try:
             # The common executor has validated the handler's occurrence.
             # Keep ownership anchored to the submitted Future's identity.
-            _returned_id, content, is_search = future.result()
+            receipt = future.result()
+            _returned_id, content, is_search = receipt
             tool_results[call_id] = (content, is_search)
+            if isinstance(receipt, UnexecutedCall):
+                tool_verdicts[call_id] = receipt.verdict
             logger.warning(
                 '[Task %s] conv=%s Recovered completed tool=%s tc_id=%s '
                 'round=%d after %s; handler was not repeated',
@@ -355,7 +433,7 @@ def _harvest_completed_tool_results(futures, task, tool_results, tool_verdicts,
                 '[Task %s] conv=%s Tool=%s tc_id=%s completed with error '
                 'at round=%d after %s: %s',
                 task['id'][:8], task.get('convId', ''), name, call_id,
-                round_num, reason, error)
+                round_num, reason, text_value(error))
             from lib.tasks_pkg.executor._effects import tool_exception_result
             item = items_by_id.get(call_id)
             tool_results[call_id] = (tool_exception_result(
@@ -363,7 +441,7 @@ def _harvest_completed_tool_results(futures, task, tool_results, tool_verdicts,
             tool_verdicts[call_id] = 'error'
 
 
-def _drain_cancelled_tool_workers(task, futures):
+def _drain_cancelled_tool_workers(task, futures, *, items_by_id=None):
     """Release scoped resources before allowing the task to become terminal.
 
     Python threads cannot be killed safely. A worker still owns the live task,
@@ -373,7 +451,7 @@ def _drain_cancelled_tool_workers(task, futures):
     Non-cooperative handlers therefore remain cancelling (not falsely stopped).
     No reaper thread or replacement executor is spawned here.
     """
-    from lib.tasks_pkg.tool_runtime import cancel_task_contexts
+    from lib.tasks_pkg.tool_runtime import active_context_for_call, cancel_task_contexts
 
     pending = set(futures)
     for future in pending:
@@ -381,7 +459,17 @@ def _drain_cancelled_tool_workers(task, futures):
     while pending:
         # Repeat fanout to close the submit -> context registration race.
         # Callback removal is exactly-once in the runtime context registry.
-        cancel_task_contexts(task)
+        if items_by_id is None:
+            cancel_task_contexts(task)
+        else:
+            # A dispatch failure owns only this invocation's workers. Nested
+            # pipelines can share a task without sharing resource lifetimes.
+            for future in pending:
+                item = items_by_id[futures[future][0]]
+                context = active_context_for_call(
+                    task, round_num=item[4], tool_call_id=item[2], round_entry=item[5])
+                if context is not None:
+                    context.request_resource_cancellation()
         pending = {future for future in pending if not future.done()}
         if pending:
             wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
@@ -404,10 +492,12 @@ def _parallel_idle_reuse_hint(item_count: int, *, programmatic: bool = False
 
 
 # ── Per-turn search/fetch accumulator budget ──
-# ``all_search_results_text`` accumulates web_search/fetch_url text across
-# EVERY round of a turn. The no-prose fallback (orchestrator._finalize) joins
-# it into one assistant message when the model returned tools but no prose, so
-# an unbounded list re-sends the whole corpus and blows up memory + context.
+# ``all_search_results_text`` accumulates the turn's web evidence across EVERY
+# round, each distinct result once, exactly as the model received it (see
+# ``_record_round_search_evidence``, its only writer). The no-prose fallback
+# (orchestrator._finalize) joins it into one assistant message when the model
+# returned tools but no prose, so an unbounded list re-sends the whole corpus
+# and blows up memory + context.
 # Bound it in UTF-8 bytes; keep the NEWEST results (closest to the final
 # answer) and head-truncate any single oversized result with a marker. Sits
 # below the per-round aggregate budget (300k chars) because this buffer spans
@@ -450,11 +540,41 @@ def _trim_search_results_accumulator(results: list[str]) -> None:
 
 
 def _append_search_result_text(results: list[str], text: str) -> None:
-    """Append one search/fetch result and re-enforce the accumulator budget."""
-    if not isinstance(text, str):
-        text = str(text)
+    """Append one distinct search/fetch result and re-enforce the budget.
+
+    A dedup replay or a repeated prefetch of one page settles to the same
+    text; it moves to the newest position instead of being weighed twice.
+    """
+    text = str(text)
+    if text in results:
+        results.remove(text)
     results.append(text)
     _trim_search_results_accumulator(results)
+
+
+def _record_round_search_evidence(
+    task, parsed_tcs, tool_results, tool_verdicts, results: list[str],
+) -> None:
+    """Admit this round's web evidence for the no-prose fallback, in call order.
+
+    A result is evidence only when its tool is in ``SEARCH_EVIDENCE_TOOLS``,
+    its producer declared it (the handler's ``is_search``, or the dedup or
+    prefetch cache entry that replays it) and the call settled ``done``: no
+    other tool's receipt, failed result or non-page read ever is. The text is
+    the call's final ``toolContent``, read after the round aggregate budget,
+    so every path (handler, streaming prefetch, dedup replay, native gateway)
+    records exactly what the model received, never a producer's raw text or a
+    cached internal envelope.
+    """
+    for _tc, fn_name, tc_id, _args, _rn, round_entry, _parse_error in parsed_tcs:
+        settled = (round_entry or {}).get('toolContent')
+        if (fn_name in SEARCH_EVIDENCE_TOOLS
+                and tool_results.get(tc_id, (None, False))[1]
+                and not tool_verdicts.get(tc_id)
+                and isinstance(settled, str)
+                and round_entry.get('status') == 'done'):
+            with _tool_receipt_lock(task):
+                _append_search_result_text(results, settled)
 
 
 def bounded_search_results_text(
@@ -465,9 +585,8 @@ def bounded_search_results_text(
 
     Newest results are kept first; the oldest are dropped when the budget is
     exhausted, and a single result larger than the budget is head-truncated
-    with a marker. Used by the orchestrator's no-prose fallback and sources
-    footer so a list that bypassed the accumulator still cannot re-send an
-    unbounded corpus.
+    with a marker. Used by the orchestrator's no-prose fallback so a list
+    that bypassed the accumulator still cannot re-send an unbounded corpus.
     """
     sep_len = _utf8_len(separator)
     kept: list[str] = []
@@ -630,6 +749,12 @@ def _settle_tool_result(
     if tc_id in _settled:
         return _settled[tc_id]
 
+    # Later lanes (hooks, budgets, events, cache sync) treat non-text results as
+    # JSON data; a returned typed envelope object settles as its envelope text.
+    from lib.tools.result_envelope import ToolResultEnvelopeV2
+    if isinstance(tool_content, ToolResultEnvelopeV2):
+        tool_content = tool_content.to_envelope_text()
+
     # A concurrent occurrence may publish the same query while this result is
     # compacted. Rewrite only this producer's observed receipt, by identity.
     _sync_key = _make_cache_key(fn_name, fn_args) if fn_name in idempotent_tools else None
@@ -676,8 +801,8 @@ def _settle_tool_result(
     # The handler has already settled executed failures. Carry its verdict
     # into the canonical receipt as well as the terminal event; otherwise a
     # refused write has a failed card but an executionStatus=ok receipt.
-    if terminal_status is None and (round_entry or {}).get('status') in {
-            'error', 'rejected', 'aborted', 'unanswerable'}:
+    if (terminal_status is None
+            and (round_entry or {}).get('status') in FAILED_TOOL_ROUND_STATUSES):
         terminal_status = round_entry['status']
     # ``canonical_content`` carries the evidence-rich source (an image-
     # protocol dict with retained ``_modelReplaySources``) when the model-
@@ -786,10 +911,14 @@ def _settle_tool_result(
     _program_latch = task.get('_ptc_local')
     if isinstance(_program_latch, dict) and _program_latch.get('tier') == 'program':
         from lib.tasks_pkg.manager import task_user_id
-        from lib.tools.program_results import retain_program_result, describe_program_input
+        from lib.tools.program_results import (
+            describe_program_input, replayed_program_input, retain_program_result)
         _owner_id = task_user_id(task)
         _retained_input = retain_program_result(task, fn_name, fn_args, tc_id,
                                                captured_result, user_id=_owner_id)
+        if _retained_input is None:
+            # A cached replay must advertise the same capture as its first delivery.
+            _retained_input = replayed_program_input(task, fn_name, fn_args, tool_content)
         _catalog = task.get('_executable_tool_catalog') or []
         _names = {(tool.get('function') or {}).get('name') for tool in _catalog
                   if isinstance(tool, dict)} - {None}
@@ -926,7 +1055,7 @@ def _settle_tool_result(
     if round_entry is not None:
         if terminal_status:
             round_entry['status'] = terminal_status
-        elif round_entry.get('status') in ('searching', 'executing'):
+        elif round_entry.get('status') in ('queued', 'searching', 'executing'):
             round_entry['status'] = 'done'
 
     # Emit tool_complete AFTER budgeting so that toolContent
@@ -1032,7 +1161,7 @@ def _settle_tool_result(
         _status = terminal_status or (round_entry or {}).get('status')
         if terminal_status and round_entry is not None:
             round_entry['status'] = terminal_status
-        if _status and _status not in ('done', 'searching', 'executing'):
+        if _status and _status not in ('done', 'queued', 'searching', 'executing'):
             _evt['status'] = _status
         _rejection = tool_rejection_descriptor(round_entry)
         if _rejection is not None:
@@ -1123,7 +1252,8 @@ def _prepare_screenshot_replay(task, row, screenshot, model, tool_name, call_id)
     blocks = carrier[0]['content']
     if task.get('_userId') and not task.get('_transientRuntime'):
         from types import SimpleNamespace
-        from lib.tasks_pkg.mcp_result_media import capture_mcp_result_images
+        from lib.tasks_pkg.mcp_result_media import (
+            capture_mcp_result_images, task_media_lock)
         payloads = []
         for block in blocks:
             if block.get('type') == 'image_url':
@@ -1154,7 +1284,7 @@ def _prepare_screenshot_replay(task, row, screenshot, model, tool_name, call_id)
                 url = block['image_url']['url']
                 encoded_bytes = (len(url.encode('utf-8')) if len(url) <= _INLINE_MODEL_IMAGE_MAX_BYTES
                                  else _INLINE_MODEL_IMAGE_MAX_BYTES + 1)
-                with task['_mcpMediaLock']:
+                with task_media_lock(task):
                     inline_used = int(task.get('_inlineModelImageBytes') or 0)
                     if (encoded_bytes <= _INLINE_MODEL_IMAGE_MAX_BYTES
                             and inline_used + encoded_bytes <= _INLINE_MODEL_IMAGES_PER_TURN_MAX_BYTES):
@@ -1381,7 +1511,10 @@ def _git_guard_presence_roots(command, project_path, fn_args, conv_id):
     Resolve the same explicit/sticky cwd as the project runner, then literal
     shell cd and Git -C hops. Git global options stop at the subcommand: a
     commit message or pathspec containing -C must not select a different root.
-    Unresolvable paths fall back to the existing approval gate via the caller.
+    A leading cd that cannot fail leaves no fallback to the starting cwd, so
+    ``cd <own worktree> && a; git rm x`` does not borrow the shared checkout's
+    presence. Unresolvable paths fall back to the existing approval gate via
+    the caller.
     """
     from lib.project_mod.config import get_conv_cwd
     from lib.project_mod.path_resolution import _resolve_base
@@ -1398,7 +1531,8 @@ def _git_guard_presence_roots(command, project_path, fn_args, conv_id):
     if not cwd:
         return ['']  # An unattached task cannot borrow the server's cwd/presence.
     return list(dict.fromkeys(
-        root for scope in git_command_scopes(command, cwd, environment=os.environ)
+        root for scope in git_command_scopes(
+            command, cwd, environment=os.environ, certain_leading_cd=True)
         if scope.classification == 'tree_destroying'
         for root in scope.presence_roots()))
 
@@ -1427,18 +1561,23 @@ def _approval_stops_tool_call(
     settled_results: dict[str, Any] | None = None,
     pending_envelopes: dict[str, Any] | None = None,
     receipt_required: bool = False,
+    settle: Any = None,
 ) -> bool:
     """Apply confirmation/manual-write policy; return true when rejected.
 
     Always-confirm tools fail closed when no human is attending.  Ordinary
     writes only enter this boundary in Manual mode, with the existing
     read-only-command and durable browser-grant exceptions preserved.
+    ``settle`` lets a concurrent dispatch publish refusals under its own
+    settlement lock; it defaults to ``_settle_tool_result``.
     """
+    settle = settle or _settle_tool_result
     # Approval receipts and Git-presence decisions must bind the checkout
     # that will actually execute, including retained canonical path literals.
     from lib.tasks_pkg.workspace_delivery import rebind_project_tool_arguments
     if fn_name in {'run_command', 'write_file', 'edit_file', 'read_files',
-                   'grep_search', 'find_files', 'repo_map', 'inspect_image'}:
+                   'search_files', 'grep_search', 'find_files', 'repo_map',
+                   'inspect_image'}:
         effective_arguments = rebind_project_tool_arguments(task, fn_args)
         if effective_arguments is not fn_args:
             fn_args.clear()
@@ -1464,7 +1603,7 @@ def _approval_stops_tool_call(
         stamp_tool_rejection(round_entry, {'kind': 'effect_recovery_required', 'tool': fn_name},
                              reason=recovery_refusal, retryable=False)
         tool_results[tc_id] = (recovery_refusal, False)
-        _settle_tool_result(task, fn_name, tc_id, fn_args, rn, round_entry, recovery_refusal,
+        settle(task, fn_name, tc_id, fn_args, rn, round_entry, recovery_refusal,
             idempotent_tools=idempotent_tools, cache=cache, tid=tid, round_num=round_num,
             terminal_status='rejected', internal_result_sink=internal_result_sink,
             settled_results=settled_results, pending_envelopes=pending_envelopes)
@@ -1558,7 +1697,7 @@ def _approval_stops_tool_call(
                 reason=_gg_refusal, retryable=True,
             )
             tool_results[tc_id] = (_gg_refusal, False)
-            _settle_tool_result(
+            settle(
                 task, fn_name, tc_id, fn_args, rn, round_entry,
                 _gg_refusal, idempotent_tools=idempotent_tools,
                 cache=cache, tid=tid, round_num=round_num,
@@ -1635,7 +1774,7 @@ def _approval_stops_tool_call(
             reason=reject_content, retryable=False,
         )
         tool_results[tc_id] = (reject_content, False)
-        _settle_tool_result(
+        settle(
             task, fn_name, tc_id, fn_args, rn, round_entry,
             reject_content, idempotent_tools=idempotent_tools,
             cache=cache, tid=tid, round_num=round_num,
@@ -1732,7 +1871,7 @@ def _approval_stops_tool_call(
                     retryable=True,
                 )
                 tool_results[tc_id] = (reject_content, False)
-                _settle_tool_result(
+                settle(
                     task, fn_name, tc_id, fn_args, rn, round_entry,
                     reject_content, idempotent_tools=idempotent_tools,
                     cache=cache, tid=tid, round_num=round_num,
@@ -1757,7 +1896,7 @@ def _approval_stops_tool_call(
         retryable=True,
     )
     tool_results[tc_id] = (reject_content, False)
-    _settle_tool_result(
+    settle(
         task, fn_name, tc_id, fn_args, rn, round_entry,
         reject_content, idempotent_tools=idempotent_tools,
         cache=cache, tid=tid, round_num=round_num,
@@ -1944,14 +2083,14 @@ def _missing_tool_result(task, name, call_id, round_entry):
 def _append_ordered_tool_replay(
     _appended_tool_msgs, _cache,
     _idempotent_tools, _program_messages_to_settle, _round_results_for_budget, _settle_current,
-    all_search_results_text, messages, model, parsed_tcs,
+    messages, model, parsed_tcs,
     round_num, task, tid, tool_results,
     tool_verdicts,
 ):
     """Publish settled results in original call order, retaining image and program receipts."""
     for tc, fn_name, tc_id, fn_args, rn, round_entry, _pe in parsed_tcs:
         if tc_id in tool_results:
-            tool_content, is_search = tool_results[tc_id]
+            tool_content = tool_results[tc_id][0]
         else:
             # Completed Futures have already been harvested. No receipt remains
             # from which to infer tool availability or an external effect.
@@ -1960,12 +2099,8 @@ def _append_ordered_tool_replay(
                 'round=%d — returning a typed collection failure',
                 tid, task.get('convId', '') if task else '',
                 fn_name, tc_id, round_num)
-            tool_content, is_search = (
-                _missing_tool_result(task, fn_name, tc_id, round_entry), False)
+            tool_content = _missing_tool_result(task, fn_name, tc_id, round_entry)
             tool_verdicts[tc_id] = 'error'
-        if is_search:
-            with _tool_receipt_lock(task):
-                _append_search_result_text(all_search_results_text, tool_content)
 
         # Convert screenshot dict → image_url content block for vision models.
         # The MESSAGE append is what genuinely belongs here ():
@@ -2018,11 +2153,11 @@ def _append_ordered_tool_replay(
                      round_num=round_num, terminal_status=tool_verdicts.get(tc_id)))
         else:
             # Settle this tool (idempotent). Tools dispatched through the
-            #   parallel pool / serial lanes already settled at their OWN
-            #   completion instant — this call returns their cached content
-            #   without re-emitting. Only tools that never went through a
-            #   dispatch lane (dedup cache hits, approval rejections,
-            #   pre-hook blocks, abort short-circuits, the missing-result
+            #   concurrent lane already settled at their OWN completion
+            #   instant (approval and hook refusals on their worker) — this
+            #   call returns their cached content without re-emitting. Only
+            #   tools whose outcome the collector recorded without settling
+            #   (Stop placeholders, harvested gaps, the missing-result
             #   fallback) actually do work here.
             #
             #   The LOOP itself must stay: it walks ``parsed_tcs``, so the
@@ -2093,6 +2228,428 @@ def _append_ordered_tool_replay(
             ))
 
 
+def _authority_stops_tool_call(
+    *,
+    task: dict[str, Any],
+    tc: dict[str, Any],
+    fn_name: str,
+    tc_id: str,
+    fn_args: dict[str, Any],
+    rn: int,
+    round_entry: dict[str, Any] | None,
+    project_path: str | None,
+    plan_mode: bool,
+    write_tools: set[str] | frozenset[str],
+    multi_agent_banned: frozenset[str],
+    tool_results: dict[str, tuple[Any, bool]],
+    tool_verdicts: dict[str, str],
+    settle_current: Any,
+    idempotent_tools: set[str] | frozenset[str],
+    cache: dict[str, Any],
+    tid: str,
+    round_num: int,
+) -> bool:
+    """Apply execution-boundary authority refusals; return true when rejected."""
+    # Native Multi-agent subagents are analysis-only in Tofu. OpenAI
+    # attributes every function call to an agent; the Responses translator
+    # preserves that attribution in ``caller``. Reject state-changing calls
+    # from any non-root agent at the execution boundary, so the read-only
+    # policy remains an authority rule even if prompt guidance is ignored.
+    _agent_name = _blocked_multi_agent_write(
+        tc, fn_name, multi_agent_banned)
+    if _agent_name:
+        _blocked = (
+            'Tool call rejected: native Multi-agent subagents are '
+            'read-only. Return the finding to /root; only the root agent '
+            'may request a state-changing action.')
+        stamp_tool_rejection(
+            round_entry,
+            {'kind': 'multi_agent_read_only', 'agent': _agent_name,
+             'tool': fn_name},
+            reason=_blocked, retryable=False,
+        )
+        from lib.tasks_pkg.tool_call_outcome import audit_round_outcome
+        audit_round_outcome(task, round_entry, status='rejected')
+        tool_results[tc_id] = (_blocked, False)
+        tool_verdicts[tc_id] = 'rejected'
+        settle_current(
+            task, fn_name, tc_id, fn_args, rn, round_entry, _blocked,
+            idempotent_tools=idempotent_tools, cache=cache, tid=tid,
+            round_num=round_num, terminal_status='rejected')
+        logger.warning('[Task %s] Rejected Multi-agent subagent write: '
+                       'agent=%s tool=%s', tid, _agent_name, fn_name)
+        return True
+
+    from lib.tasks_pkg.coordinator_policy import coordinator_call_rejection
+    coordinator_denial = coordinator_call_rejection(task, fn_name, fn_args, project_path)
+    if coordinator_denial:
+        stamp_tool_rejection(round_entry,
+            {'kind': 'coordinator_dispatch_only', 'tool': fn_name},
+            reason=coordinator_denial, retryable=False)
+        tool_results[tc_id] = (coordinator_denial, False)
+        tool_verdicts[tc_id] = 'rejected'
+        settle_current(task, fn_name, tc_id, fn_args, rn, round_entry, coordinator_denial,
+            idempotent_tools=idempotent_tools, cache=cache, tid=tid,
+            round_num=round_num, terminal_status='rejected')
+        return True
+
+    # ── Delegate Mode orchestration-only guard ──
+    # Assembly already narrowed the root catalog; this lane closes replayed
+    # rounds, gateway batches and any schema that reached the wire anyway.
+    from lib.tasks_pkg.delegate_mode import delegate_call_rejection
+    delegate_denial = delegate_call_rejection(task, fn_name, fn_args)
+    if delegate_denial:
+        stamp_tool_rejection(round_entry,
+            {'kind': 'delegate_orchestration_only', 'tool': fn_name},
+            reason=delegate_denial, retryable=False)
+        tool_results[tc_id] = (delegate_denial, False)
+        tool_verdicts[tc_id] = 'rejected'
+        settle_current(task, fn_name, tc_id, fn_args, rn, round_entry, delegate_denial,
+            idempotent_tools=idempotent_tools, cache=cache, tid=tid,
+            round_num=round_num, terminal_status='rejected')
+        return True
+
+    # ── Plan Mode read-only guard ──
+    # The assembly-time wire filter keeps mutating schemas away from the
+    # model, but a call can still reach dispatch (Tool Search resurfacing,
+    # late-discovered MCP tools, caller-supplied tools=[...], a stale
+    # replayed round). Reject it with a model-visible error — Plan Mode's
+    # read-only contract is an authority rule, not a prompt suggestion.
+    from lib.tasks_pkg.manager import task_user_id
+    from lib.tasks_pkg.plan_mode import plan_mode_call_allowed, plan_mode_rejection
+    if (plan_mode
+            and not plan_mode_call_allowed(fn_name, fn_args, write_tools,
+                                           owner_user_id=task_user_id(task))):
+        _blocked = plan_mode_rejection(fn_name)
+        stamp_tool_rejection(
+            round_entry,
+            {'kind': 'plan_mode_read_only', 'tool': fn_name},
+            reason=_blocked, retryable=False,
+        )
+        tool_results[tc_id] = (_blocked, False)
+        tool_verdicts[tc_id] = 'rejected'
+        settle_current(
+            task, fn_name, tc_id, fn_args, rn, round_entry, _blocked,
+            idempotent_tools=idempotent_tools, cache=cache, tid=tid,
+            round_num=round_num, terminal_status='rejected')
+        logger.info('[Task %s] Plan Mode rejected mutating tool call: %s',
+                    tid, fn_name)
+        return True
+    return False
+
+
+def _emit_post_tool_snapshot(
+    task: dict[str, Any],
+    messages: list[dict[str, Any]],
+    model: str,
+    tool_list: list[dict] | None,
+    round_num: int,
+    tid: str,
+) -> None:
+    """Append the post-tool state snapshot unless gated off or unchanged."""
+    # Emit snapshot AFTER tool results appended — WIRE-FORM view (same single
+    # source of truth as the orchestrator's pre-LLM and final snapshots), so
+    # the panel reflects exactly what the model will receive next round. Runs
+    # on an independent copy via apply_wire_sanitize (does not mutate messages).
+    # Gated (fix 3): the O(history) deep-copy + sanitize is DEBUG-only, so it
+    # is skipped for unattended / headless tasks unless TOFU_POST_TOOL_SNAPSHOT
+    # opts back in.
+    if not _post_tool_snapshot_enabled(task):
+        return
+    # Reduced-scope FINDING C: the post-tool snapshot re-copies the WHOLE
+    # message history each round (O(history) → quadratic storage). The
+    # pre-request snapshot for the same round already ran the same sanitize +
+    # strip. When no message was appended or edited since that snapshot (same
+    # length and same tail identity) the post-tool frame would be byte-equal —
+    # a pure duplicate. Skip the re-snapshot and reuse the round's existing
+    # evidence; the Inspector keys by (taskId, roundNum) and already holds the
+    # identical request payload for this round.
+    try:
+        from lib.tasks_pkg.round_evidence import snapshot_unchanged_since_request
+        if snapshot_unchanged_since_request(task, messages):
+            logger.debug(
+                '[Task %s] messages_snapshot post-tool skipped at round %d — '
+                'unchanged since the request snapshot', tid, round_num + 1)
+            return
+    except Exception:
+        logger.debug('[Task %s] post-tool unchanged check failed (non-fatal)',
+                     tid, exc_info=True)
+    try:
+        from lib.tasks_pkg.round_evidence import build_round_evidence
+        from lib.tasks_pkg.round_evidence import begin_round_evidence
+        ref = task.get('_inspectorRef') or begin_round_evidence(
+            task, task.get('_inspectorTaskId') or task['id'], round_num + 1,
+            task.get('_flow_phase') or '')
+        snap_evt = build_round_evidence(
+            task, messages, ref=ref, kind='state', model=model, tools=tool_list)
+        append_event(task, snap_evt)
+    except Exception:
+        logger.warning(
+            '[Task %s] messages_snapshot post-tool failed at round %d model=%s',
+            tid, round_num + 1, model, exc_info=True)
+
+
+def _submit_tool_future(pool, run_call):
+    """Return one occurrence receipt even when its pre-submit fence fails."""
+    from lib.write_freshness import project_read_cache_generation
+
+    generation = None
+    try:
+        generation = project_read_cache_generation()
+        future = pool.submit(run_call)
+    except Exception as error:
+        future = Future()
+        future.set_exception(error)
+    return future, generation
+
+
+def _settle_parse_rejection(
+    task, item, *, tool_results, settle_current, idempotent_tools, cache, tid, round_num,
+):
+    """Settle parser and contract rejections with their canonical event metadata."""
+    tc, fn_name, tc_id, fn_args, rn, round_entry, _parse_err = item
+    if round_entry:
+        _rejected = tool_rejection_descriptor(round_entry)
+        _contract_error = round_entry.get('_contractError')
+        _err_meta = {'type': 'error', 'content': _parse_err,
+                     'toolName': fn_name}
+        if _rejected or _contract_error:
+            # Keep the distinct 'rejected' status (don't let
+            # _finalize_tool_round flip it to 'done') and carry the
+            # typed descriptor onto result meta + event so the
+            # frontend cannot project a refused call as completed.
+            if _rejected:
+                stamp_tool_rejection(
+                    _err_meta, _rejected,
+                    legacy_result_alias=True,
+                )
+            if _contract_error:
+                _err_meta['contractError'] = _contract_error
+            round_entry['results'] = [_err_meta]
+            round_entry['status'] = 'rejected'
+            _event = build_event(
+                EventType.TOOL_RESULT,
+                roundNum=rn,
+                toolCallId=round_entry.get('toolCallId', ''),
+                toolName=fn_name,
+                query=round_entry.get('query', fn_name),
+                results=[_err_meta],
+                status='rejected',
+            )
+            for key in ('taskId', 'attemptId', 'llmRound'):
+                if round_entry.get(key) is not None:
+                    _event[key] = round_entry[key]
+            if _rejected:
+                stamp_tool_rejection(_event, _rejected)
+            if _contract_error:
+                _event['_contractError'] = _contract_error
+            append_event(task, _event)
+            from lib.tasks_pkg.tool_call_outcome import (
+                audit_round_outcome)
+            audit_round_outcome(task, round_entry, status='rejected')
+        else:
+            _finalize_tool_round(
+                task, rn, round_entry,
+                [_err_meta],
+                query_override=round_entry.get('query', fn_name),
+            )
+    tool_results[tc_id] = (_parse_err, False)
+    # Settle NOW (). This tool never ran, so the round is
+    #   knowably finished the instant it is inspected — deferring to the
+    #   post-phase made a zero-cost refusal wait for the round's slowest
+    #   REAL tool. The verdict rides along so the client cannot promote
+    #   a rejected hallucination to 'done'.
+    settle_current(
+        task, fn_name, tc_id, fn_args, rn, round_entry, _parse_err,
+        idempotent_tools=idempotent_tools, cache=cache, tid=tid,
+        round_num=round_num,
+        terminal_status=(round_entry or {}).get('status') or 'rejected')
+
+
+def _pre_hook_stops_tool_call(
+    task, item, *, tool_results, settle_current, idempotent_tools, cache, tid, round_num,
+):
+    """Publish a pre-execution rejection without entering the handler."""
+    tc, fn_name, tc_id, fn_args, rn, round_entry, _parse_err = item
+    from lib.project_dispatch.admission import is_dispatch_task
+
+    _hook_result = None if is_dispatch_task(task) else run_pre_hooks(fn_name, fn_args, task)
+    if _hook_result and _hook_result.action == 'block':
+        logger.info('[Task %s] Pre-hook BLOCKED tool %s: %s',
+                    tid, fn_name, _hook_result.message)
+        _blocked_content = f'Tool blocked by pre-execution hook: {_hook_result.message}'
+        # Surface the hook's recovery guidance to the model so a block is
+        # an ACTIONABLE redirect (what was refused + how to proceed safely)
+        # rather than a dead-end the loop can't recover from.
+        _recovery = getattr(_hook_result, 'additional_context', '') or ''
+        if _recovery:
+            _blocked_content = f'{_blocked_content}\n\n{_recovery}'
+        _hook_rejection = stamp_tool_rejection(
+            round_entry,
+            {'kind': 'pre_execution_hook', 'tool': fn_name},
+            reason=_blocked_content, retryable=bool(_recovery),
+        )
+        tool_results[tc_id] = (_blocked_content, False)
+        # Settle the round NOW. Without this the round stays in its
+        #   'searching' start-state forever (no result, no terminal
+        #   status): the live UI shows a permanent "Running…" spinner and
+        #   the persisted round only gets swept to 'aborted' by the
+        #   task-end dangling sweep — so an EARLY blocked tool renders as
+        #   still-running even after the loop has advanced dozens of rounds
+        #   past it. Emit a terminal 'rejected' result exactly like the
+        #   parse-error / hallucinated-tool branch above.
+        if round_entry is not None:
+            _block_meta = {
+                'type': 'error',
+                'content': _blocked_content,
+                'toolName': fn_name,
+                'source': 'Blocked',
+                'snippet': _hook_result.message,
+                'badge': 'blocked',
+            }
+            stamp_tool_rejection(
+                _block_meta, _hook_rejection,
+                legacy_result_alias=True,
+            )
+            # For run_command / code_exec, shape the meta so the frontend's
+            # purpose-built "not run" terminal card renders it (⊘ blocked +
+            # inline reason) — that renderer keys on meta.command / notRun.
+            # A generic error meta would fall through to a plain error line.
+            if fn_name in ('run_command', 'code_exec'):
+                _block_meta['command'] = fn_args.get('command') or round_entry.get('query') or ''
+                _block_meta['notRun'] = True
+                _block_meta['exitCode'] = 'not-run'
+                _block_meta['reason'] = _blocked_content
+            round_entry['results'] = [_block_meta]
+            round_entry['status'] = 'rejected'
+            round_entry['toolContent'] = _blocked_content
+            try:
+                _block_event = build_event(
+                    EventType.TOOL_RESULT,
+                    roundNum=rn,
+                    toolCallId=round_entry.get('toolCallId', ''),
+                    toolName=fn_name,
+                    query=round_entry.get('query', fn_name),
+                    results=[_block_meta],
+                    status='rejected',
+                )
+                for key in ('taskId', 'attemptId', 'llmRound'):
+                    if round_entry.get(key) is not None:
+                        _block_event[key] = round_entry[key]
+                stamp_tool_rejection(_block_event, _hook_rejection)
+                append_event(task, _block_event)
+            except Exception as _blk_ev:
+                logger.warning(
+                    '[Task %s] tool_result (pre-hook block) emit failed for '
+                    'tool=%s round=%s (non-fatal): %s',
+                    tid, fn_name, rn, _blk_ev, exc_info=True)
+        # Settle NOW (). The hook refused the tool before it
+        #   ran, so this round costs zero time. It already carries
+        #   status='rejected' above; passing it through keeps the verdict on
+        #   the wire so the client cannot promote a BLOCKED tool to 'done'.
+        settle_current(
+            task, fn_name, tc_id, fn_args, rn, round_entry,
+            _blocked_content, idempotent_tools=idempotent_tools,
+            cache=cache, tid=tid, round_num=round_num,
+            terminal_status='rejected')
+        return True
+
+    return False
+
+
+def _admit_on_worker(
+    item, *, task, settle_current, settle_approval, confirmation_tools,
+    write_tools, attended, auto_apply, cfg, project_path, round_num, model,
+    idempotent_tools, cache, tid, internal_result_sink, settled_results,
+    pending_envelopes, command_dirs,
+):
+    """Worker-side admission of one started call; ``None`` admits its handler.
+
+    Approval and pre-hooks run on the call's own worker, so a pending human
+    decision delays only this call (owner decision 2026-10-28). A run_command
+    that inherits a sibling's sticky directory first waits for that sibling's
+    admission verdict, and every verdict is published to ``command_dirs``
+    (``_ordering.CommandDirectoryPlan``). Each refusal settles here with its
+    terminal verdict and returns an ``UnexecutedCall``.
+    """
+    tc, fn_name, tc_id, fn_args, rn, round_entry, _parse_err = item
+    entered = False
+    try:
+        refused: dict[str, tuple[Any, bool]] = {}
+        if command_dirs.resolve(tc_id, task) and _approval_stops_tool_call(
+            task=task, fn_name=fn_name, fn_args=fn_args, tc_id=tc_id,
+            rn=rn, round_entry=round_entry, confirmation_tools=confirmation_tools,
+            write_tools=write_tools, attended=attended, auto_apply=auto_apply,
+            cfg=cfg, project_path=project_path, round_num=round_num, model=model,
+            tool_results=refused, idempotent_tools=idempotent_tools, cache=cache,
+            tid=tid, internal_result_sink=internal_result_sink,
+            settled_results=settled_results, pending_envelopes=pending_envelopes,
+            settle=settle_approval,
+        ):
+            return UnexecutedCall(tc_id, refused[tc_id][0], 'rejected')
+        # Re-checked AFTER the approval gate: it can block up to the approval
+        # timeout, so a Stop pressed while the dialog is open must still win over
+        # the approved-but-not-yet-dispatched execution. 'aborted' (never 'done')
+        # renders the static "interrupted" affordance at once.
+        if task.get('aborted'):
+            logger.info('[Task %s] Skipping tool %s (tc_id=%s) — task aborted',
+                        tid, fn_name, tc_id[:8])
+            settle_current(
+                task, fn_name, tc_id, fn_args, rn, round_entry,
+                'Task aborted by user.', idempotent_tools=idempotent_tools,
+                cache=cache, tid=tid, round_num=round_num, terminal_status='aborted')
+            return UnexecutedCall(tc_id, 'Task aborted by user.', 'aborted')
+        wait_policy = _SERIAL_BLOCKING_TOOLS.get(fn_name)
+        if wait_policy and wait_policy['match'](fn_args) and wait_policy.get('inject'):
+            fn_args.update(wait_policy['inject'](task, rn))
+        if _pre_hook_stops_tool_call(
+                task, item, tool_results=refused, settle_current=settle_current,
+                idempotent_tools=idempotent_tools, cache=cache, tid=tid,
+                round_num=round_num):
+            return UnexecutedCall(tc_id, refused[tc_id][0], 'rejected')
+        entered = True
+        return None
+    finally:
+        command_dirs.settle(tc_id, entered)
+
+
+def _publish_admitted_gateway_siblings(task, round_num, parsed_tcs, admitted) -> None:
+    """Publish direct siblings an ``execute_tools`` child may duplicate.
+
+    A provider can emit BOTH ``execute_tools`` and one of its calls[] children
+    as direct siblings. That is one routing error, not two user actions. The
+    response-scoped FIFO multiset is built after authority filtering and before
+    any worker can enter the gateway handler, from the model's own arguments (a
+    child carries no frozen directory). Approval and hooks decide on workers,
+    so a direct call they later refuse still owns its identical child: the
+    child points at that refusal instead of asking twice. Nested child
+    pipelines have no ``execute_tools`` carrier and cannot overwrite it.
+    """
+    if not any(item[1] == EXECUTE_TOOLS_NAME for item in parsed_tcs):
+        return
+    _publish_execute_gateway_direct_siblings(task, round_num, [
+        (name, call_id, arguments)
+        for (_tc, name, call_id, arguments, _rn, _row, _parse_error) in admitted
+        if name not in GATEWAY_TOOL_NAMES])
+
+
+def _plan_admitted_calls(task, admitted, project_path, write_tools) -> list[AdmittedCall]:
+    """Launch facts per admitted call: call-order predecessors and bounds.
+
+    Writes, ordered state and ratified human waits keep the former serial
+    lane's limits: no pool ceiling, no declared timer, their own receipt after
+    Stop. Every other call keeps the ordinary bounded-pool contract.
+    """
+    predecessors = call_predecessors(task, project_path, admitted, write_tools)
+    return [
+        AdmittedCall(
+            item=item, predecessors=predecessors[item[2]],
+            bounded=not (item[1] in write_tools or item[1] in _ORDERED_STATE_TOOLS
+                         or _is_exempt_wait(item[1], item[3] or {})))
+        for item in admitted
+    ]
+
+
 def execute_tool_pipeline(
     task: dict[str, Any],
     parsed_tcs: list[tuple],
@@ -2108,7 +2665,7 @@ def execute_tool_pipeline(
     internal_result_sink: Any = None,
     publish_direct_gateway_siblings: bool = True,
 ) -> bool:
-    """Run the full tool-execution pipeline: approval → parallel dispatch → result append.
+    """Run the full tool-execution pipeline: admission → concurrent dispatch → result append.
 
     Returns
     -------
@@ -2117,13 +2674,14 @@ def execute_tool_pipeline(
 
     Handles three phases:
 
-    1. **Error short-circuit** — tool calls with JSON parse errors get an
-       error result returned to the LLM without execution.
-    2. **Serial approval** — write operations (``write_file``, ``apply_diff``)
-       and server-kill commands that require user approval are executed one
-       at a time, blocking until the user approves or rejects.
-    3. **Parallel execution** — all remaining tool calls run concurrently
-       in a :class:`~concurrent.futures.ThreadPoolExecutor`.
+    1. **Admission** — parse errors, authority refusals and reusable cache
+       hits settle without execution; run_command directories are frozen in
+       call order.
+    2. **Concurrent execution** — every admitted call, writes included,
+       starts at once on the demand executor. Approval and hooks run on the
+       call's own worker; only same-target mutations and ``todo_write`` wait
+       for their earlier siblings (owner decision 2026-10-28).
+    3. **Ordered replay** — results settle as each call finishes.
 
     After execution, tool result messages are appended to *messages* in the
     original tool-call order, and ``tool_complete`` events are emitted.
@@ -2169,6 +2727,11 @@ def execute_tool_pipeline(
     _produced_cache_entries: dict[str, Any] = {}
     task.pop('_settled_tool_results', None)  # repair pre-C234 live task state
 
+    # Calls settle from the collector and from their own workers (approval and
+    # hook refusals), so one invocation-local lock keeps settlement exactly
+    # once per call and its shared carriers single-writer.
+    _settle_lock = threading.RLock()
+
     def _settle_current(*args: Any, **kwargs: Any) -> Any:
         kwargs['internal_result_sink'] = internal_result_sink
         kwargs['context_messages'] = messages
@@ -2176,7 +2739,12 @@ def execute_tool_pipeline(
         kwargs['settled_results'] = _settled_results
         kwargs['pending_envelopes'] = _pending_envelopes
         kwargs['produced_cache_entry'] = _produced_cache_entries.get(args[2])
-        return _settle_tool_result(*args, **kwargs)
+        with _settle_lock:
+            return _settle_tool_result(*args, **kwargs)
+
+    def _settle_approval(*args: Any, **kwargs: Any) -> Any:
+        with _settle_lock:
+            return _settle_tool_result(*args, **kwargs)
     # Auto-apply default (2026-08-21 policy): writes do NOT require approval
     # unless the user explicitly switched this conversation to Manual
     # (autoApply=False then arrives via the request / conv settings). A caller
@@ -2195,7 +2763,6 @@ def execute_tool_pipeline(
 
     # Carry the read-start fence in existing future metadata, never a task
     # registry or a reference to the parent's cache for detached writers.
-    from lib.write_freshness import project_read_cache_generation
     # Failure VERDICTS (2026-08-06 'silent timeout' incident, conv
     #   msh9fzvo6gmuvh). A lane that failed the tool records ONLY an error
     #   string in tool_results — the tuple's second slot is is_search, NOT a
@@ -2216,8 +2783,7 @@ def execute_tool_pipeline(
     # The ban set rides the SAME per-task write partition (incl. the
     # conservative MCP classification + custom-env flags) so Plan Mode can
     # never drift from the concurrency/approval authority.
-    from lib.tasks_pkg.plan_mode import (
-        plan_mode_call_allowed, plan_mode_enabled, plan_mode_rejection)
+    from lib.tasks_pkg.plan_mode import plan_mode_enabled
     _plan_mode = plan_mode_enabled(cfg)
     # Native subagents use the same strict leaf-worker partition as local
     # Swarm even outside Plan Mode. ToolSpec.write_tools alone intentionally
@@ -2227,7 +2793,7 @@ def execute_tool_pipeline(
     _multi_agent_banned = read_only_agent_banned_names(_write_tools)
 
     # ══════════════════════════════════════════
-    #  Pre-phase: Serial write-approval tools
+    #  Admission: settle what never needs a worker
     # ══════════════════════════════════════════
     # ── Per-task dedup cache for idempotent tools ──
     # Stored on the task dict so it's scoped to one task execution.
@@ -2249,11 +2815,9 @@ def execute_tool_pipeline(
 
     from lib.project_dispatch.admission import is_dispatch_task
     if is_dispatch_task(task) and parsed_tcs:
-        from lib.project_dispatch.scope import admit_tool
-        for item in parsed_tcs:
-            admit_tool(task, item[1], item[3], project_path=project_path)
+        _admit_dispatch_tool_calls(task, parsed_tcs, project_path, tid)
 
-    parallel_items = []
+    admitted = []
     claimed_model_call_ids: set[str] = set()
     # Each response position retains its own execution and paired result.
     # Provider flood admission occurs before parsing, never by replacing a
@@ -2272,827 +2836,99 @@ def execute_tool_pipeline(
 
         # JSON parse failure / hallucinated-tool rejection: never execute.
         if _parse_err:
-            if round_entry:
-                _rejected = tool_rejection_descriptor(round_entry)
-                _contract_error = round_entry.get('_contractError')
-                _err_meta = {'type': 'error', 'content': _parse_err,
-                             'toolName': fn_name}
-                if _rejected or _contract_error:
-                    # Keep the distinct 'rejected' status (don't let
-                    # _finalize_tool_round flip it to 'done') and carry the
-                    # typed descriptor onto result meta + event so the
-                    # frontend cannot project a refused call as completed.
-                    if _rejected:
-                        stamp_tool_rejection(
-                            _err_meta, _rejected,
-                            legacy_result_alias=True,
-                        )
-                    if _contract_error:
-                        _err_meta['contractError'] = _contract_error
-                    round_entry['results'] = [_err_meta]
-                    round_entry['status'] = 'rejected'
-                    _event = build_event(
-                        EventType.TOOL_RESULT,
-                        roundNum=rn,
-                        toolCallId=round_entry.get('toolCallId', ''),
-                        toolName=fn_name,
-                        query=round_entry.get('query', fn_name),
-                        results=[_err_meta],
-                        status='rejected',
-                    )
-                    for key in ('taskId', 'attemptId', 'llmRound'):
-                        if round_entry.get(key) is not None:
-                            _event[key] = round_entry[key]
-                    if _rejected:
-                        stamp_tool_rejection(_event, _rejected)
-                    if _contract_error:
-                        _event['_contractError'] = _contract_error
-                    append_event(task, _event)
-                    from lib.tasks_pkg.tool_call_outcome import (
-                        audit_round_outcome)
-                    audit_round_outcome(task, round_entry, status='rejected')
-                else:
-                    _finalize_tool_round(
-                        task, rn, round_entry,
-                        [_err_meta],
-                        query_override=round_entry.get('query', fn_name),
-                    )
-            tool_results[tc_id] = (_parse_err, False)
-            # Settle NOW (). This tool never ran, so the round is
-            #   knowably finished the instant it is inspected — deferring to the
-            #   post-phase made a zero-cost refusal wait for the round's slowest
-            #   REAL tool. The verdict rides along so the client cannot promote
-            #   a rejected hallucination to 'done'.
-            _settle_current(
-                task, fn_name, tc_id, fn_args, rn, round_entry, _parse_err,
+            _settle_parse_rejection(
+                task, item, tool_results=tool_results, settle_current=_settle_current,
                 idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
                 round_num=round_num,
-                terminal_status=(round_entry or {}).get('status') or 'rejected')
-            continue
-
-        # Native Multi-agent subagents are analysis-only in Tofu. OpenAI
-        # attributes every function call to an agent; the Responses translator
-        # preserves that attribution in ``caller``. Reject state-changing calls
-        # from any non-root agent at the execution boundary, so the read-only
-        # policy remains an authority rule even if prompt guidance is ignored.
-        _agent_name = _blocked_multi_agent_write(
-            tc, fn_name, _multi_agent_banned)
-        if _agent_name:
-            _blocked = (
-                'Tool call rejected: native Multi-agent subagents are '
-                'read-only. Return the finding to /root; only the root agent '
-                'may request a state-changing action.')
-            stamp_tool_rejection(
-                round_entry,
-                {'kind': 'multi_agent_read_only', 'agent': _agent_name,
-                 'tool': fn_name},
-                reason=_blocked, retryable=False,
             )
-            from lib.tasks_pkg.tool_call_outcome import audit_round_outcome
-            audit_round_outcome(task, round_entry, status='rejected')
-            tool_results[tc_id] = (_blocked, False)
-            tool_verdicts[tc_id] = 'rejected'
-            _settle_current(
-                task, fn_name, tc_id, fn_args, rn, round_entry, _blocked,
-                idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
-                round_num=round_num, terminal_status='rejected')
-            logger.warning('[Task %s] Rejected Multi-agent subagent write: '
-                           'agent=%s tool=%s', tid, _agent_name, fn_name)
             continue
 
-        from lib.tasks_pkg.coordinator_policy import coordinator_call_rejection
-        coordinator_denial = coordinator_call_rejection(task, fn_name, fn_args, project_path)
-        if coordinator_denial:
-            stamp_tool_rejection(round_entry,
-                {'kind': 'coordinator_dispatch_only', 'tool': fn_name},
-                reason=coordinator_denial, retryable=False)
-            tool_results[tc_id] = (coordinator_denial, False)
-            tool_verdicts[tc_id] = 'rejected'
-            _settle_current(task, fn_name, tc_id, fn_args, rn, round_entry, coordinator_denial,
-                idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
-                round_num=round_num, terminal_status='rejected')
-            continue
-
-        # ── Plan Mode read-only guard ──
-        # The assembly-time wire filter keeps mutating schemas away from the
-        # model, but a call can still reach dispatch (Tool Search resurfacing,
-        # late-discovered MCP tools, caller-supplied tools=[...], a stale
-        # replayed round). Reject it with a model-visible error — Plan Mode's
-        # read-only contract is an authority rule, not a prompt suggestion.
-        from lib.tasks_pkg.manager import task_user_id
-        if (_plan_mode
-                and not plan_mode_call_allowed(fn_name, fn_args, _write_tools,
-                                               owner_user_id=task_user_id(task))):
-            _blocked = plan_mode_rejection(fn_name)
-            stamp_tool_rejection(
-                round_entry,
-                {'kind': 'plan_mode_read_only', 'tool': fn_name},
-                reason=_blocked, retryable=False,
-            )
-            tool_results[tc_id] = (_blocked, False)
-            tool_verdicts[tc_id] = 'rejected'
-            _settle_current(
-                task, fn_name, tc_id, fn_args, rn, round_entry, _blocked,
-                idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
-                round_num=round_num, terminal_status='rejected')
-            logger.info('[Task %s] Plan Mode rejected mutating tool call: %s',
-                        tid, fn_name)
-            continue
-
-        # ── Dedup check for idempotent tools ──
-        if fn_name in _idempotent_tools and not task.get('aborted') and not has_prefetch(
-                task, fn_name, tc_id, fn_args, round_entry, project_path):
-            cache_key = _make_cache_key(fn_name, fn_args)
-            cached = _cache.get(cache_key)
-
-            if (cached is not None
-                    and not _project_cache_entry_is_current(fn_name, cached)):
-                _discard_tool_result_cache_entry(task, cache_key, cached)
-                cached = None
-            # ── FreshGate: never serve a STALE cached read ──
-            # The streaming pre-exec/dedup cache bypasses the project-tool
-            # handler, so a cached read_files/inspect_image result can be
-            # arbitrarily older than the disk (sibling edit, git checkout).
-            # Serving it hands the model stale bytes AND never re-stamps
-            # the write-freshness token — the 're-reads never clear the
-            # refusal' loop (). When a covered file moved since
-            # this conversation's token, drop the entry and fall through to
-            # a REAL read (which re-stamps via the handler seam).
-            if cached is not None:
-                try:
-                    from lib.tasks_pkg.handlers._write_freshness_gate import (
-                        FILE_READ_TOOLS, cached_read_is_stale,
-                    )
-                    if (fn_name in FILE_READ_TOOLS
-                            and cached_read_is_stale(task, fn_args,
-                                                     project_path)):
-                        _discard_tool_result_cache_entry(task, cache_key, cached)
-                        cached = None
-                        logger.info(
-                            '[Task %s] conv=%s FreshGate: %s cache hit '
-                            'BYPASSED — covered file changed since cached '
-                            'read; re-executing',
-                            tid, task.get('convId', ''), fn_name)
-                except Exception as _fe:
-                    logger.debug('[FreshGate] cached-read staleness check '
-                                 'failed (non-fatal): %s', _fe)
-            search_projection = None
-            if cached is not None and fn_name == SEARCH_TOOLS_NAME:
-                search_projection = cached_tool_search_projection(
-                    _unpack_cache_entry(cached)[0])
-                if search_projection is None:
-                    # Invalid cache data is not evidence of zero matches.
-                    # Let the normal handler produce a fresh typed result.
-                    _discard_tool_result_cache_entry(task, cache_key, cached)
-                    cached = None
-            if cached is not None:
-                cached_content, cached_is_search, cached_source, cached_display, cached_engine_bkdn, cached_vertical, cached_search_diag = \
-                    _unpack_cache_entry(cached)
-                cached_projection_items = _cache_entry_projection_items(cached)
-                cached_producer_metadata = (
-                    _cache_entry_producer_metadata(cached))
-                is_prefetch = cached_source == 'prefetch'
-                # Compute content length for logging without materializing
-                # a massive str() for screenshot dicts (which contain base64)
-                if isinstance(cached_content, dict) and cached_content.get('__screenshot__'):
-                    _log_len = cached_content.get('compressedSize', 0)
-                    _log_suffix = ' (image)'
-                else:
-                    _log_len = len(str(cached_content))
-                    _log_suffix = ''
-                logger.info(
-                    '[Task %s] conv=%s %s HIT: %s with same args at round %d — '
-                    'returning %s result (%d chars%s) instead of re-executing',
-                    tid, task.get('convId', ''),
-                    'PREFETCH' if is_prefetch else 'DEDUP',
-                    fn_name, round_num,
-                    'prefetched' if is_prefetch else 'cached',
-                    _log_len, _log_suffix,
-                )
-                # Preserve __screenshot__ dicts as-is so the post-phase
-                # can detect them and convert to image_url blocks.
-                # Converting to str() would dump 800K+ of base64 text
-                # directly into the context, blowing up the token count.
-                if isinstance(cached_content, dict) and cached_content.get('__screenshot__'):
-                    dedup_content = cached_content  # keep as dict
-                else:
-                    dedup_content = cached_content if isinstance(cached_content, str) else str(cached_content)
-                # Update round_entry to show cached/prefetched status
-                if round_entry:
-                    # Use stored display_results for web_search / fetch_url if available
-                    # — this preserves per-result rows (titles, URLs, snippets) in the UI
-                    # instead of collapsing to a single generic meta row.
-                    if search_projection is not None:
-                        search_results, search_meta = search_projection
-                        extra = {
-                            **search_meta,
-                            'cacheSource': 'prefetch' if is_prefetch else 'cache',
-                        }
-                        round_entry.update(extra)
-                        _finalize_tool_round(
-                            task, rn, round_entry, search_results,
-                            query_override=str(fn_args.get('query') or fn_name),
-                            extra_event_fields=extra,
-                        )
-                    elif fn_name == 'web_search' or (cached_display and fn_name == 'fetch_url'):
-                        extra = {}
-                        extra['cacheSource'] = 'prefetch' if is_prefetch else 'cache'
-                        round_entry['cacheSource'] = extra['cacheSource']
-                        if cached_engine_bkdn:
-                            round_entry['engineBreakdown'] = cached_engine_bkdn
-                            extra['engineBreakdown'] = cached_engine_bkdn
-                        if cached_vertical:
-                            # Batch web_search carries multiple verticals. The
-                            # streaming prefetch path wraps them as
-                            # {'batch': [...]}, and the dedup path may hand us a
-                            # bare list. Both must land in the plural `verticals`
-                            # field — the frontend renders that as an array;
-                            # `vertical` (singular) expects one {domain, items}
-                            # dict and would silently drop a list/wrapper
-                            # (showing the bare "vertical: auto" badge with no card).
-                            if isinstance(cached_vertical, dict) and 'batch' in cached_vertical:
-                                _verts = cached_vertical.get('batch') or []
-                            elif isinstance(cached_vertical, list):
-                                _verts = cached_vertical
-                            else:
-                                _verts = None
-                            if _verts is not None:
-                                round_entry['verticals'] = _verts
-                                extra['verticals'] = _verts
-                            else:
-                                round_entry['vertical'] = cached_vertical
-                                extra['vertical'] = cached_vertical
-                        # Zero-result web_search: forward the diagnostic the
-                        # orchestrator attached at store time so the frontend
-                        # renders the honest network-error / no-matches row
-                        # (parity with the serial handler's searchDiag path)
-                        # instead of a fabricated single "result".
-                        if fn_name == 'web_search' and not cached_display and cached_search_diag:
-                            round_entry['searchDiag'] = cached_search_diag
-                            extra['searchDiag'] = cached_search_diag
-                        _finalize_tool_round(
-                            task, rn, round_entry, cached_display or [],
-                            query_override=round_entry.get('query', fn_name),
-                            extra_event_fields=extra or None,
-                        )
-                    else:
-                        _meta = _build_cache_hit_meta(
-                            fn_name, fn_args, cached_content, is_prefetch,
-                            cached_display=cached_display,
-                        )
-                        _finalize_tool_round(
-                            task, rn, round_entry, [_meta],
-                            query_override=round_entry.get('query', fn_name),
-                        )
-                    if cached_projection_items:
-                        round_entry[TOOL_RESULT_PROJECTION_ITEMS_KEY] = (
-                            cached_projection_items)
-                    if cached_producer_metadata:
-                        round_entry[TOOL_RESULT_PRODUCER_METADATA_KEY] = (
-                            cached_producer_metadata)
-                tool_results[tc_id] = (dedup_content, cached_is_search)
-                # Settle NOW (). A cache/prefetch hit costs ZERO
-                #   time: for a streaming-prefetch hit the tool already ran while
-                #   the model was still emitting tokens (StreamingToolExecutor
-                #   → inject_into_cache). Leaving it to the post-phase made the
-                #   FASTEST class of tool in the product the one that waited
-                #   longest — measured: tool_complete(cached) landed after
-                #   tool_complete(slow-sibling).
-                _settle_current(
-                    task, fn_name, tc_id, fn_args, rn, round_entry,
-                    dedup_content, idempotent_tools=_idempotent_tools,
-                    cache=_cache, tid=tid, round_num=round_num)
-                continue
-
-        if _approval_stops_tool_call(
-            task=task, fn_name=fn_name, fn_args=fn_args, tc_id=tc_id,
-            rn=rn, round_entry=round_entry,
-            confirmation_tools=_confirmation_tools,
-            write_tools=_write_tools, attended=_attended,
-            auto_apply=auto_apply, cfg=cfg, project_path=project_path,
-            round_num=round_num, model=model, tool_results=tool_results,
+        if _authority_stops_tool_call(
+            task=task, tc=tc, fn_name=fn_name, tc_id=tc_id, fn_args=fn_args,
+            rn=rn, round_entry=round_entry, project_path=project_path,
+            plan_mode=_plan_mode, write_tools=_write_tools,
+            multi_agent_banned=_multi_agent_banned,
+            tool_results=tool_results, tool_verdicts=tool_verdicts,
+            settle_current=_settle_current,
             idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
-            internal_result_sink=internal_result_sink,
-            settled_results=_settled_results, pending_envelopes=_pending_envelopes,
+            round_num=round_num,
         ):
             continue
 
-        # ── Abort check: skip remaining tools if user clicked Stop ──
-        # Re-checked AFTER the approval gate, not only before it: the gate can
-        # block up to the approval timeout in ``request_write_approval``, so a
-        # Stop pressed while the dialog is open must still win over the
-        # approved-but-not-yet-dispatched execution below.
-        if task.get('aborted'):
-            logger.info('[Task %s] Skipping tool %s (tc_id=%s) — task aborted', tid, fn_name, tc_id[:8])
-            tool_results[tc_id] = ('Task aborted by user.', False)
-            # Settle NOW with an ABORTED verdict (). Previously the
-            #   round kept status='searching' until
-            #   orchestrator._finalize_dangling_tool_rounds swept it at task end
-            #   — so a Stop left a spinner turning on every not-yet-run tool for
-            #   the remainder of the turn. 'aborted' (never 'done') is what makes
-            #   the row render the static "interrupted" affordance instead.
-            _settle_current(
-                task, fn_name, tc_id, fn_args, rn, round_entry,
-                'Task aborted by user.', idempotent_tools=_idempotent_tools,
-                cache=_cache, tid=tid, round_num=round_num,
-                terminal_status='aborted')
+        # ── Dedup check for idempotent tools ──
+        if try_reuse_tool_result(
+            task, item, cache=_cache, idempotent_tools=_idempotent_tools,
+            project_path=project_path, round_num=round_num, tid=tid,
+            tool_results=tool_results, settle_current=_settle_current,
+            finalize=_finalize_tool_round, build_hit_meta=_build_cache_hit_meta,
+            logger=logger,
+        ):
             continue
 
-        # ── Serial-dispatch for long-blocking tools ──
-        _serial_cfg = _SERIAL_BLOCKING_TOOLS.get(fn_name)
-        if _serial_cfg and _serial_cfg['match'](fn_args) and not task['aborted']:
-            _reason = _serial_cfg['reason']
-            logger.info('[Task %s] %s dispatched serially (%s) at round %d',
-                        tid, fn_name, _reason, round_num)
-            # Inject extra args (e.g. _parent_task) if configured
-            _inject_fn = _serial_cfg.get('inject')
-            if _inject_fn:
-                fn_args.update(_inject_fn(task, rn))
-            # Heartbeat this lane too (). These tools block for
-            #   MINUTES by design and emit no delta, so without a ticker both
-            #   reaper liveness clocks go stale and the task is force-failed
-            #   at TOFU_STUCK_TASK_MAX_SILENT_SECS. ``ask_human`` self-bumps,
-            #   while ``await_task`` does not and its own wait caps at 3600s —
-            #   double the reap threshold. The module comment in _heartbeat.py
-            #   claimed this lane was already covered; it was not.
-            _hb_stop, _hb_thread = _start_tool_heartbeat(task, [item], tid)
-            try:
-                tc_id_ret, tool_content, is_search = _execute_tool_one(
-                    task, tc, fn_name, tc_id, fn_args, rn, round_entry,
-                    cfg, project_path, project_enabled,
-                    all_tools=tool_list,
-                )
-            finally:
-                _hb_stop.set()
-            tool_results[tc_id_ret] = (tool_content, is_search)
-            logger.info('[Task %s] %s serial dispatch completed at round %d '
-                        '(result_len=%d)', tid, fn_name, round_num, len(str(tool_content)))
-            # Settle immediately (). These tools block for MINUTES.
-            #   Holding their
-            #   settle until the post-phase meant the round they belong to could
-            #   not report ANY tool as finished until the human answered.
-            if not (isinstance(tool_content, dict)
-                    and tool_content.get('__screenshot__')):
-                _settle_current(
-                    task, fn_name, tc_id_ret, fn_args, rn, round_entry,
-                    tool_content, idempotent_tools=_idempotent_tools,
-                    cache=_cache, tid=tid, round_num=round_num)
-            continue
-
-        # ── Pre-tool hooks: validate/block/modify before execution ──
-        _hook_result = None if is_dispatch_task(task) else run_pre_hooks(fn_name, fn_args, task)
-        if _hook_result and _hook_result.action == 'block':
-            logger.info('[Task %s] Pre-hook BLOCKED tool %s: %s',
-                        tid, fn_name, _hook_result.message)
-            _blocked_content = f'Tool blocked by pre-execution hook: {_hook_result.message}'
-            # Surface the hook's recovery guidance to the model so a block is
-            # an ACTIONABLE redirect (what was refused + how to proceed safely)
-            # rather than a dead-end the loop can't recover from.
-            _recovery = getattr(_hook_result, 'additional_context', '') or ''
-            if _recovery:
-                _blocked_content = f'{_blocked_content}\n\n{_recovery}'
-            _hook_rejection = stamp_tool_rejection(
-                round_entry,
-                {'kind': 'pre_execution_hook', 'tool': fn_name},
-                reason=_blocked_content, retryable=bool(_recovery),
-            )
-            tool_results[tc_id] = (_blocked_content, False)
-            # Settle the round NOW. Without this the round stays in its
-            #   'searching' start-state forever (no result, no terminal
-            #   status): the live UI shows a permanent "Running…" spinner and
-            #   the persisted round only gets swept to 'aborted' by the
-            #   task-end dangling sweep — so an EARLY blocked tool renders as
-            #   still-running even after the loop has advanced dozens of rounds
-            #   past it. Emit a terminal 'rejected' result exactly like the
-            #   parse-error / hallucinated-tool branch above.
-            if round_entry is not None:
-                _block_meta = {
-                    'type': 'error',
-                    'content': _blocked_content,
-                    'toolName': fn_name,
-                    'source': 'Blocked',
-                    'snippet': _hook_result.message,
-                    'badge': 'blocked',
-                }
-                stamp_tool_rejection(
-                    _block_meta, _hook_rejection,
-                    legacy_result_alias=True,
-                )
-                # For run_command / code_exec, shape the meta so the frontend's
-                # purpose-built "not run" terminal card renders it (⊘ blocked +
-                # inline reason) — that renderer keys on meta.command / notRun.
-                # A generic error meta would fall through to a plain error line.
-                if fn_name in ('run_command', 'code_exec'):
-                    _block_meta['command'] = fn_args.get('command') or round_entry.get('query') or ''
-                    _block_meta['notRun'] = True
-                    _block_meta['exitCode'] = 'not-run'
-                    _block_meta['reason'] = _blocked_content
-                round_entry['results'] = [_block_meta]
-                round_entry['status'] = 'rejected'
-                round_entry['toolContent'] = _blocked_content
-                try:
-                    _block_event = build_event(
-                        EventType.TOOL_RESULT,
-                        roundNum=rn,
-                        toolCallId=round_entry.get('toolCallId', ''),
-                        toolName=fn_name,
-                        query=round_entry.get('query', fn_name),
-                        results=[_block_meta],
-                        status='rejected',
-                    )
-                    for key in ('taskId', 'attemptId', 'llmRound'):
-                        if round_entry.get(key) is not None:
-                            _block_event[key] = round_entry[key]
-                    stamp_tool_rejection(_block_event, _hook_rejection)
-                    append_event(task, _block_event)
-                except Exception as _blk_ev:
-                    logger.warning(
-                        '[Task %s] tool_result (pre-hook block) emit failed for '
-                        'tool=%s round=%s (non-fatal): %s',
-                        tid, fn_name, rn, _blk_ev, exc_info=True)
-            # Settle NOW (). The hook refused the tool before it
-            #   ran, so this round costs zero time. It already carries
-            #   status='rejected' above; passing it through keeps the verdict on
-            #   the wire so the client cannot promote a BLOCKED tool to 'done'.
-            _settle_current(
-                task, fn_name, tc_id, fn_args, rn, round_entry,
-                _blocked_content, idempotent_tools=_idempotent_tools,
-                cache=_cache, tid=tid, round_num=round_num,
-                terminal_status='rejected')
-            continue
-
-        parallel_items.append(item)
+        admitted.append(item)
 
     # ══════════════════════════════════════════
-    #  Ordered-state / write-tool serial phase (concurrency safety)
-    #  Write tools run serially to prevent filesystem race conditions.
-    #  Order-sensitive task-local protocols (currently todo_write) share the
-    #  ordered lane without inheriting write approval or cache invalidation.
+    #  Every admitted call starts now (owner decision 2026-10-28)
     # ══════════════════════════════════════════
-    _serial_items = [
-        item for item in parallel_items
-        if item[1] in _write_tools or item[1] in _ORDERED_STATE_TOOLS
-    ]
-    parallel_items = [
-        item for item in parallel_items
-        if item[1] not in _write_tools and item[1] not in _ORDERED_STATE_TOOLS
-    ]
+    # Approval, the post-approval Stop check, human-wait argument injection and
+    # pre-hooks run on each call's own worker (_admit_on_worker), so a pending
+    # approval or human answer delays only that call. Only same-target file or
+    # browser mutations and todo_write keep call order (_ordering); run_command
+    # directories are frozen here in call order so concurrency never moves one.
+    if publish_direct_gateway_siblings:
+        _publish_admitted_gateway_siblings(task, round_num, parsed_tcs, admitted)
+    _command_dirs = plan_command_working_dirs(task, admitted)
+    batch = ToolExecutionBatch(
+        task=task,
+        configuration=cfg,
+        project_path=project_path,
+        project_enabled=project_enabled,
+        tools=tool_list,
+        model=model,
+        round_number=round_num,
+        task_label=tid,
+        calls=parsed_tcs,
+        write_tools=_write_tools,
+        reusable_tools=_idempotent_tools,
+        cache=_cache,
+        results=tool_results,
+        verdicts=tool_verdicts,
+        produced_cache_entries=_produced_cache_entries,
+        settle=_settle_current,
+        admit=partial(
+            _admit_on_worker, task=task, settle_current=_settle_current,
+            settle_approval=_settle_approval, confirmation_tools=_confirmation_tools,
+            write_tools=_write_tools, attended=_attended, auto_apply=auto_apply,
+            cfg=cfg, project_path=project_path, round_num=round_num, model=model,
+            idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
+            internal_result_sink=internal_result_sink, command_dirs=_command_dirs,
+            settled_results=_settled_results, pending_envelopes=_pending_envelopes),
+    )
+    ports = ToolExecutionPorts(
+        idle_reuse_hint=_parallel_idle_reuse_hint,
+        pool_factory=InstrumentedThreadPoolExecutor,
+        start_heartbeat=_start_tool_heartbeat,
+        timeout_setting=_bounded_tool_env_int,
+        clock=time,
+        submit=_submit_tool_future,
+        execute_one=_execute_tool_one,
+        execute_bounded=_execute_tool_one_in_pool,
+        settle_content=_dispatch_settle_content,
+        canonical_content=_canonical_settle_source,
+        collect=_completed_tools_until_cancel,
+        expire=_expire_collected_tool,
+        harvest=_harvest_completed_tool_results,
+        drain=_drain_cancelled_tool_workers,
+        log=logger,
+    )
+    admitted_calls = _plan_admitted_calls(task, admitted, project_path, _write_tools)
     # A read that runs CONCURRENTLY with a sibling write may capture pre-write
-    # bytes. The dedup-cache population in the drain loop below therefore
-    # refuses to cache write-sensitive reads in a round that also wrote.
-    _has_serial_write = any(it[1] in _write_tools for it in _serial_items)
-
-    # A provider can emit BOTH ``execute_tools`` and one of its calls[] children
-    # as direct siblings. That is one routing error, not two user actions. Build
-    # a response-scoped FIFO multiset after authority/approval/hook filtering,
-    # so a refused direct occurrence cannot absorb a runnable child. Nested
-    # child pipelines have no ``execute_tools`` carrier and cannot overwrite it.
-    if (publish_direct_gateway_siblings
-            and any(item[1] == EXECUTE_TOOLS_NAME for item in parsed_tcs)):
-        _publish_execute_gateway_direct_siblings(
-            task,
-            round_num,
-            [
-                (direct_name, direct_id, direct_args)
-                for (_direct_tc, direct_name, direct_id, direct_args,
-                     _direct_rn, _direct_entry, _direct_parse_error)
-                in (_serial_items + parallel_items)
-                if direct_name not in GATEWAY_TOOL_NAMES
-            ],
-        )
-    # ══════════════════════════════════════════
-    #  Read pool starts IMMEDIATELY (fix 1)
-    # ══════════════════════════════════════════
-    # Reads used to be submitted only AFTER every serial (write) tool had
-    # finished, so a slow run_command delayed the whole round's reads (the
-    # spawn_wait measured on the flame graph). Submit them FIRST; the serial
-    # lane below runs on this thread while the pool executes.
-    _pool = None
-    _futures: dict = {}
-    _timed_out = False
-    _pool_hb_stop = None
-    _parallel_by_id: dict[str, tuple] = {}
-    _tool_deadline = None
-    if parallel_items:
-        # ── Abort check before spawning parallel pool ──
-        if task.get('aborted'):
-            logger.info('[Task %s] Skipping %d parallel tools — task aborted', tid, len(parallel_items))
-            for tc, fn_name, tc_id, fn_args, rn, round_entry, _pe in parallel_items:
-                tool_results[tc_id] = ('Task aborted by user.', False)
-                tool_verdicts[tc_id] = 'aborted'
-            parallel_items = []  # skip the pool entirely
-
-    if parallel_items:
-        _has_bounded_gateway_children = any(
-            (
-                isinstance(tc.get('caller'), dict)
-                and tc['caller'].get('type') == 'program'
-            )
-            or str(tc.get('source') or '') in {
-                'execute_program', 'execute_calls'
-            }
-            for tc, _fn, _id, _args, _rn, _entry, _pe in parallel_items
-        )
-        max_workers = _parallel_idle_reuse_hint(
-            len(parallel_items), programmatic=_has_bounded_gateway_children)
-        _pool = InstrumentedThreadPoolExecutor(max_workers=max_workers,
-                                               metric_pool='tool-parallel',
-                                               thread_name_prefix='tool-parallel')
-        # ── Item 3: long-tool heartbeat ──────────────────────────────────
-        # A single blocking tool (a slow web_search on dead hosts, a hung MCP
-        # call, a stalled browser action) emits NO delta while it runs, so the
-        # SSE stream goes silent — a buffering proxy idle-times-out. This
-        # daemon ticker fires every TOOL_HEARTBEAT_INTERVAL seconds while the
-        # pool wait blocks, emitting a ``tool_progress`` per still-active
-        # round so the UI shows "Searching… (Ns)". Fast tools finish before
-        # the first tick, so they never emit a heartbeat.
-        # EVIDENCE GRADING (): for ordinary tools these ticks are
-        #   marked ``_selfTick`` and do NOT feed the reaper liveness clocks —
-        #   liveness must come from REAL output (stdout chunks / results).
-        #   Only ratified human-wait tools (ask_human / await_task(wait)) keep
-        #   the reaper exemption. See _heartbeat.py.
-        _pool_hb_stop, _pool_hb_thread = _start_tool_heartbeat(task, parallel_items, tid)
-        # O(1) tc_id → item lookup for the drain loop (fix 2).
-        _parallel_by_id = {_it[2]: _it for _it in parallel_items}
-        _futures = {}
-        for tc, fn_name, tc_id, fn_args, rn, round_entry, _pe in parallel_items:
-            try:
-                _start_generation = project_read_cache_generation()
-                future = _pool.submit(_execute_tool_one_in_pool, task,
-                    tc, fn_name, tc_id, fn_args, rn, round_entry,
-                    cfg, project_path, project_enabled, all_tools=tool_list)
-            except Exception as error:
-                # Failed submit has never dispatched the callable. Keep its
-                # original error in the ordinary exactly-once settlement lane.
-                future = Future()
-                future.set_exception(error)
-            _futures[future] = (tc_id, fn_name, _start_generation)
-        # Measure the parallel timeout from SUBMISSION so the serial lane's
-        # wall time cannot extend a hung read past TOOL_PARALLEL_TIMEOUT.
-        _tool_deadline = time.monotonic() + _bounded_tool_env_int(
-            'TOOL_PARALLEL_TIMEOUT', 300, 1, 3600)
-
-    for item in _serial_items:
-        tc, fn_name, tc_id, fn_args, rn, round_entry, _pe = item
-        if task.get('aborted'):
-            logger.info('[Task %s] Skipping serial write tool %s — task aborted', tid, fn_name)
-            tool_results[tc_id] = ('Task aborted by user.', False)
-            # Same abort contract as the pre-phase lane ().
-            _settle_current(
-                task, fn_name, tc_id, fn_args, rn, round_entry,
-                'Task aborted by user.', idempotent_tools=_idempotent_tools,
-                cache=_cache, tid=tid, round_num=round_num,
-                terminal_status='aborted')
-            continue
-        logger.debug('[Task %s] Ordered serial dispatch: %s at round %d',
-                     tid, fn_name, round_num)
-        # Heartbeat this lane (). ``run_command`` resolves
-        #   timeout=None BY DESIGN (no ceiling, pinned by
-        #   tests/project_mod/test_no_backend_timeouts.py) and every non-readOnly MCP tool
-        #   lands in this same write partition. Running them bare left BOTH
-        #   reaper clocks silent, so the reaper's 1800s became an invisible,
-        #   unconfigurable ceiling that killed the WHOLE task — measured
-        #   2026-07-31: tasks 38562f78 and 31d08c82, each 1846s in
-        #   run_command, process group killed, ¥22.95 + ¥12.01 of completed
-        #   rounds discarded. Aliveness is proven by BEATING, never by
-        #   not-timing-out.
-        # EVIDENCE GRADING (, same day, same incident family):
-        #   the beat must be EVIDENCE, not self-rescue. For ordinary tools
-        #   this tick is marked ``_selfTick`` and keeps ONLY the transport
-        #   alive; the reaper clocks are fed by real stdout chunks instead
-        #   (a producing command never goes stale). A command silent >30min
-        #   IS reaped now — wedged by definition; the ratified human-wait
-        #   exemption covers only ask_human / await_task(wait).
-        # External writes may block and therefore need a transport heartbeat.
-        # Task-local todo transitions are bounded in-memory work; avoiding a
-        # heartbeat thread on every revision keeps the progress protocol cheap.
-        _hb_stop = None
-        if fn_name in _write_tools:
-            _hb_stop, _hb_thread = _start_tool_heartbeat(task, [item], tid)
-        try:
-            tc_id_ret, tool_content, is_search = _execute_tool_one(
-                task, tc, fn_name, tc_id, fn_args, rn, round_entry,
-                cfg, project_path, project_enabled,
-                all_tools=tool_list,
-            )
-        finally:
-            if _hb_stop is not None:
-                _hb_stop.set()
-        tool_results[tc_id_ret] = (tool_content, is_search)
-        if fn_name in _write_tools:
-            _invalidate_project_cache(task, trigger=fn_name)
-        # Settle at THIS tool's own completion () — a serial write
-        #   used to run before the parallel pool started, so deferring its
-        #   settle to the post-phase made it wait for every read tool in the
-        #   round. Same barrier, different lane. Screenshots included
-        #   () — see the parallel lane for why the vision verdict
-        #   needs no barrier.
-        _settle_arg = _dispatch_settle_content(
-            task, round_entry, tool_content, model, fn_name, tc_id_ret)
-        _settle_current(
-            task, fn_name, tc_id_ret, fn_args, rn, round_entry,
-            _settle_arg, idempotent_tools=_idempotent_tools,
-            cache=_cache, tid=tid, round_num=round_num,
-            canonical_content=_canonical_settle_source(tool_content))
-
-    # ══════════════════════════════════════════
-    #  Main phase: Drain the read pool (reads were submitted BEFORE the writes)
-    # ══════════════════════════════════════════
-    if _futures:
-        try:
-            try:
-                for fut in _completed_tools_until_cancel(
-                        _futures, task, _tool_deadline):
-                    # ── Abort check during parallel execution: cancel remaining futures ──
-                    if fut is None:
-                        logger.info('[Task %s] Abort detected during parallel tool execution — cancelling remaining', tid)
-                        for pending_fut, (pending_id, pending_fn, _generation) in _futures.items():
-                            pending_fut.cancel()
-                            if pending_id not in tool_results:
-                                tool_results[pending_id] = ('Task aborted by user.', False)
-                                tool_verdicts[pending_id] = 'aborted'
-                        break
-                    fut_tc_id, fut_fn_name, _start_generation = _futures[fut]
-                    try:
-                        ret_tc_id, tool_content, is_search = fut.result()
-                        tool_results[ret_tc_id] = (tool_content, is_search)
-                        # ── Populate dedup cache for idempotent tools ──
-                        if fut_fn_name in _idempotent_tools:
-                            _pi = _parallel_by_id.get(ret_tc_id)
-                            # Concurrency safety (fix 1): a read that ran
-                            #   beside a sibling write may hold PRE-write bytes,
-                            #   and this population happens after the write's
-                            #   _invalidate_project_cache already ran — caching
-                            #   now would leave a stale entry a later
-                            #   FreshGate-checked hit serves verbatim.
-                            if (_pi is not None
-                                    and (_pi[5] or {}).get(
-                                        '_cacheableResult', True)
-                                    and not (
-                                    _has_serial_write
-                                    and fut_fn_name in _WRITE_SENSITIVE_READ_TOOLS)):
-                                _pi_cache_key = _make_cache_key(fut_fn_name, _pi[3])
-                                # For web_search / fetch_url, also cache display_results
-                                # + engineBreakdown from the round_entry for later cache hits —
-                                # this keeps the rich per-result UI even on dedup replay
-                                # (e.g. batch "3 URLs" stays as 3 rows, not 1 generic row).
-                                _pi_display = None
-                                _pi_eng_bkdn = None
-                                _pi_vert = None
-                                _pi_search_diag = None
-                                _pi_re = _pi[5]  # round_entry
-                                if fut_fn_name in ('web_search', 'fetch_url'):
-                                    if _pi_re and _pi_re.get('results'):
-                                        _pi_display = _pi_re['results']
-                                    if _pi_re:
-                                        _pi_eng_bkdn = _pi_re.get('engineBreakdown')
-                                        _pi_vert = _pi_re.get('vertical') or _pi_re.get('verticals')
-                                        # Zero-result searches: the handler
-                                        # stamps searchDiag on the round —
-                                        # cache it so a later hit renders
-                                        # the honest diagnostic row.
-                                        _pi_search_diag = _pi_re.get('searchDiag')
-                                elif fut_fn_name in ('read_files', 'inspect_image'):
-                                    # Preserve the FULLY-MERGED inline render
-                                    # descriptors (images + SVG source URIs) so a
-                                    # dedup replay renders identically to the fresh
-                                    # read. SVG content caches as a plain str, so
-                                    # its out-of-band imageDataUris would otherwise
-                                    # be lost on the second identical read.
-                                    _pi_res = (_pi_re or {}).get('results') or []
-                                    if (_pi_res and isinstance(_pi_res[0], dict)
-                                            and _pi_res[0].get('imageDataUris')):
-                                        _pi_display = _pi_res[0]['imageDataUris']
-                                _pi_projection = None
-                                if _pi_re:
-                                    _pi_projection = _pi_re.get(
-                                        TOOL_RESULT_PROJECTION_ITEMS_KEY)
-                                _pi_cache_entry = (
-                                    tool_content, is_search, 'dedup',
-                                    _pi_display, _pi_eng_bkdn, _pi_vert,
-                                    _pi_search_diag)
-                                if _pi_projection is not None:
-                                    _pi_cache_entry += (_pi_projection,)
-                                # Retain this occurrence's actual publication,
-                                # including a freshness wrapper, before another
-                                # pipeline can replace the same query receipt.
-                                with _tool_receipt_lock(task):
-                                    previous = _cache.get(_pi_cache_key)
-                                    _store_tool_result_cache_entry(
-                                        task, _pi_cache_key, _pi_cache_entry,
-                                        generation=_start_generation)
-                                    published = _cache.get(_pi_cache_key)
-                                    if published is not None and published is not previous:
-                                        _produced_cache_entries[ret_tc_id] = published
-                        # ── Invalidate project cache after write/exec ops ──
-                        elif fut_fn_name in ('write_file', 'edit_file', 'apply_diff', 'apply_diffs',
-                                             'insert_content', 'insert_contents',
-                                             'code_exec', 'bash_exec', 'run_command'):
-                            _invalidate_project_cache(task, trigger=fut_fn_name)
-
-                        # SETTLE NOW, not after the barrier ().
-                        #   This tool is done; budget its result, stamp the
-                        #   round and emit tool_complete at THIS instant. The
-                        #   old code deferred all of that past
-                        #   pool.shutdown(wait=True), so a fast tool's content
-                        #   and token chips waited for the slowest sibling in
-                        #   the round — a 2s search kept spinning for as long
-                        #   as a 40s one beside it, with no way for the user to
-                        #   tell them apart.
-                        #
-                        #   Screenshots settle here TOO (): the
-                        #   display text depends only on
-                        #   model_supports_vision(model), a pure function of a
-                        #   parameter we already hold, so there is nothing to
-                        #   wait for. Only the multimodal MESSAGE append stays
-                        #   in the post-phase, where tool-call order lives.
-                        _pi = _parallel_by_id.get(ret_tc_id)
-                        if _pi is not None:
-                            _settle_arg = _dispatch_settle_content(
-                                task, _pi[5], tool_content, model, _pi[1], ret_tc_id)
-                            _settle_current(
-                                task, _pi[1], ret_tc_id, _pi[3],
-                                _pi[4], _pi[5], _settle_arg,
-                                idempotent_tools=_idempotent_tools,
-                                cache=_cache, tid=tid,
-                                round_num=round_num,
-                                canonical_content=_canonical_settle_source(
-                                    tool_content))
-                    except Exception as e:
-                        # UnknownWorkspaceRootError is the LLM's fault
-                        # (bad root prefix); it's already logged at WARNING
-                        # at the raise site + INFO by executor.  Do not
-                        # re-log as ERROR with traceback here — just record
-                        # the error for the LLM and move on.
-                        _is_unknown_root = False
-                        try:
-                            from lib.project_mod.config import UnknownWorkspaceRootError
-                            _is_unknown_root = isinstance(e, UnknownWorkspaceRootError)
-                        except ImportError as _imp:
-                            logger.debug('[Task %s] UnknownWorkspaceRootError '
-                                         'import failed: %s', tid, _imp)
-                        if _is_unknown_root:
-                            logger.info(
-                                '[Task %s] conv=%s Tool %s (tc_id=%s) '
-                                'recoverable workspace-root error '
-                                'returned to LLM at round %d: %s',
-                                tid, task.get('convId', ''),
-                                fut_fn_name, fut_tc_id, round_num, e)
-                        else:
-                            logger.error(
-                                '[Task %s] conv=%s Tool %s (tc_id=%s) execution failed at round %d model=%s',
-                                tid, task.get('convId', ''), fut_fn_name, fut_tc_id, round_num, model, exc_info=True)
-
-                        from lib.tasks_pkg.executor._effects import tool_exception_result
-                        item = _parallel_by_id.get(fut_tc_id)
-                        tool_results[fut_tc_id] = (tool_exception_result(
-                            task, fut_fn_name, item[5] if item is not None else None, e), False)
-                        tool_verdicts[fut_tc_id] = 'error'
-            except (TimeoutError, _FuturesTimeoutError):
-                _timed_out = True
-                _pipeline_timed_out = True
-                _n_pending = sum(1 for f in _futures if not f.done())
-                logger.error(
-                    '[Task %s] conv=%s Tool parallel execution timeout at round %d (%d tools pending) model=%s',
-                    tid, task.get('convId', ''), round_num, _n_pending, model,
-                    exc_info=True)
-
-                # Harvest results from futures that completed but weren't
-                # yielded before the TimeoutError was raised. A published
-                # verdict always wins over later worker completion.
-                _harvest_completed_tool_results(
-                    _futures, task, tool_results, tool_verdicts,
-                    round_num=round_num, reason='collector timeout', items_by_id=_parallel_by_id)
-                for fut, (fut_tc_id, fut_fn_name, _generation) in _futures.items():
-                    if fut_tc_id not in tool_results:
-                        fut.cancel()
-                        from lib.tasks_pkg.executor._effects import tool_timeout_result
-                        pending_row = _parallel_by_id[fut_tc_id][5]
-                        tool_results[fut_tc_id] = (
-                            tool_timeout_result(task, fut_fn_name, pending_row), False)
-                        tool_verdicts[fut_tc_id] = 'error'
-                        # 'error', not 'aborted': the user did not stop this
-                        # tool — the pool ceiling did. Effect evidence remains
-                        # independent: an entered worker may still be running.
-        finally:
-            # Stop the heartbeat ticker first so it can't emit after the round
-            # settles (it checks round status, but stop the loop deterministically).
-            _pool_hb_stop.set()
-            # Preserve the finite pool-timeout contract. Runtime cancellation
-            # callbacks are synchronous and arbitrary handlers may never exit;
-            # neither can be drained on this timeout path. Running threads may
-            # still mutate shared state: wait=False is NOT a resource fence.
-            # Stop retains cooperative cleanup/ownership until workers exit.
-            if task.get('aborted') and not _timed_out:
-                _drain_cancelled_tool_workers(task, _futures)
-            _pool.shutdown(wait=not _timed_out, cancel_futures=True)
-
-    if len(tool_results) < len(parsed_tcs):
-        # A collector may omit a terminal Future. Reuse its executor receipt
-        # before classifying the gap; do not enter handlers or add a new wait.
-        _harvest_completed_tool_results(
-            _futures, task, tool_results, tool_verdicts,
-            round_num=round_num, reason='collector gap', items_by_id=_parallel_by_id)
+    # bytes, so a round that writes never caches its write-sensitive reads.
+    _pipeline_timed_out = execute_admitted_tools(
+        batch, ports, admitted_calls,
+        has_write=any(item[1] in _write_tools for item in admitted))
+    restore_command_sticky_cwd(task, _command_dirs, {
+        call.item[2] for call in admitted_calls if call.entered})
 
     # ══════════════════════════════════════════
     #  Post-phase: Add tool messages in original order
@@ -3108,9 +2944,7 @@ def execute_tool_pipeline(
     _append_ordered_tool_replay(
         _appended_tool_msgs, _cache,
         _idempotent_tools, _program_messages_to_settle, _round_results_for_budget, _settle_current,
-        all_search_results_text, messages, model, parsed_tcs,
-        round_num, task, tid, tool_results,
-        tool_verdicts,
+        messages, model, parsed_tcs, round_num, task, tid, tool_results, tool_verdicts,
     )
 
     _apply_round_aggregate_budget(
@@ -3120,6 +2954,8 @@ def execute_tool_pipeline(
         _appended_tool_msgs,
         settled_results=_settled_results, pending_envelopes=_pending_envelopes,
     )
+    _record_round_search_evidence(
+        task, parsed_tcs, tool_results, tool_verdicts, all_search_results_text)
 
     # Measure the exact content that the next Responses request will replay.
     # Aggregate L0 compaction above can replace large results, so measuring in
@@ -3132,47 +2968,7 @@ def execute_tool_pipeline(
             settle_programmatic_call(
                 task, _ptc, _status, content=_tool_message.get('content'))
 
-    # Emit snapshot AFTER tool results appended — WIRE-FORM view (same single
-    # source of truth as the orchestrator's pre-LLM and final snapshots), so
-    # the panel reflects exactly what the model will receive next round. Runs
-    # on an independent copy via apply_wire_sanitize (does not mutate messages).
-    # Gated (fix 3): the O(history) deep-copy + sanitize is DEBUG-only, so it
-    # is skipped for unattended / headless tasks unless TOFU_POST_TOOL_SNAPSHOT
-    # opts back in.
-    if not _post_tool_snapshot_enabled(task):
-        return _pipeline_timed_out
-    # Reduced-scope FINDING C: the post-tool snapshot re-copies the WHOLE
-    # message history each round (O(history) → quadratic storage). The
-    # pre-request snapshot for the same round already ran the same sanitize +
-    # strip. When no message was appended or edited since that snapshot (same
-    # length and same tail identity) the post-tool frame would be byte-equal —
-    # a pure duplicate. Skip the re-snapshot and reuse the round's existing
-    # evidence; the Inspector keys by (taskId, roundNum) and already holds the
-    # identical request payload for this round.
-    try:
-        from lib.tasks_pkg.round_evidence import snapshot_unchanged_since_request
-        if snapshot_unchanged_since_request(task, messages):
-            logger.debug(
-                '[Task %s] messages_snapshot post-tool skipped at round %d — '
-                'unchanged since the request snapshot', tid, round_num + 1)
-            return _pipeline_timed_out
-    except Exception:
-        logger.debug('[Task %s] post-tool unchanged check failed (non-fatal)',
-                     tid, exc_info=True)
-    try:
-        from lib.tasks_pkg.round_evidence import build_round_evidence
-        from lib.tasks_pkg.round_evidence import begin_round_evidence
-        ref = task.get('_inspectorRef') or begin_round_evidence(
-            task, task.get('_inspectorTaskId') or task['id'], round_num + 1,
-            task.get('_flow_phase') or '')
-        snap_evt = build_round_evidence(
-            task, messages, ref=ref, kind='state', model=model, tools=tool_list)
-        append_event(task, snap_evt)
-    except Exception:
-        logger.warning(
-            '[Task %s] messages_snapshot post-tool failed at round %d model=%s',
-            tid, round_num + 1, model, exc_info=True)
-
+    _emit_post_tool_snapshot(task, messages, model, tool_list, round_num, tid)
     return _pipeline_timed_out
 
 

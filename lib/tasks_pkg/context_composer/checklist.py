@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import json
 
+from lib.log import get_logger
 from lib.tasks_pkg.context_composer._models import ComposeRequest, ContextBlock
 from lib.tasks_pkg.context_composer.registry import context_block
 from lib.tools.todo import render_todo_snapshot, todo_state_from_task
+
+logger = get_logger(__name__)
 
 CHECKLIST_HEADING = '## Active Task Checklist'
 _TODO_TOOL_NAMES = frozenset(('todo_write', 'todo_list'))
@@ -181,7 +184,8 @@ def _evidence_memo_scope(messages: list[dict], state: dict,
     try:
         from lib.tasks_pkg.context_composer import _round_num
         round_num = _round_num(task)
-    except Exception:
+    except Exception as error:
+        logger.debug('checklist evidence memo scope unavailable: %s', error)
         return None
     # todo_state_from_task returns detached normalized snapshots. Their values,
     # including explanation and content, identify accepted progress, not id().

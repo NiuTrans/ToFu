@@ -16,6 +16,6 @@ public protocol ProfileStore: Sendable {
     func update(_ profile: Profile) async
     func deleteById(_ id: Int64) async
     func touchLastUsed(_ id: Int64, _ at: Int64) async
-    func setAuthType(_ id: Int64, _ authType: AuthType) async
-    func setCookieHost(_ id: Int64, _ host: String?) async
+    /// Atomic identity/URL/auth compare-and-write; rejects changed/deleted rows.
+    func setCookieHostIfCurrent(_ profile: Profile, _ host: String) async -> Bool
 }

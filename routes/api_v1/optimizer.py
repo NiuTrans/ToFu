@@ -91,10 +91,10 @@ def _request_optimizer_owner() -> tuple[PrincipalContext, int]:
 def list_proposals():
     """List recent optimizer proposals (filterable by status).
 
-    Wrapped in @safe_route: any uncaught exception (e.g. DB blip in
-    _storage.list_proposals) is converted to a 500 envelope with the
-    function qualname as source, replacing the ad-hoc try/except that
-    duplicated api_internal_error's own logging.
+    Wrapped in @safe_route: any uncaught non-storage exception is
+    converted to a 500 envelope with the function qualname as source
+    (storage failures keep the global boundary's status), replacing the
+    ad-hoc try/except that duplicated api_internal_error's own logging.
     """
     status = (request.args.get('status') or '').strip() or None
     try:
@@ -122,7 +122,7 @@ def list_proposals():
 def get_proposal(proposal_id):
     """Return one proposal plus its action-log row, or 404.
 
-    @safe_route wraps the primary proposal lookup — any DB failure
+    @safe_route wraps the primary proposal lookup — a non-storage failure
     surfaces as a 500 with the correct source. The action_log lookup
     below keeps its own local try/except because it is DESIGNED to soft-
     fail (warning + None fallback + return the proposal anyway); that

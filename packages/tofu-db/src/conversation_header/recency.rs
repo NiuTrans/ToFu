@@ -36,7 +36,7 @@ const MAX_CONVERSATION_ID_BYTES: usize = 255;
 /// One directory entry. Ordering matches the legacy comparator exactly:
 /// `updated_at` descending, then `id` (byte-wise == string-wise for the
 /// ASCII conversation ids) descending.
-type Entry = (u64, Vec<u8>);
+pub(crate) type Entry = (u64, Vec<u8>);
 
 #[derive(Debug, Eq, PartialEq)]
 enum DirectoryState {
@@ -368,6 +368,28 @@ fn unfiltered(request: &ListRequest) -> bool {
         && request.created_at_lt.is_none()
 }
 
+/// The owner's live count and newest-first entries when the directory state,
+/// recorded live count and entry count all agree with the authority; `None`
+/// sends the caller to its exact legacy read. Page rows still need per-row
+/// hydration checks by the caller.
+pub(crate) fn covered_entries(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+) -> io::Result<Option<(u64, Vec<Entry>)>> {
+    database.flush_deferred_indexes(transaction)?;
+    if read_state(database, transaction)? != DirectoryState::Complete {
+        return Ok(None);
+    }
+    let (live_count, entries) = load_directory(database, transaction)?;
+    if live_count != owner_live_count(database, transaction)? {
+        return Ok(None);
+    }
+    if entries.len() != (live_count as usize).min(MAX_RECENCY_DIRECTORY_ENTRIES) {
+        return Ok(None);
+    }
+    Ok(Some((live_count, entries)))
+}
+
 /// Serve an updated-descending unfiltered list from the directory, or
 /// return `None` so the caller takes the exact legacy path. Every coverage
 /// gate from `docs/TOFUDB_RECENCY_DIRECTORY.md` is checked: request shape,
@@ -385,17 +407,9 @@ pub(crate) fn try_directory_list(
     if request.limit > MAX_RECENCY_DIRECTORY_ENTRIES {
         return Ok(None);
     }
-    database.flush_deferred_indexes(transaction)?;
-    if read_state(database, transaction)? != DirectoryState::Complete {
+    let Some((_, entries)) = covered_entries(database, transaction)? else {
         return Ok(None);
-    }
-    let (live_count, entries) = load_directory(database, transaction)?;
-    if live_count != owner_live_count(database, transaction)? {
-        return Ok(None);
-    }
-    if entries.len() != (live_count as usize).min(MAX_RECENCY_DIRECTORY_ENTRIES) {
-        return Ok(None);
-    }
+    };
     if request.limit > entries.len() {
         return Ok(None);
     }
@@ -441,8 +455,7 @@ pub(crate) fn try_directory_list(
             .checked_add(separator + bytes.len() + 1)
             .is_none_or(|length| length > maximum_bytes)
         {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "conversation list response exceeds its byte budget",
             ));
         }
@@ -507,6 +520,8 @@ mod tests {
 
     use std::path::Path;
     use std::sync::Arc;
+
+    use serde_json::json;
 
     use crate::vfs::{DeterministicVfs, Vfs};
 
@@ -715,6 +730,216 @@ mod tests {
         // A purged id can be recreated and re-enters the directory once.
         create(&mut database, "conv-1", 300);
         assert_eq!(served(&database, 50), legacy(&database, 50));
+    }
+
+    fn create_with_settings(database: &mut AuthorityDatabase, id: &str, at: u64, settings: Value) {
+        let mut tx = database.begin_with_identity_claim_scopes(TENANT, OWNER).unwrap();
+        let mut request = make_create(id, at);
+        request.settings_json = serde_json::to_vec(&settings).unwrap();
+        super::super::create(database, &mut tx, &request).unwrap();
+        database.commit(tx).unwrap();
+    }
+
+    fn catalog_request(
+        limit: usize,
+        cursor: Option<(u64, &str)>,
+        settings_keys: Option<Vec<String>>,
+    ) -> super::super::CatalogPageRequest {
+        super::super::CatalogPageRequest {
+            folder_id: None,
+            before_updated_at_ms: cursor.map(|(at, _)| at),
+            before_id: cursor.map_or_else(String::new, |(_, id)| id.to_owned()),
+            limit,
+            settings_keys,
+        }
+    }
+
+    const ALL_LIMITS: [usize; 5] = [0, 1, 3, 50, MAX_RECENCY_DIRECTORY_ENTRIES];
+
+    fn all_key_variants() -> [Option<Vec<String>>; 3] {
+        [None, Some(Vec::new()), Some(vec!["model".to_owned(), "missing".to_owned()])]
+    }
+
+    /// (directory answer if it served the page, public answer, legacy answer)
+    fn catalog_answers(
+        database: &AuthorityDatabase,
+        request: &super::super::CatalogPageRequest,
+    ) -> (Option<Vec<u8>>, Vec<u8>, Vec<u8>) {
+        let mut tx = database.begin(TENANT, OWNER).unwrap();
+        let directory = super::super::directory_catalog_page(database, &mut tx, request).unwrap();
+        let public = super::super::catalog_page(database, &mut tx, request).unwrap();
+        let count = owner_live_count(database, &mut tx).unwrap();
+        let legacy = super::super::primary_catalog_page(database, &mut tx, request, count).unwrap();
+        (directory, public, legacy)
+    }
+
+    /// Every first page, cursor page (existing and synthetic cursor values)
+    /// and settings projection must equal the legacy read-all+sort answer
+    /// byte for byte; pages wholly inside the window must not need it.
+    fn assert_catalog_pages_match_legacy(
+        database: &AuthorityDatabase,
+        live: usize,
+        sampled: &dyn Fn(usize) -> bool,
+        limits: &[usize],
+        key_variants: &[Option<Vec<String>>],
+    ) {
+        let (_, _, full) = catalog_answers(database, &catalog_request(live + 1, None, None));
+        let full: Value = serde_json::from_slice(&full).unwrap();
+        let order: Vec<(u64, String)> = full["items"].as_array().unwrap().iter().map(|item| (
+            item["metadata"]["updated_at"].as_u64().unwrap(),
+            item["metadata"]["id"].as_str().unwrap().to_owned(),
+        )).collect();
+        assert_eq!(order.len(), live);
+        let mut cursors: Vec<Option<(u64, String)>> = vec![None];
+        for (at, id) in order.iter().enumerate().filter(|(index, _)| sampled(*index)).map(|(_, row)| row) {
+            cursors.extend([Some((*at, id.clone())), Some((*at, String::new())),
+                Some((*at + 1, String::new())), Some((*at, format!("{id}~")))]);
+        }
+        let window = live.min(MAX_RECENCY_DIRECTORY_ENTRIES);
+        let truncated = live > window;
+        let mut served_pages = 0;
+        for cursor in &cursors {
+            let start = cursor.as_ref().map_or(0, |(at, id)| order.iter()
+                .take_while(|(row_at, row_id)| row_at > at || row_at == at && row_id >= id).count());
+            for &limit in limits {
+                for keys in key_variants {
+                    let request = catalog_request(limit, cursor.as_ref().map(|(at, id)| (*at, id.as_str())), keys.clone());
+                    let (directory, public, legacy) = catalog_answers(database, &request);
+                    assert_eq!(String::from_utf8(public).unwrap(), String::from_utf8(legacy.clone()).unwrap(),
+                        "cursor={cursor:?} limit={limit}");
+                    let inside_window = !(truncated && start >= window)
+                        && start + (live - start).min(limit) <= window;
+                    assert_eq!(directory.is_some(), inside_window, "cursor={cursor:?} limit={limit}");
+                    if let Some(directory) = directory {
+                        assert_eq!(directory, legacy);
+                        served_pages += 1;
+                    }
+                }
+            }
+        }
+        assert!(served_pages > 0);
+    }
+
+    #[test]
+    fn catalog_pages_inside_the_directory_window_match_the_legacy_catalog() {
+        let mut database = authority();
+        for index in 0..12_u64 {
+            // Shared timestamps exercise id-descending ties and tie cursors.
+            create_with_settings(&mut database, &format!("conv-{index:02}"), 100 + index / 3,
+                json!({"model": format!("m{index}"), "folderId": format!("f{}", index % 2)}));
+        }
+        assert_eq!(state_of(&database), DirectoryState::Complete);
+        assert_catalog_pages_match_legacy(&database, 12, &|_| true, &ALL_LIMITS, &all_key_variants());
+        bump(&mut database, "conv-03", 500);
+        remove_conversation(&mut database, "conv-07", 501);
+        assert_catalog_pages_match_legacy(&database, 11, &|_| true, &ALL_LIMITS, &all_key_variants());
+        revive(&mut database, "conv-07", 502);
+        assert_catalog_pages_match_legacy(&database, 12, &|_| true, &ALL_LIMITS, &all_key_variants());
+        // Folder pages count only matching headers and keep the legacy plan.
+        let mut tx = database.begin(TENANT, OWNER).unwrap();
+        let mut folder = catalog_request(50, None, None);
+        folder.folder_id = Some("f1".to_owned());
+        assert!(super::super::directory_catalog_page(&database, &mut tx, &folder).unwrap().is_none());
+    }
+
+    #[test]
+    fn directory_catalog_page_reads_only_its_own_headers() {
+        let mut database = authority();
+        for index in 0..6_u64 {
+            create(&mut database, &format!("conv-{index}"), 100 + index);
+        }
+        // An uncounted document is visible only to a read of every header.
+        let mut tx = database.begin_with_identity_claim_scopes(TENANT, OWNER).unwrap();
+        let stored = super::super::stored_document_envelope(&database, &mut tx, "conv-0").unwrap();
+        let ghost = super::super::document_key(&tx, "conv-ghost").unwrap();
+        database.entity_put(&mut tx, ghost, stored).unwrap();
+        database.commit(tx).unwrap();
+        let request = catalog_request(3, None, None);
+        let mut tx = database.begin(TENANT, OWNER).unwrap();
+        assert!(super::super::primary_catalog_page(&database, &mut tx, &request, 6).is_err());
+        let page: Value = serde_json::from_slice(
+            &super::super::catalog_page(&database, &mut tx, &request).unwrap()).unwrap();
+        assert_eq!(page["total_count"], 6);
+        assert_eq!(page["has_more"], true);
+        let ids: Vec<_> = page["items"].as_array().unwrap().iter()
+            .map(|item| item["metadata"]["id"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(ids, ["conv-5", "conv-4", "conv-3"]);
+    }
+
+    #[test]
+    fn catalog_pages_beyond_a_truncated_directory_fall_back_exactly() {
+        let mut database = authority();
+        let live = MAX_RECENCY_DIRECTORY_ENTRIES + 7;
+        for index in 0..live as u64 {
+            create_with_settings(&mut database, &format!("deep-{index:03}"), 1_000 + index / 2,
+                json!({"model": "m"}));
+        }
+        assert_eq!(state_of(&database), DirectoryState::Complete);
+        // Exhaustive cursors are quadratic; sample both ends and the window edge.
+        let window = MAX_RECENCY_DIRECTORY_ENTRIES;
+        assert_catalog_pages_match_legacy(&database, live,
+            &|index| index < 3 || index + 3 >= live || (window - 53..window + 2).contains(&index),
+            &[0, 1, 50], &[None]);
+        // A count write outside the maintenance funnels disables the directory.
+        let mut tx = database.begin_with_identity_claim_scopes(TENANT, OWNER).unwrap();
+        let count_key = super::super::key(TENANT, OWNER, CONVERSATION_COUNT_NAMESPACE, COUNT_KEY).unwrap();
+        database.entity_put(&mut tx, count_key, (live as u64 + 1).to_le_bytes().to_vec()).unwrap();
+        database.commit(tx).unwrap();
+        let mut tx = database.begin(TENANT, OWNER).unwrap();
+        let request = catalog_request(50, None, None);
+        assert!(super::super::directory_catalog_page(&database, &mut tx, &request).unwrap().is_none());
+        // The unchanged legacy plan still reports the corrupted count.
+        assert!(super::super::catalog_page(&database, &mut tx, &request).is_err());
+    }
+
+    // Real-volume component measurement at the legacy primary plan's largest
+    // owner. Hot caches are disabled, so every header read reaches the volume;
+    // this is not an application or sidebar end-to-end latency.
+    #[test]
+    #[ignore = "real-volume measurement; requires an explicit disposable parent and output"]
+    fn catalog_page_cold_read_measurement() {
+        let parent = std::env::var("TOFU_DB_CATALOG_MEASURE_ROOT").unwrap();
+        let output = std::env::var("TOFU_DB_CATALOG_MEASURE_OUTPUT").unwrap();
+        let directory = tempfile::tempdir_in(&parent).unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        database.set_write_overlay_for_test(true);
+        let owner_conversations = super::super::INDEX_SCAN_PAGE_ROWS as u64;
+        for index in 0..owner_conversations {
+            create_with_settings(&mut database, &format!("measure-{index:04}"), 10_000 + index,
+                json!({"model": "m", "folderId": format!("f{}", index % 7)}));
+        }
+        assert_eq!(state_of(&database), DirectoryState::Complete);
+        database.merge_entity_overlay_fully().unwrap();
+        database.checkpoint_wal_window().unwrap();
+        database.configure_hot_data_caches(0, 0).unwrap();
+        let request = catalog_request(50, None, Some(vec!["model".to_owned(), "folderId".to_owned()]));
+        let mut legacy_micros = Vec::new();
+        let mut directory_micros = Vec::new();
+        for _ in 0..5 {
+            let mut tx = database.begin(TENANT, OWNER).unwrap();
+            let started = std::time::Instant::now();
+            let legacy = super::super::primary_catalog_page(&database, &mut tx, &request, owner_conversations).unwrap();
+            legacy_micros.push(started.elapsed().as_micros() as u64);
+            let mut tx = database.begin(TENANT, OWNER).unwrap();
+            let started = std::time::Instant::now();
+            let served = super::super::catalog_page(&database, &mut tx, &request).unwrap();
+            directory_micros.push(started.elapsed().as_micros() as u64);
+            assert_eq!(served, legacy);
+        }
+        let median = |samples: &[u64]| {
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            sorted[sorted.len() / 2]
+        };
+        let report = json!({
+            "source_sha256": env!("TOFUDB_SOURCE_SHA256"), "parent": parent,
+            "scope": "one owner, primary-plan maximum, limit 50, hot caches disabled; component, not sidebar end-to-end",
+            "owner_conversations": owner_conversations,
+            "legacy_micros": legacy_micros, "directory_micros": directory_micros,
+            "legacy_median_micros": median(&legacy_micros),
+            "directory_median_micros": median(&directory_micros),
+        });
+        std::fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
 
     fn prepared_bump(

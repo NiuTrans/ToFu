@@ -60,9 +60,12 @@ def test_failed_retained_read_card_reports_actual_work(
     card = page.locator('.ptc-card')
     assert card.is_visible()
     assert card.locator('.ptc-observation').count() == 0
-    assert card.locator('.ptc-meta').inner_text() == messages['ptc.calls.successful'].replace('{done}','0').replace('{attempts}','0')
+    # Exact counters live under Technical details; the header names the failure.
+    assert messages['ptc.calls.successful'].replace('{done}','0').replace('{attempts}','0') in (
+        card.locator('.ptc-measurements').text_content())
     assert messages['ptc.measurement.reused'].replace('{n}','1') in card.inner_text()
-    assert 'TypeError' in card.inner_text()
+    assert 'javascript_error: TypeError' in card.locator('.ptc-meta').inner_text()
+    assert '{' not in card.locator('.ptc-meta').inner_text()
     assert card.locator('.ptc-result').evaluate('node=>node.open') is True
     assert card.locator('.ptc-code').evaluate('node=>node.open') is False
     assert page.evaluate('''()=>{

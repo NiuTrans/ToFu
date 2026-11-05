@@ -40,6 +40,9 @@ import subprocess
 import tempfile
 
 import pytest
+from tests._jsdom import require_node_modules
+
+from tests._runtime_sections import anchor_relative_imports
 
 pytestmark = pytest.mark.unit
 
@@ -48,8 +51,6 @@ ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 _READER_SRC = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'recommend.ts')
 ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
-
-
 def _node_deps_available():
     if not shutil.which('node'):
         return False
@@ -218,22 +219,17 @@ console.log('__RESULT__' + JSON.stringify(out));
 
 
 def _run(reader=_READER_SRC):
+    require_node_modules('vite')
     with tempfile.TemporaryDirectory(prefix='tofu-recommend-render-') as temp_dir:
         built = os.path.join(temp_dir, 'recommend.js')
         with open(reader, encoding='utf-8') as source_file:
             source = source_file.read()
-        dependency = os.path.join(
-            os.path.dirname(_READER_SRC), 'push-transport.ts').replace('\\', '/')
-        source = source.replace(
-            "from './push-transport';", f'from {json.dumps(dependency)};')
+        # The bundler materializes stdin in a temp dir, so anchor every
+        # relative specifier to the shipped module's own directory instead of
+        # maintaining a per-import list that goes stale when imports change.
+        source = anchor_relative_imports(source, os.path.dirname(_READER_SRC))
         registry = os.path.join(
             ROOT, 'frontend', 'src', 'feature-registry.ts').replace('\\', '/')
-        source = source.replace(
-            "from '../../feature-registry';", f'from {json.dumps(registry)};')
-        html_safety = os.path.join(
-            ROOT, 'frontend', 'src', 'html-safety.ts').replace('\\', '/')
-        source = source.replace(
-            "from '../../html-safety';", f'from {json.dumps(html_safety)};')
         # Bridge the module-private feature registry onto the jsdom window,
         # mirroring how main.ts injects the production service table. Without
         # the connection the harness cannot see any installed global owner.
@@ -270,8 +266,6 @@ def _run(reader=_READER_SRC):
     raise AssertionError(f'no result line: {proc.stdout}\n{proc.stderr}')
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_reconciler_streams_skeleton_to_grounded_incrementally():
     out = _run()
     # Phase 1 → two searching skeletons, nothing grounded yet.
@@ -298,8 +292,6 @@ def test_reconciler_streams_skeleton_to_grounded_incrementally():
     assert out['statusSettled'] is True, f'status line must hide once done + all grounded: {out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC1_child_node_identity_compare_before_swap_is_load_bearing(tmp_path):
     """NC-1: drop the `_recSig` compare-before-swap short-circuit → a re-paint
     of identical state recreates the grounded node (identity check fails).
@@ -321,8 +313,6 @@ def test_NC1_child_node_identity_compare_before_swap_is_load_bearing(tmp_path):
         assert f.read() == original, 'shipped paper-reader.js must be byte-identical after NC-1'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC2_incremental_reveal_is_load_bearing(tmp_path):
     """NC-2: make _paintRecommendNow paint ONLY when status==='done' → the
     mid-stream partial-grounding assertion (slot 0 grounded while slot 1 still

@@ -1,0 +1,23 @@
+{
+  "action": "s",
+  "agentUsageV1": {},
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "conversationId": "s",
+  "emits": "s",
+  "error": {},
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "finishReason": "s",
+  "flowProjection": "s",
+  "partial": "s",
+  "requestId": "s",
+  "seq": 1,
+  "status": "s",
+  "taskId": "s",
+  "turnRole": "s",
+  "type": "aborted",
+  "vuMsgId": "s",
+  "workerActive": true
+}

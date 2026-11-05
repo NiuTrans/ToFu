@@ -1,9 +1,8 @@
 """Structure pins for the iOS client (ios/).
 
-There is no Swift toolchain on this host, so these pins are the local guard;
-the macOS workflow (.github/workflows/build-ios.yml) compiles and runs the
-XCTest suites. What is pinned here is what a structure-only review can still
-catch — and each pin exists because of a concrete failure mode:
+These checks cover package and shell wiring. The Swift core suite runs on
+macOS and Linux; the macOS workflow additionally builds the simulator app.
+Behavioral session specifications belong in XCTest, not source strings.
 
   * the core package must stay Foundation-only so `swift test` runs without
     a simulator (a SwiftUI/WebKit import in Sources/ would break that);
@@ -166,9 +165,10 @@ def test_js_bridge_wire_names_match_spa_contract() -> None:
 def test_successful_login_navigates_into_web_screen() -> None:
     model = _read(APP / "AppViewModel.swift")
     assert "case .success:" in model
-    assert "screen = .web(profile)" in model, (
-        "a successful login must open the web screen — otherwise tapping a "
-        "server with a working session visibly does nothing"
+    # This is shell wiring only. Executable InteractiveSsoTests cover the
+    # active profile policy; a handoff may adapt that profile before navigation.
+    assert re.search(r"\bscreen\s*=\s*\.web\s*\(", model), (
+        "a successful login must wire the browser route into the app screen"
     )
 
 

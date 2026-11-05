@@ -1,7 +1,7 @@
 //! Header-bound active-work summaries for restart recovery.
 //! Project mutations publish the summary in their existing transaction. Legacy
-//! rows fall back to the projection until the existing maintenance worker fills
-//! them from a pinned replica; publication rechecks the exact source header.
+//! documents fall back to the projection until the existing maintenance worker
+//! fills them from a pinned replica; publication rechecks the exact source header.
 
 use super::*;
 use crate::generated_tofudb_ir::PROJECT_BRAIN_RECOVERY_NAMESPACE;
@@ -9,7 +9,11 @@ use crate::maintenance::MaintenanceScope;
 use std::sync::{Arc, Mutex, TryLockError};
 
 const MAGIC: &[u8; 7] = b"TDBPR01";
-const CURSOR_KEY: &[u8] = b"backfill";
+/// Backfill position in the digest-keyed project documents.
+const CURSOR_KEY: &[u8] = b"backfill:documents";
+/// Superseded update-index pass; its completion marker never re-checked
+/// summaries published since, so the document pass replaces and retires it.
+const LEGACY_CURSOR_KEY: &[u8] = b"backfill";
 const SCAN_ROWS: usize = 1000;
 
 fn key(transaction: &AuthorityTransaction, project: &str) -> io::Result<EntityKey> {
@@ -27,6 +31,15 @@ fn cursor_key(transaction: &AuthorityTransaction) -> io::Result<EntityKey> {
         transaction.owner_user_id(),
         PROJECT_BRAIN_RECOVERY_NAMESPACE,
         CURSOR_KEY,
+    )
+}
+
+fn legacy_cursor_key(transaction: &AuthorityTransaction) -> io::Result<EntityKey> {
+    EntityKey::new(
+        transaction.tenant_id(),
+        transaction.owner_user_id(),
+        PROJECT_BRAIN_RECOVERY_NAMESPACE,
+        LEGACY_CURSOR_KEY,
     )
 }
 
@@ -85,9 +98,19 @@ pub(super) fn can_skip(
     let Some(header) = source_header(database, transaction, project)? else {
         return Ok(true);
     };
+    proves_inactive(database, transaction, project, &header)
+}
+
+/// True only for a well-formed negative summary bound to exactly `header`.
+pub(super) fn proves_inactive(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    project: &str,
+    header: &[u8],
+) -> io::Result<bool> {
     Ok(database
         .entity_get(transaction, &key(transaction, project)?)?
-        .and_then(|summary| active(&summary, &header))
+        .and_then(|summary| active(&summary, header))
         == Some(false))
 }
 
@@ -116,7 +139,7 @@ fn prepare(
     if old_cursor.as_deref() == Some(&[1]) {
         return Ok(None);
     }
-    let (mut start, end) = updated_index_range(&transaction)?;
+    let (mut start, end) = document_range(&transaction)?;
     if let Some(cursor) = &old_cursor {
         if cursor.first() != Some(&0) {
             return Err(invalid_data("Project recovery cursor is invalid"));
@@ -124,7 +147,7 @@ fn prepare(
         start = EntityKey::new(
             scope.tenant_id,
             scope.owner_user_id,
-            PROJECT_BRAIN_UPDATED_INDEX_NAMESPACE,
+            PROJECT_BRAIN_DOCUMENT_NAMESPACE,
             &cursor[1..],
         )?;
     }
@@ -134,31 +157,23 @@ fn prepare(
     }
     let mut summary = None;
     let mut consumed = 0;
-    for (_, raw_project) in &rows {
+    for (physical, header) in &rows {
         if stopped() {
             return Ok(None);
         }
         consumed += 1;
-        let project = std::str::from_utf8(raw_project)
-            .map_err(|_| invalid_data("Project Brain updated index is malformed"))?;
-        let Some(header) = source_header(database, &mut transaction, project)? else {
-            continue;
-        };
-        let summary_key = key(&transaction, project)?;
+        let project = stored_project_key(&transaction, physical, header)?;
+        let summary_key = key(&transaction, &project)?;
         if database
             .entity_get(&mut transaction, &summary_key)?
-            .and_then(|summary| active(&summary, &header))
+            .and_then(|summary| active(&summary, header))
             .is_some()
         {
             continue;
         }
         // At most one full historical projection per round, off the writer.
-        let projection = load_projection(database, &mut transaction, project)?;
-        summary = Some((
-            project.to_owned(),
-            header.clone(),
-            encode(&header, &projection)?,
-        ));
+        let projection = load_projection(database, &mut transaction, &project)?;
+        summary = Some((project, header.clone(), encode(header, &projection)?));
         break;
     }
     let next_cursor = if consumed == rows.len() && rows.len() < SCAN_ROWS {
@@ -226,6 +241,12 @@ fn publish(
     }
     if stopped() {
         return Ok(false);
+    }
+    if prepared.next_cursor == [1] {
+        let legacy_cursor = legacy_cursor_key(&transaction)?;
+        if database.entity_get(&mut transaction, &legacy_cursor)?.is_some() {
+            database.maintenance_entity_delete(&mut transaction, legacy_cursor)?;
+        }
     }
     database.maintenance_entity_put(&mut transaction, cursor, prepared.next_cursor)?;
     database.commit(transaction)?;
@@ -307,6 +328,88 @@ mod tests {
         );
     }
 
+    /// One complete restart walk. `cold` models the slow mount, where every
+    /// historical hydration outlasts the cooperative page target and the
+    /// page yields right after it. Returns hydrations, pages and active returns.
+    fn walk(database: &AuthorityDatabase, cold: bool) -> (usize, usize, Vec<String>) {
+        let started = projection_hydrations();
+        let mut cursor: Option<RecoveryCursor> = None;
+        let mut pages = 0;
+        let mut active = Vec::new();
+        loop {
+            pages += 1;
+            let mut transaction = database.begin(7, 11).unwrap();
+            let mut observed = projection_hydrations();
+            let page: Value = serde_json::from_slice(
+                &recovery_snapshot_with_yield(database, &mut transaction, cursor.as_ref(), || {
+                    let now = projection_hydrations();
+                    cold && std::mem::replace(&mut observed, now) != now
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            for project in page["projects"].as_array().unwrap() {
+                active.push(project["projectKey"].as_str().unwrap().to_owned());
+            }
+            if page["capped"] == false {
+                return (projection_hydrations() - started, pages, active);
+            }
+            cursor = Some(serde_json::from_value(page["nextCursor"].clone()).unwrap());
+        }
+    }
+
+    #[test]
+    fn restart_walk_hydrates_each_project_at_most_once_despite_legacy_index_rows() {
+        let seed = Arc::new(DeterministicVfs::new(None));
+        seed.create_dir(Path::new("/data")).unwrap();
+        seed.sync_directory(Path::new("/")).unwrap();
+        let mut database =
+            AuthorityDatabase::initialize_with_vfs(Path::new("/data"), seed.clone()).unwrap();
+        let projects = ["/legacy-0", "/legacy-1", "/legacy-2", "/summarized", "/active"];
+        for project in &projects[..3] {
+            write(&mut database, project, "completed", true);
+        }
+        write(&mut database, "/summarized", "completed", false);
+        write(&mut database, "/active", "active", false);
+        // Older generations kept one update-index row per historical save, so
+        // the same projects recur on every index page.
+        let mut seed_rows = database.begin(7, 11).unwrap();
+        for timestamp in 0..1500_u64 {
+            let project = projects[timestamp as usize % projects.len()];
+            let row = updated_index_key(&seed_rows, project, timestamp).unwrap();
+            database
+                .entity_put(&mut seed_rows, row, project.as_bytes().to_vec())
+                .unwrap();
+        }
+        database.commit(seed_rows).unwrap();
+        database.checkpoint_for_test().unwrap();
+        drop(database);
+        let measurements = [false, true].map(|cold| {
+            let vfs = Arc::new(seed.fork_durable().unwrap());
+            let database =
+                AuthorityDatabase::open_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+            // Every hydration reaches the mount, as after a restart.
+            database.configure_hot_data_caches(0, 0).unwrap();
+            vfs.arm_fault(None).unwrap();
+            let (hydrations, pages, active) = walk(&database, cold);
+            let reads = vfs
+                .trace()
+                .unwrap()
+                .iter()
+                .filter(|op| **op == Operation::Read)
+                .count();
+            eprintln!("project_recovery_walk cold={cold} projects=5 legacy_index_rows=1500 \
+                hydrations={hydrations} pages={pages} active_returns={} reads={reads}", active.len());
+            (cold, hydrations, active)
+        });
+        for (cold, hydrations, active) in measurements {
+            // Three summary-less legacy projects and one active project; the
+            // valid negative summary is never hydrated.
+            assert_eq!(hydrations, 4, "cold={cold}");
+            assert_eq!(active, ["/active"], "cold={cold}");
+        }
+    }
+
     #[test]
     fn stale_corrupt_and_foreign_summaries_never_hide_active_work() {
         let directory = tempfile::tempdir().unwrap();
@@ -372,6 +475,41 @@ mod tests {
     }
 
     #[test]
+    fn document_backfill_makes_inactive_hydration_durable_for_the_next_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let projects = ["/legacy-0", "/legacy-1", "/active"];
+        write(&mut database, projects[0], "completed", true);
+        write(&mut database, projects[1], "completed", true);
+        write(&mut database, projects[2], "active", false);
+        // The superseded index pass had already marked itself complete.
+        let mut seed = database.begin(7, 11).unwrap();
+        let legacy_cursor = legacy_cursor_key(&seed).unwrap();
+        database.entity_put(&mut seed, legacy_cursor.clone(), vec![1]).unwrap();
+        for timestamp in 0..1500_u64 {
+            let project = projects[timestamp as usize % projects.len()];
+            let row = updated_index_key(&seed, project, timestamp).unwrap();
+            database.entity_put(&mut seed, row, project.as_bytes().to_vec()).unwrap();
+        }
+        database.commit(seed).unwrap();
+        assert_eq!(walk(&database, true).0, 3);
+        let database = Arc::new(Mutex::new(database));
+        let scope = MaintenanceScope::new(7, 11).unwrap();
+        let before = projection_hydrations();
+        while backfill(&database, scope, &|| false).unwrap() {}
+        // One hydration per summary-less document, however many index rows.
+        assert_eq!(projection_hydrations() - before, 2);
+        let database = database.lock().unwrap();
+        let (hydrations, _, active) = walk(&database, true);
+        assert_eq!(hydrations, 1, "only the active project still needs its projection");
+        assert_eq!(active, ["/active"]);
+        let mut read = database.begin(7, 11).unwrap();
+        let cursor = cursor_key(&read).unwrap();
+        assert_eq!(database.entity_get(&mut read, &cursor).unwrap(), Some(vec![1]));
+        assert_eq!(database.entity_get(&mut read, &legacy_cursor).unwrap(), None);
+    }
+
+    #[test]
     fn slow_legacy_hydration_does_not_hold_writer() {
         let vfs = Arc::new(crate::test_stop_vfs::StopVfs::new());
         vfs.create_dir(Path::new("/data")).unwrap();
@@ -424,6 +562,12 @@ mod tests {
         let mut database =
             AuthorityDatabase::initialize_with_vfs(Path::new("/data"), seed.clone()).unwrap();
         write(&mut database, "/project", "active", true);
+        let mut completed_index_pass = database.begin(7, 11).unwrap();
+        let legacy_cursor = legacy_cursor_key(&completed_index_pass).unwrap();
+        database
+            .entity_put(&mut completed_index_pass, legacy_cursor.clone(), vec![1])
+            .unwrap();
+        database.commit(completed_index_pass).unwrap();
         database.checkpoint_for_test().unwrap();
         drop(database);
         let scope = MaintenanceScope::new(7, 11).unwrap();
@@ -474,6 +618,9 @@ mod tests {
                     summary.as_ref().and_then(|s| active(s, &header)) == Some(true),
                     "fault {index} {action:?}"
                 );
+                // The completing pass retires the superseded cursor atomically.
+                let legacy = reopened.entity_get(&mut read, &legacy_cursor).unwrap();
+                assert_eq!(legacy.is_none(), cursor.is_some(), "fault {index} {action:?}");
             }
         }
     }

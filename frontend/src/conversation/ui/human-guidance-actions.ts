@@ -3,16 +3,19 @@
  *
  * Responsibility: validate delegated card actions, own optimistic DOM state,
  * optionally translate free text, submit one response, and project terminal
- * UI feedback through explicit ports. Entry point:
+ * UI feedback through explicit ports. A non-blocking card
+ * (`data-hg-reply="chat"`) answers through the chat composer port with the
+ * card's bounded question quote instead of the guidance transport. Entry point:
  * `createHumanGuidanceActions`. This controller owns no conversation/Turn
  * state and never constructs selectors from untrusted guidance identifiers.
  */
 
 import { escapeHtmlText } from '../../html-safety';
 import type { I18nArgs, I18nKey, Translator } from '../../i18n';
+import {
+  field, scalarText as safeText,
+} from '../presentation/tool-payload-values';
 import { TOOL_HUMAN_GUIDANCE_PRESENTATION_LIMITS } from '../presentation/tool-human-guidance-presentation';
-
-type UnknownRecord = Readonly<Record<string, unknown>>;
 
 export type HumanGuidanceActiveConversation = Readonly<{
   conversationId: string;
@@ -32,6 +35,16 @@ export type HumanGuidanceLateAnswerRequest = Readonly<{
   responseText: string;
 }>;
 
+export type HumanGuidanceChatReplyRequest = Readonly<{
+  conversationId: string;
+  guidanceId: string;
+  quote: string;
+  responseText: string;
+}>;
+
+/** `sent`: the chat message left; `drafted`: it waits in the composer. */
+export type HumanGuidanceChatReplyOutcome = 'sent' | 'drafted';
+
 export type HumanGuidanceActions = Readonly<{
   submitFreeText(element: unknown): Promise<void>;
   submitChoice(element: unknown): Promise<void>;
@@ -48,6 +61,9 @@ export type HumanGuidanceActionsDependencies = Readonly<{
   submitLateAnswer: (
     request: HumanGuidanceLateAnswerRequest,
   ) => Promise<unknown>;
+  replyInChat: (
+    request: HumanGuidanceChatReplyRequest,
+  ) => Promise<HumanGuidanceChatReplyOutcome>;
   markSubmitted: (
     conversationId: string,
     guidanceId: string,
@@ -55,7 +71,7 @@ export type HumanGuidanceActionsDependencies = Readonly<{
   ) => void;
   requestExpiredRender: (conversationId: string) => void;
   renderConversationList: () => void;
-  showToast: (message: string, kind: 'error' | 'warning') => void;
+  showToast: (message: string, kind: 'error' | 'warning' | 'info') => void;
   log: (
     level: 'debug' | 'success' | 'warn' | 'error',
     message: string,
@@ -72,6 +88,8 @@ const CHOICE_LABEL_UNITS =
 const OPTION_ITEMS = TOOL_HUMAN_GUIDANCE_PRESENTATION_LIMITS.optionItems;
 const OPTION_NOTE_UNITS =
   TOOL_HUMAN_GUIDANCE_PRESENTATION_LIMITS.optionNoteUnits;
+const REPLY_QUOTE_UNITS =
+  TOOL_HUMAN_GUIDANCE_PRESENTATION_LIMITS.replyQuoteUnits;
 
 export const HUMAN_GUIDANCE_ACTION_LIMITS = Object.freeze({
   identifierUnits: IDENTIFIER_UNITS,
@@ -79,33 +97,8 @@ export const HUMAN_GUIDANCE_ACTION_LIMITS = Object.freeze({
   responseUnits: RESPONSE_UNITS,
   optionItems: OPTION_ITEMS,
   optionNoteUnits: OPTION_NOTE_UNITS,
+  replyQuoteUnits: REPLY_QUOTE_UNITS,
 });
-
-const EMPTY_RECORD: UnknownRecord = Object.freeze({});
-
-function record(value: unknown): UnknownRecord {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as UnknownRecord
-    : EMPTY_RECORD;
-}
-
-function field(value: unknown, name: string): unknown {
-  try {
-    return record(value)[name];
-  } catch {
-    return undefined;
-  }
-}
-
-function safeText(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (
-    typeof value === 'number'
-    || typeof value === 'boolean'
-    || typeof value === 'bigint'
-  ) return String(value);
-  return '';
-}
 
 function boundedIdentity(value: unknown, limit: number): string {
   const text = safeText(value);
@@ -132,6 +125,12 @@ function lateAnswerTurnId(card: HTMLElement): string {
   if (card.dataset.hgLateAnswer !== '1') return '';
   return boundedIdentity(card.dataset.turnId, IDENTIFIER_UNITS);
 }
+
+/** The bounded question quote of a chat-reply card; null for guidance cards. */
+function chatReplyQuote(card: HTMLElement): string | null {
+  if (card.dataset.hgReply !== 'chat') return null;
+  return safeText(card.dataset.hgQuote).slice(0, REPLY_QUOTE_UNITS);
+}
 function matchingDatasetValue(
   values: readonly (string | undefined)[],
   limit: number,
@@ -154,6 +153,7 @@ export function createHumanGuidanceActions(
     translateResponse,
     submitResponse,
     submitLateAnswer,
+    replyInChat,
     markSubmitted,
     requestExpiredRender,
     renderConversationList,
@@ -175,7 +175,7 @@ export function createHumanGuidanceActions(
     }
   }
 
-  function safeToast(message: string, kind: 'error' | 'warning'): void {
+  function safeToast(message: string, kind: 'error' | 'warning' | 'info'): void {
     if (destroyed) return;
     try {
       showToast(message, kind);
@@ -218,6 +218,24 @@ export function createHumanGuidanceActions(
     return `${conversationId}\u0000${guidanceId}`;
   }
 
+  function projectAnswered(
+    conversationId: string,
+    guidanceId: string,
+    originalResponse: string,
+  ): void {
+    if (destroyed) return;
+    try {
+      markSubmitted(conversationId, guidanceId, originalResponse);
+    } catch {
+      safeLog('warn', 'Human guidance presentation patch failed');
+    }
+    try {
+      renderConversationList();
+    } catch {
+      safeLog('warn', 'Human guidance conversation-list refresh failed');
+    }
+  }
+
   async function submitPayload(
     active: HumanGuidanceActiveConversation,
     guidanceId: string,
@@ -248,22 +266,7 @@ export function createHumanGuidanceActions(
         return false;
       }
       safeLog('success', `Human guidance answered: ${guidanceId.slice(0, 16)}`);
-      if (!destroyed) {
-        try {
-          markSubmitted(
-            active.conversationId,
-            guidanceId,
-            originalResponse,
-          );
-        } catch {
-          safeLog('warn', 'Human guidance presentation patch failed');
-        }
-        try {
-          renderConversationList();
-        } catch {
-          safeLog('warn', 'Human guidance conversation-list refresh failed');
-        }
-      }
+      projectAnswered(active.conversationId, guidanceId, originalResponse);
       return true;
     } catch (error) {
       safeLog('error', `Human guidance error: ${safeText(field(error, 'message'))}`);
@@ -278,6 +281,38 @@ export function createHumanGuidanceActions(
         }
         return false;
       }
+      safeToast(translatedText('project.hgNetworkError'), 'error');
+      return false;
+    }
+  }
+
+  /* A non-blocking question has no waiting request: its answer is an
+   * ordinary chat message quoting the question. The composer either sends it
+   * now or keeps it as a draft beside the user's unsent work; only a sent
+   * reply collapses the card. */
+  async function replyPayload(
+    active: HumanGuidanceActiveConversation,
+    guidanceId: string,
+    quote: string,
+    responseText: string,
+  ): Promise<boolean> {
+    try {
+      const outcome = await replyInChat({
+        conversationId: active.conversationId,
+        guidanceId,
+        quote,
+        responseText,
+      });
+      if (outcome === 'drafted') {
+        safeToast(translatedText('toolHumanGuidance.replyDrafted'), 'info');
+        return false;
+      }
+      if (outcome !== 'sent') throw new Error('unknown chat reply outcome');
+      safeLog('success', `Human guidance replied in chat: ${guidanceId.slice(0, 16)}`);
+      projectAnswered(active.conversationId, guidanceId, responseText);
+      return true;
+    } catch (error) {
+      safeLog('error', `Human guidance chat reply error: ${safeText(field(error, 'message'))}`);
       safeToast(translatedText('project.hgNetworkError'), 'error');
       return false;
     }
@@ -339,9 +374,11 @@ export function createHumanGuidanceActions(
       'button.hg-submit-btn',
     );
     const originalButtonHtml = submitButton?.innerHTML ?? '';
+    const chatQuote = chatReplyQuote(parts.card);
     let finalText = text;
     try {
-      if (active.autoTranslate && containsChinese(text)) {
+      // A chat reply is translated by the ordinary send pipeline instead.
+      if (chatQuote === null && active.autoTranslate && containsChinese(text)) {
         if (submitButton) {
           submitButton.disabled = true;
           submitButton.innerHTML = `<span class="hg-spinner"></span> ${escapeHtmlText(
@@ -362,13 +399,15 @@ export function createHumanGuidanceActions(
           finalText = text;
         }
       }
-      const ok = await submitPayload(
-        active,
-        parts.guidanceId,
-        finalText,
-        text,
-        lateAnswerTurnId(parts.card),
-      );
+      const ok = chatQuote === null
+        ? await submitPayload(
+          active,
+          parts.guidanceId,
+          finalText,
+          text,
+          lateAnswerTurnId(parts.card),
+        )
+        : await replyPayload(active, parts.guidanceId, chatQuote, text);
       if (!ok && !destroyed) parts.card.classList.remove('hg-submitting');
     } finally {
       activeSubmissions.delete(key);
@@ -481,9 +520,11 @@ export function createHumanGuidanceActions(
       button.classList.toggle('hg-selected', button === parts.button);
       button.disabled = true;
     }
+    const chatQuote = chatReplyQuote(parts.card);
     try {
       let finalNote = note;
-      if (note && active.autoTranslate && containsChinese(note)) {
+      if (note && chatQuote === null && active.autoTranslate
+          && containsChinese(note)) {
         try {
           const translated = safeText(await translateResponse(note));
           if (!translated || translated.length > RESPONSE_UNITS) {
@@ -504,13 +545,17 @@ export function createHumanGuidanceActions(
       const originalResponse = note
         ? `${parts.choiceLabel}\nuser_note: ${note}`
         : parts.choiceLabel;
-      const ok = await submitPayload(
-        active,
-        parts.guidanceId,
-        responseText,
-        originalResponse,
-        lateAnswerTurnId(parts.card),
-      );
+      const ok = chatQuote === null
+        ? await submitPayload(
+          active,
+          parts.guidanceId,
+          responseText,
+          originalResponse,
+          lateAnswerTurnId(parts.card),
+        )
+        : await replyPayload(
+          active, parts.guidanceId, chatQuote, originalResponse,
+        );
       if (!ok && !destroyed) {
         for (const state of previous) {
           state.button.disabled = state.disabled;
@@ -592,14 +637,20 @@ export function createHumanGuidanceActions(
     activeSubmissions.add(key);
     card.classList.add('hg-submitting');
     const responseJson = JSON.stringify(answers);
+    const chatQuote = chatReplyQuote(card);
+    // A chat message is read by people too: numbered answers follow the
+    // numbered questions of the quoted form.
+    const chatText = answers.map(({ index, answer }) => `${index + 1}. ${answer}`).join('\n');
     try {
-      const ok = await submitPayload(
-        active,
-        guidanceId,
-        responseJson,
-        responseJson,
-        lateAnswerTurnId(card),
-      );
+      const ok = chatQuote === null
+        ? await submitPayload(
+          active,
+          guidanceId,
+          responseJson,
+          responseJson,
+          lateAnswerTurnId(card),
+        )
+        : await replyPayload(active, guidanceId, chatQuote, chatText);
       if (!ok && !destroyed) card.classList.remove('hg-submitting');
     } finally {
       activeSubmissions.delete(key);

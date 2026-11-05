@@ -10,6 +10,8 @@ host conversation.
 """
 from __future__ import annotations
 
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+
 import json
 import os
 import time
@@ -36,12 +38,12 @@ def _stub_stream_llm_response(task, body, tag='', on_tool_call_ready=None):
 def _install_llm_stubs():
     import lib.tasks_pkg.llm_fallback._call as llm_fb
 
-    saved = llm_fb.stream_llm_response
-    llm_fb.stream_llm_response = _stub_stream_llm_response
+    saved = _fallback_transport.stream_llm_response
+    _fallback_transport.stream_llm_response = _stub_stream_llm_response
     try:
         yield
     finally:
-        llm_fb.stream_llm_response = saved
+        _fallback_transport.stream_llm_response = saved
 
 
 def _wait_app_ready(page, timeout=15000):

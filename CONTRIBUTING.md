@@ -47,6 +47,8 @@ Never hand-edit generated artifacts. Edit their source and run the owner:
 | Conversation clients/validators | `contracts/conversation_sync_v3.yaml` | `npm run generate:conversation-sync` |
 | Runtime action catalog | action source modules | `npm run generate:actions` |
 | Tool inventory | tool registry | `python3 scripts/gen_tool_inventory.py` |
+| i18n contract, language module, locale delivery JSON | `frontend/src/i18n/languages.json`, `frontend/src/i18n/locales/` | `npm run generate:i18n` |
+| Derived locales `frontend/src/i18n/locales/{ja,ko,fr,de,ru}.json` | source locales `{zh,en}.json`, `translation-glossary.json` | `python3 scripts/translate_i18n_locales.py --model <translator> --review-model <reviewer>` |
 
 Checks use the corresponding `check:*` command and fail on stale output.
 
@@ -55,12 +57,21 @@ Python generated modules live beside their consumer under a package-local
 `tool_*` module name that hides its generated status. The generator’s
 `--check` mode and the owning contract test must agree on the path.
 
-The i18n locale authorities (`frontend/src/i18n/locales/{en,zh}.json`) also
-feed a dead-key scan, `scripts/check_i18n_dead_keys.mjs`, wired into
-`check:i18n` / `check:frontend` as a non-failing warning. It flags catalog
-keys not referenced anywhere in `frontend/src` (accounting for dynamic-prefix
-families such as `t('swarm.phase.' + phase)` via an allowlist). Run it with
-`--json` to list dead keys for a pruning pass.
+Product copy is authored only in the source locales
+(`frontend/src/i18n/locales/{zh,en}.json`). After adding or editing source
+copy, run the translation tool above: it translates only missing, stale or
+invalid derived keys through the running application's LLM API, using two
+strong models from different families (translator and independent reviewer).
+Builds deliver a pending translation from English; `check:i18n` fails until
+every derived locale is complete and current. See
+`frontend/src/i18n/AGENTS.md`.
+
+The source locales also feed a dead-key scan,
+`scripts/check_i18n_dead_keys.mjs --fail`, wired into `check:i18n` /
+`check:frontend`. It flags catalog keys not referenced anywhere in
+`frontend/src` (accounting for dynamic-prefix families such as
+`t('swarm.phase.' + phase)` via an allowlist). Run it with `--json` to list
+dead keys for a pruning pass.
 
 ## Change workflow
 

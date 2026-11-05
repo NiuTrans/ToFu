@@ -207,10 +207,10 @@ def test_continuation_pages_complete_human_chain_without_transcripts(monkeypatch
     assert all('toolRounds' not in row['projection'] and 'content' not in row['projection']
                and 'thinking' not in row['projection'] for row in page['turns'])
     from lib.swarm.integration._autocontinue import _durable_chain_allows
-    assert not _durable_chain_allows(page['turns'], 'wake', failure=False, ceiling=3)
+    assert not _durable_chain_allows(page['turns'], 'wake', failure=False)
     rows[11]['status'] = 'completed'
     assert _durable_chain_allows(read_continuation_turns('conversation', user_id=7)['turns'],
-                               'wake', failure=False, ceiling=3)
+                               'wake', failure=False)
 
 
 def test_continuation_compacts_tool_guard_and_retains_pairing_receipts(monkeypatch):
@@ -233,14 +233,14 @@ def test_continuation_compacts_tool_guard_and_retains_pairing_receipts(monkeypat
     turns = read_continuation_turns('conversation', user_id=7)['turns']
     assert turns[-1]['_externalBlocker']['kind'] == 'git_guard'
     assert 'toolRounds' not in turns[-1]['projection']
-    assert not _durable_chain_allows(turns, 'wake', failure=False, ceiling=3)
+    assert not _durable_chain_allows(turns, 'wake', failure=False)
     rows[3]['projection']['toolRounds'] = []
     turns = read_continuation_turns('conversation', user_id=7)['turns']
-    assert _durable_chain_allows(turns, 'wake', failure=True, ceiling=3)
+    assert _durable_chain_allows(turns, 'wake', failure=True)
     del rows[2]['projection']['error']
     turns = read_continuation_turns('conversation', user_id=7)['turns']
-    assert not _durable_chain_allows(turns, 'wake', failure=True, ceiling=3)
-    assert not _durable_chain_allows(turns, 'previous', failure=False, ceiling=3)
+    assert not _durable_chain_allows(turns, 'wake', failure=True)
+    assert not _durable_chain_allows(turns, 'previous', failure=False)
 
 
 def test_continuation_reads_real_owner_scoped_actor_and_projection(storage, monkeypatch):

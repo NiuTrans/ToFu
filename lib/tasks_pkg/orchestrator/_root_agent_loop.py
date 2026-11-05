@@ -73,6 +73,12 @@ from lib.tasks_pkg.orchestrator._tool_loop_breaker import (
 from lib.tasks_pkg.orchestrator._tool_timeout_breaker import (
     handle_tool_timeout_circuit_breaker,
 )
+from lib.tasks_pkg.round_prep_timing import (
+    begin_round_prep,
+    end_round_prep,
+    round_prep_lap,
+    round_prep_step,
+)
 
 __all__ = ['RootLoopRequest', 'RootLoopResult', 'run_root_agent_loop', 'prepare_round_context', 'admit_round_context']
 
@@ -116,56 +122,65 @@ def prepare_round_context(task, messages, *, round_num, tid, model,
     Both loop owners invoke this policy; no dispatch, reservation or terminal
     transition belongs here. Message receipts preserve the prepared checkpoint.
     """
-    run_round_message_hygiene(
-        task, messages,
-        round_num=round_num, tid=tid,
-        model=model,
-        project_path=project_path,
-        project_enabled=project_enabled,
-    )
+    with round_prep_step(task, 'hygiene'):
+        run_round_message_hygiene(
+            task, messages,
+            round_num=round_num, tid=tid,
+            model=model,
+            project_path=project_path,
+            project_enabled=project_enabled,
+        )
     from lib.tasks_pkg.invocation import is_child_invocation
     if not is_child_invocation(task):
-        drain_and_inject_inbox(
-            task=task, messages=messages,
-            round_num=round_num, tid=tid)
+        with round_prep_step(task, 'inputs.inbox'):
+            drain_and_inject_inbox(
+                task=task, messages=messages,
+                round_num=round_num, tid=tid)
 
     if not is_child_invocation(task):
-        from lib.swarm.team_messages import prepare_coordinator_mailbox
-        prepare_coordinator_mailbox(task)
+        with round_prep_step(task, 'inputs.mailbox'):
+            from lib.swarm.team_messages import prepare_coordinator_mailbox
+            prepare_coordinator_mailbox(task)
 
     # Preserve checkpoint carriers even when optional acquisition fails.
     from lib.tasks_pkg.message_input_receipts import remember
     remember(task, messages)
+    round_prep_lap(task, 'inputs.remember')
 
     if not is_child_invocation(task) and (task.get('config') or {}).get('projectPath'):
-        from lib.agent_core.store import get_conversation_store
-        get_conversation_store().inject_project_messages(task, messages, round_num)
+        with round_prep_step(task, 'inputs.project_messages'):
+            from lib.agent_core.store import get_conversation_store
+            get_conversation_store().inject_project_messages(task, messages, round_num)
 
     if task.get('_swarmMessageBinding'):
-
-        from lib.swarm.run_messages import inject_messages
-        inject_messages(task, messages, round_num)
+        with round_prep_step(task, 'inputs.swarm_messages'):
+            from lib.swarm.run_messages import inject_messages
+            inject_messages(task, messages, round_num)
 
     if (task.get('config') or {}).get('evolution', {}).get('run_id'):
-        from lib.evolution.coordination import inject_updates
-        inject_updates(task, messages, round_num)
+        with round_prep_step(task, 'inputs.evolution_updates'):
+            from lib.evolution.coordination import inject_updates
+            inject_updates(task, messages, round_num)
 
-    from lib.tasks_pkg.project_guidance import refresh_project_guidance
-    refresh_project_guidance(task, messages, model=model)
+    with round_prep_step(task, 'inputs.guidance'):
+        from lib.tasks_pkg.project_guidance import refresh_project_guidance
+        refresh_project_guidance(task, messages, model=model)
 
-    from lib.tasks_pkg.context_composer.working_facts import refresh_working_facts
-    refresh_working_facts(messages, task=task, model=model)
+    with round_prep_step(task, 'inputs.working_facts'):
+        from lib.tasks_pkg.context_composer.working_facts import refresh_working_facts
+        refresh_working_facts(messages, task=task, model=model)
 
-    from lib.tasks_pkg.context_composer import refresh_programmatic_inputs
-    from lib.tasks_pkg.manager import task_user_id
-    refresh_programmatic_inputs(
-        # Unknown ownership denies discovery when no input exists; the
-        # empty refresh still withdraws a previously available directory.
-        messages, task=task,
-        user_id=task_user_id(task) if task.get('_programResultRefs') else 0,
-        model=model,
-        tool_names={(tool.get('function') or {}).get('name')
-                    for tool in (round_tools or ()) if isinstance(tool, dict)} - {None})
+    with round_prep_step(task, 'inputs.programmatic_inputs'):
+        from lib.tasks_pkg.context_composer import refresh_programmatic_inputs
+        from lib.tasks_pkg.manager import task_user_id
+        refresh_programmatic_inputs(
+            # Unknown ownership denies discovery when no input exists; the
+            # empty refresh still withdraws a previously available directory.
+            messages, task=task,
+            user_id=task_user_id(task) if task.get('_programResultRefs') else 0,
+            model=model,
+            tool_names={(tool.get('function') or {}).get('name')
+                        for tool in (round_tools or ()) if isinstance(tool, dict)} - {None})
 
 
 def admit_round_context(task, messages, tools, *, round_num, model,
@@ -295,9 +310,19 @@ class _RootLoopHooks:
             self.task['_firstDispatchRound'] = round_num
         self.round_num = round_num
         record_active_round(self.task, round_num)
-        emit_round_open(self.task, self.state, round_num)
+        # ROUND_START -> logical MODEL_REQUEST_START; the request start
+        # consumes it, an unstarted request retires it silently.
+        prep_timing = begin_round_prep(self.task, round_num)
         try:
-            return self._dispatch_open_round(round_num, round_tools)
+            emit_round_open(self.task, self.state, round_num)
+        except BaseException:
+            end_round_prep(self.task, prep_timing)
+            raise
+        round_prep_lap(self.task, 'round_open')
+        from lib.tasks_pkg.compaction._tokens import task_round_text_identities
+        try:
+            with task_round_text_identities(self.task):
+                return self._dispatch_open_round(round_num, round_tools)
         except BaseException:
             # Failed dispatch skips normal round settlement. Close the announced
             # round before fatal handling can start another turn attempt. Let a
@@ -308,6 +333,12 @@ class _RootLoopHooks:
             append_event(self.task, build_event(
                 EventType.ROUND_END, roundNum=round_num, reason='error'))
             raise
+        finally:
+            # The round's mailbox target check is shared only inside this
+            # dispatch; ``_activeRoundNum`` outlives it for failure attribution.
+            from lib.swarm.run_messages import ROUND_TARGET_FIELD
+            self.task.pop(ROUND_TARGET_FIELD, None)
+            end_round_prep(self.task, prep_timing)
 
     def _dispatch_open_round(
         self,
@@ -331,8 +362,14 @@ class _RootLoopHooks:
         from lib.token_counter.base import (
             REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_KEY,
         )
+        admission_tools = round_tools
+        initial_tools = self.task.get('_tool_schema')
+        if (isinstance(initial_tools, list)
+                and str(self.task.get('_toolSearchMode') or '')
+                in {'auto', 'local'}):
+            admission_tools = initial_tools
         reusable_schema_evidence = (
-            round_tools is self._admission_tool_schema_source
+            admission_tools is self._admission_tool_schema_source
             and state.model == self._admission_tool_schema_model
         )
         reusable_schema_tokens = (
@@ -341,15 +378,16 @@ class _RootLoopHooks:
         reusable_schema_fingerprint = (
             self._admission_tool_schema_fingerprint
             if reusable_schema_evidence else None)
-        prompt_admission = admit_round_context(self.task, self.messages, round_tools,
-            round_num=round_num, model=state.model,
-            precomputed_tool_schema_tokens=reusable_schema_tokens)
+        with round_prep_step(self.task, 'admission'):
+            prompt_admission = admit_round_context(self.task, self.messages, admission_tools,
+                round_num=round_num, model=state.model,
+                precomputed_tool_schema_tokens=reusable_schema_tokens)
         measured_schema_tokens = validated_tool_schema_token_count(
-            round_tools, prompt_admission.get('toolSchemaTokens'))
+            admission_tools, prompt_admission.get('toolSchemaTokens'))
         if measured_schema_tokens is not None:
             if not reusable_schema_evidence:
                 self._admission_tool_schema_fingerprint = ''
-            self._admission_tool_schema_source = round_tools
+            self._admission_tool_schema_source = admission_tools
             self._admission_tool_schema_model = state.model
             self._admission_tool_schema_tokens = measured_schema_tokens
         else:
@@ -359,23 +397,25 @@ class _RootLoopHooks:
             self._admission_tool_schema_fingerprint = ''
         # Pop the identity map into this one synchronous call: it must not live
         # in admission evidence or survive body preparation into the stream.
-        tools_this_round, body = build_round_request(
-            self.task, state, self.messages, round_tools,
-            round_num=round_num, tid=request.tid,
-            thinking_depth=request.thinking_depth,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            response_format=request.response_format,
-            admitted_input_tokens=prompt_admission.get('totalTokens'),
-            admitted_tool_schema_tokens=prompt_admission.get(
-                'toolSchemaTokens'),
-            admitted_tool_schema_fingerprint=reusable_schema_fingerprint,
-            reusable_text_token_counts_by_identity=prompt_admission.pop(
-                REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_KEY, None),
-        )
+        with round_prep_step(self.task, 'build_body'):
+            tools_this_round, body = build_round_request(
+                self.task, state, self.messages, round_tools,
+                round_num=round_num, tid=request.tid,
+                thinking_depth=request.thinking_depth,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+                response_format=request.response_format,
+                admitted_input_tokens=prompt_admission.get('totalTokens'),
+                admitted_tool_schema_tokens=prompt_admission.get(
+                    'toolSchemaTokens'),
+                admitted_tool_schema_fingerprint=reusable_schema_fingerprint,
+                reusable_text_token_counts_by_identity=prompt_admission.pop(
+                    REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_KEY, None),
+            )
         stream_accumulator = build_stream_accumulator(
             self.task, state, request.cfg, round_num,
             request.project_enabled)
+        round_prep_lap(self.task, 'accumulator')
         self.round_context = {
             'tools': tools_this_round,
             'stream_accumulator': stream_accumulator,
@@ -385,8 +425,8 @@ class _RootLoopHooks:
         dispatch_returned = False
         current_request_usage = None
         try:
-            from lib.tasks_pkg.persistence_wait import checkpoint_invocation
-            checkpoint_invocation(self.task, self.messages, round_num, phase='model_in_flight')
+            from lib.tasks_pkg.persistence_wait import checkpoint_model_dispatch
+            checkpoint_model_dispatch(self.task, self.messages, round_num)
             request_attempted = True
             llm_action = run_llm_call_with_fallback(
                 self.task, state, body, self.messages, round_tools,
@@ -401,7 +441,7 @@ class _RootLoopHooks:
                 tool_schema_fingerprint_from_evidence(
                     body.get(TOOL_SCHEMA_EVIDENCE_KEY)))
             if (measured_schema_fingerprint
-                    and round_tools is self._admission_tool_schema_source
+                    and admission_tools is self._admission_tool_schema_source
                     and state.model == self._admission_tool_schema_model):
                 self._admission_tool_schema_fingerprint = (
                     measured_schema_fingerprint)
@@ -426,9 +466,9 @@ class _RootLoopHooks:
                 # Admission and durable checkpoints precede final settlement;
                 # expose paid receipts after every provider call, including errors.
                 from lib.cost import merge_usage_totals, observed_usage_totals
-                from lib.tasks_pkg.orchestrator._finalize import _stamp_child_round_costs, _child_cost_usage
-                _stamp_child_round_costs(self.task, state.api_rounds, model=state.model)
-                state.accumulated_usage = _child_cost_usage(state.accumulated_usage, state.api_rounds)
+                from lib.tasks_pkg.round_costs import stamp_round_costs, usage_with_round_costs
+                stamp_round_costs(self.task, state.api_rounds, model=state.model)
+                state.accumulated_usage = usage_with_round_costs(state.accumulated_usage, state.api_rounds)
                 # last_usage deliberately retains earlier paid evidence; it
                 # cannot prove this request's receipt when fallback returns an
                 # internally caught failure or a usage-free provider reply.

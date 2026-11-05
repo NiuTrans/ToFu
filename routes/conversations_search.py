@@ -12,6 +12,7 @@ from quart import request
 
 from lib.api_response import api_bad_request, api_internal_error, api_ok
 from lib.conversations.search import search_conversation_page
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 from lib.storage.errors import StorageError
 from routes.api_v1.auth import request_user_id as _request_user_id
@@ -46,11 +47,11 @@ async def search_convs():
 
     try:
         page = await asyncio.to_thread(search)
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
     except StorageError as exc:
-        if exc.code == 'database_protocol_error':
-            return api_bad_request(exc.message)
+        # A protocol failure is a server fault even when a malformed cursor
+        # provoked it; only the storage taxonomy's own 400 rejects the request.
         return storage_failure_response(exc, operation='conversation.search')
     except Exception:
         logger.exception('[search_convs] unexpected search failure')

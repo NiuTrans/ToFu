@@ -80,9 +80,9 @@ def test_abort_marker_drops_turn_before_create(flask_client, conversation_comman
         task_start_runtime, 'start_conversation_attempt_executor',
         lambda *a, **kw: starts.append((a, kw)) or ('task-x', None))
 
-    def fake_build(payload, config, *, user_id, conv_id=None):
-        # The abort-conv request lands while the handler is still inside its
-        # synchronous translate stretch — AFTER _request_started_at.
+    def fake_build(payload, config, *, user_id, conv_id=None, **_kwargs):
+        # The abort-conv request lands while the handler is still building
+        # the input (before the turn commits) — AFTER _request_started_at.
         _plant_abort_marker(conv_id)
         return {'role': 'user', 'content': payload.get('text', 'hi')}
 

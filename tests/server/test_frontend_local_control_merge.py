@@ -32,7 +32,6 @@ drift into asserting a world that production left behind. Symbols are located
 by SEARCHING for their definition, not by hardcoding a line range, and the
 three failure modes are separately diagnosable (deleted / duplicated / found).
 """
-import functools
 import json
 import re
 import shutil
@@ -43,6 +42,7 @@ from pathlib import Path
 import pytest
 
 from tests._runtime_sections import runtime_sections_dir
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -53,27 +53,8 @@ INDEX_HTML = ROOT / "index.html"
 
 def _node() -> str:
     exe = shutil.which("node")
-    if not exe:
-        pytest.skip("node not available")
+    require_node_modules('jsdom')
     return exe
-
-
-@functools.lru_cache(maxsize=1)
-def _has_jsdom() -> bool:
-    """Probe for jsdom ONCE per session.
-
-    Cached because every ``@pytest.mark.skipif`` argument is evaluated at
-    IMPORT time, and `require('jsdom')` costs ~5s on this FUSE mount (measured:
-    0.12s for bare node, 5.2s once jsdom's module tree is pulled in). With one
-    probe per decorator that was ~145s of collection before a single test body
-    ran — enough to look like a hang and to blow a suite timeout.
-    """
-    try:
-        subprocess.run([_node(), "-e", "require('jsdom')"], cwd=ROOT,
-                       capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
 
 
 def _find_defining_file(symbol: str) -> Path:
@@ -221,7 +202,6 @@ MODAL_HTML = """
       <span class="browser-status-dot disconnected"></span>
       <span class="lc-status-text">checking</span>
     </span>
-    <button class="lc-switch" id="lcBrowserSwitch" aria-checked="false"></button>
     <p class="lc-cap-about" id="lcBrowserAbout"></p>
     <div class="lc-cap-setup" id="lcBrowserSetup"></div>
   </div>
@@ -243,10 +223,9 @@ HARNESS = textwrap.dedent("""
     const dom = new JSDOM(`<!DOCTYPE html><body>{html}</body>`);
     global.document = dom.window.document;
     global.window = dom.window;
-    global.browserEnabled = false;
+    global.browserEnabled = true;
     global.desktopEnabled = false;
     global.LocalControlShellState = Object.freeze({{
-      get browserEnabled() {{ return Boolean(global.browserEnabled); }},
       get desktopEnabled() {{ return Boolean(global.desktopEnabled); }},
     }});
     global.t = (k) => k;                    // i18n absent -> fallback strings
@@ -392,14 +371,12 @@ HARNESS = textwrap.dedent("""
       document.getElementById('lcBrowserSetup').innerHTML = '';
       _lcRenderBrowser(bcases[k]);
       const el = document.getElementById('lcBrowserSetup');
-      const bsw = document.getElementById('lcBrowserSwitch');
       browser[k] = {{
         steps: el.querySelectorAll('.lc-step').length,
         text: el.textContent.trim(),
         hasPath: el.textContent.includes('/srv/tofu/browser_extension'),
         hasDownloadBtn: !!el.querySelector('#lcExtDownloadBtn'),
         hasOpenBtn: !!el.querySelector('#lcExtOpenBtn'),
-        switchUsable: !bsw.disabled,
         about: document.getElementById('lcBrowserAbout').textContent.trim(),
         statusText: (document.querySelector(
           '#lcBrowserStatus .lc-status-text') || {{textContent: ''}})
@@ -506,7 +483,6 @@ def test_there_is_exactly_one_setup_modal():
 
 # ── 2. ONE instruction per state (the cognitive-load contract) ─────────
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_each_desktop_state_renders_exactly_one_instruction():
     out = _run(_shipped())["desktop"]
 
@@ -522,7 +498,6 @@ def test_each_desktop_state_renders_exactly_one_instruction():
             f"must be exactly ONE next action")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_the_three_states_give_three_different_instructions():
     """If they all said the same thing, the detection would be decorative."""
     out = _run(_shipped())["desktop"]
@@ -533,7 +508,6 @@ def test_the_three_states_give_three_different_instructions():
     assert "tray" in texts["tray"].lower() or "托盘" in texts["tray"]
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_one_file_installer_is_the_primary_attach_in_every_branch():
     """One runnable .exe is the whole setup; auth never reaches the UI."""
     res = _run(_shipped())
@@ -565,7 +539,6 @@ def test_one_file_installer_is_the_primary_attach_in_every_branch():
             f"branch")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_the_deprecated_cli_flow_is_never_taught():
     """`python -m lib.desktop_agent` is the SUPERSEDED path.
 
@@ -584,7 +557,6 @@ def test_the_deprecated_cli_flow_is_never_taught():
                 f"setup_state={st} exposes the raw CLI flag {flag}")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_browser_row_picks_the_actionable_instruction():
     """On-disk folder when the backend says so; download otherwise."""
     out = _run(_shipped())["browser"]
@@ -610,7 +582,6 @@ def test_browser_row_picks_the_actionable_instruction():
     assert out["download"]["hasPath"] is False
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_browser_row_distinguishes_the_install_states():
     """'Never installed' / current / outdated / locked out / incompatible are
     different situations and the row must say which. The rejected-device
@@ -645,7 +616,6 @@ def test_browser_row_distinguishes_the_install_states():
     assert "尚未安装" in out["download"]["statusText"]
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_load_unpacked_offers_the_one_click_open_button():
     """The on-disk case's ONE action: open the page + copy the path.
 
@@ -664,7 +634,6 @@ def test_load_unpacked_offers_the_one_click_open_button():
         "the server, not on their machine")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_the_open_button_copies_the_path_and_calls_the_route():
     """One click does BOTH halves, and reports what happened."""
     click = _run(_shipped())["openClick"]
@@ -678,7 +647,6 @@ def test_the_open_button_copies_the_path_and_calls_the_route():
         "the click must report the outcome — a silent button is a dead one")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_connected_state_lights_the_dot():
     """Complement: the merge must not lose the live status signal itself."""
     out = _run(_shipped())["desktop"]
@@ -688,7 +656,6 @@ def test_connected_state_lights_the_dot():
 
 # ── 3. NEUTER — prove the detection is load-bearing ────────────────────
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_ignoring_setup_state_collapses_the_three_paths():
     """Make the desktop renderer ignore the backend's verdict.
 
@@ -705,7 +672,6 @@ def test_NEUTER_ignoring_setup_state_collapses_the_three_paths():
     assert out["tray"]["text"] == out["remote"]["text"]
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_showing_every_path_at_once_breaks_the_one_action_rule():
     """A menu of all three instructions must be rejected, not tolerated."""
     out = _run(_shipped(lambda s: s.replace(
@@ -715,7 +681,6 @@ def test_NEUTER_showing_every_path_at_once_breaks_the_one_action_rule():
     assert out["tray"]["steps"] > 1, "NEUTER did not inject extra instructions"
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_rendering_an_instruction_while_connected_is_noise():
     """Complement to the 'exactly one' rule: connected must render ZERO.
 
@@ -735,7 +700,6 @@ def test_NEUTER_rendering_an_instruction_while_connected_is_noise():
 # are both dead ends: the user is told to do something they cannot do from
 # here. These assert the two halves that make the instruction followable.
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_remote_state_offers_a_real_download_link():
     """The remote user does not have the app — give them a way to get it.
 
@@ -752,7 +716,6 @@ def test_remote_state_offers_a_real_download_link():
         f"an actionable instruction.")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_only_the_states_that_need_the_app_show_a_download_link():
     """A download link belongs exactly where the user does NOT have the app.
 
@@ -773,7 +736,6 @@ def test_only_the_states_that_need_the_app_show_a_download_link():
             f"but gives no way to get it")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_no_authentication_or_connection_line_is_taught():
     out = _run(_shipped())
     for st, info in out["desktop"].items():
@@ -782,7 +744,6 @@ def test_no_authentication_or_connection_line_is_taught():
         assert "连接行" not in info["text"] and "配对码" not in info["text"]
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_a_server_hosted_entry_shows_where_the_file_comes_from():
     """A download served by THIS server must say so, and name its size.
 
@@ -801,7 +762,6 @@ def test_a_server_hosted_entry_shows_where_the_file_comes_from():
         "the artifact size must appear next to the download")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_the_direct_link_is_rebased_onto_the_live_proxy_prefix():
     """The reported 404: the backend builds downloads[].url from
     request.host_url, which under a path-prefixed cloud-IDE proxy
@@ -817,7 +777,6 @@ def test_the_direct_link_is_rebased_onto_the_live_proxy_prefix():
     assert not out["remote"]["pageHref"], 'direct agent installation has no duplicate release-page link'
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_rendering_the_server_url_verbatim_is_caught():
     """Strip the rebase (render p.url verbatim) → the prefix-less absolute
     URL goes straight into the href: the exact reported 404 shape."""
@@ -830,7 +789,6 @@ def test_NEUTER_rendering_the_server_url_verbatim_is_caught():
         'live prefix')
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_stripping_the_download_link_is_caught():
     """No links helper output → told to install with no way to get the app."""
     out = _run(_shipped(
@@ -842,7 +800,6 @@ def test_NEUTER_stripping_the_download_link_is_caught():
         "NEUTER did not remove the followable link")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_dropping_the_platform_matched_links_is_caught():
     """Lose the direct row → only the five-asset releases page remains.
 
@@ -860,13 +817,11 @@ def test_NEUTER_dropping_the_platform_matched_links_is_caught():
         "direct row, not the whole instruction")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 # ── 5. Usability: never invite a click that grants nothing ─────────────
 # The original bug was a toggle that lit up while the tool registry shipped
 # ZERO tools. Moving it into a nicer modal does not fix that — a switch the
 # user CAN flip while nothing is connected reproduces the same dead end.
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_the_switch_is_inert_until_the_capability_can_actually_work():
     """Disconnected → the switch cannot be flipped, and says why.
 
@@ -882,22 +837,30 @@ def test_the_switch_is_inert_until_the_capability_can_actually_work():
             f"exact silent failure this merge set out to remove")
         assert out["desktop"][st]["switchReason"].strip(), (
             f"setup_state={st}: the switch is inert but gives no reason")
-    for k in ("load_unpacked", "download"):
-        assert out["browser"][k]["switchUsable"] is False, (
-            f"browser {k}: no extension connected, switch must not be flippable")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_a_connected_capability_is_switchable():
     """Complement — otherwise 'disable everything' would pass the test above."""
     out = _run(_shipped())
     assert out["desktop"]["connected"]["switchUsable"] is True, (
         "a connected agent MUST be switchable, or the feature is unreachable")
-    assert out["browser"]["connected"]["switchUsable"] is True, (
-        "a connected extension MUST be switchable")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_the_browser_row_has_no_switch():
+    """The browser is always on: its tools need only a connected extension.
+
+    A switch would invite a choice that no longer exists. The desktop row
+    keeps its switch — running commands on the machine stays opt-in.
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert 'id="lcBrowserSwitch"' not in html, (
+        "the Local Control modal still renders a browser switch")
+    assert "toggleBrowserFromLocalModal" not in html, (
+        "markup still wires an action to the removed browser toggle")
+    assert 'id="lcDesktopSwitch"' in html, (
+        "the desktop switch must remain — computer control is opt-in")
+
+
 def test_each_row_says_what_the_ai_actually_gets():
     """Granting access to your browser session and machine needs informed consent.
 
@@ -915,7 +878,6 @@ def test_each_row_says_what_the_ai_actually_gets():
         "running a shell command); one shared sentence hides that")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_the_permissions_note_only_appears_where_it_can_be_followed():
     """It explains the TRAY menu — useless to someone with nothing installed.
 
@@ -933,7 +895,6 @@ def test_the_permissions_note_only_appears_where_it_can_be_followed():
             f"instruction the user cannot follow")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_allowing_the_switch_while_disconnected_is_caught():
     """Ungate the switch → the dead-end toggle is back."""
     out = _run(_shipped(
@@ -943,7 +904,6 @@ def test_NEUTER_allowing_the_switch_while_disconnected_is_caught():
         "NEUTER did not re-enable the switch")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_blanking_the_capability_line_is_caught():
     """Remove the description → the user grants access without being told what."""
     out = _run(_shipped(
@@ -953,7 +913,6 @@ def test_NEUTER_blanking_the_capability_line_is_caught():
         "NEUTER did not blank the capability line")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_showing_the_permissions_note_everywhere_is_caught():
     """Always-on note → an unfollowable instruction in the remote case."""
     out = _run(_shipped(
@@ -995,9 +954,8 @@ LC_FILE_HARNESS = textwrap.dedent("""
     global._applyBrowserLnaWarning = () => {{}};
     // The real wire flags + their real painters live in main.js; the modal
     // only ever reaches them through these two setters.
-    global.browserEnabled = false;
+    global.browserEnabled = true;
     global.desktopEnabled = false;
-    global._applyBrowserUI = (v) => {{ global.browserEnabled = !!v; }};
     global._applyDesktopUI = (v) => {{ global.desktopEnabled = !!v; }};
     global.captureActiveConversationSettings = () => {{}};
     global.updateSubmenuCounts = () => {{}};
@@ -1041,10 +999,16 @@ LC_FILE_HARNESS = textwrap.dedent("""
     // (d) Never probed: the modal was never opened this session. An
     //     unverified capability must not be presented as broken.
     global.desktopEnabled = true;
-    global.browserEnabled = false;
     _lcReach.desktop = null; _lcReach.browser = null;
     _lcUpdateBadge();
     out.neverProbed = snap();
+
+    // (f) The always-on browser has no switch. Without a connected extension
+    //     it must neither count on the badge nor raise a stale warning.
+    global.desktopEnabled = false;
+    _lcReach.desktop = null; _lcReach.browser = false;
+    _lcUpdateBadge();
+    out.browserAlwaysOnUnreachable = snap();
 
     // (e) The badge is retained while reachability belongs to the lazy owner.
     //     Before that owner loads there is no presentation-state port, so the
@@ -1085,7 +1049,6 @@ def _run_file(neuter=None) -> dict:
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_an_enabled_capability_can_always_be_switched_off():
     """The agent dropping must not trap the user with access they can't revoke."""
     out = _run_file()
@@ -1098,7 +1061,6 @@ def test_an_enabled_capability_can_always_be_switched_off():
         "still being sent to the server")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_an_enabled_but_unreachable_capability_does_not_look_healthy():
     """ON + disconnected ⇒ the AI gets ZERO tools. Saying otherwise is the lie
     this whole merge exists to stop telling.
@@ -1119,7 +1081,6 @@ def test_an_enabled_but_unreachable_capability_does_not_look_healthy():
         "flagged as stale but with no explanation of what is wrong")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_turning_it_on_while_disconnected_is_still_refused():
     """Complement: the one-way gate must not become no gate at all."""
     out = _run_file()
@@ -1129,7 +1090,6 @@ def test_turning_it_on_while_disconnected_is_still_refused():
         "the flip was not actually refused")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_a_connected_capability_is_unaffected():
     """Complement: none of the above may degrade the working path."""
     out = _run_file()
@@ -1141,7 +1101,6 @@ def test_a_connected_capability_is_unaffected():
         "a live capability must not warn")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_an_unprobed_capability_is_not_reported_as_broken():
     """Complement: 'never checked' ≠ 'unreachable'.
 
@@ -1154,7 +1113,6 @@ def test_an_unprobed_capability_is_not_reported_as_broken():
         "a capability that was never probed is being reported as broken")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_badge_is_safe_before_local_control_state_initializes():
     """Retained badge code must not require the lazy reachability owner.
 
@@ -1168,7 +1126,6 @@ def test_badge_is_safe_before_local_control_state_initializes():
         f"{out['beforeReachInit'].get('error', '')}")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_gating_both_directions_traps_the_user():
     """Restore the symmetric gate → revoking becomes impossible again."""
     out = _run_file(lambda s: s.replace(
@@ -1180,18 +1137,38 @@ def test_NEUTER_gating_both_directions_traps_the_user():
         "NEUTER should have made the wire flag unrevokable")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_the_always_on_browser_never_counts_on_the_badge():
+    """No switch means no user choice to summarize.
+
+    Counting the browser would pin a permanent "1" on the toolbar row, and a
+    missing extension would turn it into a permanent stale warning for every
+    user who never installed one.
+    """
+    out = _run_file()
+    assert out["browserAlwaysOnUnreachable"]["badgeText"] == "", (
+        "the merged badge counts the always-on browser")
+    assert out["browserAlwaysOnUnreachable"]["badgeStale"] is False, (
+        "a missing extension raises a permanent stale warning")
+
+
+def test_NEUTER_counting_the_browser_on_the_badge_is_caught():
+    """Re-add the browser to the count → the permanent badge returns."""
+    out = _run_file(lambda s: s.replace(
+        "var n = dOn ? 1 : 0;",
+        "var n = (dOn ? 1 : 0) + (browserEnabled ? 1 : 0);"))
+    assert out["browserAlwaysOnUnreachable"]["badgeText"] == "1", (
+        "NEUTER did not restore browser counting")
+
+
 def test_NEUTER_counting_unreachable_capabilities_as_live_is_caught():
     """Drop the staleness split → the badge overstates what the AI has."""
     out = _run_file(lambda s: s.replace(
-        "var stale = ((bOn && reach.browser === false) ? 1 : 0)\n"
-        "            + ((dOn && reach.desktop === false) ? 1 : 0);",
+        "var stale = (dOn && reach.desktop === false) ? 1 : 0;",
         "var stale = 0;"))
     assert out["enabledThenDropped"]["badgeStale"] is False, (
         "NEUTER did not collapse the badge back to a plain count")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_letting_a_toggle_assert_reachability_is_caught():
     """The toggle must report what the POLL observed, not assume success.
 
@@ -1222,8 +1199,8 @@ def test_a_new_chat_does_not_inherit_computer_control():
     locating the function via symbol search, not a hardcoded path or line.
     """
     reset = _slice_fn("_resetToolsToDefaults")
-    assert "_applyBrowserUI(false)" in reset, (
-        "browser access is no longer reset on a new chat")
+    assert "_applyBrowserUI(true)" in reset, (
+        "a new chat must keep the always-on browser on")
     assert "_applyDesktopUI(false)" in reset, (
         "a new chat does not reset desktop control, so it is inherited from "
         "the previous conversation — the highest-risk capability here "

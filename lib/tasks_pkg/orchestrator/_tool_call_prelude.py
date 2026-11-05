@@ -42,9 +42,6 @@ from __future__ import annotations
 from typing import Any
 
 from lib.log import get_logger
-from lib.tasks_pkg.assistant_messages import (
-    append_assistant_message_with_partial_prefill,
-)
 from lib.tasks_pkg.conv_message_builder._toolcalls import (
     build_assistant_tool_call_message,
 )
@@ -100,11 +97,7 @@ def append_assistant_tool_call_message(
         _builder_kwargs['anthropic_content_blocks'] = (
             assistant_msg['_anthropic_content_blocks'])
     clean_msg = build_assistant_tool_call_message(**_builder_kwargs)
-    append_assistant_message_with_partial_prefill(
-        messages,
-        clean_msg,
-        continuation_content=assistant_msg.get('content') or '',
-    )
+    messages.append(clean_msg)
 
     # Discard the inter-round narration this round streamed before
     #   its tool calls (backend reset + client DELTA_RESET). See

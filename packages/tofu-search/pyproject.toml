@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu-search"
-version = "0.12.21"
+version = "0.12.26"
 description = "Multi-engine web search, vertical lookups, and content fetching with optional LLM filtering — standalone library from the Tofu AI assistant"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -30,6 +30,10 @@ dependencies = [
     "beautifulsoup4>=4.13.4",
     "python-dateutil>=2.8",
     "urllib3>=2.5",
+    # Local text PDFs work without native binaries, browser installs or keys.
+    # Imported only on first PDF use when the optional native reader is absent.
+    # 6.21 includes additional stream-parser work limits; use its patched release.
+    "pypdf>=6.21.1,<7",
     # lxml is a TRANSITIVE dep of trafilatura, NOT imported by tofu_search
     # directly. All BeautifulSoup parsing in this package uses 'html.parser'
     # (see search/_common.py:soup_of) — lxml 6.x/libxml2 can segfault under
@@ -47,6 +51,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+local-rerank = ["torch==2.14.1", "transformers==5.20.2", "safetensors>=0.8,<1"]
 playwright = ["playwright>=1.49"]
 pdf = ["pymupdf>=1.24", "pymupdf4llm>=0.0.17"]
 # 'all' means every CONTENT-processing capability. The MCP server is an

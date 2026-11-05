@@ -19,6 +19,7 @@ from lib.api_keys import (
     ALL_SCOPES, create_key, get_key_by_id, list_keys, revoke_key, update_key,
 )
 from lib.api_response import api_bad_request, api_created, api_not_found, api_ok
+from lib.error_envelope import BadRequest
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import (
@@ -125,9 +126,9 @@ def create_key_route():
     if not scopes and not admin:
         return api_bad_request(
             'At least one scope is required (or admin=true)', field='scopes')
+    owner_user_id, tenant_id = _credential_boundary()
+    auth_context = current_auth()
     try:
-        owner_user_id, tenant_id = _credential_boundary()
-        auth_context = current_auth()
         row, plaintext = create_key(
             name=name, scopes=scopes, rate_limit_rpm=rpm,
             rate_limit_tpd=tpd, expires_at=expires,
@@ -136,7 +137,7 @@ def create_key_route():
             account_user_id=(
                 auth_context.account_user_id if auth_context else ''),
         )
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e))
     return api_created(key=row, token=plaintext)
 

@@ -105,8 +105,10 @@ def test_l2_candidate_checklist_cleanup_never_mutates_rejected_live_prefix(monke
         economics_calls.append(kwargs)
         # Permit summary generation, then reject the fully rendered candidate.
         return {'dropped_tokens': kwargs['tokens_before'] if len(economics_calls) == 1 else 0,
-                'cache_read_tokens': 0, 'payback_rounds': 0}
+                'cache_read_tokens': 0, 'warm_prefix_tokens': 0, 'payback_rounds': 0}
     monkeypatch.setattr(layer2, '_proactive_cache_economics', economics)
+    # The stubbed economics prices this route; keep the pricing probe consistent.
+    monkeypatch.setattr(layer2, '_main_route_pricing_verified', lambda *a, **k: True)
     monkeypatch.setattr(layer2, '_archive_transcript',
                         lambda *a, **k: pytest.fail('unaccepted candidate archived'))
     meta = {}

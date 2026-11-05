@@ -6,9 +6,96 @@ storage and recovery. Imports here never load a capability runtime.
 """
 from __future__ import annotations
 from dataclasses import replace
+from typing import Any
 from lib.log import get_logger
-from lib.tools.registry._spec import ToolContext, ToolSpec
+from lib.tools.registry._plugins import resolve_enabled_plugins
+from lib.tools.registry._spec import ToolContext, ToolSpec, all_specs
 logger = get_logger(__name__)
+
+# Distinctive product/tool vocabulary that names a bundled optional tool in a
+# query. Generic capability words stay out on purpose (same rule as the
+# connector evidence): the hint fires only when the user actually named a
+# dormant tool, not whenever a word in its search hints happens to score.
+_BUNDLED_DISCOVERY_ALIASES: dict[str, tuple[str, ...]] = {
+    'produce_slides': ('ppt', 'pptx', '幻灯片', '课件', '路演',
+                       'slide deck', 'presentation', 'powerpoint', 'keynote'),
+    'produce_report': ('produce_report', '生成报告'),
+    'produce_research': ('produce_research', '深度研究'),
+    'produce_video': ('produce_video', '制作视频', '生成视频', '科普视频'),
+    'edit_slides': ('edit_slides', '改ppt', '编辑幻灯片'),
+    'patch_slides': ('patch_slides', 'restyle_slides', '换配色', '换字体'),
+    'revert_slides': ('revert_slides', 'revert_video', '恢复上一版'),
+    'paper_build': ('paper_build', 'paper_layout', 'latex', 'xelatex',
+                    'pdflatex', '编译论文', '论文排版'),
+    'paper_import_arxiv': ('paper_import_arxiv', 'arxiv', 'eprint'),
+    'paper_check': ('paper_check', 'paper_review', 'paper_scaffold',
+                    '投稿检查', '审稿', '论文骨架'),
+    'paper_cite_search': ('paper_cite_search', 'paper_cite_insert',
+                          'paper_citation_audit', '文献检索', '参考文献',
+                          'bibliography', '引用核验'),
+    'paper_propose_edits': ('paper_propose_edits', '提案修改'),
+    'generate_image': ('generate_image', '生成图片', '编辑图片', '配图',
+                       '插画', '海报', '封面图'),
+    'local_serve_deploy': ('local_serve', 'vllm', 'sglang', 'ollama',
+                           'llama.cpp', '本地部署', '本地推理', '本地模型部署'),
+}
+
+
+def bundled_plugin_search_availability(cfg: dict, query: Any, namespace: Any,
+                                       usable_tool_names) -> list[dict]:
+    """Explain dormant bundled plugins a search names but this task cannot call.
+
+    ``cfg`` is the request config (``config.plugins`` wins over
+    ``TOFU_DEFAULT_TOOL_PLUGINS``, exactly as tool assembly resolves it).
+    ``usable_tool_names`` is the task's executable catalog, so an enabled
+    plugin or an already-callable tool never produces evidence.
+    """
+    enabled = resolve_enabled_plugins(cfg if isinstance(cfg, dict) else {})
+    usable = {str(value).strip().casefold()
+              for value in (usable_tool_names or ())}
+    named_namespace = str(namespace or '').strip().casefold()
+    normalized_query = str(query or '').strip().casefold()
+    matched_by_plugin: dict[str, list[str]] = {}
+    gate_by_plugin: dict[str, str] = {}
+    for spec in all_specs():
+        plugin = spec.plugin_name
+        if spec.source != 'plugin' or not plugin:
+            continue
+        # None = allow every plugin; this request exposes it, so no evidence.
+        if enabled is None or plugin in enabled:
+            continue
+        if plugin not in gate_by_plugin:
+            gate_by_plugin[plugin] = spec.gate or f'config.plugins: {plugin}'
+        for name in sorted(spec.provides):
+            folded = name.casefold()
+            if folded in usable:
+                continue
+            aliases = (folded, *_BUNDLED_DISCOVERY_ALIASES.get(name, ()))
+            if named_namespace == plugin.casefold() or any(
+                    alias and alias in normalized_query for alias in aliases):
+                matched_by_plugin.setdefault(plugin, []).append(name)
+    evidence = []
+    for plugin, matched in matched_by_plugin.items():
+        gate = gate_by_plugin[plugin]
+        evidence.append({
+            'capability': 'bundled_plugin', 'namespace': plugin,
+            'plugin': plugin, 'available': False,
+            'reason_code': 'bundled_plugin_not_enabled',
+            'tool_name': matched[0], 'matched_tools': matched,
+            'message': (
+                f"{', '.join(matched)} belongs to the bundled optional "
+                f"'{plugin}' capability, which is not enabled for this "
+                f'deployment. Its tools exist but are excluded from this '
+                "task's catalog by the plugin allow-list."),
+            'recovery_hint': (
+                f'Ask the user to enable it (gate: {gate}). A dedicated '
+                f"deployment adds '{plugin}' to TOFU_DEFAULT_TOOL_PLUGINS "
+                'and restarts the server; an /api/v1/agent/run caller can '
+                f"instead pass config.plugins=['{plugin}'] (or '*') for one "
+                'request. Do not repeat this search until the user confirms '
+                'the change.'),
+        })
+    return evidence
 
 
 def _build_image_gen(ctx: ToolContext) -> list[dict]:
@@ -196,7 +283,7 @@ def build_optional_specs() -> list[ToolSpec]:
                                      'paper_import_arxiv',
                                      'paper_propose_edits'}),
                  # The import downloads into the workspace (a fresh arxiv-<id>/
-                 # directory), so it rides the serial write partition + Manual
+                 # directory), so it rides the write partition + Manual
                  # approval like other project mutations.
                  write_tools=frozenset({'paper_import_arxiv'}),
                  cacheable_tools=frozenset(),

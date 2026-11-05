@@ -9,6 +9,7 @@ from quart import request
 from lib.api_response import (
     api_bad_request,
     api_error,
+    api_internal_error,
     api_not_found,
     api_ok,
 )
@@ -93,10 +94,13 @@ async def search_arxiv_route():
         )
         return api_bad_request(str(e))
     except Exception as e:
+        # A server fault is not an upstream answer: never 502, never raw text.
         logger.error(
             "[Paper:arXiv:Search] route failed for %.120s: %s", query, e, exc_info=True
         )
-        return api_error("arXiv search failed: %s" % e, status=502)
+        return api_internal_error(
+            e, source="api_v1.paper.search_arxiv", log_traceback=False
+        )
     if search_error:
         return api_error("arXiv search failed: %s" % search_error, status=502)
     return api_ok({"query": query, "results": results})

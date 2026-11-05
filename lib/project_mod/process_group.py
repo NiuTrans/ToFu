@@ -2,16 +2,19 @@
 
 No daemon, pool, subprocess or persistent state is added. Callers validate the
 leader/record identity and own direct-child reaping. Linux scans establish owned
-writer settlement or cancellation; zombies have closed descriptors and are quiescent.
+writer settlement or cancellation; only a final zombie thread proves quiescence.
 """
 from __future__ import annotations
 
+import functools
+import io
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
+from pathlib import Path
 from typing import Callable
 
 
@@ -19,34 +22,99 @@ class ProcessGroupRetirementError(RuntimeError):
     """The owned group could not be proven quiescent before the cleanup bound."""
 
 
+@functools.cache
+def _kernel_lists_children() -> bool:
+    """Whether this kernel publishes per-thread child lists (CONFIG_PROC_CHILDREN)."""
+    return os.path.exists(f'/proc/self/task/{threading.get_native_id()}/children')
+
+
+def _read_child_list(path: str) -> bytes | None:
+    """One thread's child list through a raw descriptor; None once it is gone.
+
+    Read until EOF: a long list spans several reads. The text and buffer
+    layers would add several syscalls per file, and every syscall releases
+    the GIL ("Command stdin sensor discovery" in docs/RESOURCE_CONTROL.md).
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    try:
+        chunks = []
+        while chunk := os.read(fd, io.DEFAULT_BUFFER_SIZE):
+            chunks.append(chunk)
+    except ProcessLookupError:
+        return None
+    finally:
+        os.close(fd)
+    return b''.join(chunks)
+
+
 def descendant_pids(root_pid: int) -> list[int]:
     """Discover only an owned Linux subtree, including children of all threads.
 
-    Reading kernel child lists avoids a whole-host /proc scan per timed-out
-    search. Vanished processes are normal; other observation failures remain
-    visible to the caller. No process is signalled by this read-only helper.
+    Kernel child lists keep the cost proportional to the subtree, not to the
+    host's process count, for callers that repeat discovery (every stdin probe
+    tick, every timed-out search): one directory listing per member and one
+    raw read per member thread. Only a kernel without those lists falls back
+    to one parent-link pass over /proc. Vanished processes are normal; other
+    observation failures remain visible to the caller. No process is signalled
+    by this read-only helper.
     """
+    if not _kernel_lists_children():
+        return _descendants_by_parent_links(root_pid)
     found = []
     seen = {root_pid}
     pending = [root_pid]
     while pending:
         parent = pending.pop()
         try:
-            with os.scandir(f'/proc/{parent}/task') as tasks:
-                thread_ids = [entry.name for entry in tasks if entry.name.isdecimal()]
+            thread_ids = [name for name in os.listdir(f'/proc/{parent}/task')
+                          if name.isdecimal()]
         except (FileNotFoundError, ProcessLookupError):
             continue
         for thread_id in thread_ids:
-            try:
-                children = Path(f'/proc/{parent}/task/{thread_id}/children').read_text().split()
-            except (FileNotFoundError, ProcessLookupError):
+            children = _read_child_list(f'/proc/{parent}/task/{thread_id}/children')
+            if children is None:
                 continue
-            for value in children:
+            for value in children.split():
                 pid = int(value)
                 if pid > 1 and pid not in seen:
                     seen.add(pid)
                     found.append(pid)
                     pending.append(pid)
+    return found
+
+
+def _descendants_by_parent_links(root_pid: int) -> list[int]:
+    """Map every visible process to its parent in one /proc pass, then walk the map."""
+    try:
+        entries = os.scandir('/proc')
+    except FileNotFoundError:
+        return []  # No procfs: no descendant is observable.
+    children = {}
+    with entries:
+        for entry in entries:
+            if not entry.name.isdecimal():
+                continue
+            try:
+                # Unbuffered bytes skip the text and buffer layers of a host-wide pass.
+                with open(f'/proc/{entry.name}/stat', 'rb', buffering=0) as handle:
+                    raw = handle.read()
+                # PPID follows the state after comm's final ')'; comm may contain ')'.
+                parent = int(raw[raw.rindex(b')') + 1:].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue  # Exited, or another owner's process this reader cannot observe.
+            children.setdefault(parent, []).append(int(entry.name))
+    found = []
+    seen = {root_pid}
+    pending = [root_pid]
+    while pending:
+        for pid in children.get(pending.pop(), ()):
+            if pid not in seen:
+                seen.add(pid)
+                found.append(pid)
+                pending.append(pid)
     return found
 
 
@@ -64,6 +132,12 @@ def read_process_fields(pid: int) -> list[bytes]:
 def group_has_live_members(pgid: int) -> bool:
     """Observe actual group members, not the lifetime of its reaped leader."""
     if sys.platform.startswith('linux'):
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False  # No process, not even a zombie, holds this group: skip the scan.
+        except PermissionError:
+            pass  # A member exists; the scan below decides whether it is live.
         for path in Path('/proc').iterdir():
             if not path.name.isdecimal():
                 continue
@@ -71,7 +145,10 @@ def group_has_live_members(pgid: int) -> bool:
                 if os.getpgid(int(path.name)) != pgid:
                     continue
                 fields = read_process_fields(int(path.name))
-                if int(fields[2]) == pgid and fields[0] not in (b'Z', b'X'):
+                # Linux can retain a zombie group leader while other threads
+                # still execute and hold descriptors. State alone is not exit.
+                if int(fields[2]) == pgid and (
+                        fields[0] not in (b'Z', b'X') or int(fields[17]) > 1):
                     return True
             except (FileNotFoundError, ProcessLookupError):
                 continue  # A member disappeared between discovery and observation.

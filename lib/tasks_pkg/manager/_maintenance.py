@@ -7,6 +7,7 @@ import threading
 import time
 
 from lib.agent_core.events import EventType, build_event
+from lib.agent_core.storage_errors import is_transient_storage_error
 from lib.error_envelope import to_json as _err_to_json
 from lib.log import get_logger
 from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_STATUSES
@@ -17,7 +18,6 @@ from lib.tasks_pkg.manager.runtime import (
     _conv_latest_task,
     _conv_latest_task_lock,
 )
-from lib.tasks_pkg.explained_wait import explained_wait
 from lib.tasks_pkg.manager._events import append_event
 from lib.tasks_pkg.manager._persist import (
     _upsert_task_row,
@@ -142,19 +142,23 @@ def cleanup_old_tasks():
     # (mirror-inclusive: a local-only prune strands the store mirror corpse)
     if finished_ids:
         with _conv_latest_task_lock:
-            stale_convs = [cid for cid, tid in _conv_latest_task.items()
+            stale_convs = [(cid, tid) for cid, tid in _conv_latest_task.items()
                            if tid in finished_ids]
-        for cid in stale_convs:
-            _clear_latest_task(cid)
+        # Compare-and-clear: a turn created since the snapshot owns the entry.
+        for cid, tid in stale_convs:
+            _clear_latest_task(cid, expect_task_id=tid)
     if n:
         logger.debug('[Manager] cleanup_old_tasks removed %d tasks', n)
     # Stuck-task backstop (rides the same tick). cleanup_stale only evicts
     #   FINISHED tasks, so a purely-wedged running task (never superseded) would
     #   otherwise live forever with no terminal state. See reap_stuck_running_tasks.
+    # A fenced authority fails these steps identically on every tick; the
+    # storage runtime reports that verdict, so an outage logs one line here.
     try:
         reap_stuck_running_tasks()
     except Exception as e:
-        logger.warning('[Manager] reap_stuck_running_tasks failed: %s', e, exc_info=True)
+        logger.warning('[Manager] reap_stuck_running_tasks failed: %s', e,
+                       exc_info=not is_transient_storage_error(e))
     # Cross-surface execution deadline audit. It only raises the canonical
     # cancellation flag; the owning provider/task path remains responsible for
     # unwinding and exactly-once resource settlement.
@@ -166,7 +170,7 @@ def cleanup_old_tasks():
     except Exception as e:
         logger.warning(
             '[Manager] execution deadline reconciliation failed: %s', e,
-            exc_info=True,
+            exc_info=not is_transient_storage_error(e),
         )
     # Queue-lease reaper (rides the same tick, ): reclaim leases
     #   orphaned by a crash/exception mid-dispatch and re-dispatch them, so a
@@ -181,14 +185,16 @@ def cleanup_old_tasks():
         if recovery_needs_retry():
             recover_background_commands_on_startup()
     except Exception as e:
-        logger.warning('[Manager] background delivery retry failed: %s', e, exc_info=True)
+        logger.warning('[Manager] background delivery retry failed: %s', e,
+                       exc_info=not is_transient_storage_error(e))
     try:
         from lib.message_queue import (reap_expired_queue_leases,
                                        drain_idle_background_batches)
         reap_expired_queue_leases()
         drain_idle_background_batches()
     except Exception as e:
-        logger.warning('[Manager] reap_expired_queue_leases failed: %s', e, exc_info=True)
+        logger.warning('[Manager] reap_expired_queue_leases failed: %s', e,
+                       exc_info=not is_transient_storage_error(e))
     # Result-level reconciliation (DB, not registry). The reaper above can
     #   only see tasks still IN MEMORY; a carrier that finished and left the
     #   registry without a terminal write is invisible to it. See
@@ -197,7 +203,8 @@ def cleanup_old_tasks():
         try:
             report_orphan_running_results()
         except Exception as e:
-            logger.warning('[Manager] report_orphan_running_results failed: %s', e, exc_info=True)
+            logger.warning('[Manager] report_orphan_running_results failed: %s', e,
+                           exc_info=not is_transient_storage_error(e))
         else:
             _finish_orphan_result_report()
     trim_released_task_heap()
@@ -280,10 +287,10 @@ def shed_memory_under_pressure() -> dict:
         evicted = chat_task_runtime.cleanup_stale(max_age=0)
         if finished_ids:
             with _conv_latest_task_lock:
-                stale_convs = [c for c, tid in _conv_latest_task.items()
+                stale_convs = [(c, tid) for c, tid in _conv_latest_task.items()
                                if tid in finished_ids]
-            for cid in stale_convs:
-                _clear_latest_task(cid)
+            for cid, tid in stale_convs:
+                _clear_latest_task(cid, expect_task_id=tid)
     except Exception as e:
         logger.warning('[Manager] shed: terminal-task eviction failed: %s', e,
                        exc_info=True)
@@ -298,34 +305,45 @@ def shed_memory_under_pressure() -> dict:
     return {'evicted': evicted, 'gc_collected': collected, 'trimmed': trimmed}
 
 
-# Age (seconds) after which a running task that has produced ZERO output
-# (no events, no content, no thinking) is considered wedged and force-failed.
-# Env-tunable; 0 disables the backstop. Default 30 min — comfortably longer
-# than any legitimate pre-first-token wait (queueing, long tool prep).
-def _stuck_task_max_silent_secs() -> int:
-    import os
-    try:
-        return int(os.environ.get('TOFU_STUCK_TASK_MAX_SILENT_SECS', '') or '1800')
-    except (ValueError, TypeError) as e:
-        logger.debug('[Manager] TOFU_STUCK_TASK_MAX_SILENT_SECS parse failed, using fallback: %s', e)
-        return 1800
+# A long blocking wait (poll, the run_command background handoff) must end
+# this far ahead of the shared silence threshold
+# (lib.tasks_pkg.liveness.stall_threshold_seconds): both clocks are fresh
+# when a tool starts, so a wait shorter than threshold minus margin can never
+# be reaped for waiting. The floor is the historical 60-second bound, so an
+# operator who lowers the threshold never gets a shorter wait than before.
+_REAPER_WAIT_MARGIN_S = 300.0
+_REAPER_WAIT_FLOOR_S = 60.0
 
 
-# Grace (seconds) the reaper gives a JUST-ISSUED command interrupt to be
-# consumed by the run_command read loop (which polls every ~0.2s). Only when
-# the flag sits UNCONSUMED past this window is the loop itself considered
-# wedged, escalating back to a full task reap. Env-tunable; default 120s.
-def _cmd_interrupt_grace_secs() -> int:
-    import os
-    try:
-        return int(os.environ.get('TOFU_CMD_INTERRUPT_GRACE_SECS', '') or '120')
-    except (ValueError, TypeError) as e:
-        logger.debug('[Manager] TOFU_CMD_INTERRUPT_GRACE_SECS parse failed, using fallback: %s', e)
-        return 120
+def reaper_safe_wait_s(cap_s: float) -> float:
+    """Clamp a tool's declared silent-wait cap below the stuck-task reaper."""
+    from lib.tasks_pkg.liveness import stall_threshold_seconds
+    max_silent = stall_threshold_seconds()
+    if max_silent <= 0:
+        return float(cap_s)
+    return min(float(cap_s), max(_REAPER_WAIT_FLOOR_S,
+                                 max_silent - _REAPER_WAIT_MARGIN_S))
 
 
 def reap_stuck_running_tasks() -> int:
-    """Force-terminate running tasks that are WEDGED (generalized dual-clock).
+    """Apply the shared liveness verdicts to every running task, root or child.
+
+    ``lib.tasks_pkg.liveness.judge`` decides (dual clocks, explained waits,
+    silence origin, per-command ladder, one threshold); this sweep only acts:
+
+    - ``explained`` — stamp when the silence was last explained, so the silence
+      that follows restarts from the wait's end.
+    - ``interrupt`` — stamp ``_cmd_interrupt`` with the silent command's pid.
+      Its read loop kills that process tree within ~0.2s and returns the PARTIAL
+      output to the model, so the agent continues and siblings keep running.
+    - ``wedged`` — a ROOT turn is force-failed and finalized from outside
+      (below): its worker may never return and the conversation must still
+      settle. A CHILD invocation is an agent beside its parent, not a
+      conversation Turn: it receives the same verdict as its own typed stall
+      (``invocation.stop_stalled_invocation``), settles failed
+      (``invocation_stalled``) through its invocation owner and reports to the
+      parent. Its stamp happens after the registry transaction because the
+      owner's Stop probe may read the registry.
 
     Targets the "produced-then-wedged zombie" the supersede/abort path does NOT
     cover: a task that emitted a first token (or a whole tool round) and THEN
@@ -339,116 +357,60 @@ def reap_stuck_running_tasks() -> int:
 
     The ORIGINAL discriminator gated on ``content=='' AND thinking=='' AND
     n_events==0`` — it could ONLY see the never-produced-anything case, so the
-    produced-then-wedged zombie fell straight through. The generalized
-    discriminator uses TWO liveness clocks that must BOTH be stale to reap:
-
-      • ``_t_last_event``      — bumped by REAL progress events (deltas /
-                                 tool results / tool stdout chunks / retry
-                                 phases). A rate-limited-but-alive turn keeps
-                                 emitting retry phases → stays fresh. Events
-                                 marked ``_selfTick`` (the tool-heartbeat
-                                 pinging itself, ) deliberately do
-                                 NOT bump this clock: they prove the
-                                 dispatcher is alive, not the tool.
-      • ``_dispatch_heartbeat`` — refreshed while a dispatch / cooldown-wait /
-                                 model wait is in-flight, and while blocking
-                                 on ratified human-wait tools (ask_human /
-                                 await_task(wait) / timer_create — the
-                                 2026-07-25 exemption). A turn stuck in a live
-                                 socket read emits no delta but IS heartbeating
-                                 → never reaped; a hung ordinary tool (silent
-                                 >30min) gets NO such refresh → reaped.
-
-    One exception refines the second clock (2026-08-01, ): a task
-    blocked INSIDE a run_command subprocess (``_subprocess_pid`` set) is not
-    force-failed — the reaper issues a per-command interrupt instead
-    (``_cmd_interrupt``, consumed by the run_command read loop within ~0.2s),
-    which kills the process tree and returns the PARTIAL output to the model
-    so the turn continues. Only if the interrupt sits unconsumed past
-    :func:`_cmd_interrupt_grace_secs` — i.e. the read loop itself, not merely
-    the subprocess, is wedged — does the full task reap below fire.
-
-    Silence may also be OWNED by an external waiter, and then it is progress
-    this reaper cannot see from a clock: storage ACK backpressure and command
-    writer admission both publish a marker for the duration of the wait
-    (:mod:`lib.tasks_pkg.explained_wait`; the lease wait owner publishes it, so
-    every acquisition path is covered), and a task holding one is skipped.
-    Writer admission is the case that produced a false reap (2026-10-20): a
-    turn queued behind another task's 31-minute command has no process and no
-    output BY DESIGN, so both clocks are stale from the first second while the
-    wait is completely healthy. Explicit Stop, an execution deadline and the
-    operator bound ``TOFU_WORKSPACE_TOOL_WAIT_SECONDS`` still end such a wait;
-    this reaper does not.
+    produced-then-wedged zombie fell straight through. The judge's two clocks
+    (event and dispatch heartbeat, both must be stale) see it; a slow but live
+    dispatch, a ratified human wait (2026-07-25) and a rate-limited turn's
+    retry phases each keep one fresh. Silence owned by an external waiter is
+    waiting, not a wedge: a storage ACK, writer admission (the 2026-10-20 false
+    reap), a live child, or a stale filesystem mount (the 2026-11-02 freeze).
+    Explicit Stop, an execution deadline and the operator bound
+    ``TOFU_WORKSPACE_TOOL_WAIT_SECONDS`` still end such a wait; this reaper
+    does not.
 
     Requiring BOTH stale is exactly the signal a client-side poll CANNOT recover
     (poll only sees ``status='running'``, indistinguishable from a slow turn),
     so the reap MUST be server-side. Both clocks fall back to ``created_at`` so
     the legacy zero-output case is a strict subset (still caught).
 
-    Marks the task aborted (reason ``stuck_no_progress``) and runs the FULL
-    finalizer (``_finalize_reaped_stuck_task``: terminal floor → DONE(error)
-    SSE → conv sync → queue drain) so a poll resolves terminally, the conv is
-    detached from the dead stream, and any turn queued behind it is drained.
-    Returns the number of tasks reaped.
+    A wedged root is marked aborted (reason ``stuck_no_progress``) and runs
+    the FULL finalizer (``_finalize_reaped_stuck_task``: terminal floor →
+    DONE(error) SSE → conv sync → queue drain) so a poll resolves terminally,
+    the conv is detached from the dead stream, and any turn queued behind it
+    is drained. Returns the number of wedged tasks stopped.
     """
-    max_silent = _stuck_task_max_silent_secs()
+    from lib.tasks_pkg.invocation import is_child_invocation, stop_stalled_invocation
+    from lib.tasks_pkg.liveness import EXPLAINED_AT_KEY, judge, stall_threshold_seconds
+    max_silent = stall_threshold_seconds()
     if max_silent <= 0:
         return 0
     now = time.time()
     stuck = []
+    wedged_children = []
 
     def _inspect_and_reap(task):
-
-        # Silence owned by an external waiter (storage ACK, command writer
-        # admission) is waiting, not a wedge: no output can arrive until that
-        # owner answers. Explicit Stop/deadline remain controlled by the
-        # invocation owner.
-        if explained_wait(task):
+        verdict = judge(task, now, max_silent)
+        if verdict.state == 'explained':
+            task[EXPLAINED_AT_KEY] = now
             return
-        created = task.get('created_at', now)
-        # Both clocks fall back to created_at so a task that never emitted
-        # output is judged by the same dual-clock rule.
-        last_event = task.get('_t_last_event', created)
-        heartbeat = task.get('_dispatch_heartbeat', created)
-        event_silent = now - last_event
-        dispatch_silent = now - heartbeat
-        if event_silent < max_silent or dispatch_silent < max_silent:
+        if verdict.state == 'interrupt':
+            task['_cmd_interrupt'] = {
+                'source': 'watchdog',
+                'ts': now,
+                'note': 'no output for %ds' % int(verdict.command_silence),
+                'pid': verdict.pid,
+            }
+            logger.warning(
+                '[Task %s] conv=%s ⚠️ run_command pid=%s silent for %.0fs — '
+                'interrupting that command; the task and its other commands remain live',
+                str(task.get('id') or '')[:8], str(task.get('convId') or '')[:8],
+                verdict.pid, verdict.command_silence,
+            )
             return
-        # A silent subprocess is recoverable: interrupt the command first and
-        # let the tool loop return partial output. Only an unconsumed interrupt
-        # past its grace window escalates to failing the whole task.
-        if task.get('_subprocess_pid'):
-            pending = task.get('_cmd_interrupt')
-            if isinstance(pending, dict):
-                issued_at = pending.get('ts', now)
-                try:
-                    issued_at = float(issued_at)
-                except (ValueError, TypeError) as error:
-                    logger.debug(
-                        '[Manager] bad _cmd_interrupt ts (%s) — treating as fresh',
-                        error,
-                    )
-                    issued_at = now
-                if now - issued_at < _cmd_interrupt_grace_secs():
-                    return
-            else:
-                task['_cmd_interrupt'] = {
-                    'source': 'watchdog',
-                    'ts': now,
-                    'note': (
-                        'no output for %ds'
-                        % int(min(event_silent, dispatch_silent))
-                    ),
-                    'pid': task.get('_subprocess_pid'),
-                }
-                logger.warning(
-                    '[Task %s] conv=%s ⚠️ silent in run_command for %.0fs — '
-                    'interrupting the command; the task remains live',
-                    str(task.get('id') or '')[:8],
-                    str(task.get('convId') or '')[:8],
-                    min(event_silent, dispatch_silent),
-                )
-                return
+        if verdict.state != 'wedged':
+            return
+        if is_child_invocation(task):
+            wedged_children.append(task)
+            return
         had_output = bool(
             (task.get('content') or '') or (task.get('thinking') or '')
         )
@@ -476,7 +438,7 @@ def reap_stuck_running_tasks() -> int:
             'worker_lost',
             detail=(
                 'Task made no progress for %d seconds and was terminated as wedged.'
-                % int(min(event_silent, dispatch_silent))
+                % int(verdict.silent_seconds)
             ),
             model=(task.get('config') or {}).get('model', '') or '',
             context='stuck-task-reaper',
@@ -492,6 +454,19 @@ def reap_stuck_running_tasks() -> int:
         ),
         updater=_inspect_and_reap,
     )
+    stalled_children = 0
+    for child in wedged_children:
+        # Re-judged outside the registry transaction: progress since the sweep
+        # (or an owner Stop, which stop_stalled_invocation checks first) wins.
+        verdict = judge(child, time.time(), max_silent)
+        if verdict.state == 'wedged' and stop_stalled_invocation(
+                child, silent_seconds=verdict.silent_seconds, stall_timeout=max_silent):
+            stalled_children += 1
+            logger.warning(
+                '[Task %s] conv=%s ⚠️ WEDGED child invocation — no progress for %.0fs; '
+                'its invocation owner settles the typed stall and reports to the parent',
+                str(child.get('id') or '')[:8], str(child.get('convId') or '')[:8],
+                verdict.silent_seconds)
     for t in stuck:
         logger.warning('[Task %s] conv=%s ⚠️ WEDGED — no event/dispatch progress for '
                        '%.0fs (had_output=%s), force-failed and finalizing',
@@ -526,7 +501,7 @@ def reap_stuck_running_tasks() -> int:
     if stuck:
         logger.warning('[Manager] reap_stuck_running_tasks force-failed %d wedged task(s)',
                        len(stuck))
-    return len(stuck)
+    return len(stuck) + stalled_children
 
 
 # Age (seconds) past which a ``task_results`` row still marked

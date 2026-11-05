@@ -20,6 +20,15 @@ describe('safe tool failure diagnostics', () => {
   ])('keeps unsafe or unparseable output out of summaries', value => {
     expect(toolFailureText(value, fallback)).toBe(fallback);
   });
+  it('shows the admission cause without the duplicated command payload', () => {
+    const raw = JSON.stringify({ code: 'tool_execution_failed', status: 'error', retryable: false,
+      message: 'Error: tool "run_command" execution failed with CommandAdmissionRefusal: '
+        + 'Error [git-inspection-preparation]: Git worktree lifecycle requires literal operands. '
+        + 'Command was not started.. Arguments received: {"command":"ROOT=/path; git worktree remove \\"$WT\\""}' });
+    expect(toolFailureText(raw, fallback)).toBe(
+      'tool_execution_failed: Git worktree lifecycle requires literal operands. Command was not started.',
+    );
+  });
   it('bounds cyclic and overdeep wrappers without mutation', () => {
     const cyclic: Record<string, unknown> = {}; cyclic.result = cyclic;
     expect(toolFailureText(cyclic, fallback)).toBe(fallback);

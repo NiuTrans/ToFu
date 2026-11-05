@@ -41,7 +41,9 @@ from __future__ import annotations
 import hashlib
 import json
 
+from lib.conversation_sync.settled_rows import SettledDict, memo_get, memo_put
 from lib.log import get_logger
+from lib.utils import sha256_holding_gil, update_holding_gil
 
 logger = get_logger(__name__)
 
@@ -64,7 +66,7 @@ def _canon(obj) -> str:
 
 def content_hash(obj) -> str:
     """Short stable content hash for a JSON-able object."""
-    return hashlib.sha256(_canon(obj).encode('utf-8')).hexdigest()[:16]
+    return sha256_holding_gil(_canon(obj).encode('utf-8')).hexdigest()[:16]
 
 
 def shared_prefix_len(prev: list, cur: list) -> int:
@@ -87,6 +89,44 @@ def prefix_hash(messages: list, k: int) -> str:
     return content_hash(messages[:k])
 
 
+_FINGERPRINT_KEY = ('snapshot-message-fingerprint',)
+
+
+def _message_fingerprint(message) -> tuple[bytes | None, bytes]:
+    """``(canonical bytes, full SHA-256 digest)`` of one message.
+
+    A settled message is immutable, so its digest lives in its own memo slot
+    and a repeat returns ``None`` bytes with the very same digest object. That
+    object identity proves the same message in the next snapshot, so its
+    canonical bytes are never retained: an unchanged prefix reuses the
+    previous scan's hash state instead (``_ScanState``).
+    """
+    if type(message) is SettledDict:
+        fingerprint = memo_get(message, _FINGERPRINT_KEY)
+        if fingerprint is not None:
+            return None, fingerprint
+    canonical = _canon(message).encode('utf-8')
+    fingerprint = sha256_holding_gil(canonical).digest()
+    if type(message) is SettledDict:
+        memo_put(message, _FINGERPRINT_KEY, fingerprint)
+    return canonical, fingerprint
+
+
+class _ScanState:
+    """One baseline: each message's digest and the hash of all of them.
+
+    ``hasher`` has consumed ``[`` and every canonical message joined by
+    ``,``. A later snapshot whose shared prefix is exactly these messages, as
+    the same settled objects, continues from a copy of it.
+    """
+
+    __slots__ = ('fingerprints', 'hasher')
+
+    def __init__(self, fingerprints: list[bytes], hasher) -> None:
+        self.fingerprints = fingerprints
+        self.hasher = hasher
+
+
 class SnapshotProjector:
     """Per-task projection state: message fingerprints + known tools hashes.
 
@@ -94,52 +134,80 @@ class SnapshotProjector:
     its delta form and (when the tool set is new) the ``tools_dict`` row that
     must be persisted alongside it.
 
-    Memory: retains one content-free full SHA-256 digest per prior message,
-    never another prompt copy. It is released by :meth:`forget` at terminal
-    state. The stored row's canonical prefix hash remains the replay authority;
-    a hypothetical fingerprint collision therefore degrades at rebuild rather
-    than silently authorizing a different prefix.
+    Memory: retains one content-free full SHA-256 digest per prior message
+    and one hash state, never another prompt copy. It is released by
+    :meth:`forget` at terminal state. The stored row's canonical prefix hash
+    remains the replay authority and always covers the current messages'
+    bytes: an equal digest of a different object is re-hashed, so a
+    hypothetical fingerprint collision still degrades at rebuild rather than
+    silently authorizing a different prefix.
     """
 
     def __init__(self):
-        self._prev_message_fingerprints: dict[tuple, list[bytes]] = {}
+        self._previous_scans: dict[tuple, _ScanState] = {}
         self._known_tools: dict[str, set] = {}
 
     @staticmethod
     def _scan_message_prefix(
         messages: list,
-        previous_fingerprints: list[bytes] | None,
-    ) -> tuple[int, str, list[bytes]]:
+        previous: _ScanState | None,
+    ) -> tuple[int, str, _ScanState]:
         """Fingerprint each current message once and hash its shared prefix.
 
         ``shared_prefix_len`` plus ``prefix_hash`` previously canonicalized
         the unchanged history about three times per snapshot. This fused scan
         preserves the exact canonical-list hash while retaining only digests
-        for the next comparison.
+        and one hash state for the next comparison. Settled messages reuse
+        their memoized digest, and a prefix made of exactly the previous
+        scan's settled messages continues from its hash state, so an unchanged
+        history is neither encoded nor hashed again. Digests keep the GIL;
+        hashlib would hand it away twice per message
+        (``lib.utils.update_holding_gil``).
         """
-        current_fingerprints: list[bytes] = []
+        previous_fingerprints = previous.fingerprints if previous is not None else ()
+        fingerprints: list[bytes] = []
+        encodings: list[bytes | None] = []
         shared_prefix = 0
-        prefix_is_open = previous_fingerprints is not None
-        prefix_hasher = hashlib.sha256()
-        prefix_hasher.update(b'[')
+        prefix_is_open = previous is not None
+        same_messages = prefix_is_open
         for index, message in enumerate(messages):
-            canonical_message = _canon(message).encode('utf-8')
-            fingerprint = hashlib.sha256(canonical_message).digest()
-            current_fingerprints.append(fingerprint)
+            canonical_message, fingerprint = _message_fingerprint(message)
+            fingerprints.append(fingerprint)
+            encodings.append(canonical_message)
             if (prefix_is_open
                     and index < len(previous_fingerprints)
                     and fingerprint == previous_fingerprints[index]):
-                if shared_prefix:
-                    prefix_hasher.update(b',')
-                prefix_hasher.update(canonical_message)
                 shared_prefix += 1
+                same_messages = (same_messages
+                                 and fingerprint is previous_fingerprints[index])
             else:
                 prefix_is_open = False
+        if same_messages and shared_prefix == len(previous_fingerprints):
+            hasher = previous.hasher.copy()
+            hashed = shared_prefix
+        else:
+            hasher = hashlib.sha256(b'[')
+            hashed = 0
+
+        def consume(through: int) -> None:
+            nonlocal hashed
+            for index in range(hashed, through):
+                canonical_message = encodings[index]
+                if canonical_message is None:
+                    canonical_message = _canon(messages[index]).encode('utf-8')
+                if index:
+                    hasher.update(b',')
+                update_holding_gil(hasher, canonical_message)
+            hashed = through
+
+        consume(shared_prefix)
+        prefix_hasher = hasher.copy()
         prefix_hasher.update(b']')
+        consume(len(messages))
         return (
             shared_prefix,
             prefix_hasher.hexdigest()[:16],
-            current_fingerprints,
+            _ScanState(fingerprints, hasher),
         )
 
     @staticmethod
@@ -191,12 +259,8 @@ class SnapshotProjector:
             out['toolsCount'] = 0
 
         # ── messages: shared-prefix delta (§10.2 item 2) ──
-        k, canonical_prefix_hash, current_fingerprints = (
-            self._scan_message_prefix(
-                messages,
-                self._prev_message_fingerprints.get(key),
-            )
-        )
+        k, canonical_prefix_hash, scan = self._scan_message_prefix(
+            messages, self._previous_scans.get(key))
         out['prefixLen'] = k
         out['prefixHash'] = canonical_prefix_hash
         out['messageCount'] = len(messages)
@@ -206,16 +270,16 @@ class SnapshotProjector:
         if new_tail:
             out['newMessages'] = new_tail
 
-        self._prev_message_fingerprints[key] = current_fingerprints
+        self._previous_scans[key] = scan
         return out
 
     def forget(self, task_id: str) -> None:
         """Drop per-task projection state (call at terminal state)."""
         for key in [
-            key for key in self._prev_message_fingerprints
+            key for key in self._previous_scans
             if key[0] == task_id
         ]:
-            self._prev_message_fingerprints.pop(key, None)
+            self._previous_scans.pop(key, None)
         self._known_tools.pop(task_id, None)
 
 
@@ -417,6 +481,39 @@ class SnapshotReplayIndex(SnapshotReplayState):
             self.append(source_index, row)
 
 
+def rebuild_attempt_event_frames(events: list) -> list:
+    """Rehydrate live debug frames carried on attempt events.
+
+    ``turn_lifecycle`` stores a large ``messages_snapshot`` in the same
+    shared-prefix delta form the event log uses, so an attempt event does not
+    duplicate the full wire frame.  The attempt-event API keeps its original
+    contract: every returned ``payload.event`` snapshot is complete.  Full
+    frames pass through untouched; only delta rows are replaced.
+    """
+    if not events:
+        return events
+    index = SnapshotReplayState()
+    replace = []
+    for position, event in enumerate(events):
+        payload = event.get('payload') if isinstance(event, dict) else None
+        frame = payload.get('event') if isinstance(payload, dict) else None
+        if not isinstance(frame, dict) or frame.get('type') != SNAPSHOT:
+            continue
+        index.append(position, {'payload': frame})
+        if DELTA_MARKER in frame:
+            replace.append(position)
+    for position in replace:
+        rebuilt = index.payload(position)
+        # A page may start after the baseline. Keep the delta rather than
+        # publishing a partial frame as if it were complete; live consumers
+        # already know how to wait for the next baseline.
+        if rebuilt.get('degraded'):
+            continue
+        events[position]['payload']['event'] = rebuilt
+    index.finish()
+    return events
+
+
 def rebuild_snapshots(rows: list) -> list:
     """Rebuild all payloads through the same verified compact replay index."""
     index = SnapshotReplayIndex(rows)
@@ -477,7 +574,8 @@ def forget_projector_task(task_id: str) -> None:
 __all__ = [
     'SNAPSHOT', 'TOOLS_DICT', 'DELTA_MARKER',
     'SNAPSHOT_DELTA_VERSION', 'SNAPSHOT_DELTA_VERSION_MARKER',
-    'SnapshotProjector', 'SnapshotReplayIndex', 'rebuild_snapshots', 'get_projector',
+    'SnapshotProjector', 'SnapshotReplayIndex', 'rebuild_snapshots',
+    'rebuild_attempt_event_frames', 'get_projector',
     'forget_projector_task',
     'shared_prefix_len', 'prefix_hash', 'content_hash',
 ]

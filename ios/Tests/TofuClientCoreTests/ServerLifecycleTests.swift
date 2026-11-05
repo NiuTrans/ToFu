@@ -102,7 +102,6 @@ final class ServerLifecycleTests: XCTestCase {
     func test_isLoginBlocking() {
         XCTAssertFalse(ServerLifecycle.isLoginBlocking(.success(host: "h")))
         XCTAssertTrue(ServerLifecycle.isLoginBlocking(.badCredentials))
-        XCTAssertTrue(ServerLifecycle.isLoginBlocking(.noCredential))
         // Yields no cookie — proceeding would 401 and misreport the cause.
         XCTAssertTrue(ServerLifecycle.isLoginBlocking(.needsInteractiveSso(url: "u")))
         XCTAssertTrue(ServerLifecycle.isLoginBlocking(.error(message: "x")))

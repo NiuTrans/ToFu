@@ -1,8 +1,10 @@
 """Conversation reference — single-conversation render surface.
 
 Holds ``get_conversation`` (fetch + format the full transcript of one
-conversation) and its formatting helpers (``_extract_text``,
-``_format_tool_rounds``, ``_extract_result_text``, ``_truncate``).
+conversation, including the caller's CURRENT conversation, whose durable
+transcript keeps Turns that compaction moved out of the working view) and its
+formatting helpers (``_extract_text``, ``_format_tool_rounds``,
+``_extract_result_text``, ``_truncate``).
 """
 
 from dataclasses import dataclass
@@ -26,6 +28,14 @@ MAX_CHARS = 80000
 TRANSCRIPT_HEAD = 3
 TRANSCRIPT_TAIL = 60
 _RAW_TAIL_PROBE_WINDOW = 64
+
+#: Header line of a read of the caller's own conversation. The durable
+#: transcript is the recall path after compaction removed Turns from the
+#: working view, so the reader must not mistake it for that working view.
+_CURRENT_CONVERSATION_NOTE = (
+    'Current conversation: durable transcript, which may include Turns '
+    'outside your current working view (page older Turns with before=N).'
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -510,7 +520,7 @@ def _read_raw_message_window(
 
 def get_conversation(conversation_id, *, user_id,
                      include_tool_details=True, current_conv_id=None,
-                     raw=False, limit=None, before=None):
+                     raw=False, limit=None, before=None, turn_id=None):
     """Retrieve and format the content of a conversation.
 
     Selection is MESSAGE-level (head + tail), not a character cut: a long
@@ -520,9 +530,12 @@ def get_conversation(conversation_id, *, user_id,
     usually the reason to open a past conversation at all.
 
     Args:
-        conversation_id: ID of the conversation to fetch
+        conversation_id: ID of the conversation to fetch. The caller's own
+            conversation is readable: its durable transcript is the recall
+            path for Turns outside the current working view.
         include_tool_details: whether to include full tool arguments/results
-        current_conv_id: the current conversation's ID (to prevent self-reference loops)
+        current_conv_id: the caller's conversation ID; a read of it is labelled
+            as the current conversation's durable transcript.
         raw: when True, return the DB record as structured JSON for debugging.
             The record is WINDOWED before serialization (never cut mid-token),
             so the dump always parses.
@@ -533,13 +546,18 @@ def get_conversation(conversation_id, *, user_id,
         before: cursor — render the window ENDING just before this 1-based
             message number, so the caller can page backwards through a long
             history rather than being stuck at one window.
+        turn_id: render the page around this main-lane Turn instead (for
+            example a list_conversations match); exclusive with ``before``.
 
     Returns a formatted string with the selected messages, tool calls, and results.
     """
-    if current_conv_id and conversation_id == current_conv_id:
-        return "Error: Cannot reference the current conversation — you are already in it. Use list_conversations to find other conversations."
-
+    is_current = bool(current_conv_id) and conversation_id == current_conv_id
     owner_id = require_user_id(user_id, context='get conversation reference')
+    if turn_id is not None:
+        return _get_conversation_around_turn(
+            conversation_id, owner_id=owner_id, turn_id=turn_id,
+            include_tool_details=include_tool_details, is_current=is_current,
+            raw=raw, limit=limit)
     _tail = TRANSCRIPT_TAIL if limit is None else max(1, int(limit))
     _before = None if before is None else max(0, int(before) - 1)
     try:
@@ -575,6 +593,7 @@ def get_conversation(conversation_id, *, user_id,
                 limit=limit,
                 before=before,
                 message_window=raw_projection[1],
+                is_current=is_current,
             )
         except _RawWindowNeedsFull:
             try:
@@ -597,6 +616,7 @@ def get_conversation(conversation_id, *, user_id,
                 conversation_id,
                 limit=limit,
                 before=before,
+                is_current=is_current,
             )
 
     # Layer 2 trigger: PAUSED. The sidebar conversation-summary feature is
@@ -619,6 +639,8 @@ def get_conversation(conversation_id, *, user_id,
     parts.append(f"{'═' * 60}")
     parts.append(f"Referenced Conversation: \"{title}\"")
     parts.append(f"   ID: {conversation_id}")
+    if is_current:
+        parts.append(f"   {_CURRENT_CONVERSATION_NOTE}")
     if settings.get('preset'):
         parts.append(f"   Model preset: {settings['preset']}")
     parts.append(f"   Messages: {total}")
@@ -635,57 +657,7 @@ def get_conversation(conversation_id, *, user_id,
                          f"re-read with before={i + 1} to see them] …")
             parts.append("")
         _prev_idx = i
-        role = msg.get('role', 'unknown')
-        content = msg.get('content', '')
-
-        if role == 'user':
-            parts.append(f"── User Message #{i+1} {'─' * 40}")
-            # Handle text content
-            text = _extract_text(content)
-            if text:
-                parts.append(text)
-
-            # Note any images/PDFs
-            if msg.get('images'):
-                parts.append(f"  [Contains {len(msg['images'])} image(s)]")
-            if msg.get('attachments'):
-                for attachment in msg['attachments']:
-                    if not isinstance(attachment, dict):
-                        continue
-                    parts.append(
-                        f"  [Attachment: {attachment.get('name', 'unknown')} "
-                        f"({attachment.get('kind', 'media')}, "
-                        f"{attachment.get('status', 'unknown')})]")
-            if msg.get('pdfTexts'):
-                for pdf in msg['pdfTexts']:
-                    parts.append(f"  [PDF: {pdf.get('name', 'unknown')} — {pdf.get('pages', '?')} pages]")
-                    if include_tool_details and pdf.get('text'):
-                        # Truncate very long PDFs
-                        pdf_text = pdf['text']
-                        if len(pdf_text) > 5000:
-                            pdf_text = pdf_text[:5000] + f"\n... [truncated, {len(pdf['text'])} chars total]"
-                        parts.append(f"  PDF Content:\n{pdf_text}")
-
-        elif role == 'assistant':
-            parts.append(f"── Assistant Response #{i+1} {'─' * 36}")
-
-            # Content
-            if content:
-                parts.append(content)
-
-            # Thinking/reasoning
-            if msg.get('thinking') and include_tool_details:
-                thinking = msg['thinking']
-                if len(thinking) > 3000:
-                    thinking = thinking[:3000] + f"\n... [thinking truncated, {len(msg['thinking'])} chars total]"
-                parts.append(f"\n  [Thinking]: {thinking}")
-
-            # Tool rounds (toolRounds)
-            tool_rounds = msg.get('toolRounds', [])
-            if tool_rounds:
-                parts.append(_format_tool_rounds(tool_rounds, include_tool_details))
-
-        parts.append("")  # blank line between messages
+        parts.extend(_prose_message_lines(i, msg, include_tool_details))
 
     # Tell the model how to reach what it did not get. A truncated result with
     # no next step is a dead end — it knows content is missing but has no way
@@ -699,11 +671,17 @@ def get_conversation(conversation_id, *, user_id,
     # Trim trailing whitespace
     result = '\n'.join(parts).rstrip()
 
-    # Character-level backstop. Message-level selection already bounds a normal
-    # read; this only fires when a SINGLE message is itself enormous. Clamp
-    # HEAD+TAIL rather than head-only so the end of the record survives here
-    # too — a head-only cut at this layer would reintroduce exactly the bug
-    # message-level selection was added to fix.
+    return _clamp_prose(result)
+
+
+def _clamp_prose(result):
+    """Character-level backstop for a SINGLE enormous message.
+
+    Message-level selection already bounds a normal read. Clamp HEAD+TAIL
+    rather than head-only so the end of the record survives here too — a
+    head-only cut at this layer would reintroduce exactly the bug
+    message-level selection was added to fix.
+    """
     if len(result) > MAX_CHARS:
         head_budget = int(MAX_CHARS * 0.6)
         tail_budget = int(MAX_CHARS * 0.35)
@@ -715,8 +693,170 @@ def get_conversation(conversation_id, *, user_id,
               f"are too large to render in full] ...\n\n"
             + result[-tail_budget:]
         )
-
     return result
+
+
+def _prose_message_lines(i, msg, include_tool_details):
+    """Render one transcript message (0-based index ``i``) as prose lines."""
+    parts = []
+    role = msg.get('role', 'unknown')
+    content = msg.get('content', '')
+
+    if role == 'user':
+        parts.append(f"── User Message #{i+1} {'─' * 40}")
+        # Handle text content
+        text = _extract_text(content)
+        if text:
+            parts.append(text)
+
+        # Note any images/PDFs
+        if msg.get('images'):
+            parts.append(f"  [Contains {len(msg['images'])} image(s)]")
+        if msg.get('attachments'):
+            for attachment in msg['attachments']:
+                if not isinstance(attachment, dict):
+                    continue
+                parts.append(
+                    f"  [Attachment: {attachment.get('name', 'unknown')} "
+                    f"({attachment.get('kind', 'media')}, "
+                    f"{attachment.get('status', 'unknown')})]")
+        if msg.get('pdfTexts'):
+            for pdf in msg['pdfTexts']:
+                parts.append(f"  [PDF: {pdf.get('name', 'unknown')} — {pdf.get('pages', '?')} pages]")
+                if include_tool_details and pdf.get('text'):
+                    # Truncate very long PDFs
+                    pdf_text = pdf['text']
+                    if len(pdf_text) > 5000:
+                        pdf_text = pdf_text[:5000] + f"\n... [truncated, {len(pdf['text'])} chars total]"
+                    parts.append(f"  PDF Content:\n{pdf_text}")
+
+    elif role == 'assistant':
+        parts.append(f"── Assistant Response #{i+1} {'─' * 36}")
+
+        # Content
+        if content:
+            parts.append(content)
+
+        # Thinking/reasoning
+        if msg.get('thinking') and include_tool_details:
+            thinking = msg['thinking']
+            if len(thinking) > 3000:
+                thinking = thinking[:3000] + f"\n... [thinking truncated, {len(msg['thinking'])} chars total]"
+            parts.append(f"\n  [Thinking]: {thinking}")
+
+        # Tool rounds (toolRounds)
+        tool_rounds = msg.get('toolRounds', [])
+        if tool_rounds:
+            parts.append(_format_tool_rounds(tool_rounds, include_tool_details))
+
+    parts.append("")  # blank line between messages
+    return parts
+
+
+def _grow_around(count, anchor, fits, cap=None):
+    """Largest contiguous ``[lo, hi)`` around ``anchor`` that ``fits``.
+
+    Starts from the anchor alone (always kept) and alternately adds the next
+    newer then the next older message; a side stops at its first misfit, so
+    the window stays contiguous and centred on what still fits. ``cap``
+    bounds the message count.
+    """
+    lo, hi = anchor, anchor + 1
+    open_sides = ['newer', 'older']
+    while open_sides and (cap is None or hi - lo < cap):
+        for side in list(open_sides):
+            if cap is not None and hi - lo >= cap:
+                break
+            candidate = (lo, hi + 1) if side == 'newer' else (lo - 1, hi)
+            if candidate[0] < 0 or candidate[1] > count or not fits(*candidate):
+                open_sides.remove(side)
+                continue
+            lo, hi = candidate
+    return lo, hi
+
+
+def _read_anchored_window(conversation_id, *, user_id, turn_id, window):
+    """Dependency seam for the owner-scoped anchored window read."""
+    from lib.conversations.repository import get_anchored_conversation_window
+    return get_anchored_conversation_window(
+        conversation_id, user_id=user_id, turn_id=turn_id, message_window=window)
+
+
+def _turn_paging_hint(conversation_id, first, last, total, page):
+    """1-based shown range → the before= cursors of its neighbouring pages."""
+    hints = []
+    if first > 1:
+        hints.append(f'older: get_conversation(conversation_id="{conversation_id}", '
+                     f'before={first})')
+    if last < total:
+        newer_end = last + page
+        hints.append(
+            f'newer: get_conversation(conversation_id="{conversation_id}"'
+            + (f', before={newer_end + 1})' if newer_end < total else ') (latest)'))
+    return '; '.join(hints)
+
+
+def _get_conversation_around_turn(conversation_id, *, owner_id, turn_id,
+                                  include_tool_details, is_current, raw, limit):
+    """Render the page containing ``turn_id``, fitted around that Turn."""
+    from lib.conversations.repository import MAX_MESSAGE_WINDOW
+
+    default = _RAW_TAIL_PROBE_WINDOW if raw else TRANSCRIPT_TAIL
+    window_size = min(MAX_MESSAGE_WINDOW, default if limit is None else max(1, int(limit)))
+    try:
+        window = _read_anchored_window(
+            conversation_id, user_id=int(owner_id), turn_id=turn_id,
+            window=window_size)
+    except Exception as exc:
+        logger.debug('[conv_ref] anchored read failed conv=%s: %s',
+                     (conversation_id or '')[:12], exc)
+        window = None
+    if window is None:
+        return (f"Error: Conversation '{conversation_id}' not found. "
+                'Use list_conversations to find valid conversation IDs.')
+    if window.anchor_sequence is None:
+        return (f"Error: Turn '{turn_id}' is not a main-transcript Turn of "
+                f"conversation '{conversation_id}' ({window.total_count} messages); it "
+                'may have been deleted, folded by compaction or live on a branch. '
+                'Page the transcript with before=N instead.')
+    row = window.snapshot
+    start = row.message_start
+    pairs = [(start + offset, message) for offset, message in enumerate(row.messages)]
+    anchor = window.anchor_sequence - start
+    total = window.total_count
+    if raw:
+        return _render_raw_conversation(
+            row, conversation_id, limit=limit,
+            message_window=_RawMessageWindow(
+                head=[], tail=pairs, total=total, end=start + len(pairs),
+                reaches_head=True),
+            is_current=is_current, anchor=(window.anchor_sequence, turn_id))
+
+    title = row['title'] or '(untitled)'
+    header = [
+        f"{'═' * 60}",
+        f"Referenced Conversation: \"{title}\"",
+        f"   ID: {conversation_id}",
+        *([f"   {_CURRENT_CONVERSATION_NOTE}"] if is_current else []),
+        f"   Messages: {total}",
+    ]
+    blocks = ['\n'.join(_prose_message_lines(i, message, include_tool_details))
+              for i, message in pairs]
+    budget = MAX_CHARS - 2048  # header + paging-line margin
+    lo, hi = _grow_around(
+        len(blocks), anchor,
+        lambda low, high: sum(len(block) + 1 for block in blocks[low:high]) <= budget,
+        cap=None if limit is None else max(1, int(limit)))
+    first, last = pairs[lo][0] + 1, pairs[hi - 1][0] + 1
+    header.append(f"   Showing #{first}–#{last} of {total} around Turn {turn_id} "
+                  f"(message #{window.anchor_sequence + 1})")
+    header.append(f"{'═' * 60}")
+    header.append("")
+    hint = _turn_paging_hint(conversation_id, first, last, total, hi - lo)
+    result = '\n'.join(header + blocks[lo:hi]).rstrip()
+    if hint:
+        result += f"\n\n[Neighbouring pages — {hint}.]"
+    return _clamp_prose(result)
 
 
 def build_conversation_digest(conversation_id, *, user_id,
@@ -956,6 +1096,8 @@ def _render_raw_conversation(
     before=None,
     *,
     message_window: _RawMessageWindow | None = None,
+    is_current: bool = False,
+    anchor: tuple[int, str] | None = None,
 ):
     """Render the DB record of a conversation as a structured JSON dump.
 
@@ -979,6 +1121,10 @@ def _render_raw_conversation(
     The header states what was delivered (``DELIVERED N of M``), how to reach
     the rest (``before=`` / ``limit=``), and any clamping — a read that had to
     shrink fields must not look like a faithful one.
+
+    ``anchor`` is ``(sequence, turn_id)`` of a Turn the window must contain:
+    the fit then grows around it (newer first) instead of backwards from the
+    end, and the header names the neighbouring pages.
     """
     messages = _coerce_json(row['messages'], default=[], label='conv-ref-raw-messages')
     settings = _coerce_json(row['settings'], default={}, label='conv-ref-raw-settings')
@@ -1059,7 +1205,21 @@ def _render_raw_conversation(
     tail = []
     record, dump = None, ''
     stopped_for_budget = False
-    for i, message in reversed(tail_candidates):
+    if anchor is not None:
+        fitted = {}
+
+        def fits(low, high):
+            rec, d = _serialize(tail_candidates[low:high], total - (high - low))
+            fitted[(low, high)] = (rec, d)
+            return len(d) <= budget
+
+        position = next(index for index, (i, _) in enumerate(tail_candidates)
+                        if i == anchor[0])
+        low, high = _grow_around(len(tail_candidates), position, fits,
+                                 cap=None if limit is None else max(1, int(limit)))
+        tail = tail_candidates[low:high]
+        record, dump = fitted.get((low, high)) or _serialize(tail, total - len(tail))
+    for i, message in ([] if anchor is not None else reversed(tail_candidates)):
         if len(tail) >= tail_cap:
             break
         cand = [(i, message)] + tail
@@ -1086,10 +1246,19 @@ def _render_raw_conversation(
         f"{'═' * 60}",
         f"Raw Conversation Record: \"{record['title']}\"",
         f"   ID: {conversation_id}",
+        *([f"   {_CURRENT_CONVERSATION_NOTE}"] if is_current else []),
         f"   DELIVERED {len(record['messages'])} of {total} messages"
         f"  (msg_count column: {row['msg_count']}, rev: {row['rev']})",
     ]
-    if omitted:
+    if anchor is not None:
+        first, last = tail[0][0] + 1, tail[-1][0] + 1
+        header_lines.append(
+            f"   AROUND Turn {anchor[1]} (message #{anchor[0] + 1}): delivered "
+            f"#{first}–#{last}")
+        hint = _turn_paging_hint(conversation_id, first, last, total, len(tail))
+        if hint:
+            header_lines.append(f"   … neighbouring pages — {hint}")
+    elif omitted:
         oldest_tail_1based = (end - len(tail)) + 1
         header_lines.append(
             f"   … {omitted} earlier message(s) not delivered — page back with "

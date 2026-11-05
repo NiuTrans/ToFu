@@ -81,13 +81,6 @@ Object.defineProperties(runtimeScope, {
     get: function () { return _stgPresets; },
     set: function (value) { _stgPresets = value || {}; },
   },
-  // Declared with var in settings/other_tabs.js; the concatenated module
-  // hoists the binding, so this accessor stays live across both owners.
-  _searchLastPreset: {
-    configurable: true,
-    get: function () { return _searchLastPreset; },
-    set: function (value) { _searchLastPreset = value; },
-  },
 });
 
 /* ═══════════════════════════════════════════════════════════════════

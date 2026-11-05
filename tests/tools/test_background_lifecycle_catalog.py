@@ -8,7 +8,9 @@ import pytest
 
 from lib.swarm.tools import MASTER_TOOLS, SPAWN_AGENTS_TOOL
 from lib.tools import gateway
-from lib.tools.poll import BACKGROUND_TOOL_NAMES, KILL_TOOL, POLL_TOOL
+from lib.tools.background_guidance import (
+    project_leaf_worker_tools, project_no_saved_conversation_tools, project_run_completion_tools)
+from lib.tools.poll import BACKGROUND_TOOL_NAMES, KILL_TOOL, POLL_TOOL, POLL_WAIT_CAP_S
 from lib.tools.registry import ToolContext, all_specs, assemble_tool_list
 from lib.tools.registry import _build
 from lib.tools.registry._builtin_specs import build_builtin_specs
@@ -58,8 +60,8 @@ def test_lifecycle_schemas_are_eager_in_real_assembly(native_exposure, capabilit
     assert 'spawn_agent' not in by_name
 
 
-@pytest.mark.parametrize('capability', ['bare_swarm', 'base', 'project', 'code_exec'])
-def test_storage_free_runtime_does_not_gain_lifecycle_tools(capability):
+@pytest.mark.parametrize('capability', ['base', 'project', 'code_exec'])
+def test_storage_free_runtime_keeps_run_lane_lifecycle_controls(capability):
     ctx = _ctx(
         cfg={'_storageFreeRuntime': True},
         fetch_enabled=capability == 'base',
@@ -68,9 +70,20 @@ def test_storage_free_runtime_does_not_gain_lifecycle_tools(capability):
         code_exec_enabled=capability == 'code_exec',
     )
     surface, _ = assemble_tool_list(ctx)
-    assert not BACKGROUND_TOOL_NAMES.intersection(map(_name, surface))
-    assert not BACKGROUND_TOOL_NAMES.intersection(
-        map(_name, ctx.executable_tool_catalog))
+    assert BACKGROUND_TOOL_NAMES.issubset(set(map(_name, surface)))
+    assert BACKGROUND_TOOL_NAMES.issubset(
+        set(map(_name, ctx.executable_tool_catalog)))
+    # No conversation can receive a completion, so the prose never promises
+    # one; the run itself reads it at its next step.
+    text = ' '.join(_bytes(tool) for tool in surface
+                    if _name(tool) in BACKGROUND_TOOL_NAMES)
+    assert 'delivered automatically' not in text
+    for tool in surface:
+        if _name(tool) == 'run_command':
+            assert 'arrive automatically' not in _bytes(tool)
+            assert 'reaches your next step' in _bytes(tool)
+            assert _bytes(tool) == _bytes(
+                project_run_completion_tools([tool])[0])
 
 
 def test_background_builder_requires_live_launch_capability():
@@ -79,6 +92,10 @@ def test_background_builder_requires_live_launch_capability():
     ctx.executable_tool_catalog = [SPAWN_AGENTS_TOOL]
     assert _build._build_background(ctx) == [POLL_TOOL, KILL_TOOL]
     ctx.cfg['_storageFreeRuntime'] = True
+    # Storage-free keeps in-process handles, read by its own run.
+    assert _bytes(_build._build_background(ctx)) == _bytes(
+        project_run_completion_tools([POLL_TOOL, KILL_TOOL]))
+    ctx = _ctx(cfg={'_storageFreeRuntime': True})
     assert _build._build_background(ctx) == []
 
 
@@ -112,7 +129,7 @@ def test_public_swarm_catalog_teaches_waiting_with_returned_ids():
     assert 'await_agents' not in set(map(_name, MASTER_TOOLS))
     description = SPAWN_AGENTS_TOOL['function']['description']
     assert 'await_agents' not in description
-    assert 'poll(ids=[<returned agent ids>], wait_s=60' in description
+    assert f'poll(ids=[<returned agent ids>], wait_s={POLL_WAIT_CAP_S}' in description
     assert 'dashboard, not a wait' in description
 
 
@@ -155,3 +172,14 @@ def test_authority_reprojection_revokes_stale_kill_and_deduplicates_poll():
     assert projected[0] is POLL_TOOL
     assert gateway.preserve_background_wire_tools(
         [POLL_TOOL, KILL_TOOL], authority_catalog=[]) == []
+
+
+@pytest.mark.parametrize('project', [project_leaf_worker_tools, project_no_saved_conversation_tools])
+def test_subagent_free_projections_never_advertise_agent_handles(project):
+    """Rewording the canonical poll/kill prose must not leak agent handles here."""
+    projected = {_name(tool): tool for tool in project([deepcopy(POLL_TOOL), deepcopy(KILL_TOOL)])}
+    for name in ('poll', 'kill'):
+        text = _bytes(projected[name])
+        assert 'swarm' not in text and 'spawn_agents' not in text, name
+    mode = projected['poll']['function']['parameters']['properties']['mode']['description']
+    assert mode.startswith('With multiple command ids:')

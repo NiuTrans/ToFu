@@ -16,14 +16,18 @@ adds a worker, or writes SQL.
 `ProjectDispatchRepository(owner, project, *, client, conversations, turn_get,
 binding_repository, clock, attempt_get, workspace_get)` accepts self-contained test ports. Defaults use the
 selected portable storage client, owner-scoped conversation repository,
-`get_turn(conversation, turn, user_id=owner)` and coordination repository.
+`get_turn(conversation, turn, user_id=owner, include_projection=...)` and
+coordination repository. Prerequisite evidence reads Turn metadata only.
 `clock` and budget deadlines are Unix seconds; grant `createdAt` uses that clock.
 
 Authorization replay preserves evidence, never renews a revoked/expired grant.
 `validate(admission)` is the live gate: it rechecks owner/tenant/project/revision,
 recipient metadata, current coordinator binding and genuine human source
 projection revision. Caller API identity cannot promote synthetic input.
-Execution association is immutable. `revoke(id, expected_revision)` returns
+Initial execution binding is immutable; a restart-paused or background-completion
+continuation advances only from its exact settled, unreviewed predecessor through
+`continue_execution`, preserving one deterministic workspace task identity.
+`revoke(id, expected_revision)` returns
 that association (or `None`) for caller-owned existing cancellation.
 `record_review` fences the grant revision and records an immutable decision
 linked to a positive result revision; it does not assert delivery/completion.
@@ -66,21 +70,37 @@ continuations scoped to their original request. Verify the handoff contracts on
 all three selected authorities; passive project history grants no control rights.
 
 `continuation.py` derives result-driven grants and immutable completion receipts
-from the original finite policy. Recovery reuses ordinary command/Turn admission;
-no synthetic human, poller or new task store. Verify continuation race/Stop tests
-and the native Coordinator restart/review/delivery journey.
+from the original policy, with no spend ceiling or deadline. Stalled turns retry
+with backoff before a blocked report; `request_decision` keeps a request open and
+applies the recommendation when the human stays silent. Timed wakes are a
+process-local reminder over durable due times; startup/settlement recovery is the
+authority. No synthetic human, durable scheduler or new task store. Verify
+continuation race/Stop/backoff/decision tests and the native Coordinator journey.
 
-`request_budget.py` composes initial human and Worker occurrence receipts into
-that same dispatch CAS; `accounting.py` reduces existing ExecutionBudget events.
-It creates no physical account or wallet. Future defaults belong to conversations/
-coordinator_budget.py; accepted request policies cannot be edited or replenished.
-Verify source/Worker allowance races, uncertain ACKs, restart and startup rollback.
+`request_budget.py` registers the human source account once the accepted input is
+final (an attempt owing a deferred input translation binds at worker entry in
+`lib/tasks_pkg/spawn.py`) and records occurrences into that same dispatch CAS for
+usage projection only; it never refuses work for spend. Its authority refusal at
+dispatch is a typed `ModelAdmissionRefused`, never a builtin exception.
+`accounting.py` reduces existing ExecutionBudget events and folds settled receipts
+into counters with per-root watermarks so unbounded requests keep bounded records.
+Earlier finite grants keep their recorded ceilings. Verify usage, uncertain ACKs,
+fold/replay idempotency, restart and startup rollback.
 
 `scope.py` owns the explicit file profile and descriptor fence; root dispatch
 pins the first-party handler before plugin/MCP routing. `admission.py` resolves
 exact bound physical task and registered workspace, never cwd or sibling tasks.
+One admission validates once: `validated_dispatch` hands the validated row to that
+same decision only, never to a later admission or request.
 Its `requires_isolated_workspace` resolves the validated file profile before
 ordinary direct-mode selection; it grants no task or file execution authority.
+`require_isolated_worker_root` refuses delegation for roots no Worker can be
+isolated from; tool admission refusals raise `ToolAdmissionRefused` (failed,
+never a user Stop), while argument-shape refusals are `ToolContractError` and
+reject only that call. The root contract lives in PROJECT_COORDINATION.md.
+Authority failures stop the task through `stop_on_authority_failure`, naming
+`dispatch_grant_revoked` or `dispatch_authority_lost`; an earlier Stop keeps its
+cause. Verify `test_project_dispatch_abort_cause.py` and its settlement specs.
 `publication.py` stamps initial origin and guards all existing publication paths;
 `service.publish` pins the checkpoint. `recovery.py` retries existing versioned
 grants at settlement/startup and withdraws authority through real Stop entry points.
@@ -112,8 +132,18 @@ small legacy locator for startup discovery; only the redundant copy is removed.
 Snapshot selections must include every row needed by admission and accounting.
 `history.py` selects bounded passive history pages through owned range cursors;
 its policy-free display selection must never be reused for admission/accounting.
-Exact commands/assignments remain point queries. Frontend history replaces one
-page at a time; full recovery and allowance cohorts remain separate consumers.
+`history.RecipientOrigins` reads catalog Coordinator provenance from the order
+index, each immutable admission once per process; the head's assignment count is
+its only freshness witness. It is display evidence, never admission input.
+`service.HistoryPreviews` lets a page reuse a result preview only for the exact
+Turn revision and status it read; the route keeps one page per owner/project.
+A build whose client disconnected stops before its next row (`HistoryBuildCancelled`).
+Page rows are the contract's `historyRow` request projection; exact
+commands/assignments remain point queries returning complete views. A page's
+dependency states are display evidence evaluated against that page's `snapshot`;
+admission never reuses it. Frontend
+history replaces one page at a time; full recovery and allowance cohorts remain
+separate consumers.
 Head/count witnesses reject torn or incomplete allowance indexes; do not turn
 missing evidence into free capacity. Full history and current-request cohort
 reads still materialize their selected evidence; see PROJECT_COORDINATION.md.

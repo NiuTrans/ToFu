@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import sys
 import types
 
 import pytest
@@ -100,8 +99,8 @@ def test_knowledge_pdf_holds_one_lease_across_text_ocr_and_visuals(
 
 
 
-def test_scanned_pdf_ocr_stops_at_text_budget(monkeypatch):
-    from lib.knowledge import ingest
+def test_scanned_pdf_ocr_stops_at_text_budget():
+    from lib.knowledge import _ocr_worker
 
     pages_requested = []
 
@@ -124,10 +123,10 @@ def test_scanned_pdf_ocr_stops_at_text_budget(monkeypatch):
 
     fake_pymupdf = types.SimpleNamespace(
         open=lambda **_kwargs: FakeDocument())
-    monkeypatch.setitem(sys.modules, 'pymupdf', fake_pymupdf)
 
-    text, warnings = ingest._ocr_scanned_pdf(
-        b'%PDF-ocr-budget-test', page_limit=5, max_chars=64)
+    text, warnings = _ocr_worker.recognize_pdf(
+        fake_pymupdf, b'%PDF-ocr-budget-test', page_limit=5, max_chars=64,
+        failures={})
 
     assert len(text) == 64
     assert pages_requested == [0]

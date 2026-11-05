@@ -54,7 +54,8 @@ from lib.identity import require_user_id
 from lib.log import get_logger
 from lib.llm.llm_errors import AbortedError
 from lib.paper.contracts import PAPER_TITLE_HINT_MAX_CHARS
-from lib.production.stages import Stage, StageAborted, run_stages
+from lib.production.stages import Stage, StageAborted
+from lib.production.workflows import AgentToolWorkflow, WorkflowNode, run_workflow
 from lib.research.contracts import (
     DEFAULT_RESEARCH_HARVEST_PAPERS,
     normalize_discovered_arxiv_ids,
@@ -818,9 +819,9 @@ def _run_publish(ctx: dict) -> dict:
 
 # ── Stage graph + runner ───────────────────────────────────────────────────
 
-def research_recipe_stages() -> list:
+def research_workflow() -> AgentToolWorkflow:
     """The ordered research graph; data-dependent fan-out stays inside stages."""
-    return [
+    stages = [
         Stage('harvest', _run_harvest, gate=_gate_harvest, retry=1),
         Stage('survey', _run_survey, gate=_gate_survey, retry=1,
               checkpoint_version='comparison-matrix-v2'),
@@ -830,6 +831,14 @@ def research_recipe_stages() -> list:
         Stage('publish', _run_publish, retry=2,
               checkpoint_version='research-artifacts-v1'),
     ]
+    return AgentToolWorkflow('research.deliverable', '1', tuple(
+        WorkflowNode(stage, 'deterministic' if stage.name == 'publish' else 'model',
+                     {'type': 'object'}) for stage in stages))
+
+
+def research_recipe_stages() -> list:
+    """Domain stages from the same fixed workflow declaration."""
+    return [node.stage for node in research_workflow().nodes]
 
 
 def build_research_from_direction(direction: str, workdir: str, *, lang: str = 'en',
@@ -900,8 +909,8 @@ def build_research_from_direction(direction: str, workdir: str, *, lang: str = '
                 counts['candidates'] = counts['accepted'] + counts['rejected']
         if emit:
             emit({**event, 'counts': counts})
-    artifacts = run_stages(
-        research_recipe_stages(), ctx, state_path=state_path, emit=checkpoint_event,
+    artifacts = run_workflow(
+        research_workflow(), ctx, state_path=state_path, emit=checkpoint_event,
         abort_check=ctx['abort_check'], abort_exceptions=(AbortedError,))
 
     ideate = artifacts.get('ideate') or {}

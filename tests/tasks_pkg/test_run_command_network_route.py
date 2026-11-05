@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
+import os
+from pathlib import Path
 import shlex
+import shutil
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -217,16 +222,57 @@ def test_ssh_proxy_projection_hides_proxy_url_from_git_command():
     )
     child_env = {}
     network.apply_network_environment(child_env, prepared)
-    assert "lib.project_mod.proxy_connect %h %p" in child_env["GIT_SSH_COMMAND"]
+    connector = _proxy_connector(child_env)
+    assert connector[-2:] == ["%h", "%p"]
+    assert Path(connector[-3]).read_bytes() == Path(network.__file__).with_name(
+        "proxy_connect.py").read_bytes()
     assert "http://proxy.test:8080" not in child_env["GIT_SSH_COMMAND"]
     assert child_env["TOFU_COMMAND_PROXY_URL"] == "http://proxy.test:8080"
+
+
+def _proxy_connector(child_env):
+    option = shlex.split(child_env["GIT_SSH_COMMAND"])[-1]
+    assert option.startswith("ProxyCommand=")
+    return shlex.split(option.removeprefix("ProxyCommand="))
+
+
+def test_ssh_proxy_command_runs_the_connector_loaded_with_the_planner(tmp_path, monkeypatch):
+    loaded = tmp_path / "loaded"
+    loaded.mkdir()
+    shutil.copyfile(network.__file__, loaded / "network_command.py")
+    source = Path(network.__file__).with_name("proxy_connect.py").read_text()
+    # The connector version this planner was imported with identifies itself.
+    (loaded / "proxy_connect.py").write_text(source.replace(
+        '"proxy connector route is unavailable"', '"connector loaded with the planner"'))
+    module_name = "lib.project_mod._network_command_loaded_before_checkout_update"
+    spec = importlib.util.spec_from_file_location(module_name, loaded / "network_command.py")
+    planner = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, planner)
+    spec.loader.exec_module(planner)
+    (loaded / "proxy_connect.py").write_text('raise SystemExit("connector from a later checkout")\n')
+    target = planner.NetworkTarget(
+        "git:clone", "ssh", "dev.example.test", 3022, "ssh://dev.example.test:3022/"
+    )
+    child_env = {}
+    planner.apply_network_environment(child_env, planner.PreparedNetworkCommand(
+        target, _proxy(), "parallel_probe", 12, ("direct", "proxy:environment")))
+    connector = shlex.join(_proxy_connector(child_env)[:-2] + ["dev.example.test", "3022"])
+    # ssh runs ProxyCommand in Git's cwd: any workspace, without Tofu on sys.path.
+    workspace = tmp_path / "unrelated-workspace"
+    workspace.mkdir()
+    environment = {name: value for name, value in os.environ.items()
+                   if name not in ("PYTHONPATH", "TOFU_COMMAND_PROXY_URL")}
+    result = subprocess.run(connector, shell=True, cwd=workspace, env=environment,
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 2, result.stderr
+    assert "connector loaded with the planner" in result.stderr
 
 
 def test_inherited_git_ssh_proxycommand_remains_authoritative(monkeypatch):
     target = network.NetworkTarget(
         "git:clone", "ssh", "dev.example.test", 22, "ssh://dev.example.test:22/"
     )
-    monkeypatch.setattr(network, "detect_network_target", lambda _command: target)
+    monkeypatch.setattr(network, "detect_network_target", lambda _command, **_context: target)
     called = []
     monkeypatch.setattr(
         "lib.proxy.global_egress_route_specs",
@@ -246,7 +292,7 @@ def test_inherited_git_ssh_port_participates_in_route_identity(monkeypatch):
     )
     fake = _FakeManager([_proxy()])
     monkeypatch.setattr(network, "_route_manager", fake)
-    monkeypatch.setattr(network, "detect_network_target", lambda _command: target)
+    monkeypatch.setattr(network, "detect_network_target", lambda _command, **_context: target)
     monkeypatch.setattr(
         "lib.proxy.global_egress_route_specs",
         lambda *args, **kwargs: [_direct(), _proxy()],

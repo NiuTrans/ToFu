@@ -60,6 +60,32 @@ def _extract_latest_user_text(cfg) -> str:
     return ''
 
 
+def _memory_scope(cfg):
+    """``(memory_enabled, project_path, project_enabled)`` of a chat-mode cfg."""
+    project_path = cfg.get('canonicalProjectPath') or cfg.get('projectPath', '')
+    project_enabled = bool(project_path)
+    if not project_enabled:
+        # RWA: a remote-worktree binding (cfg['project_remote'], 总闸
+        # TOFU_REMOTE_WORKTREE) implies the project tool set even though no
+        # server-side projectPath exists — paths are resolved agent-side.
+        from lib.desktop.remote import remote_worktree_binding
+        project_enabled = remote_worktree_binding(cfg) is not None
+    return cfg.get('memoryEnabled', True), project_path, project_enabled
+
+
+def resolve_memory_scope(cfg):
+    """Resolve ``(memory_enabled, project_path, project_enabled)`` as a task does.
+
+    Applies the same chat-mode overlay as :func:`_resolve_model_config`, so an
+    accepted attempt can decide its memory listing before its worker resolves
+    the full model configuration.
+    """
+    from lib.tasks_pkg.chat_mode import apply_chat_mode, normalize_chat_mode
+    if normalize_chat_mode(cfg) is not None:
+        cfg = apply_chat_mode(cfg)
+    return _memory_scope(cfg)
+
+
 def _resolve_model_config(cfg, task_id):
     """Resolve model and features from the task config.
 
@@ -152,16 +178,8 @@ def _resolve_model_config(cfg, task_id):
     # may pass fetchEnabled=False to strip all network tools — honored here.
     fetch_enabled = cfg.get('fetchEnabled', True)
 
-    project_path = cfg.get('projectPath', '')
-    project_enabled = bool(project_path)
-    if not project_enabled:
-        # RWA: a remote-worktree binding (cfg['project_remote'], 总闸
-        # TOFU_REMOTE_WORKTREE) implies the project tool set even though no
-        # server-side projectPath exists — paths are resolved agent-side.
-        from lib.desktop.remote import remote_worktree_binding
-        project_enabled = remote_worktree_binding(cfg) is not None
+    memory_enabled, project_path, project_enabled = _memory_scope(cfg)
     code_exec_enabled = cfg.get('codeExecEnabled', False)
-    memory_enabled = cfg.get('memoryEnabled', True)
     browser_enabled = cfg.get('browserEnabled', False)
     desktop_enabled = cfg.get('desktopEnabled', False)
     image_gen_enabled = cfg.get('imageGenEnabled', False)
@@ -209,7 +227,8 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
                          code_exec_enabled, browser_enabled, desktop_enabled,
                          image_gen_enabled=False,
                          human_guidance_enabled=False, scheduler_enabled=False,
-                         messages=None, conv_id=''):
+                         messages=None, conv_id='', no_saved_conversation=False,
+                         completion_delivery=True):
     """Build the tool_list based on enabled features.
 
     Returns ``(tool_list, has_real_tools)`` where ``tool_list`` may be ``None``
@@ -381,6 +400,8 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
         scheduler_enabled=scheduler_enabled, messages=messages,
         enabled_plugins=enabled_plugins,
         conv_id='' if cfg.get('_storageFreeRuntime') else conv_id,
+        no_saved_conversation=no_saved_conversation,
+        completion_delivery=completion_delivery,
         owner_user_id=int(
             cfg.get('userId') or cfg.get('_turnOwnerUserId') or 0),
     )

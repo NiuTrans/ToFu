@@ -276,7 +276,7 @@ test('directory responses and hydrate completions cannot publish after A-B-A or 
 });
 
 for (const phase of ['read', 'hydrate']) for (const change of ['head', 'switch']) {
-  test(`exact jump releases busy and refreshes after ${change} during ${phase}`, async () => {
+  test(`exact jump ${change === 'head' ? 're-resolves and lands' : 'is abandoned'} after ${change} during ${phase}`, async () => {
     const { dom, host, nav } = setup(); nav.destroy();
     let head = 1; let release; let block = false; const scrolls = []; const reads = [];
     const pause = () => new Promise(resolve => { release = resolve; });
@@ -293,15 +293,83 @@ for (const phase of ['read', 'hydrate']) for (const change of ['head', 'switch']
     exact.update('a', state); await settle();
     block = true; host.querySelector('[data-direction=previous]').click(); await settle();
     assert.equal(host.getAttribute('aria-busy'), 'true');
+    const before = reads.length;
     head++; exact.update(change === 'head' ? 'a' : 'b', state);
-    release(); await settle(); await settle();
+    block = false; release(); await settle(); await settle();
     assert.equal(host.getAttribute('aria-busy'), 'false');
     assert.equal(host.querySelector('.turn-nav-readout').textContent, '5 / 5');
     assert.equal(reads.at(-1).id, change === 'head' ? 'a' : 'b');
     assert.equal(reads.at(-1).limit, 50);
-    assert.deepEqual(scrolls, []);
-    block = false; host.querySelector('[data-direction=previous]').click(); await settle();
-    assert.equal(scrolls.length, 1);
+    if (change === 'head') {
+      // The round is resolved again under the new ranks, then revealed.
+      assert.ok(reads.slice(before).some(read => read.limit === 1));
+      assert.deepEqual(scrolls, ['a-3']);
+    } else {
+      assert.deepEqual(scrolls, []);
+    }
+    host.querySelector('[data-direction=previous]').click(); await settle();
+    assert.equal(scrolls.length, change === 'head' ? 2 : 1);
     exact.destroy(); dom.window.close();
   });
 }
+
+function exactNavigation(ports = {}) {
+  const { dom, host, nav } = setup(); nav.destroy();
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  const reads = []; const scrolls = []; let head = 1; let gate = null;
+  const exact = createTurnNavigation({ host, translate: key => key, scrollToTurn: id => scrolls.push(id),
+    directoryKey: () => String(head),
+    directory: async (id, offset, limit) => {
+      reads.push({ offset, limit });
+      if (gate && limit === 50) await gate.promise;
+      return { conversationId: id, totalRounds: 4, activeRound: 4, entries: Array.from(
+        { length: Math.min(limit, 4 - offset) }, (_, i) => ({ turnId: `a-${offset + i + 1}`,
+          actor: 'human', ordinal: offset + i, roundNumber: offset + i + 1 })) };
+    }, hydrateRound: async () => {}, ...ports });
+  const state = { laneOrder: { main: ['a-4'] }, turnsById: { 'a-4': { actor: 'human', projection: {} } } };
+  const hold = () => { let release; gate = { promise: new Promise(resolve => { release = resolve; }) };
+    return () => { gate = null; release(); }; };
+  const advance = () => { head++; exact.update('a', state); };
+  exact.update('a', state);
+  return { dom, host, exact, reads, scrolls, settle, hold, advance };
+}
+
+test('a jump requested while a background rank read runs waits for it instead of being dropped', async () => {
+  const { dom, host, exact, scrolls, settle, hold, advance } = exactNavigation();
+  await settle();
+  host.querySelector('.turn-nav-position').click(); await settle();
+  const panel = dom.window.document.querySelector('.turn-jump-panel');
+  const release = hold(); advance(); await settle();
+  assert.equal(host.getAttribute('aria-busy'), 'true');
+  // Typing is not interrupted by the background refresh.
+  const input = panel.querySelector('input');
+  assert.equal(input.disabled, false);
+  input.value = '2';
+  panel.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle();
+  assert.deepEqual(scrolls, []);
+  release(); await settle(); await settle();
+  assert.deepEqual(scrolls, ['a-2']);
+  assert.equal(host.getAttribute('aria-busy'), 'false');
+  exact.destroy(); dom.window.close();
+});
+
+test('a failed jump stays reported through a background refresh until the reader acts', async () => {
+  let fail = true;
+  const { dom, host, exact, scrolls, settle, advance } = exactNavigation({
+    hydrateRound: async () => { if (fail) throw new Error('history unavailable'); } });
+  await settle();
+  host.querySelector('.turn-nav-position').click(); await settle();
+  const panel = dom.window.document.querySelector('.turn-jump-panel');
+  panel.querySelector('.turn-jump-first').click(); await settle(); await settle();
+  const error = () => panel.querySelector('.turn-jump-error').textContent;
+  assert.equal(error(), 'conversationBar.historyFailed');
+  advance(); await settle(); await settle();
+  assert.equal(error(), 'conversationBar.historyFailed');
+  assert.equal(panel.querySelector('.turn-jump-load').hidden, false);
+  fail = false;
+  panel.querySelector('.turn-jump-first').click(); await settle(); await settle();
+  assert.deepEqual(scrolls, ['a-1']);
+  assert.equal(error(), '');
+  exact.destroy(); dom.window.close();
+});

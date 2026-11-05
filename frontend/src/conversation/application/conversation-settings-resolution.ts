@@ -37,6 +37,7 @@ export interface ConversationSettingsSource extends UnknownRecord {
   readonly humanGuidanceEnabled?: unknown;
   readonly chatMode?: unknown;
   readonly planMode?: unknown;
+  readonly delegateMode?: unknown;
   readonly projectPaths?: unknown;
   readonly readOnlyPaths?: unknown;
   readonly autoTranslate?: unknown;
@@ -54,9 +55,16 @@ export interface ConversationSettingsResponse {
   readonly status: number;
 }
 
+/** Cancellation for one resolution; send attempts own and abort it. */
+export interface ResolutionRequestOptions {
+  readonly signal?: AbortSignal;
+}
+
 export interface ConversationSettingsResolutionPorts {
-  resolveConfig(inputs: UnknownRecord): Promise<unknown>;
-  resolveSettings(inputs: ConversationSettingsInputs): Promise<unknown>;
+  resolveConfig(inputs: UnknownRecord, options?: ResolutionRequestOptions): Promise<unknown>;
+  resolveSettings(
+    inputs: ConversationSettingsInputs, options?: ResolutionRequestOptions,
+  ): Promise<unknown>;
   patchResolvedSettings(
     conversationId: string,
     inputs: ConversationSettingsInputs,
@@ -73,11 +81,14 @@ export interface ConversationSubmissionResolution {
 }
 
 export interface ConversationSettingsResolution {
-  resolveConfig(inputs: UnknownRecord): Promise<UnknownRecord>;
-  resolveSettings(inputs: ConversationSettingsInputs): Promise<UnknownRecord>;
+  resolveConfig(inputs: UnknownRecord, options?: ResolutionRequestOptions): Promise<UnknownRecord>;
+  resolveSettings(
+    inputs: ConversationSettingsInputs, options?: ResolutionRequestOptions,
+  ): Promise<UnknownRecord>;
   resolveSubmission(
     configInputs: UnknownRecord,
     settingsInputs: ConversationSettingsInputs,
+    options?: ResolutionRequestOptions,
   ): Promise<ConversationSubmissionResolution>;
   persist(
     conversationId: string,
@@ -127,6 +138,7 @@ export function buildConversationSettingsSnapshot(
     humanGuidanceEnabled: source.humanGuidanceEnabled,
     chatMode: 'chat',
     planMode: Boolean(source.planMode),
+    delegateMode: Boolean(source.delegateMode),
     ...captureConversationProject(source as ProjectConversation),
     autoTranslate: source.autoTranslate,
     uiLang: source.uiLang || uiLanguage,
@@ -150,37 +162,40 @@ export function createConversationSettingsResolution(
 
   const resolveConfig = async (
     inputs: UnknownRecord,
+    options?: ResolutionRequestOptions,
   ): Promise<UnknownRecord> => {
     const source = record(inputs.conv_settings);
     const workspace = source && captureSubmissionBinding(source);
-    const resolved = unwrapEnvelope(await ports.resolveConfig(inputs));
+    const resolved = unwrapEnvelope(await ports.resolveConfig(inputs, options));
     return workspace ? { ...resolved, ...workspace, chatMode: 'chat' } : resolved;
   };
 
   const resolveSettings = async (
     inputs: ConversationSettingsInputs,
+    options?: ResolutionRequestOptions,
   ): Promise<UnknownRecord> => {
     const workspace = captureSubmissionBinding(inputs.conv_settings);
-    const resolved = unwrapEnvelope(await ports.resolveSettings(inputs));
+    const resolved = unwrapEnvelope(await ports.resolveSettings(inputs, options));
     return { ...resolved, ...workspace, chatMode: 'chat' };
   };
 
   const resolveSubmission = async (
     configInputs: UnknownRecord,
     settingsInputs: ConversationSettingsInputs,
+    options?: ResolutionRequestOptions,
   ): Promise<ConversationSubmissionResolution> => {
     const workspace = captureSubmissionBinding(configInputs.conv_settings as UnknownRecord);
     const config = await resolveConfig({
       ...configInputs,
       settings_conv_settings: settingsInputs.conv_settings,
       include_settings: true,
-    });
+    }, options);
     const fusedSettings = record(config.settings);
     delete config.settings;
     // Resolver defaults must never fill explicit empty roots from ambient state.
     return {
       config: { ...config, ...workspace, chatMode: 'chat' },
-      settings: { ...(fusedSettings || await resolveSettings(settingsInputs)), ...workspace, chatMode: 'chat' },
+      settings: { ...(fusedSettings || await resolveSettings(settingsInputs, options)), ...workspace, chatMode: 'chat' },
     };
   };
 

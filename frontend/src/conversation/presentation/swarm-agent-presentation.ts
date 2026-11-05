@@ -12,9 +12,16 @@ const terminal = (status: unknown): boolean => [
   'done', 'completed', 'failed', 'error', 'aborted', 'cancelled', 'canceled', 'interrupted',
 ].includes(String(status ?? ''));
 
+/* A worker's own chat loop forwards its PHASE values (lib/agent_core/events.py,
+ * chat domain) beside the swarm's words; each is evidence of a running worker. */
+const forwardedChatPhases = [
+  'llm_thinking', 'tool_exec', 'waiting_model', 'stream_stalled', 'executor_queued',
+  'working', 'compacting', 'todo_continuation', 'intent_stall_nudge',
+  'tool_history_restored', 'tool_authority',
+];
 const activePhases = new Set([
   'running', 'starting', 'thinking', 'tool_use', 'writing', 'searching',
-  'coding', 'analyzing', 'retrying',
+  'coding', 'analyzing', 'retrying', ...forwardedChatPhases,
 ]);
 const queuedPhases = new Set(['pending', 'queued', 'waiting']);
 
@@ -39,6 +46,55 @@ export function swarmAgentWaitLabel(agent: Row,
   if (agent.waitReason === 'dependencies') return tt('swarm.wait.dependencies', 'Waiting for prerequisites');
   if (agent.waitReason === 'capacity') return tt('swarm.wait.capacity', 'Waiting for capacity');
   return tt('swarm.wait.pending', 'Waiting to start');
+}
+
+export type SwarmLabelText = (key: string, fallback: string,
+  args?: Readonly<Record<string, string | number>>) => string;
+
+const phaseWords: Readonly<Record<string, readonly [string, string]>> = {
+  thinking: ['swarm.phase.thinking', 'Thinking…'],
+  llm_thinking: ['swarm.phase.thinking', 'Thinking…'],
+  writing: ['swarm.phase.writing', 'Writing…'],
+  tool_use: ['swarm.phase.tool_use', 'Using tools'],
+  tool_exec: ['swarm.phase.tool_use', 'Using tools'],
+  searching: ['swarm.phase.searching', 'Searching…'],
+  coding: ['swarm.phase.coding', 'Coding…'],
+  analyzing: ['swarm.phase.analyzing', 'Analyzing…'],
+  retrying: ['swarm.phase.retrying', 'Retrying…'],
+  waiting_model: ['swarm.phase.waitingModel', 'Waiting for model…'],
+  stream_stalled: ['swarm.phase.streamStalled', 'Model output stalled'],
+  compacting: ['swarm.phase.compacting', 'Compacting context…'],
+  executor_queued: ['swarm.wait.capacity', 'Waiting for capacity'],
+};
+
+/** One status word per agent state for every surface that names it. The same
+ * state arrives in two vocabularies (the swarm's `tool_use`, the forwarded
+ * `tool_exec`), so both read as one word, and an unknown live phase reads as
+ * plain work: a raw phase value never reaches the reader. Terminal status
+ * outranks a phase stranded at a live value. */
+export function swarmAgentPhaseLabel(agent: Row, tt: SwarmLabelText): string {
+  const status = agentStatus(agent);
+  if (status === 'done') return tt('swarm.phase.complete', 'Complete');
+  if (status === 'failed' || status === 'error') return tt('swarm.phase.failed', 'Failed');
+  if (status === 'interrupted') return tt('swarm.phase.interrupted', 'Interrupted by restart');
+  if (['aborted', 'cancelled', 'canceled'].includes(status)) return tt('swarm.phase.aborted', 'Cancelled');
+  if (status === 'stalled') {
+    // The backend judged this agent silent; its measured silence says why.
+    const silent = Math.round(Number(agent.stallSilentSeconds));
+    return silent > 0
+      ? tt('swarm.phase.stalledSilent', 'Stalled · silent {seconds}s', { seconds: silent })
+      : tt('swarm.phase.stalled', 'Stalled');
+  }
+  if (status === 'pending') return swarmAgentWaitLabel(agent, tt);
+  if (status !== 'running') return tt('swarm.phase.noResult', 'No result');
+  const [key, fallback] = phaseWords[String(agent.phase || '')] ?? ['swarm.phase.running', 'Working…'];
+  return tt(key, fallback);
+}
+
+/** What an agent does, as readers see it before opening its full instructions:
+ * the instruction's opening line. Cards and the dock share this one brief. */
+export function swarmAgentBrief(objective: unknown): string {
+  return String(objective ?? '').trim().split('\n', 1)[0].trim();
 }
 
 /** Log identity is display-only; routing continues to use the canonical spec ID. */

@@ -10,7 +10,7 @@ from lib.storage_authority_sql.native_checkpoint_rows import HEADERS, SNAPSHOTS,
 from lib.storage_authority_sql.operations_pkg._common import _load
 from lib.storage_authority_sql.operations_pkg._records import _load_record_value
 from lib.storage_authority_sql.operations_pkg._runs import _decode_run_error
-from lib.storage_authority_sql.operation_domains.billing import _ledger_document
+from lib.storage_authority_sql.operations_pkg._billing_wallets import _ledger_document
 
 
 class GoalReads:

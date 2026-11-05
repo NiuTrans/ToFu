@@ -15,7 +15,8 @@ result; sub-agent completions arrive on subsequent turns as auto-injected
 orchestrator's between-round drain hook).
 
 Model-facing waits use ``poll`` with explicit agent handles and ``wait_s``
-bounded to 60 seconds; no-ID ``poll()`` is only a snapshot.
+bounded by ``lib.tools.poll.POLL_WAIT_CAP_S``; no-ID ``poll()`` is only a
+snapshot.
 
 This module is a re-export facade. Implementations live in the sub-modules:
 
@@ -23,7 +24,7 @@ This module is a re-export facade. Implementations live in the sub-modules:
   * ``_logs``        — durable on-disk sub-agent transcript access
   * ``_recovery``    — owner-scoped checkpoint outcomes and partial evidence
   * ``_state``       — the ONE process-wide session registry + autocontinue
-                       state + all fns that ``global``-rebind them
+                       latch + all fns that ``global``-rebind them
   * ``_autocontinue``— Phase-2 auto-continue helpers
   * ``_tools``       — ``execute_swarm_tool`` + spawn/await/get-result handlers
   * ``_rehydrate``   — startup rehydration of persisted sessions
@@ -46,7 +47,6 @@ from lib.swarm.integration._config import (  # noqa: E402,F401
     MAX_SESSIONS,
     SESSION_TTL_SECONDS,
     SWARM_AUTOCONTINUE_ENABLED,
-    SWARM_AUTOCONTINUE_MAX_CHAIN,
     SWARM_OUTPUT_DIR,
     _CLEANUP_INTERVAL,
     _env_truthy,
@@ -70,7 +70,6 @@ from lib.swarm.integration._logs import (  # noqa: E402,F401
 #  Re-exported BY REFERENCE — same dict/lock objects across the process.
 from lib.swarm.integration._state import (  # noqa: E402,F401
     _active_sessions,
-    _autocontinue_chain,
     _autocontinue_inflight,
     _autocontinue_lock,
     _background_cleanup,
@@ -91,6 +90,7 @@ from lib.swarm.integration._state import (  # noqa: E402,F401
     add_session_alias,
     get_active_session,
     get_swarm_status,
+    stop_swarm_agent,
     stop_swarm_cleanup_timer,
     list_active_swarms,
     swarm_cleanup_snapshot,
@@ -101,7 +101,6 @@ from lib.swarm.integration._state import (  # noqa: E402,F401
 from lib.swarm.integration._autocontinue import (  # noqa: E402,F401
     _maybe_autocontinue,
     _start_autocontinue_turn,
-    reset_autocontinue_chain,
 )
 
 # ── Tool dispatch + handlers ─────────────────────────────
@@ -126,7 +125,7 @@ __all__ = [
     'SESSION_TTL_SECONDS', 'MAX_SESSIONS', 'SWARM_OUTPUT_DIR',
     'SwarmSessionConflict',
     'AWAIT_AGENTS_HARD_CAP_SEC', 'SWARM_AUTOCONTINUE_ENABLED',
-    'SWARM_AUTOCONTINUE_MAX_CHAIN', '_CLEANUP_INTERVAL',
+    '_CLEANUP_INTERVAL',
     '_env_truthy', 'swarm_key_for', '_persist_config', '_PERSIST_CFG_KEYS',
     # Logs / disk
     '_resolve_output_dir', '_swarm_base_dir', '_read_log_file', '_read_agent_log',
@@ -135,14 +134,15 @@ __all__ = [
     # Shared state (by reference)
     '_active_sessions', '_session_timestamps', '_key_aliases', '_sessions_lock',
     '_last_cleanup', '_cleanup_timer',
-    '_autocontinue_chain', '_autocontinue_inflight', '_autocontinue_lock',
+    '_autocontinue_inflight', '_autocontinue_lock',
     '_resolve_key', '_key_is_live', '_cleanup_stale_sessions',
     '_background_cleanup', '_start_cleanup_timer',
     '_get_session', '_set_session', '_remove_session', 'add_session_alias',
     'get_active_session', 'get_swarm_status', 'list_active_swarms',
-    'abort_swarm', 'stop_swarm_cleanup_timer', 'swarm_cleanup_snapshot',
+    'abort_swarm', 'stop_swarm_agent', 'stop_swarm_cleanup_timer',
+    'swarm_cleanup_snapshot',
     # Auto-continue
-    'reset_autocontinue_chain', '_maybe_autocontinue', '_start_autocontinue_turn',
+    '_maybe_autocontinue', '_start_autocontinue_turn',
     # Tools
     'execute_swarm_tool', '_handle_spawn_agents', '_handle_await_agents',
     '_handle_get_agent_result', '_handle_artifact_tool', '_await_from_disk',

@@ -34,8 +34,15 @@ def _task_snapshot(task: dict) -> str:
     return snapshot
 
 
-def _execute_await_task(fn_args, *, user_id: int):
-    """List owned running tasks, inspect status, or wait at most 60 seconds."""
+def _execute_await_task(fn_args, *, user_id: int, max_wait_s: float = 60,
+                        interrupted=None):
+    """List owned running tasks, inspect status, or wait at most ``max_wait_s``.
+
+    The retired await_task adapter keeps its 60-second bound; the unified poll
+    passes its own cap and an ``interrupted`` predicate that names Stop or new
+    turn input ending the wait early.
+    """
+    from lib.tools.poll import POLL_WAIT_CAP_S
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
 
     action = fn_args.get('action', 'list')
@@ -76,7 +83,8 @@ def _execute_await_task(fn_args, *, user_id: int):
         return _task_snapshot(task) if task else unavailable
 
     if action == 'wait':
-        timeout = max(0, min(_coerce_int_arg('timeout', fn_args.get('timeout', 60), 60), 60))
+        timeout = max(0, min(_coerce_int_arg('timeout', fn_args.get('timeout', 60), 60),
+                             int(max_wait_s)))
         poll_interval = max(_coerce_int_arg('poll_interval', fn_args.get('poll_interval', 5), 5), 2)
         deadline = _time.monotonic() + timeout
         parent_task = fn_args.get('_parent_task')
@@ -100,6 +108,10 @@ def _execute_await_task(fn_args, *, user_id: int):
                 return unavailable
             if task.get('status') in TASK_REPLAY_TERMINAL_STATUSES:
                 return _task_snapshot(task)
+            if interrupted is not None and interrupted() == 'pending_input':
+                return ('Wait ended early: new input is waiting for this turn '
+                        'and is delivered right after this tool call; no '
+                        f'terminal outcome is verified.\n{_task_snapshot(task)}')
 
         # Recheck at the deadline: completion racing with timeout has the same
         # full-result representation as an already-terminal status request.
@@ -111,7 +123,8 @@ def _execute_await_task(fn_args, *, user_id: int):
         return (
             f'Wait bound reached after {timeout}s; no terminal outcome is verified.\n'
             f'{_task_snapshot(task)}\n'
-            f'Use poll(id={task_id!r}, wait_s=60) only when no useful work remains.'
+            f'Use poll(id={task_id!r}, wait_s={POLL_WAIT_CAP_S}) only when no '
+            'useful work remains.'
         )
 
     return f'Error: Unknown task polling action: {action}. Use list/wait/status.'

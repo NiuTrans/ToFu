@@ -2,6 +2,158 @@
 
 This document defines the current browser rendering invariants. The storage and wire authority is [CONVERSATION_SYNC_V3.md](contracts/CONVERSATION_SYNC_V3.md); the frontend module boundary is [FRONTEND_ARCHITECTURE.md](FRONTEND_ARCHITECTURE.md).
 
+## Opening a conversation keeps the two-zone geometry (2026-11-01)
+
+**Problem (owner report):** clicking a sidebar conversation painted its Turns
+centered, then the context rail appeared and pushed the column left by the
+whole track (226px at a 1680px window; one layout-shift entry of 0.455). Each
+new Surface started with its latch `absent`: the loading frame collapsed the
+shell's track and moved the composer, and when the byte-budgeted first page
+held only a round's huge reply, the content painted in the no-rail geometry
+until the input Turn hosting the rail landed. Separately, the rail had two
+renderers (the retained `renderTurnCtxNote` string builder and a typed
+fallback) that had drifted, and its rules lived in a compaction sheet with row
+hairlines, outlined badges and per-section one-off type.
+
+**Decision:**
+- `data-turn-context-rail` is tri-state: `present` once a rail has shown
+  (latched per conversation as before), `pending` while the transcript cannot
+  tell, and `absent` only when it proves the conversation rail-less: a mounted
+  human input without a context snapshot (legacy history), or a fully mounted,
+  complete history with none. The evidence is gathered while the mounted
+  main-lane window renders, so the decision costs no extra reads as history
+  grows. `23-reading-context-rail.css` collapses the track only
+  for `absent` or when no latch is mounted (the new-chat welcome); it keys on
+  the latch attribute, not on the Surface's class.
+- Every new human input records a snapshot, so the column and composer keep
+  the rail-granted position from the first frame of a switch and the rail
+  settles into its reserved track (a short opacity transition through
+  `@starting-style`; reduced motion shortens it to nothing).
+- `frontend/src/conversation/ui/turn-context-rail/` is the single renderer of
+  the rail, its fold and the live branch/checklist rows, escaped through
+  `safeHtml`; its `AGENTS.md` maps every other rail owner. The retained
+  `renderTurnCtxNote` is a bridge that supplies catalog names, brand marks and
+  the live branch; the typed fallback in `context-blocks.ts` calls the same
+  renderer.
+- One section anatomy for every fact (see [DESIGN_SYSTEM.md](DESIGN_SYSTEM.md),
+  context rail).
+
+**Evidence:** `tests/visual/test_visual_context_rail_switch_stability.py`
+samples every painted frame of cold and warm switches, including a reply-only
+first page; `.chat-inner` and `.input-inner` stay within 1px. Restoring the
+previous latch fails it on that page (column at 530px instead of 304px). The
+latch states are specified in
+`tests/frontend/test_frontend_conversation_surface_vite.py`.
+
+**Alternatives considered:**
+- Reserving the track for every Surface regardless of evidence would leave
+  an empty column beside legacy rail-less conversations; keeping their
+  centered geometry costs one composer move when their first page lands.
+- Remembering per-conversation decisions in the browser fixes only revisits
+  and adds client state.
+- A server tail window that always admits the round's input Turn (still a
+  candidate below) removes the reply-only page but not the loading frame.
+- Hoisting one conversation-level rail would fork the per-Turn snapshot
+  authority.
+
+## Compact action reading (2026-10-27)
+
+**Problem:** after V5 a whole screen showed one tool call. Rows were 18px
+two-line headers (64px minimum), the identity line printed entire multi-line
+commands, agent messages rendered their full body open, and prose ran at
+18px/1.7. The context rail also vanished mid-read. The snapshot's byte-budgeted
+tail window admits only the newest Turn, so a huge reply arrived without the
+input Turn that hosts its rail. Residency later retired that input Turn while
+its reply was still on screen. Each loss collapsed the rail track through a
+mounted-DOM `:has()` predicate and reflowed the whole column.
+
+**Decision:**
+- One quiet line per call on the turn's single text edge: the step's intent in
+  secondary ink (one line on desktop, two on phones; full text in the
+  tooltip and the evidence), then one outcome slot at a shared end column.
+  Running and unresolved steps read in primary ink; a step needing attention
+  shows its whole intent.
+- Exact identity (tool + target) shows inline when the step is open or needs
+  attention (on its own line for attention); at rest it is in the intent's
+  tooltip with the full intent, unless the native renderer set its own title.
+  A running step does not repeat it (2026-11-01 owner report): its glyph,
+  intent and live output say what runs, and the command pane holds the exact
+  command; an open command pane likewise suppresses it. Hover never reveals it: inline
+  identity takes width from the intent and reflowed wrapping evidence under the
+  pointer, breaking drag-selection. Command/output folds, per-call debug
+  anchors and disclosure carets appear on hover or keyboard focus by opacity
+  only, ordered before the outcome so outcomes share one end column; touch
+  devices keep them visible. Secondary text (identity, message preview)
+  shrinks before the intent. Intents carrying structured evidence (Repo Map
+  parameters, saved-output search terms) keep their wrapping contracts.
+- Every round's reasoning merges into the reply's single reasoning disclosure
+  ahead of its tool panel ([Grouped reply zones](#grouped-reply-zones-2026-10-28)).
+  The view model keeps each round's block; only the mounted disclosure joins
+  them, keyed by the first member, so reader state stays stable.
+- Type ramp: 15px prose at 1.65, 14px tables, 13px rows and evidence, 12px
+  metadata; code and tables at 1.5 line height. Measure 800px.
+- A routine `send_agent_message` row is collapsed with its first authored line
+  as a preview. Failed and unconfirmed sends open by default; the fold stays
+  reader-owned across receipt repaints.
+- The Surface latches `data-turn-context-rail="present"` per conversation once
+  any Turn shows a rail. The shell reserves the track from that latch, never
+  from which Turns happen to be mounted (tri-state since 2026-11-01, see
+  [Opening a conversation keeps the two-zone geometry](#opening-a-conversation-keeps-the-two-zone-geometry-2026-11-01)).
+- A loaded main lane with no input Turn requests the page that opens its round,
+  while the reader is inside its first Turn. Residency never retires the
+  nearest mounted rail host (within four Turns) above a resident Turn.
+- The composer keeps its left-edge lock (2026-08-03 owner decision) instead of
+  V5's pane centering.
+
+**Alternatives considered:**
+- Fixing the tail window server-side (always admit the newest input Turn)
+  would change both the SQL and native TofuDB snapshot owners and require an
+  engine rebuild and restart. It stays a candidate; the client rule is
+  idempotent with it.
+- Reserving the track unconditionally re-introduces an empty column in new
+  chats.
+- Hoisting one conversation-level rail would fork the per-Turn context
+  snapshot authority.
+- Restoring tool glyphs contradicts the shared-text-edge contract on narrow
+  gutters.
+- Deleting intermediate reasoning, or moving it into the tool's evidence DOM,
+  loses audit chronology or breaks stable block identity and reader-owned
+  disclosure; one merged disclosure keeps both.
+- Showing identity at rest repeated the intent in monospace on every row (the
+  2026-10-27 "too much text" report); hiding the outcome too would remove the
+  one signal a reader scans for.
+
+## Warm dark action reading (V5, 2026-10-27 owner approval)
+
+**Problem:** dense tool chrome, tiny technical labels and repeated completion
+marks obscure backend behavior. A round with many calls needs a readable
+overview without losing the evidence used to debug it.
+
+**Decision:** the shared action summary uses an intent, exact tool identity and
+target, a single meaningful outcome, and its existing inline evidence control.
+No connected completion markers, per-tool duration emphasis or decorative tool
+name pills. Rich bodies and raw input/output keep their existing owners.
+Dark mode uses warm charcoal and tofu cream; light themes retain their palettes.
+Row sizing, the measure and composer placement are superseded by
+[Compact action reading](#compact-action-reading-2026-10-27).
+
+For a real, explicitly identified model round with more than eight tools, the
+Surface may show a round heading with call search. It never folds mounted
+calls: the former "Show N returned calls" fold between the first four and last
+three calls was removed (owner report 2026-11-02). Inside an opened tool panel
+it was a second, differently styled disclosure that hid calls the reader had
+just opened, and against a bounded window it counted only the mounted
+candidates ("3 returned calls" out of hundreds). The tool panel is the calls'
+one disclosure. Search indexes tool identity/intent/target in the full ordered round, including
+unmounted calls; selecting a hit uses the existing bounded content window.
+It does not search raw outputs or fetch deferred evidence. Existing chronological
+paging remains available. Round identity never implies parallel execution.
+In a grouped reply these round controls live inside the open tool panel.
+
+**Alternatives considered:** a permanent debug side pane wastes new-chat space;
+removing tools sacrifices debuggability; copying results into a second timeline
+forks lifecycle state; rendering every body bypasses the bounded DOM contract.
+
 
 ## Navigation operation ownership and request-name refusals
 
@@ -30,39 +182,25 @@ edit; silently enabling connections overrides an owner decision. Specs:
 
 ## Reasoning without a readable summary
 
-**Problem:** a provider can report substantial internal reasoning-token usage
-while returning no readable reasoning text; an absent thinking disclosure made
-that look like reasoning was disabled. **Decision:** the common assistant header
-shows a compact, text-only receipt row, outside historical Process and Thinking
-folds, when readable reasoning is absent but recorded reasoning evidence exists.
-It distinguishes the last returned effort from provider-reported token usage.
-Effort comes only from validated selected-slot resolution receipts, never the
-composer, model catalog or encrypted replay. Turn-level token counts are not
-attributed to one effort setting; explicitly incomplete usage is labelled as a
-lower bound, and legacy last-round fallback counts name that scope.
+**Problem:** reasoning-control, token-count and missing-summary notices at the
+reply header interrupt reading without providing an action. **Decision:** the
+common classic/default headers do not render a reasoning-status row, regardless
+of model, reply lifecycle or reported usage. Missing readable reasoning produces
+neither a notice nor an empty Thinking disclosure. Late usage and effort receipts
+must not repaint an otherwise unchanged header or replace the answer.
 
-Completed replies with positive reported reasoning tokens say that the reasoning
-summary is unavailable. Active replies say no readable summary has been received
-yet; failed/interrupted replies never claim successful provider completion.
-Unknown/unreported counts and efforts stay absent rather than becoming zero or
-a default. Malformed, discarded, auxiliary, foreign and provably stale receipts
-cannot supply effort. Unscoped historical receipts are labelled as last recorded,
-not as the currently running request. During a live resumed/regenerated attempt,
-inherited unscoped effort and aggregate usage remain absent until an existing
-receipt explicitly matches the current attempt/task. The resume acknowledgement
-and later unrelated projection revisions are not evidence of a new request.
-Late fields retain the same effort → token count → availability reading order as
-cold reload, without replacing unchanged status spans or answer nodes.
-If readable reasoning arrives, its existing
-safe Markdown, translation and disclosure path remains authoritative and replaces
-the no-summary row. Empty or encrypted reasoning never creates an expandable
-Thinking card. Chinese/English copy and small-screen wrapping share the same
-projection/renderer owners; no reads, timers or durable browser state are added.
+Readable reasoning keeps its existing safe Markdown, translation and disclosure
+path, including reader-owned open state and keyboard focus. Provider usage,
+selected-slot reasoning-resolution receipts, encrypted replay and stored Turn
+facts remain intact; existing usage/footer and Request Inspector diagnostics
+retain their own evidence boundaries. No model-call control, storage schema,
+request, timer or preference is added by this presentation change. An absent
+summary still does not mean zero internal reasoning.
 
-**Alternatives rejected:** synthesizing a reasoning explanation fabricates model
-output; treating `thinking=0chars` as zero reasoning conflates text and usage;
-showing the current composer effort misattributes old turns and retries; hiding
-the receipt inside Process keeps the observed-work distinction inaccessible.
+**Alternatives rejected:** moving the notice to another unsolicited surface or
+adding a setting retains unnecessary chrome; CSS-only hiding leaves redundant
+DOM and projection work; removing provider evidence would break accounting and
+diagnostics; synthesizing thinking would fabricate model output.
 Specs: `tests/visual/test_visual_reasoning_summary.py`, the real app/storage/reload
 journey `tests/e2e/test_e2e_reasoning_receipts.py`, and focused reasoning
 presentation/header tests under `frontend/src/conversation/`.
@@ -142,6 +280,8 @@ and weak DOM bindings retain no history, background work or observers.
 
 ## Command working directory
 
+Background-command results share one native disclosure renderer across queued and submitted inputs. Their summaries suppress browser-default filled markers and use the shared trailing outlined chevron, right-facing while closed and down-facing while open. Enter/Space, independent reader folds, selected output and exact queue-cancellation ownership remain unchanged. Specs: `background-command-queue.test.ts` and `tests/visual/test_visual_background_command_queue.py`.
+
 Command cards show the supplied `working_dir` argument as a muted line inside
 the command code pane, before `$ command`, in both running and settled states.
 It folds with a collapsible command instead of taking a separate band outside
@@ -149,9 +289,16 @@ the pane. It is escaped and capped at 4,096 characters; missing arguments do
 not invent a directory. This is requested execution context, not evidence
 that a process started or resolved that path.
 
+## Incoming context visibility
+
+**Problem:** Turn-wide completion-sidecar suppression hid independent `inbox_delivery` notes. **Decision:** runtime inputs default to persisted system notes; only declared producer-owned sidecars replace them. Typed Surface and retained timeline share `context-note-grouping.ts`: hide a historical note only on exact, complete payload equality in the same model round and compatible explicit task/attempt scope. Missing, truncated, empty, partial or conflicting evidence keeps it.
+Equality also requires complete display coverage: preview-count/raw/Markdown limits and omitted structured fields cannot justify hiding a generic note; the selector uses the presenter’s coverage predicate, not mere receipt presence. The label means context was appended, not read/accepted/acted on; mailbox receipts and completion reports keep their separate authority. Process disclosure may fold settled evidence, but refresh and narrow layouts retain access. Unknown reasons use the generic safe renderer; no Messages-to-DOM mirror or second conversation store.
+**Alternatives rejected:** blanket suppression loses independent messages; source/type/round alone does not prove equality; agent markup cannot grant authority.
+Writer policy and verification boundaries: [Runtime input visibility ownership](CONTEXT_INJECTIONS.md#runtime-input-visibility-ownership).
+
 ## Compact compression receipts
 
-**Problem:** a full-width, four-line card repeated the unchanged main model and exposed a technical English trigger sentence as primary content. **Decision:** the default card uses a full-width header and one wrapping accounting row: before → after, reduction, recorded summary model, and a short localized trigger. Main-model/provider identity and the original trigger reason live in a native Details disclosure; failed/warning reasons stay visible. Disclosure state and keyboard focus survive updates. Unknown summary execution is explicit, never inferred from the parent or a selected-only route. Snapshot access and all stored receipt evidence remain unchanged; no new request or timer is introduced. **Rejected:** deleting diagnostics loses evidence; shrinking raw English or hiding failure reasons makes the card harder to understand. Specs: `activity-block.test.ts` and `tests/visual/test_visual_translation_compaction_attribution.py`.
+**Problem:** a separate model line, selected-model echo and filled Details triangle made a compact receipt needlessly tall. **Decision:** recorded compression-model attribution sits inline with the status; before → after, reduction and a short localized trigger share the accounting row. The whole receipt summary opens native diagnostics directly, without a separate Details label or triangle. Main-model/provider identity, selection-only evidence, original trigger reason and snapshot access remain in the expanded body; failed/warning reasons stay visible even while closed. Unknown execution stays explicit, never inferred from the parent or a selected-only route. Reader disclosure and keyboard focus survive updates; long identities wrap only when space requires it. No new request, timer or receipt mutation is introduced. **Rejected:** deleting diagnostics loses evidence; a model-only extra row repeats information; another click handler duplicates native keyboard behavior. Specs: `activity-block.test.ts` and `tests/visual/test_visual_translation_compaction_attribution.py`.
 
 ## Translation attribution
 
@@ -184,6 +331,14 @@ insertion/queue evidence; failure restores the draft and preserves the scoped
 failure receipt. Navigation, stop and disposal use the existing send lifecycle.
 **Rejected:** hiding the fake assistant with CSS retains duplicate transcript
 state; a separate insertion spinner would duplicate the composer status owner.
+A busy ordinary or Worker conversation asks steer/queue/cancel; a bound
+Coordinator conversation (any project's, the Global Router or the Watchdog)
+always steers without asking, and the server queues the message when its live
+window has already closed. That decision (`isCoordinatorConversation`, which
+the retained `presence.js` bridge publishes) reads server bindings only: the
+newest settled binding of the open chat's project and of the browsed folder's
+project, and the Global Router and Watchdog reads that mark their headers, so
+browsing another folder never changes the answer.
 
 ## Content-first execution details
 
@@ -206,57 +361,157 @@ changes block order, stable identity,
 reader-owned disclosure, actionable states or lazy result ownership. Historical
 pagination is visible only when there is earlier or later content to navigate.
 
-**Problem:** round number, call count and a routine "response returned" label were the primary collapsed content, hiding the assistant's actual narration. A long checklist explanation also competed with the header in flex layout. **Decision:** settled assistant history is **final-answer first**. The Surface selects the last explicit terminal/deliverable text and its accepted attempt/task/model-round scope; earlier final-looking text from older attempts is process, not the answer. Other durable deliverables remain outside. Completed status alone is not a success claim. Tool results, exit codes, refusal reasons and diagnostic evidence remain inspectable inside Process. Problem: the repeated outer tool-result receipt list overwhelmed the answer. Decision: remove that list; one compact, initially collapsed Process disclosure sits in the explicit answer toolbar (or before the answer in a renderer without that toolbar). Its label includes an item count and a trailing chevron; its bounded reading area mounts only on expansion. Alternative rejected: merely hiding the repeated receipt list retains duplicate DOM and presentation policy.
+### Grouped reply zones (2026-10-28)
 
-`ui/history-process.ts` owns one native `details` per historical presentation
-identity. Thinking, intermediate narration, tools/programs, notes and diagnostic
-chronology stay ordered inside it. This supersedes the older historical rule
-that **all tool headers and narration were always visible**. Closing removes
-process leaves and invokes the existing renderer cancellation port; closed
-process neither mounts rich leaves nor hydrates lazy outputs. Opening mounts a
-bounded content page (the existing viewport-derived block budget, maximum 200),
-with explicit previous/next content buttons. Pages replace, not append, leaves.
-Inner scrolling is contained and has no external block/turn window sentinels or
-history intents. Outer navigation continues to select actual turns, not tools.
+**Problem (owner report):** the interleaved stream — reasoning, narration and
+calls alternating every round — plus the settled final-answer-first Process
+popover made every reply noisy. Nearly every round has tool calls, so the
+reading column became a wall of rows, receipts and repeated disclosures. The
+interleaving had been adopted only so failures could be shown where they
+happened.
 
-The Process body uses a native nonmodal popover when supported, preserving its
-Turn ancestry for delegated events while escaping scroll/paint containment. It
-floats at the right on desktop and at the bottom on narrow screens, without
-moving the answer. The existing history owner permits one open inspector per
-Surface; close/Escape restores focus and releases lazy leaves. The queued top
-layer mount checks identity, connectivity and open state before acting, so
-unmount/disposal cannot revive a detached panel. Unsupported browsers retain the
-inline native disclosure. The answer toolbar is retained across replay; the
-optional heading menu in `renderers/answer-navigation.ts` reads current direct
-Markdown headings, caps controls at 32, and navigates/focuses within that answer.
-There is no new document listener, timer, transport or transcript cache.
+**Decision:** every assistant reply, live or settled, reads in grouped zones
+owned by `presentation/grouped-turn-layout.ts`: leading context; ONE reasoning
+disclosure merging every round's reasoning; ONE tool panel; the prose
+(narration and answer, in authored order); then trailing receipts (file
+changes, plan execution, artifacts, generated images, accepted work, the
+Turn's terminal failure, live status). The panel holds every tool/program call
+plus the process events between them — failures, retries, interventions,
+injections, rolled-back content — in authored order, so a failure sits
+directly below the call it followed. The view model stays chronological; only
+the Surface's mounted order is grouped, so activity anchors, round identity
+and Turn authority are untouched. Input Turns keep their authored order.
 
-Live, failed, waiting-command/approval, interactive and background-unresolved
-turns retain their actionable stream; an unresolved action overrides a settled
-Turn stamp. Missing/empty explicit final boundaries retain narration and expose
-an honest localized fallback notice instead of dropping it or inventing an
-answer. Within an open process each action still owns its sole evidence
-summary; there is no model-round/bulk toolbar or duplicated round heading.
+The panel header (design port `toolPanelHeader` in `ui/surface-design.ts`;
+the engine owns its state and delegation) is a Surface-owned native button
+that tops the panel's paper card, leading with a glyph tile: "N tools used ·
+M turns" ("Working…" while a call runs), an error chip counting failed calls
+and failure/warning events inside the panel, and a caret. Without a reader choice it follows a layout default
+that folds exactly where the retired history process folded: a completed
+reply with its own explicit answer, no pending command or approval and no
+active, interactive or unresolved background call. Anything else stays open:
+a live, failed, interrupted or truncated reply, and a reply without an answer,
+whose calls are its content. A pending proposed plan or live status renders
+outside the panel, so unlike the history process it no longer holds the
+process open. An explicit toggle, or any click inside a call while
+reading it, is a reader choice keyed by Turn presentation that survives
+settlement and replay; conversation reset and Surface disposal clear it. A
+closed panel mounts none of its calls, so it hydrates no lazy outputs; opening
+an oversized panel windows its calls from the first one. A reply without calls
+has no panel; its process rows render inline before the prose.
 
-Surface-owned, presentation/block-keyed UI choices retain process open/page,
-scroll, focus, nested disclosure and reader expansion across replay, close/reopen
-and Turn DOM eviction. Snapshots contain choices, never HTML/tool-result copies,
-and cap each block's snapshot at 64 relevant reader nodes. Conversation reset and
-Surface disposal release readers and pending reads. Accepted projections remain
-immutable in the existing store; there is no new transport or second store.
-**Alternatives rejected:** CSS-only hiding retains hydrated expensive leaves;
-per-action-only disclosure still makes tools compete with the final answer;
-scroll-driven process windows confuse tool browsing with turn history navigation;
-deleting intermediate narration loses audit/debug chronology.
+When reasoning and calls are both present, their independent disclosures form
+one activity card: two full-width, equal-height rows with matching glyph tiles
+and trailing chevrons, separated by the card's rule rather than a detached pill.
+The reasoning glyph is the shared brain icon; the former dot was only a
+streaming-status decoration, not a necessary control or content state.
+`23-reading-tool-panel.css` joins the existing keyed siblings visually without
+reparenting either disclosure, so streaming identity, focus and reader-owned
+expansion remain unchanged. Expanded reasoning starts at the card's normal
+inset rather than a second indent under the header label; it never toggles
+the tool panel. A reply without
+calls keeps the ordinary reasoning disclosure, not an empty activity section.
 
-Block-window limits still apply to live/failed/fallback streams; historical
-process counts content entries, not model rounds. A tail cap may not hide fewer
-than four leading blocks. Oversized rounds may span bounded windows without
-hiding the tail or stalling navigation.
-Executable specs: `tests/frontend/test_frontend_history_process.py`,
-`tests/frontend/test_frontend_round_outline.py`, Surface contracts,
-`tests/visual/test_visual_historical_process.py` and
-`tests/visual/test_visual_round_outline.py`.
+**Alternatives rejected:** stretching only the old pill leaves two disconnected
+cards and an unexplained status dot; a wrapper around both disclosures would
+replace keyed streaming nodes and reader state; removing reasoning entirely
+would discard provider-authored evidence. Vertical spacing still separates
+reasoning paragraphs. Executable geometry and independent-disclosure specs:
+`tests/visual/test_visual_grouped_turn_layout.py`; icon identity and automatic
+fold behavior: `renderers/text-blocks.test.ts`.
+
+Failures and warnings share one issue grammar (`23-reading-activity.css`): a
+tinted wash with a severity rule hung into the leading gutter, so the row text
+keeps its column and width. Single activity rows, retry/failure storms and the
+terminal receipt use it; compaction keeps its own receipt. A failure goes
+**below** the call it followed: it is that step's outcome, so the reader meets
+the attempt first. Events that block a call before dispatch are anchored ahead
+of it by the existing activity anchors, which this layout does not change.
+Translation attribution is one receipt per Turn, on its answer (or input),
+never repeated under each narration paragraph.
+
+**Alternatives rejected:** a lighter-styled interleaved stream still alternates
+prose and rows every round; the Process popover hid narration behind the
+answer and duplicated paging; one panel per round re-creates the round noise;
+moving failures into a Turn-level summary loses where they happened; mirroring
+tool results into a second timeline forks lifecycle state. Executable
+specifications: `presentation/grouped-turn-layout.test.ts`,
+`ui/conversation-surface.test.ts`, `tests/visual/test_visual_grouped_turn_layout.py`
+and `tests/visual/test_visual_timeline_reading.py`.
+
+### Grouped reply windowing and live stability (2026-10-31)
+
+**Problem (owner report):** while a long reply streamed, the panel's rows
+suddenly lost their indent and the reasoning vanished, then reappeared. A live
+observer on the running app reproduced it: the Surface windowed the whole
+grouped list and followed its tail, so once a reply passed the viewport budget
+(about 22 entries) the head — reasoning and panel header — fell out of the
+window, rows styled relative to the header went flush-left, and remounted
+reasoning was recreated open while streaming. The window also flipped size as
+rounds crossed the compact-round rule, so the head blinked in and out. One
+window over the grouped order had a second defect: prose sorts last, so a long
+reply's narration could crowd every call out of the tail.
+
+**Decision:** `entryRegions` (`presentation/grouped-turn-layout.ts`) names a
+grouped reply's two windowable regions — its calls, and its prose closed by
+the trailing receipts — and the engine windows each on its own key (the
+presentation id for calls, a `\0prose` sibling for prose), following each
+region's live tail. The head before every region (context, reasoning, the
+panel header) is always mounted, so it never blinks and keeps its DOM node.
+Receipts and live status window with the prose: a following reader sees them
+at the tail, and a Turn scrolled away from does not keep them mounted. Scroll
+residency measures each region's own nodes (`data-block-region`), so pinned
+entries never skew its geometry. The calls region announces its hidden calls
+in place, inside the card, with a visible row (`data-region-boundary`, design
+port `toolPanelBoundary`): "N earlier tool calls hidden — click to expand".
+
+**Calls page only on click (owner report 2026-11-02).** Problem: an opened
+oversized panel started at its first call, and scroll residency also applied
+to the calls region, so scrolling silently mounted later calls under a row that
+promised a click and retired the calls above — rows flickered, the top
+vanished, and the newest calls were the hardest to reach. Decision: an opened
+panel starts at its newest calls (the same tail window a following reader
+sees). Scroll residency skips the calls region; only its in-card rows page it.
+A row click grows the mounted range at its own edge and keeps the calls
+already shown, until the hard per-Turn cap (`maxBlocksPerTurn`) forces the far
+edge to page, which its own row then announces. A range at the tail, opened
+there or grown to it, keeps the calls appended later whether or not the reader
+follows the transcript (owner report 2026-11-03: the follow latch drops on any
+upward nudge or while a conversation opens, and a range frozen at that moment
+put the newest calls behind a "N newer tool calls" row nobody clicked, until a
+later frame arrived while following). Appended calls and a smaller viewport
+budget only widen such a range, up to `maxBlocksPerTurn`, which then retires
+its oldest calls; only a row click or a search jump leaves newer calls behind
+the later row. Hardening the follow latch alone was rejected: a reader reading
+calls above the tail still lost the newest ones. Alternatives rejected: relabeling the
+rows "scroll to load" keeps the flicker and the hidden top; virtualizing calls
+by geometry fights the rows' own disclosure heights; mounting every call
+breaks the bounded DOM contract. Specs: `ui/conversation-surface.test.ts` and
+`tests/visual/test_visual_grouped_turn_layout.py`. Prose and ungrouped Turns
+keep scroll residency and the outer keyboard-fallback boundaries, so reading
+never meets a visible paging row. The merged reasoning disclosure re-enters
+its active state every round, so it auto-collapses only after an automatic
+opening; a reader's own toggle stays put.
+
+**Alternatives rejected:** keeping one window and only fixing the indent CSS
+leaves the head blinking and lets prose crowd out the calls; a chronological
+window displayed in grouped order breaks residency, whose geometry assumes a
+region's nodes are monotonic on screen; windowing only the calls leaves a long
+reply's narration unbounded; merging narration into one block re-renders all
+of it on every stream delta and loses per-paragraph identity, copy and
+translation. Specifications: `ui/conversation-surface.test.ts` (37 live frames
+keep the same reasoning and header nodes; each region stays bounded with its
+tail visible), `presentation/grouped-turn-layout.test.ts` and
+`renderers/text-blocks.test.ts`.
+
+A region's window is bounded by the viewport budget (plus the existing
+small-overflow slack), so a grouped reply mounts at most its two region
+windows plus its pinned head; an open tool panel counts its calls and events
+as entries, not model rounds. A tail cap may not hide fewer than four leading
+blocks. Oversized rounds may span bounded windows without hiding the tail or
+stalling navigation.
+Executable specs: `tests/frontend/test_frontend_round_outline.py`, Surface
+contracts and `tests/visual/test_visual_round_outline.py`.
 
 Tool SVG icon slots are transparent, without background tiles or shadow halos,
 including live process groups and reopened historical inspectors. Marker geometry,
@@ -307,11 +562,106 @@ Conversation disposal retires listeners and fences already-delivered frames.
 `conversation-surface-controller.test.ts` under `frontend/src/conversation/`
 exercise these boundaries; shipped-button visual tests exercise the real bridge.
 
+**Opening a conversation keeps the followed tail still.** Problem (2026-11-02
+owner report): reading a just-opened conversation's final answer, the page
+jumped once as if the content above moved, and a short final answer could
+vanish and reappear. The commit pinned the tail, then `afterConversationCommit`
+rendered the composer's model notice in the same frame, shrinking the pane; the
+only correction was the next frame's write, so one painted frame clipped the
+tail (29 px for a one-line notice, 77 px for a fallback notice). Selection had
+also cleared the notice, collapsing the composer for the whole cold load, and
+the project strip above the pane reappeared after its reads with no correction
+at all. Decision: the viewport port observes its own box and re-pins a
+followed tail when the pane resizes for any reason; observations arrive after
+layout and before paint, and the pin records the offset a growing pane clamps,
+so that clamp is not taken for reader intent. When script has read layout
+first, the clamp's scroll event precedes the observation; an upward offset
+change that leaves a followed viewport at its physical bottom therefore keeps
+following, because no upward reader movement ends there. The same layout pass
+can also shrink the pane (a narrower window reflows the transcript shorter while
+the strip above it grows), leaving the clamped offset above the new bottom; an
+upward change in a scroll whose pane height differs from the last observation
+keeps following too, because a reader's movement never changes the pane. A
+suspended reader is left in place. Selection holds the outgoing notice's box, not its facts
+(`holdComposerModelNotice`); the first hydrated commit renders the new notice,
+while a cold conversation's pre-snapshot commit leaves the hold alone and a
+failed load releases it. The strip's same-project behavior is recorded in
+`docs/PROJECT_COORDINATION.md`. Alternatives rejected: rendering the notice
+before the Surface commit fixes one caller and leaves every other pane resize
+(strip, typing, window) unpinned; reserving composer height is a tuned
+constant that differs per notice. Specs: `conversation-viewport.test.ts`,
+`composer-model-notice.test.ts`, `tests/conversation_composer_switch.test.cjs`
+and `tests/visual/test_visual_conversation_open_stability.py`, which samples
+every painted frame of cold and warm opens and of a strip mounted above the pane.
+
 Measured in real Chromium at a 700px viewport: a 450-block live/fallback stream retained
 22 mounted blocks through four earlier batches; a 300-Turn conversation
 retained 10 mounted Turns. The tracked reading item shifted at most 0.313px
-in the desktop fixtures. Scroll demand adds one pending animation frame, no
-polling timer or independent history transport.
+in the desktop fixtures. Scroll demand keeps at most one pending animation
+frame, no polling timer or independent history transport.
+
+### Geometric residency
+
+**Problem:** history mounted only once the reader reached the mounted edge, and
+the residency set was a fixed Turn count sized from a 160px-per-Turn estimate.
+At the top edge the scroll offset is 0, where Chrome disables native scroll
+anchoring; the programmatic correction that held the reader there cancelled
+smooth/momentum scrolling and clamped the gesture. Reading upward through all
+history in real Chromium took 26 such corrections (61,544px in total) for 160
+mixed Turns at 1180px and 73 (71,539px) for 300 one-line Turns at 390px. The
+sliding count window also retired Turns and block ranges by count rather than
+position, so nothing kept retired content out of view, and residual ~1px
+corrections after native anchoring cancelled smooth scrolling on later shifts.
+**Decision:** scroll demand measures the mounted range
+(`planResidentRange` in `surface-windowing.ts`). While less than 1.5 viewports
+(plus twice the reader's last per-frame travel, at most four viewports) of
+rendered content remain ahead, it mounts the Turns (or live/failed/fallback
+blocks) estimated from the mounted average to refill one further viewport,
+re-measures once to top up a short estimate, and stays within one paging batch
+per frame; a gesture keeps refilling for a bounded number of frames. A reader
+gesture toward earlier content requests the next remote page while less than twelve
+viewports of loaded content (mounted Turns above the reader plus loaded Turns not
+yet mounted, at their mean height) remain above, so the round trip overlaps
+reading them ([history read-ahead](contracts/CONVERSATION_SYNC_V3.md)). It retires only content
+entirely beyond three viewports, and only together with growth or once content
+extends a viewport past that, so a steady reader commits about once per
+viewport. Passes without reader demand (after a render, jump or Latest) only
+retire; they never mount or fetch history. A tail window that residency
+retired keeps its start across later renders; only a window that was never
+retired fills newly loaded Turns up to the Turn budget. Re-expanding a retired
+tail on every render remounted and retired the same Turns each time (a
+captured coordinator switch committed 10 times after first paint, oscillating
+between 8 and 3 mounted Turns, each with a 30-40 ms forced layout). When a
+retained tail no longer mounts the prefetch distance above the viewport (a
+settled process folded away), that render refills the budget before paint.
+The Surface controller remembers that retired main-lane range (first and last
+Turn ID, at most 64 conversations, oldest evicted, dropped on conversation
+disposal) when a Surface is disposed; a revisit whose newest Turn is unchanged
+mounts that range on first render instead of the whole budget it would retire
+again right after paint (captured 42-Turn coordinator revisit: click to paint
+126 to 77 ms, longest task 110 to 53 ms). A different newest Turn or a range
+that no longer reaches the prefetch distance falls back to the budget. The cap (80 Turns across lanes, the block-per-Turn cap) never retires
+content within the prefetch distance; growth stops instead. Every mount
+therefore happens above or below the viewport at a non-zero offset, where
+native anchoring holds the reader inside the browser's own scroll animation;
+the viewport port writes a correction only when the browser did not move the
+viewport (offset 0, anchoring unsupported or suppressed) or left the reader
+more than half a viewport away. Explicit paging (focus-only fallback buttons,
+`showEarlier`/`showLater`, `revealTurn`, latest) keeps whole-range semantics.
+Without layout (no attached viewport or zero-size boxes) scroll demand is
+inert. **Alternatives rejected:** a larger fixed window still reaches its edge
+and still retires visible content for dense Turns; spacer-based virtualization
+needs height estimates for unmounted Turns and corrects the scrollbar as they
+resolve, the same jump class moved elsewhere; programmatic smooth correction
+conflicts with the reader's own scroll animation. Specs:
+`surface-windowing.test.ts`, `conversation-viewport.test.ts` and
+`tests/visual/test_visual_conversation_scroll_stability.py`, which reads a
+realistic 160-Turn transcript (1180px) and a 300 one-line-Turn transcript
+(390px) through every remote page with wheel and fling input and requires zero
+edge corrections, zero movement against the gesture, zero uneven movement and
+no visible block vanishing. Measured: zero programmatic scroll writes in every
+phase, at most 11-12 (mixed) and 18-23 (one-line) mounted Turns, and no long
+animation frame.
 
 ## Sent child-agent messages
 
@@ -366,6 +716,11 @@ identity/routing remains guarded by
 
 An empty composer restores the selected conversation's saved model and project; turn provenance is historical evidence, not a replacement settings source. Browser submissions carry the saved thinking depth, never the capability-derived `thinkingEnabled` display flag. Unknown or unsupported capability may hide a control but cannot turn a saved depth into an explicit off request; the server derives the legacy flag from the submitted depth. Draft protection counts sendable textarea content and pending attachments, not log-cleanup suggestions derived from an earlier paste. Those asynchronous suggestions can outlive the input and must not suppress both selection restores. The sidebar regression harness `tests/conversation_composer_switch.test.cjs` executes the retained pointer handler, lifecycle and restore adapters for warm and cold opens, and verifies that real text/attachment drafts remain protected.
 
+## Coordinator-started sidebar groups
+
+Each Coordinator’s `_coordinatorSource` children leave the owner’s ordinary date-group projection and appear in one collapsed-by-default, per-Coordinator group beneath that Coordinator’s entry. Empty shells and every historical status remain. The group totals and running/unread aggregates stay live while collapsed; expanded rows use ordinary conversation status/title presentation, a relative timestamp and direct navigation. Its independently scrolling body bounds layout, not history. Expansion persists per Coordinator in the browser. A real button exposes `aria-expanded` and visible keyboard focus; reduced motion removes chevron animation. Search results remain ordinary rows and identify Coordinator provenance. Origin is server-issued in the catalog or backfilled by the on-demand project roster from durable assignments, never title/ID inference. The global catalog never scans dispatch history. A Coordinator group discovers roster-only legacy members while it is shown, and a transient roster failure retries on the next refresh. Any successful catalog load, including a background 304 refresh, clears the boot catalog warning; recovery is not owned only by the initial retry loop.
+
+## Sidebar background activity
 ## Sidebar background activity
 
 The sidebar and composer background chip project the same owner-scoped activity
@@ -386,7 +741,9 @@ poller, event stream, or durable browser state is introduced.
 
 ## Per-turn context rail geometry
 
-**Problem:** user and assistant turns can both carry context; stopping only at next-round user input lets their absolute-positioned cards paint over each other. **Decision:** each card's travel and scrollable height end at the first next visible railed sibling or human-input sibling in its lane, or the content tail. Hidden/empty cards do not reserve space. Measure intrinsic height and unshifted host positions each pass so a previous cap cannot feed back into the next one. A track too small even for padding is nonpainting, not unbounded, and recovers when space returns; narrow panes still use the inline context disclosure. Structure/hidden-state mutations and pane resizing share the frame-coalesced follower, including absolute cards inserted without changing transcript height. **Alternatives rejected:** deleting assistant context loses valid provenance; changing z-index merely obscures overlapping facts; a next-rail-only boundary would let a card trespass into a new round with no rail. `tests/turn_lifecycle/test_turn_ctx_rail_overlap.py` covers same-round cards, scroll handoff, dynamic insertion, zero-space recovery, and narrow/wide changes.
+**Problem:** user and assistant turns can both carry context; stopping only at next-round user input lets their absolute-positioned cards paint over each other. Separately, server-created inputs (proactive/background-command wakes, peer messages) persisted without a context snapshot, and a snapshot-less human input also ended the preceding card, so whole rounds showed an empty gutter and the card seemed to follow only from the next user message. **Decision:** each rail's track, and so its card's travel and height, ends at the host of the first next visible railed sibling in its lane, or the transcript's end. Every new input records its own snapshot (`create_turn_pair` derives one from the accepted config when no browser captured it; see `docs/contracts/CONVERSATION_SYNC_V3.md`), regardless of human or agent authorship, so each round normally opens its own card. An input without one now exists only in history; it is not a boundary, so the preceding card keeps its seat beside that round, and when it is the latest input that covering card also hosts the background-agent section. Hidden/empty cards do not reserve space. Track lengths are differences of host positions, never derived from a card or the scroll height, so a previous pass cannot feed back into the next one. A track too small even for padding is nonpainting, not unbounded, and recovers when space returns; narrow panes still use the inline context disclosure. Structure/hidden-state mutations and pane resizing share the frame-coalesced track pass, including absolute cards inserted without changing transcript height. **Alternatives rejected:** deleting assistant context loses valid provenance; changing z-index merely obscures overlapping facts; ending a card at every human input (the previous rule) leaves snapshot-less rounds with an empty, unfollowing gutter, and once new inputs always record context the trespass it prevented can only reach legacy rounds, where continuity is worth more than a blank column; backfilling legacy inputs with a reconstructed snapshot would rewrite historical evidence. `tests/turn_lifecycle/test_turn_ctx_rail_overlap.py` covers same-round cards, scroll handoff, dynamic insertion, zero-space recovery, and narrow/wide changes; `tests/visual/test_visual_context_rail_follow.py` covers travel beside a snapshot-less round and the yield at the next railed round.
+
+**Problem:** a script follower translated each card from a scroll listener and sized it to the free track below it. The translation landed a frame or more after the compositor had already scrolled the transcript (more while a stream kept the main thread busy), so the card jittered and trailed the reading; and the free track of the running round reached the transcript's end, so a card taller than the pane hung below its edge, unreachable until the reader scrolled to the round's end, where its head was cut off instead (2026-11-01 owner report). **Decision:** the rail root (`.turn-ctx`) is an out-of-flow track that `info-rail.js` stretches from its host to the next railed host, never past the transcript's in-flow end (or the pane's bottom while the transcript is shorter); the host's layout containment also keeps the track out of the scroll range. A Surface-owned card part (`.tctx-card`) inside it is `position: sticky`: the browser pins it under the pane's top edge and pushes it out at the next railed host in the same frame as the reader's scroll. The track is a flex column, so the card shrinks into a shorter track, and its max-height is the pane height (`--tctx-pane-h`) minus twice the pin gap, which bounds it from its first frame. Once pinned, every fact is in view or one scroll of the card away; at either end of the card's own scroll, the wheel moves on to the transcript, and a wheel over the card never suspends tail-follow. The background-agent section mounts in the card. Resizes (streaming growth, the pane) re-measure the tracks before the frame paints, so a followed stream never pushes the last card off its pin; structure changes take a pass coalesced to the next frame; nothing runs on scroll. **Alternatives rejected:** keeping the follower and capping its height to the pane fixes reach but not the lag; regrouping the transcript into per-round containers would let sticky work without a measured track but rewires Surface lanes, residency and branch rendering for one presentation concern; scroll-driven animations need the same measured lengths plus timeline support in every engine; a card emitted by the rail markup would leave the agent section outside it or remove it on every context re-render. `tests/turn_lifecycle/test_turn_ctx_rail_sticky.py` covers same-frame pinning, handoff, host containment and fold parking; `tests/visual/test_visual_context_rail_follow.py` covers a card taller than the pane mid-round, at the tail and in every frame of a followed stream; `surface-design.test.ts` pins the track › card › content anatomy and `conversation-viewport.test.ts` the card's wheel.
 
 ## System interventions
 
@@ -422,17 +779,39 @@ another drift when a new context capability is registered.
 
 **One context/provenance owner:** `context-provenance.ts` runs after grouping. A unique matching witness owns passive acquisition metadata (memory selection, applied My Context, tool discovery, path relocation). Unmatched/failed/skipped metadata remains visibly separate from injected text inside the leading context disclosure; provenance-only historical Turns use the same native context disclosure. Multiple matching retry witnesses are not guessed. Memory selection success is not provider delivery or model consumption. Pending MCP login approval and pending preference acceptance remain actionable outside the fold. The old external `turn-prov` / `tp-segs` strip is no longer rendered. Payloads, item bodies/order and stored counts are unchanged. Live equality includes reason/action/scope and acquisition fields; repaint preserves the native disclosure's open state. **Rejected alternative:** simply hiding the strip loses failure and provenance-only evidence; retaining both owners repeats the same fact in two places. Executable evidence: `tests/frontend/test_context_provenance_integration.py`, provenance status and escaping tests, and the Chromium grouping test below.
 
-For a long session-start tail, the collapsed summary shows one muted localized
-"Context notes" title and the count, without a redundant action badge;
-expanding keeps each
-member's reason, action and escaped verbatim text in arrival order. The
-summary and member reason chips wrap on narrow screens rather than forcing
-horizontal overflow. A previously opened browser tab may still run an older
-hashed frontend asset until reload; the current asset preserves this rule.
-The Chromium regression in `tests/visual/test_visual_context_note_grouping.py`
-checks both render paths at desktop and phone widths. We keep adjacent-only
-render grouping instead of dropping notes or coalescing wire records, because
-intervention provenance and exact replay order must remain available.
+**Context rows (owner decision 2026-11-01).** Problem: every member card
+repeated the fold's own meaning three times (an "injected context" title, a
+raw reason chip such as `skills_index`, a "context appended" badge) above a
+boxed monospace dump whose first line restated the chip (`<available_skills>`),
+so a three-note stack read as a wall of chrome. Decision: the collapsed
+summary is the muted "Context notes" title, then the members' registry labels
+in arrival order (ellipsized on one line), then the count. Expanded, one index
+card lists one row per member: a glyph sticker tinted by the block's registry
+authority, the localized label (`NotePresentation`, raw id kept as the title
+tooltip), a quiet size (lines, or a paired fact's count) and a one-line
+glimpse. A rule-file note (`project_scoped_rules`) glimpses its `Source:`
+path, clipped from its start so the file stays visible: every rule file's
+first line is the same `Project Intelligence — AGENTS.md` title, and a
+root-relative path would need workspace roots the renderers do not receive.
+A single-line note shows its whole text in the row; a multi-line
+note opens in place onto its escaped verbatim bytes, where whole-line wrapper
+tags are quieted and Markdown headings emphasised by wrapping, never by
+rewriting. A paired acquisition fact (memory selection) supplies the glimpse
+and opens onto its sentence and list; unmatched receipts sit apart on a dashed
+card above. Rows keep the reader's open state across live growth; a lone
+context note keeps the same summary with its row already open. Both render
+paths share `presentation/context-note-presentation.ts`; interventions keep
+their own title, reason chip and action badge. **Rejected alternatives:**
+hiding the duplicate chrome with CSS (the raw id and kind title stay the only
+label); stripping the wrapper tags (the body would stop being the wire text);
+a per-reason label map in the frontend (the registry already owns the
+vocabulary and a whitelist drifts). A previously opened browser tab may
+still run an older hashed frontend asset until reload; the current asset
+preserves this rule. The Chromium regression in
+`tests/visual/test_visual_context_note_grouping.py` checks both render paths
+at desktop and phone widths. We keep adjacent-only render grouping instead of
+dropping notes or coalescing wire records, because intervention provenance and
+exact replay order must remain available.
 
 **Injection disclosure visibility.** The same native `<details>` chrome is
 used by human mid-turn steer, peer, swarm inbox, background-command and stall
@@ -455,6 +834,52 @@ operator messages are not coalesced by equal text or round. An unconsumed
 steer at turn end instead follows the durable queue fallback as a new input
 Turn; that is delivery, not a second rendered confirmation. Blind text-based
 cross-Turn hiding would suppress legitimate retries and is forbidden.
+
+### Vetoed answers have one owner
+
+**Problem:** a continuation lane (intent-stall nudge, commentary continuation,
+output contract) vetoes a prose-only stop and re-drives the model. The vetoed
+answer is snapshotted as continuation prose because its round owns no tool
+batch, but the intent-stall lane also left the same bytes in the live text, the
+terminal deliverable. When the re-driven round answered in prose only, the
+reply showed the answer twice: as process prose above the answer and again
+inside it (2026-11-02, conv `mvyttf2hwfzppy`). The intervention note also
+rendered above the vetoed answer when that round had reasoning, because only
+its text half was stepped past.
+
+**Decision:** each vetoed channel has exactly one owner at a time.
+`record_continuation_prose` marks a channel *held* while the live text still
+ends with its bytes; the live text, and so the terminal deliverable, owns them.
+`reset_task_text` is the only replacement of live text, and in the same
+critical section it releases every hold whose prefix the replacement drops: a
+later tool round's pre-tool discard, a retry reset, a superseding lane. A
+rollback to the round base preserves the prefix and keeps the hold. After a
+release it refreshes the segment mirror before the caller's structural
+`delta_reset`, so the live projection that empties the answer already shows
+the released prose instead of a stale terminal block.
+`assemble_segments` reads the live text and holds atomically and renders only
+released channels, as non-deliverable prose at the vetoed round, followed by
+the note that re-drove it. Each lane states its owner explicitly. The
+intent-stall nudge keeps the vetoed answer provisional: a prose-only follow-up,
+often only an end-turn declaration, still delivers it. The re-driven message
+starts on a new paragraph, streamed as one delta so the live view matches the
+accumulated text. Commentary is intermediate work and an invalid structured
+answer is replaced, so both leave the live answer at the veto and render once
+as process prose. Wire messages and replay are unchanged.
+
+**Alternatives rejected:** resetting the live text in every lane loses the
+answer when the follow-up is only `[END_TURN: done]`, and turns an addendum
+into the whole reply. Byte or substring matching of the snapshot against the
+final text breaks when finalization strips the end-turn token or collapses
+blank lines, and it misfires when a later answer repeats earlier wording.
+Keying on "a later round called tools" ignores the other resets.
+
+**Verification:** `tests/tasks_pkg/test_vetoed_answer_ownership.py` (record,
+discard, round-base rollback, the live `delta_reset` projection, both analyser
+lanes, and the real root loop with scripted provider bytes for prose-only and
+tool follow-ups) and
+`TestInjectedNotes` in `tests/tasks_pkg/test_segment_model.py`.
+
 ## Authority
 
 The browser renders an immutable projection of the v3 turn snapshot:
@@ -466,6 +891,18 @@ Storage Sidecar turn rows
   -> applyTurnStateProjection
   -> renderTurnStateInto
 ```
+
+A terminal Store revision may precede its DOM commit; scheduling is not rendering
+or perception evidence. The Surface controller retains the newest accepted graph
+through a failed commit and permits one immediate repair per conversation-local
+failure streak. Scheduled paints, explicit navigation and disclosure flushes use
+the same owner. Pending demand is acknowledged only after the DOM and required
+commit callbacks succeed; pending, failed and detached surfaces do not claim
+synchronization. Subsequent canonical/health/UI demand can retry a persistent
+failure without inventing content or adding reads. Conversation disposal resets
+the retry budget and fences late callbacks. A single fallback timer prevents
+withheld RAF callbacks from stranding DOM work; cancellation failure cannot skip
+or duplicate a commit. Actual visible paint evidence remains frame-only.
 
 There is no conversation-sized mutable `messages[]` authority and no task-SSE
 fallback. Retained JavaScript may adapt the typed runtime to existing UI
@@ -494,6 +931,19 @@ The implementation owners are:
 | Human Guidance delegated response lifecycle | `frontend/src/conversation/ui/human-guidance-actions.ts` |
 | image/external-asset source allowlist | `frontend/src/conversation/presentation/image-source-policy.ts` |
 | composition | `frontend/src/core/turn-runtime.ts` |
+
+Problem: tool-card presenters and Human Guidance actions duplicated payload
+record checks, guarded property reads and scalar conversion. Decision:
+`conversation/presentation/tool-payload-values.ts` owns these pure primitives.
+Arrays cannot masquerade as records, inherited fields remain readable, and
+throwing property access yields absent metadata. Guidance and injection text
+accept only strings/numbers/booleans/bigints; approval keeps its existing guarded
+object conversion. Preview bounds, freezing and all action authority stay in
+their existing owners. A universal object-to-text converter was rejected because
+it would invoke untrusted coercion hooks in previously scalar-only lanes.
+`tool-payload-boundary.test.ts` specifies these differences through the public
+presenters; the approval, injection and Human Guidance suites cover markup and
+response behavior. Sharing adds no scans, requests, caches or timers.
 
 While a foreground `run_command` or `code_exec` is running, its card presents
 independent **Interrupt** (stop only that process; return partial output) and
@@ -560,6 +1010,12 @@ in [CONVERSATION_SYNC_V3.md](contracts/CONVERSATION_SYNC_V3.md#background-comman
   DOM key.
 - `laneId` plus `ordinal` defines order. Array position and legacy message
   indexes are not identities.
+- A transient or swarm presentation overlay whose Turn is absent from the
+  loaded durable lane may only extend that lane: it is composed only when its
+  ordinal is beyond the durable tail. A copy of history evicted by a
+  byte-bounded tail snapshot is withheld until that page reloads, because
+  appending it would render older history below the live Turn
+  (`transient-turn-overlay.test.ts`).
 - A renderer node carries `data-turn-id`. Reconciliation reuses that node for
   newer projection revisions and removes nodes absent from an authoritative
   full snapshot.
@@ -572,12 +1028,36 @@ in [CONVERSATION_SYNC_V3.md](contracts/CONVERSATION_SYNC_V3.md#background-comman
   durable history. `test_surface_tail_window_keeps_retained_turns_in_place`
   verifies this mutation budget alongside the existing history/scroll tests.
 
-- Conversation-bar jumps call the Surface `revealTurn` operation before DOM
-  scrolling. Loaded-but-unmounted targets move the existing bounded window,
-  never build a second transcript or unbounded DOM. Explicit navigation cancels
-  pending follow-to-bottom work; `followLatest` first returns to the tail window.
-  The controller flushes a pending state before reveal and rejects inactive
-  conversation IDs. History loading stays with the v3 coordinator.
+- Conversation-bar jumps call the Surface `revealTurn` operation to mount and
+  align the selected Turn through the existing viewport owner. Loaded-but-unmounted
+  targets move the bounded window, never build a second transcript or unbounded
+  DOM. The controller flushes pending state and rejects inactive conversation IDs;
+  history hydration stays with the v3 coordinator. Exact jumps invalidate queued
+  scroll-history demand and synchronize its geometry baseline. Alignment is instant
+  with one lifecycle-fenced next-layout correction; another jump, reader gesture,
+  Latest, unmount or disposal retires that correction. `followLatest` first returns
+  to the logical tail window. A single downward scrollbar move to that logical
+  tail cancels the correction and rearms follow; an unmounted physical tail cannot.
+  Retained convergence retries also carry jump/view generations, so a newer
+  successful click or an A–B–A switch cannot revive an older request.
+
+  Alignment respects the native scroll area's end: a short final Turn remains
+  visible at the closest reachable position. An independent Chromium test
+  compares the viewport owner with native `scrollIntoView(block: 'start')`.
+  An unconditional zero-offset assertion incorrectly rejected that physical
+  boundary; the streaming journey now checks the reachable position and target
+  visibility with the same 2px tolerance. Raising the tolerance would hide real
+  drift, and adding empty transcript padding would change the product to satisfy
+  a test. Neither is required by the viewport's alignment contract.
+
+  **Problem:** native smooth scrolling raced instant anchor restoration, and even
+  a zero-pixel `scrollTop` write cancelled the jump partway through. **Decision:**
+  one viewport owns both navigation and anchoring; unchanged geometry performs no
+  anchor write. **Rejected:** retrying the independent smooth animator retains two
+  competing authorities, while disabling lazy history or anchoring breaks bounded
+  reading. Specs: `conversation-viewport.test.ts`, `conversation-surface.test.ts`
+  and `tests/visual/test_visual_turn_jump_scroll.py` verify target geometry,
+  detached hydration, replay, repeated jumps, reader interruption and bounded DOM.
 
 Goal phases use the same keyed Turn projection as ordinary chat. Producer task
 identity and persisted `inspectorRef = {taskId, roundNum, turn}` survive live
@@ -770,7 +1250,7 @@ Multimedia tool receipts are composed by `conversation/ui/motion-card/index.ts`;
 Accepted producer receipts delegate to `conversation/ui/work-unit/`. Problem:
 collapsing a completed tool call concealed the still-running work and its human
 review. Decision: explicit `workUnitRef` metadata keeps a persistent card outside
-both historical Process and model-round disclosures; generic tools retain their
+both the tool panel and model-round disclosures; generic tools retain their
 existing attention policy. The card shows current activity, visible outline or
 storyboard review, partial previews, then published artifacts and scoped revision
 actions. Process/request details stay collapsed. Status comes only from server
@@ -853,16 +1333,14 @@ The demand-loaded slide editor now has one TypeScript session authority under `f
   CSS-only restyle (retains ambiguous semantics) and rebuilding the transcript
   from activity events (a bounded diagnostic mirror cannot own chronology).
 - Round headings show tool count and returned/active/background/attention
-  state in text, not color alone. Completed routine history starts folded;
-  active work, any unresolved background result, failed results, and important
-  or unknown tool semantics stay exposed by default. Background dispatch does
-  not mean command completion. User disclosure choices override later defaults
-  for the mounted section. Expand all, collapse completed, and latest activity
-  operate on the current mounted block window; they neither load older pages
-  nor mutate execution. Native buttons, heading structure, `aria-expanded`,
+  state in text, not color alone. Background dispatch does not mean command
+  completion. Round controls operate on the current mounted block window; they
+  neither load older pages nor mutate execution. Native buttons, heading structure, `aria-expanded`,
   `aria-controls`, and a visible focus ring support keyboard/screen-reader use.
-- Final/terminal answer text, system notes, and diagnostic activity blocks are
-  never hidden inside process disclosures. Missing round metadata remains
+- Final/terminal answer text is never hidden inside a disclosure. System notes
+  and diagnostic activity blocks are never folded by round controls; in a
+  grouped reply they keep their place inside the tool panel, whose header
+  counts the failures among them. Missing round metadata remains
   visible and ungrouped, rather than borrowing a nearby diagnostic round.
   Changing turn lifecycle also refreshes outline defaults when the block array
   is reused. Stable leaf/header keys preserve reader state across cloned
@@ -907,7 +1385,7 @@ The demand-loaded slide editor now has one TypeScript session authority under `f
   receipt and activity timeline; a later successful recovery is a separate
   tool occurrence and cannot rewrite the failed attempt.
 - Tool receipts have audience-specific projections. Before explicit durable compaction, the exact backend result remains model-context and debug authority; afterward the honest placeholder plus its receipt is authoritative. Protocol repair text is not automatically browser copy. `todo_write` supplies a complete flat snapshot (`todos` with content/status, plus optional `explanation`); the browser renders structured result metadata in both retained and turn-native paths. Replacement may remove old items or start new pending work after completion. Progress and escaped `todoExplanation` need no item IDs, revision or nesting fields; explanations occupy the expanded body, outside the horizontal header. Explicit `todoRejected` / `todoNoop` metadata distinguishes “Update rejected” from valid “Checklist unchanged” no-ops in the collapsed label; accepted changes retain their checklist progress label. Every audit round remains visible, while update counts/history include accepted snapshots only, identified by `todoUpdateCount` or round identity. Historical revision identity, operations and breadcrumbs remain readable when explicitly present; new snapshots do not imply `sync` or show revision/nesting instructions. Historical rejections never become successful updates or replace accepted state. Their expanded card preserves the full refusal reason as escaped text; result prose never overrides an explicit verdict.
-- Conversation-scoped swarm push is presentation telemetry: agent phases and bounded tool history rebase onto the latest authoritative Turn on every Surface render, never replacing it or hiding newer parent revisions. Terminal presentation hydrates authority before releasing the overlay. An unsettled roster is resolved before fencing history: a settled sibling with the same session/task ID cannot veto it. Bare/full-v2/sparse receipts share snapshot ownership and select the rich panel without live-only flags; launch failures select error panels, never invented rosters. Session status filters to the launch roster; session identity never overwrites task/attempt identity, and unknown late launches cannot reopen settled or overlay-ended history while hydration is pending. Across eligible Turns, Absent launches require the current live producing attempt; retained unsettled receipts permit detached recovery. Missing run evidence stays unbound, never an execution-id conflict. Each `tool_use` binds rich data by exact `toolCallId` and ordered occurrence within scope (attempt ID, otherwise task ID; unscoped pairs only). Repeatable `llmRound` is only an id-less fallback unique in that scope. Snapshots retain complete final answers; reconstructible tool history keeps at most 30 rows and 32 KiB row/detail data per agent. Recent evidence wins; every elision is explicit in metadata and panel.
+- Conversation-scoped swarm push is presentation telemetry: agent phases and bounded tool history rebase onto the latest authoritative Turn on every Surface render, never replacing it or hiding newer parent revisions. Terminal presentation hydrates authority before releasing the overlay. An unsettled roster is resolved before fencing history: a settled sibling with the same session/task ID cannot veto it. Bare/full-v2/sparse receipts share snapshot ownership and select the rich panel without live-only flags; launch failures select error panels, never invented rosters. Session status filters to the launch roster; session identity never overwrites task/attempt identity, and unknown late launches cannot reopen settled or overlay-ended history while hydration is pending. Across eligible Turns, Absent launches require the current live producing attempt; retained unsettled receipts permit detached recovery. Missing run evidence stays unbound, never an execution-id conflict. Each `tool_use` binds rich data by exact `toolCallId` and ordered occurrence within scope (attempt ID, otherwise task ID; unscoped pairs only). Repeatable `llmRound` is only an id-less fallback unique in that scope. Snapshots retain complete final answers; reconstructible tool history keeps at most 30 rows and 32 KiB row/detail data per agent. In a terminal Turn's browser view a settled swarm's timelines also share one 128 KiB budget, divided evenly among agents (never above the per-agent ceiling), because the per-agent bound alone scaled with swarm width (13 agents sent 518 KiB per read); unsettled snapshots may still receive durable progress and keep the per-agent ceiling. Recent evidence wins; every elision is explicit in metadata and panel.
 - Unsettled cards merge durable/live evidence by agent ID; incomplete live rosters
   cannot hide recorded models, worker clocks or tool results. Empty placeholders
   cannot erase evidence; terminal tool/agent verdicts cannot regress to running.
@@ -926,6 +1404,81 @@ The demand-loaded slide editor now has one TypeScript session authority under `f
   fence nonterminal recovery replies racing newer live evidence; terminal evidence
   remains eligible. Rows explain capacity/dependency waits and share copyable
   `agent-<role>-<id>` log identity; transport uses the canonical spec ID.
+- **Swarm completion progress.** Problem: counting running agents filled the
+  bar before any child finished; a theme-only header divider duplicated the track.
+  Decision: the fill and the bar's accessible completion label
+  (`aria-valuenow`/`aria-label`) use the same roster fraction: successful,
+  failed and cancelled/aborted children count as finished, while running, waiting,
+  interrupted, stalled and unknown children do not. No percentage rounding may
+  turn an unfinished roster into a full bar. Error/cancellation color remains
+  distinct from success, with the success fraction relative to the finished
+  portion and both properties in one valid inline style. The header has no
+  separator competing with the progress track in any theme. Rejected: counting
+  admitted workers as completion or adding a second activity/progress line.
+  Specs: `tests/swarm_panel_authority.test.cjs` and
+  `tests/visual/test_visual_swarm_activity.py`.
+- **Parallel execution card (2026-11-01).** Problem (owner report): the card
+  stated one run fact up to five times (header counts, a running chip, the shared
+  row's generic "In progress" state, whose duplicate guard matched a nonexistent
+  `.sw-status` class, an "N/M agents finished" line and a footer task count),
+  showed three copies of the clock, put the raw `spawn_agents` identity mid-header,
+  nested four bordered boxes per agent and opened task instructions as an 11px
+  scroll box. Decision: one header line (glyph tile, localized title, quiet live
+  counts, ONE verdict, ONE clock) over a full-bleed completion line. The verdict
+  follows the tool rows' outcome grammar and `--tool-row-*` inks: accent text by a
+  spinner while live, a bare check on success, a chip only for failures and runs
+  needing attention (stale, unconfirmed, interrupted, stalled); its tone also
+  tints the glyph. Agents form a divided list (state glyph, ordinal, role, quiet
+  log ID and model, phase, clock). An open agent hangs from the conversation's
+  evidence spine and reads brief (its first line until opened) → earlier calls →
+  latest call → result; rows use the parent panel's tool glyphs (`toolRoundSvg`),
+  and bare tool names appear only without per-call records. Earlier tool history
+  scrolls vertically only, with no horizontal drag bar. The footer keeps
+  only usage totals. Identity stays in the title tooltip, the RoundOutline guard
+  matches `.sw-status-pill`, every swarm sheet is token-only (the Tofu-only
+  overrides are gone) and phones stack the title over its counts and move an
+  agent's IDs to a second line. Rejected: hiding the verdict while running (the
+  run's state must stay in one place across every transition) and lighter per-agent
+  cards (still nested boundaries inside the tool panel). Specs:
+  `tests/swarm_panel_authority.test.cjs`, `round-outline.test.ts` and
+  `tests/visual/test_visual_swarm_activity.py`.
+- **A parallel run is one call of the tool panel (2026-11-01).** Problem (owner
+  report): inside the grouped tool panel the swarm sheet kept its own frame, fill
+  and radius on top of the card's row band, and while the run was live the shared
+  running-row radius bent the card's sides around it: a box padded onto a box.
+  Its agent rows named one state two ways: the worker's forwarded chat-loop
+  phases (`tool_exec`, `waiting_model`, `llm_thinking`) reached the pill raw, and
+  the swarm's own `tool_use` read 调用工具中, whichever frame came last. And
+  `waiting_model` stayed up while the worker's model was already streaming,
+  because that phase has no closing frame and the card never sees child deltas.
+  Decision: rows inside an open panel never take a radius of their own (only the
+  panel's last row rounds the card). The run sheds the sheet and takes a call
+  row's columns: a plain glyph tinted by the run's tone in the glyph column, the
+  title on the intent edge, the verdict ending on the rows' outcome column, the
+  caret in the end lane, and the agents hanging from the title's edge. Free-
+  standing sheets (the agent dock, a receipt outside the panel) keep the sheet.
+  One label policy, `swarmAgentPhaseLabel`, names an agent's state for the card
+  and the Goal live line: terminal and waiting status outrank a stranded phase,
+  both vocabularies map to one localized word, `waiting_model`, `stream_stalled`
+  and `compacting` gain short words, and an unknown live phase reads as plain
+  work, never its raw value. The worker restates its card word on its first
+  reasoning or answer delta (`thinking` / `writing`), once per change. Rejected:
+  dropping the card band under a kept sheet (the card would close and reopen
+  around the run, leaving a header-less fragment); a lighter inner sheet (any
+  boundary inside the card reads as nesting); per-surface phase maps (the drift
+  behind the mismatch); the root status line's full sentences in a row pill; and
+  ending the wait on a browser timer (a guess, not evidence). Specs:
+  `tests/visual/test_visual_swarm_card_in_tool_panel.py` (three themes, desktop
+  and phone, live and settled), `swarm-agent-presentation.test.ts` and
+  `tests/swarm/test_swarm_card_phase_words.py`.
+- **A failing agent opens itself.** Problem: the card opens running and failed
+  agents by default, but rich-card reconciliation let that default win only on
+  the transition into running, so an agent mounted while it waited and then
+  failed kept its closed fold and hid the failure until clicked. Decision: the
+  presenter's fold also wins on the transition into failure (`failed` /
+  `error`) unless the reader already chose a fold, which otherwise survives
+  every push. Rejected: forcing failures open over a reader's choice (a closed
+  card is a decision). Spec: `tests/frontend/test_rich_card_reconciliation.py`.
 - The background-agent dock counts logical executions, not launch-record copies.
   With an explicit swarm run, identity includes Turn, attempt, run and agent, plus
   producer and worker execution tasks whenever known, so adding a sibling cannot
@@ -1065,7 +1618,7 @@ The demand-loaded slide editor now has one TypeScript session authority under `f
   localized and visible. Conversation titles, Markdown sanitization, icons,
   and translation cross explicit ports; retained code owns chronological
   placement and peer navigation only.
-- Human Guidance awaiting, expired, skipped, and submitted states share one immutable presentation projection. It bounds legacy JSON before parsing, scans/renders at most 16 options, limits identifiers/questions/labels/ descriptions to 512/32,768/1,024/8,192 code units, and visibly reports every elision or fail-closed identifier. A settled unanswered `ask_human` is read-only unless that Turn's settlement explicitly offers `answer_guidance` for the same guidance ID; that late-answer lane preserves the original choice cards instead of replacing them with a terminal receipt. Each interactive choice owns one optional 4,096-unit note draft. Live response IDs, option indexes, and original labels remain escaped datasets read by static delegated actions, never interpolated executable text. The typed action owner resolves only within the originating card, requires card/group/button/note identities and ordered option indexes to agree, rejects more than 16 DOM option groups, and transports only the selected label plus its selected note. It caps free text at 32,768 code units, admits one in-flight response per conversation/guidance identity, restores the exact choice state after rejection, distinguishes an expired 404 from transport failure, and owns teardown. Retained code owns EN-to-CN arrival translation only and receives presentation state through a lexical composition port.
+- Human Guidance awaiting, expired, skipped, and submitted states share one immutable presentation projection. It bounds legacy JSON before parsing, scans/renders at most 16 options, limits identifiers/questions/labels/ descriptions to 512/32,768/1,024/8,192 code units, and visibly reports every elision or fail-closed identifier. A settled unanswered `ask_human` is read-only unless that Turn's settlement explicitly offers `answer_guidance` for the same guidance ID; that late-answer lane preserves the original choice cards instead of replacing them with a terminal receipt. Each interactive choice owns one optional 4,096-unit note draft. Live response IDs, option indexes, and original labels remain escaped datasets read by static delegated actions, never interpolated executable text. The typed action owner resolves only within the originating card, requires card/group/button/note identities and ordered option indexes to agree, rejects more than 16 DOM option groups, and transports only the selected label plus its selected note. It caps free text at 32,768 code units, admits one in-flight response per conversation/guidance identity, restores the exact choice state after rejection, distinguishes an expired 404 from transport failure, and owns teardown. Retained code owns EN-to-CN arrival translation only and receives presentation state through a lexical composition port. A non-blocking `ask_human` round (`guidanceBlocking: false`, status `done`) keeps the same interactive card regardless of Turn status or settlement, marked `data-hg-reply="chat"` with a neutral badge, a hint and a 4,096-unit escaped question quote; its answer becomes an ordinary chat message carrying that quote as `replyQuotes`. Only a sent reply collapses the card into a read-only replied row through the presentation store's `_hgRepliedInChat` decoration, which never changes the round status. A blocking question bypassed by a chat message (`guidanceSuperseded`) renders a read-only superseded row.
 - Current hosted OpenAI and local program code uses JavaScript highlighting.
 - A `_programSynthetic` tool round is the display-only parent of native PTC or local JavaScript children. It intentionally owns no `tool_use` segment and never re-enters model context; the presentation selector materializes one keyed `program` block directly from the round, before its declared child calls. Childless parse failures still render the authored code, terminal status, and aggregate error before their activity diagnostic row. Settled results, including successful aggregates, start expanded before collapsed source. Local observations include their reason as “returned for model judgment”, without implying a paused task or failed tool. Hiding successful aggregates by default was rejected because it obscures the requested findings. `programStats` displays measured private child-delivery/result byte counts, requested call stages and truncation when available; old/native runs without measurements show no fabricated savings. The typed owner is `presentation/program-execution-presentation.ts`. All retained, classic and default surfaces render through `ui/program-execution-card.ts`; internal backend names are not user-facing labels. Evidence and code have separate keyed disclosures that preserve reader choices across updates.
 
@@ -1271,6 +1824,43 @@ Specifications: `turn-reasoning-mapping.test.ts`,
 `tests/llm/test_anthropic_reasoning_effort.py`, and
 `tests/tasks_pkg/test_round_usage_live_projection.py`.
 
+## Finish Tag request name
+
+**Problem:** the model tag was capped at 220px with `overflow:hidden`. Inside
+the Surface footer's `inline-flex` tag `text-overflow` draws no ellipsis, so a
+served request name such as `kunlunbedrock.claude-opus-5.5-m17` was silently
+cut to a plausible prefix (`…-5.5-m`). **Decision:** the tag shows the complete
+served request name plus its reasoning mapping. It is bounded only by the
+footer row and wraps inside the tag only when it alone is wider than the row.
+**Alternatives rejected:** an ellipsis still hides the distinguishing suffix
+behind a hover-only title; a larger fixed cap only moves the cut to the next
+longer name. Specification: `tests/visual/test_visual_finish_request_name.py`.
+
+## Finish Tag subscription quota attribution
+
+**Problem:** the subscription-quota group (`订阅 · 7 天余99% · … · 本轮 6.4m tok`)
+appeared whenever any API round carried `usage._subscription_quota`, and its
+token fact summed every round. A turn whose main model ran on a metered API key
+but whose internal compaction call ran on a ChatGPT subscription therefore
+presented the subscription as the turn's route and charged it the whole turn's
+tokens, although only the ~17k-token compaction call touched it.
+**Decision:** only rounds that returned a quota reading count. The token fact
+sums those rounds alone. When other token-bearing rounds returned no reading,
+the turn is mixed: the prefix names the reading sources (`订阅（内部压缩
+gpt-6-luna）`, served model per round, compaction calls marked), the token fact
+becomes `订阅调用 … tok`, and the tooltip opens with how many calls returned
+readings and how many did not. A turn served entirely by the subscription keeps
+the unattributed `订阅 · … · 本轮 … tok` form; zero-token failed rounds do not
+make a turn mixed. A reading kept only on the turn usage cannot be split by
+call and keeps the whole-turn total. Like the request name, a quota fact in
+the Surface footer wraps inside its tag only when it alone is wider than the
+row. **Alternatives rejected:** hiding the group for non-subscription main
+routes would conceal real subscription use by compaction; inferring routes
+from provider ids would misattribute relays and fallbacks, whereas a returned
+reading is direct evidence. Specifications:
+`tests/tasks_pkg/test_finish_quota_attribution.py` and
+`tests/visual/test_visual_finish_quota_attribution.py`.
+
 ## Native rich responses and published assets
 
 **Problem:** a generated file path in Markdown is not a browser URL; a local
@@ -1411,6 +2001,9 @@ prefixes, fragments, mail and ambiguous web-relative URLs retain their meaning.
 Historical responses are displayed safely without rewriting stored Turns.
 
 **Markdown image presentation:** Problem: a universal 3:2 reservation letterboxed screenshots, legacy thumbnail limits hid detail, and pointer styling promised a preview that plain Markdown images never dispatched. Decision: sanitized image projection marks admitted images for responsive natural-ratio sizing. Image-only paragraphs own one normal prose gap without an inline baseline or image margin; mixed prose and linked images retain their content/navigation. Unlinked raster images open the existing preview on click or Enter/Space through the scoped ConversationSurface, using the current allowlisted source, not model-supplied preview metadata. Keyboard listeners retire with the surface. The existing preview focuses its close control, contains Tab navigation, restores a connected trigger, and cancels delayed body cleanup on reopen. Explicit width and height attributes may reserve the real ratio; unknown dimensions are not guessed. No asset publication, permission, polling, observer or persistent state is added. Rejected: a permanent guessed ratio trades scroll stability for visible gutters; a second lightbox duplicates existing behavior; wrapping linked images in another action steals navigation. Specs: Markdown image unit tests and `tests/visual/test_visual_markdown_images.py`.
+Keyboard listeners retire with the surface. The existing preview focuses its close control, contains Tab navigation, restores a connected trigger, and cancels delayed body cleanup on reopen. Explicit width and height attributes may reserve the real ratio; unknown dimensions are not guessed. No asset publication, permission, polling, observer or persistent state is added. Rejected: a permanent guessed ratio trades scroll stability for visible gutters; a second lightbox duplicates existing behavior; wrapping linked images in another action steals navigation. Specs: Markdown image unit tests and `tests/visual/test_visual_markdown_images.py`.
+
+**Preview viewer geometry:** Problem: the overlay only capped `max-height`, so a tall page render was fitted DOWN below the size it already had in the message body — "enlarge" behaved like a zoom-out and 1:1 was unreachable. Decision: the preview body is a scroll container; an image opens at viewport width capped at 1:1 (taller bitmaps scroll), and the bitmap itself is a button that toggles to a whole-image overview. The close control is reused across opens so reopening never removes the focused node, and the zoom control joins the existing Tab trap. Rich-response figures reach the same viewer through an explicit `previewImage` port, because their bitmap is an internal object URL rather than a document source. Rejected: fitting the whole bitmap as the only mode (reintroduces the shrink), and scaling up past 1:1 (blurred evidence). Specs: `tests/visual/test_visual_markdown_images.py` and `tests/frontend/test_frontend_rich_image_preview.py`.
 
 Private image delivery is authenticated, `nosniff`, and `private, no-store`, so
 logout cannot replay a browser cache entry. The generic artifact raw route

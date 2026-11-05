@@ -83,7 +83,11 @@ class NativeToolProjection:
             inference_profile=metadata['inference_profile'])
         self._check()
         tools = body.get('tools') or []
-        if any(tool.get('type')!='function' or (tool.get('function') or {}).get('name') not in catalog for tool in tools):
+        from lib.tools.gateway import GATEWAY_TOOL_NAMES
+        if any(tool.get('type')!='function'
+               or ((tool.get('function') or {}).get('name') not in catalog
+                   and (tool.get('function') or {}).get('name') not in GATEWAY_TOOL_NAMES)
+               for tool in tools):
             raise ValueError('native wire projection requires declared function tools')
         return tools
 

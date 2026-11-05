@@ -127,7 +127,7 @@ def test_child_without_conversation_still_has_no_lossy_summary_recovery():
 @pytest.mark.parametrize('last_summary', ['complete', 'unavailable', 'oversized', 'cancelled'])
 def test_repeated_dispatch_compaction_preserves_continuity_and_rejected_source(
         monkeypatch, last_summary):
-    from lib.llm.llm_errors import ContextCompactionError
+    from lib.llm.llm_errors import AbortedError, ContextCompactionError
     from lib.tasks_pkg.compaction import _prompt_admission as admission
 
     task = owner('storage_free_child')
@@ -170,7 +170,8 @@ def test_repeated_dispatch_compaction_preserves_continuity_and_rejected_source(
             messages.extend(execution(index))
         source, latest_batch = deepcopy(messages), deepcopy(messages[-2:])
         if cycle == 3 and last_summary != 'complete':
-            with pytest.raises(ContextCompactionError):
+            expected_error = AbortedError if last_summary == 'cancelled' else ContextCompactionError
+            with pytest.raises(expected_error):
                 admission.enforce_dispatch_prompt_limit(
                     messages, [], task, round_num=(cycle + 1) * 12, model='gpt-6-astra')
             assert messages == source
@@ -223,7 +224,8 @@ def test_rejected_snapshot_pressure_does_not_modify_source(monkeypatch, rejectio
     render_context(messages, [context_block('project_scoped_rules', 'CURRENT ' * 5000)], ComposeRequest())
     original = deepcopy(messages)
     monkeypatch.setattr('lib.tasks_pkg.compaction._cache_economics._proactive_cache_economics',
-                        lambda *a, **k: {'cache_read_tokens': 50000, 'payback_rounds': 1000})
+                        lambda *a, **k: {'cache_read_tokens': 50000, 'warm_prefix_tokens': 50000,
+                                         'payback_rounds': 1000})
     if rejection == 'cancelled':
         task['aborted'] = True
     assert not try_pressure_l1(
@@ -233,8 +235,7 @@ def test_rejected_snapshot_pressure_does_not_modify_source(monkeypatch, rejectio
     assert messages == original
 
 
-@pytest.mark.parametrize('pressure', ['provider', 'memory'])
-def test_storage_free_child_reactive_failure_keeps_full_source(monkeypatch, pressure):
+def test_storage_free_child_reactive_failure_keeps_full_source(monkeypatch):
     from lib.tasks_pkg.compaction import _reactive as reactive
     task = owner('storage_free_child')
     messages = [{'role': 'system', 'content': 'Required policy'},
@@ -246,6 +247,5 @@ def test_storage_free_child_reactive_failure_keeps_full_source(monkeypatch, pres
     monkeypatch.setattr(reactive, '_archive_transcript', lambda *a, **k: None)
     monkeypatch.setattr(reactive, 'force_compact_if_needed', lambda *a, **k: False)
     assert not reactive.reactive_compact(
-        messages, task, error_text='prompt is too long: 200000 tokens',
-        byte_target=1024 if pressure == 'memory' else None)
+        messages, task, error_text='prompt is too long: 200000 tokens')
     assert messages == original

@@ -13,6 +13,7 @@ from lib.conversation_sync import validation
 from lib.conversation_sync.compiled_validation import compile_success_predicates
 from lib.conversation_sync.generated_contract import OPENAPI_SCHEMAS
 from lib.conversation_sync.validation import ContractViolation, decode
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -20,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_unicode_length_parity(tmp_path):
+    require_node_modules('vite')
     cases = []
     for text, valid in (
         ("x" * 1999 + "😀", True),

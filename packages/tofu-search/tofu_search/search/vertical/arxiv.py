@@ -3,9 +3,11 @@
 import re
 import time
 import xml.etree.ElementTree as ET
+from importlib import import_module
 
-from tofu_search.search.vertical import base
 from tofu_search.search.vertical.base import _HEADERS, _TIMEOUT, logger
+
+base = import_module('tofu_search.search.vertical.base')  # leaf, not via package: base.py
 
 TYPE = 'arxiv'
 DOMAIN = 'academic'

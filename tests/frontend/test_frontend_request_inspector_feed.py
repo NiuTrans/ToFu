@@ -28,14 +28,13 @@ Drives the REAL shipped debug_panel.js + request_inspector.js under jsdom:
      gaps (not expired), and a successful retry clears the warning.
   9. closeDebug hides the drawer.
 
-NEUTER: _riFeedDividerEl returns a bare div in a COPY → the divider
-probes flip red, proving the dividers are load-bearing.
+Typed feed ownership and exact divider behavior are also exercised through
+the real public entries in test_inspector_feed_owner.py.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -46,12 +45,6 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -262,7 +255,7 @@ const kinds = () => Array.from(document.getElementById('debugContent').children)
     document.getElementById('riTurnPrev').disabled === false &&
     document.getElementById('riTurnNext').disabled === true);
   FEED_SCROLLS.length = 0;
-  document.getElementById('riTurnPrev').onclick();
+  document.getElementById('riTurnPrev').click();
   await sleep(1);
   check('stepper_scrolls_and_flashes',
     FEED_SCROLLS.length === 1 &&
@@ -271,23 +264,23 @@ const kinds = () => Array.from(document.getElementById('debugContent').children)
     FEED_SCROLLS[0].classList.contains('ri-flash'));
   check('stepper_updates_readout',
     document.getElementById('riTurnReadout').textContent === 'Reply #1');
-  document.getElementById('riTurnPos').onclick();
+  document.getElementById('riTurnPos').click();
   await sleep(1);
   const jump = document.getElementById('riTurnJump');
   const rows = jump.querySelectorAll('.ri-turn-jump-row');
   check('jump_newest_first', rows.length === 2 &&
     rows[0].textContent.indexOf('q2') !== -1);
   FEED_SCROLLS.length = 0;
-  rows[0].onclick();
+  rows[0].click();
   await sleep(1);
   check('jump_scrolls', FEED_SCROLLS.length === 1 &&
     FEED_SCROLLS[0].dataset.turnId === 't2' && jump.hidden === true);
 
   /* ── 3. Locate chip scrolls the CHAT without moving the feed ── */
-  document.getElementById('riTurnPos').onclick();
+  document.getElementById('riTurnPos').click();
   await sleep(1);
   const chip = jump.querySelector('.ri-turn-jump-row .ri-turn-chip');
-  if (chip) chip.onclick({ stopPropagation: () => {} });
+  if (chip) chip.click();
   check('locate_scrolls_chat', CHAT_SCROLLS.length === 1 && CHAT_SCROLLS[0] === 't2');
   check('locate_keeps_readout',
     document.getElementById('riTurnReadout').textContent === 'Reply #2');
@@ -306,18 +299,30 @@ const kinds = () => Array.from(document.getElementById('debugContent').children)
 
   /* ── 5. Silent refresh preserves open blocks and appends live ── */
   const firstHeader = document.querySelector('#debugContent .debug-msg-header');
-  firstHeader.onclick();
+  firstHeader.click();
   check('block_opens', firstHeader.closest('.debug-msg-block')
     .classList.contains('open'));
+  const firstBlock = firstHeader.closest('.debug-msg-block');
+  firstBlock.querySelector('.debug-raw').open = true;
+  firstHeader.focus();
+  const selectedText = firstBlock.querySelector('.debug-text').firstChild;
+  const selection = win.getSelection();
+  selection.setBaseAndExtent(selectedText, 0, selectedText, selectedText.length);
   const grown = WIRE();
   grown.messages.push(U('q2-followup'));
   grown.sections = grown.sections.map((s) => Object.assign({}, s));
   nextWire = grown;
-  await _riLoadWire('conv-1', { silent: true });
+  await riRefreshTasks();
   check('silent_refresh_appends',
     document.querySelectorAll('#debugContent .debug-msg-block').length === 7);
   check('open_block_survives_refresh',
     !!document.querySelector('#debugContent .debug-msg-block.open'));
+  check('unchanged_message_node_survives_refresh',
+    document.querySelector('#debugContent .debug-msg-block') === firstBlock);
+  check('selected_evidence_survives_refresh', selection.toString() === 'q1');
+  check('nested_raw_disclosure_survives_refresh',
+    document.querySelector('#debugContent .debug-msg-block .debug-raw').open);
+  check('focused_header_survives_refresh', document.activeElement === firstHeader);
   nextWire = null;
 
   /* ── 6. Anchor lands on the producing turn (pending scroll) ── */
@@ -332,18 +337,18 @@ const kinds = () => Array.from(document.getElementById('debugContent').children)
   /* ── 7. Trace entry: renders in place, back bar returns, poll-safe ── */
   const traceBtn = document.querySelector('.ri-feed-turn[data-turn-id="t2"] .ri-feed-trace');
   check('trace_button_present', !!traceBtn);
-  if (traceBtn) traceBtn.onclick();
+  if (traceBtn) traceBtn.click();
   await sleep(15);
   check('trace_fetched', CALLS.traces.length === 1 && CALLS.traces[0] === 'task-2');
   check('trace_rendered',
     !!document.querySelector('#debugContent .tr-wrap'));
   check('back_bar_present',
     !!document.querySelector('#debugContent .ri-feed-back'));
-  await _riLoadWire('conv-1', { silent: true });
+  await riRefreshTasks();
   check('poll_keeps_trace',
     !!document.querySelector('#debugContent .tr-wrap'));
   const backBtn = document.querySelector('.ri-feed-back button');
-  if (backBtn) backBtn.onclick();
+  if (backBtn) backBtn.click();
   await sleep(1);
   check('back_restores_feed',
     document.querySelectorAll('#debugContent .ri-feed-turn').length === 2);
@@ -356,14 +361,14 @@ const kinds = () => Array.from(document.getElementById('debugContent').children)
     readError: true, coverage: 'partial', coverageReason: 'event-limit',
     eventReadBounds: [{ taskId: 'task-2', reason: 'event-limit', afterSequence: 9999 }] };
   win.Api.tasks.convWire = async () => { CALLS.convWire++; return partial; };
-  await _riLoadWire('conv-1', { silent: true });
+  await riRefreshTasks();
   check('partial_preserves_last_good',
     document.querySelectorAll('#debugContent .debug-msg-block').length === 6 &&
     document.querySelectorAll('#debugContent .ri-feed-turn').length === 2 &&
     !!document.querySelector('#debugContent .ri-warn-line .ri-retry') &&
     document.querySelector('#debugContent .ri-feed-truncated').textContent.includes('latest snapshot unconfirmed'));
   win.Api.tasks.convWire = async () => { CALLS.convWire++; return WIRE(); };
-  await _riLoadWire('conv-1', { silent: true });
+  await riRefreshTasks();
   check('partial_recovers_without_stale_warning',
     document.querySelectorAll('#debugContent .debug-msg-block').length === 6 &&
     !document.querySelector('#debugContent .ri-warn-line') &&
@@ -381,7 +386,7 @@ const kinds = () => Array.from(document.getElementById('debugContent').children)
     !document.querySelector('#debugContent .ri-feed-turn .ri-feed-turn-preview')
       .textContent.includes('expired'));
   win.Api.tasks.convWire = async () => { CALLS.convWire++; return WIRE(); };
-  await _riLoadWire('conv-1', { silent: false });
+  await riRefreshTasks();
 
   /* ── 8. Honest states: failure → retry; empty → empty note ── */
   closeRequestInspector();
@@ -393,55 +398,43 @@ const kinds = () => Array.from(document.getElementById('debugContent').children)
     !!document.querySelector('#debugContent .ri-retry'));
   win.Api.tasks.convWire = async () => { CALLS.convWire++;
     throw new Error('storage temporarily unavailable'); };
-  await _riLoadWire('conv-1', { silent: true });
+  await riRefreshTasks();
   check('throwing_fetch_stays_retryable',
     !!document.querySelector('#debugContent .ri-retry'));
   win.Api.tasks.convWire = async () => { CALLS.convWire++;
     return { convId: 'conv-1', messages: [null], sections: [], turns: [] }; };
-  await _riLoadWire('conv-1', { silent: true });
+  await riRefreshTasks();
   check('malformed_message_retry_without_crash',
     !!document.querySelector('#debugContent .ri-retry') &&
     document.getElementById('debugTitle').textContent.includes('Failed to load') &&
     document.getElementById('debugContent')._rawMessages.length === 0);
   win.Api.tasks.convWire = async () => { CALLS.convWire++;
     return { convId: 'conv-1', messages: [], sections: [], turns: [] }; };
-  await _riLoadWire('conv-1', { silent: false });
+  await riRefreshTasks();
   check('empty_state_honest',
     document.getElementById('debugContent').textContent.indexOf('No tasks recorded') !== -1 &&
     document.getElementById('riTurnNav').hidden === true);
   win.Api.tasks.convWire = async () => { CALLS.convWire++; return WIRE(); };
-  await _riLoadWire('conv-1', { silent: false });
+  await riRefreshTasks();
   check('retry_recovers',
     document.querySelectorAll('#debugContent .debug-msg-block').length === 6);
 
   console.log(out.join('\n'));
-})().catch(e => { console.log('FAIL harness_exception ' + (e && e.stack || e)); });
+})().catch(e => { console.log('FAIL harness_exception ' + (e && e.stack || e)); })
+  .finally(() => { closeRequestInspector(); dom.window.close(); });
 """
 
 
-def _run(ri_path=None, expect_fail=None):
-    harness = os.path.join(HERE, '_ri_feed_harness.js')
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
-    try:
-        proc = subprocess.run(
-            ['node', harness,
+def _run():
+    proc = subprocess.run(
+            ['node', '-e', _HARNESS, 'diagnostics-feed',
              os.path.join(JS_DIR, 'core', 'debug_panel.js'),
-             ri_path or os.path.join(JS_DIR, 'core', 'request_inspector.js'),
+             os.path.join(JS_DIR, 'core', 'request_inspector.js'),
              ROOT],
             capture_output=True, text=True, timeout=60,
         )
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
-    if expect_fail:
-        assert f'FAIL {expect_fail}' in output, (
-            f'neutered copy did NOT flip {expect_fail} red:\n{output}')
-        return output
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'request-inspector wire-feed failures:\n' + output
     assert output.count('PASS') >= 25, (
@@ -449,37 +442,8 @@ def _run(ri_path=None, expect_fail=None):
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_wire_feed_drawer():
     _run()
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_neuter_dividers_flip_red():
-    """Negative control: _riFeedDividerEl returns a bare div in a COPY →
-    the feed-order probe MUST fail (the dividers are load-bearing)."""
-    shipped = os.path.join(JS_DIR, 'core', 'request_inspector.js')
-    with open(shipped, encoding='utf-8') as f:
-        src = f.read()
-    anchor = 'function _riFeedDividerEl(s) {'
-    assert anchor in src, 'divider anchor drifted — update the neuter'
-    neutered = src.replace(
-        anchor,
-        anchor + "\n  return document.createElement('div');",
-        1)
-    assert neutered != src
-    tmp = os.path.join(HERE, '_request_inspector_feed_neutered.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(neutered)
-    try:
-        _run(ri_path=tmp, expect_fail='feed_order')
-    finally:
-        os.remove(tmp)
-    with open(shipped, encoding='utf-8') as f:
-        assert f.read() == src, (
-            'shipped request_inspector.js must be byte-identical')
 
 
 def test_bubble_anchor_static_pins():

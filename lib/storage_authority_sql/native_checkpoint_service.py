@@ -8,9 +8,12 @@ import threading
 import time
 import uuid
 
+from lib.log import get_logger
 from lib.storage.errors import StorageError
 from lib.storage.protocol import MAX_FRAME_BYTES, validate_finite_json_numbers
 from lib.storage_authority_sql.generated_checkpoint_storage_contract import SPEC
+
+logger = get_logger(__name__)
 
 
 class NativeCheckpointService:
@@ -64,6 +67,7 @@ class NativeCheckpointService:
                 identity_bytes=config.identity_bytes, library=config.library_path, sha256=config.sha256,
                 binary_bytes=config.binary_bytes, logical_outbox=self.logical_outbox)
         except BaseException as error:
+            logger.debug('native checkpoint admission failure handled: %s', type(error).__name__)
             failure = error
         finally:
             with self._condition:

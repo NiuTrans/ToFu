@@ -161,7 +161,7 @@ public enum ServerLifecycle {
     public static func isLoginBlocking(_ result: LoginResult) -> Bool {
         switch result {
         case .success: return false
-        case .badCredentials, .noCredential, .needsInteractiveSso, .error, .incompatible:
+        case .badCredentials, .needsInteractiveSso, .error, .incompatible:
             return true
         }
     }
@@ -171,8 +171,6 @@ public enum ServerLifecycle {
         switch result {
         case .badCredentials:
             return "Wrong password for this server — edit it and try again."
-        case .noCredential:
-            return "No saved password for this server, so it can't be controlled from here."
         case .needsInteractiveSso:
             return "This server needs an interactive sign-in first — tap Open, sign in " +
                 "once, then Start and Stop will work from here."

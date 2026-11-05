@@ -320,3 +320,31 @@ class TestHandler:
         monkeypatch.setattr(handler, '_page_count', lambda *a: 8)
         _tc, content, _ = _invoke({})
         assert '共 8 页' in content
+
+    def test_success_verdict_counts_pages_from_build_synctex(self, monkeypatch, discovery):
+        import contextlib
+        import gzip
+        import io
+
+        import lib.tasks_pkg.handlers.paper_build as handler
+        accepted = {'task_id': 'paper_build_1', 'document_id': 'd' * 64,
+                    'subscriber_id': 'agent:x'}
+        monkeypatch.setattr(handler, 'start_preview',
+                            lambda payload, *, owner_user_id: accepted)
+        receipt = {**_RECEIPT, 'status': 'success', 'diagnostics': [],
+                   'artifacts': [{'name': 'document.pdf', 'sha256': 'y' * 64,
+                                  'size_bytes': 10}]}
+        scheduler = _FakeScheduler({'status': 'done', 'result': {'receipt': receipt}})
+        synctex = gzip.compress(b'SyncTeX Version:1\nInput:1:main.tex\n'
+                                b'{1\n}1\n{2\n}2\n{3\n}3\n')
+
+        class _Cache:
+            @contextlib.contextmanager
+            def open_artifact(self, owner_user_id, document_id, build_id, name):
+                assert name == 'document.synctex.gz'
+                yield io.BytesIO(synctex), len(synctex)
+
+        scheduler.cache = _Cache()
+        monkeypatch.setattr(handler, 'get_scheduler', lambda: scheduler)
+        _tc, content, _ = _invoke({})
+        assert '共 3 页' in content

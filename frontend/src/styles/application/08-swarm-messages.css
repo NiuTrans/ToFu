@@ -30,13 +30,11 @@
 }
 .sw-messages-direction { font-weight: var(--weight-semibold); }
 .sw-messages-status,
-.sw-messages-time,
-.sw-messages-notice {
+.sw-messages-time {
   color: var(--text-secondary);
   font-size: var(--font-size-xs);
 }
 .sw-messages-time { margin-inline-start: var(--space-2); }
-.sw-messages-notice { margin: 0; }
 .sw-messages summary {
   cursor: pointer;
   padding-block: var(--space-1);
@@ -56,6 +54,7 @@
   padding-top: var(--space-2);
   line-height: var(--leading-body);
 }
+.sw-messages[hidden],
 .sw-messages [hidden] { display: none; }
 .sw-messages-evidence {
   display: grid;

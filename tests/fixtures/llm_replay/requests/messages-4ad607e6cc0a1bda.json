@@ -1,0 +1,28 @@
+[
+ {
+  "content": "You are Tofu, a coding assistant running an LLM replay scenario. Answer the user directly and use the available tools when asked.",
+  "role": "system"
+ },
+ {
+  "content": "Create the sample, add functions before and after it, then refine the new return.",
+  "role": "user"
+ },
+ {
+  "role": "assistant",
+  "tool_calls": [
+   {
+    "function": {
+     "arguments": "{\"description\": \"Create the sample\", \"path\": \"build_frontend.mjs\", \"content\": \"function existing() {\\n  return 'existing';\\n}\\n\"}",
+     "name": "write_file"
+    },
+    "id": "call_create_sample",
+    "type": "function"
+   }
+  ]
+ },
+ {
+  "content": "File created: build_frontend.mjs (4 lines, 45B)\nResolved file: '{{CWD}}/project/build_frontend.mjs'; workspace root: project.",
+  "role": "tool",
+  "tool_call_id": "call_create_sample"
+ }
+]

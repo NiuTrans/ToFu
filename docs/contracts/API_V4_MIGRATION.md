@@ -16,10 +16,22 @@ v4 paths; projection preserves them. Factory-registered and multi-rule handlers
 are included, with unique projected endpoint names.
 
 `routes.register_all` omits the legacy blueprint mount on the release major.
-Plugin blueprints are discovered separately. Route registration is import-safe
+Discovered native plugin blueprints pass through
+`product_blueprints_for_policy`: legacy product paths use the same projection,
+while raw pages and already-native contracts retain their owners.
+Route registration is import-safe
 with `start_workers=False` and requires neither storage startup nor model calls.
 Conversation Sync mounts natively on v4 with its declared generated wire
 contract; it preserves domain-specific snapshot, replay and conflict receipts.
+
+Problem: mounting discovered product plugins unchanged exposed retired paths;
+copying only deferred routes also lost blueprint-local feature gates and hooks.
+Decision: projection preserves registration metadata, guard/error/response/
+teardown callbacks and their original policy owners in independent containers.
+Alternatives rejected: plugin-specific v4 route copies would duplicate domain
+logic; deep-copying callbacks can clone a bound policy object and detach its
+live state. Tests exercise native requests, live gates, request owners,
+unapproved proposals and legacy/v4 mounting policy.
 
 ## Response boundary
 
@@ -28,6 +40,55 @@ contract; it preserves domain-specific snapshot, replay and conflict receipts.
 renders generic v4 failures as `application/problem+json`; explicitly declared
 native contract blueprints keep their domain error receipts. SSE and binary
 responses retain their streams and content types.
+
+**Problem:** `meta` differs on every response, so no v4 read could be
+revalidated and polled reads were re-sent in full when nothing changed. A
+2026-10-23 access-log sample spent 47% of its bytes (56.8 MB) on 514
+project-board reads, and model-routing re-sent about 190 KB per read.
+**Decision:** for a 200 `GET`/`HEAD` JSON success, `translate_v4_envelope`
+derives a weak `ETag` from the handler's own representation (before `meta`)
+and sets `Cache-Control: private, no-cache`. A matching `If-None-Match` (weak
+comparison, `*` included) returns an empty 304, and the browser HTTP cache
+supplies the stored body; the transport keeps the default fetch cache mode, so
+no client code is involved. Handlers that set their own `ETag`, `Cache-Control`
+or cookie keep their semantics; writes, other statuses, raw-success, SSE and
+native contract blueprints are untouched. The validator saves transfer,
+compression and client parsing, not the handler's read. **Rejected:** hashing
+the final body never matches because of `meta`; a transport response cache
+would duplicate the browser cache and is excluded by the endpoint-registry
+rules; dropping `meta` would break the published envelope. Spec:
+`tests/api/test_api_v4_conditional_reads.py`.
+
+**Problem:** helper responses already own their JSON value, but the generic v4
+boundary parsed the framework's serialized bytes again, including on a matching
+304. **Decision:** `lib/http_transport/json_response.py` retains response-local
+provenance for unchanged stock Quart JSON output. The v4 boundary consumes it
+only after checking the actual response bytes. A matching validator can return
+304 without decoding; a helper-owned flat dict of exact immutable JSON scalars
+also supplies its semantic value directly for a body-bearing success. Provider
+key ordering and Unicode normalization checks run only when that body is needed.
+Borrowed nested graphs, dates/UUIDs, non-string keys, explicit surrogate code
+units, custom providers/response classes and arbitrary raw responses retain the
+existing decode path. Responses changed by another hook
+invalidate provenance. No global cache, codec, envelope field, validator or
+admission policy changes. Native/raw-success/error contracts remain separate.
+
+ABBA measurements through real Quart requests and the helper/after-request
+pipeline (24 requests per large leg, 128 per small leg) measured CPU median per
+request: a 3,920,025-byte string representation's 200 response changed from
+37.71/38.12 ms to 29.92/30.11 ms, and its matching 304 from 26.41/26.44 ms to
+17.88/17.86 ms. A 20,000-row nested result's matching 304 changed from
+36.80/36.78 ms to 21.30/21.22 ms; its 200 remained in the 50–53 ms range.
+A 20,000-field scalar result's 304 changed from 10.23/10.13 ms to 7.34/7.30 ms;
+its 200 stayed around 13–14 ms. Small responses stayed around 0.38 ms. These are
+local response-pipeline measurements, not browser or proxy latency claims.
+**Rejected:** retaining borrowed mutable graphs can disagree with already
+serialized bytes; copying every graph first increased a nested-result prototype
+from 50.4–51.0 ms to 76.8–79.7 ms. Building the final envelope in each helper
+would precede the existing status/raw/cache-policy boundary and still require
+the original representation for its validator. Specs:
+`tests/api/test_api_v4_json_provenance.py`, alongside the conditional-read and
+product-boundary tests.
 
 Browser transport and public SDKs unwrap one recognized success envelope for
 existing domain consumers. This projection does not rewrite nested domain

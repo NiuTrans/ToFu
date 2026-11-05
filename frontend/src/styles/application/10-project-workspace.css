@@ -1,23 +1,20 @@
-/* ── Left pane: docked browser fills the column, list scrolls inside ── */
+/* ── Left pane: the shared folder browser fills the column ── */
 .pm-browser-pane { display: flex; min-width: 0; min-height: 0; }
+/* Rail cards are hairline outside Tofu and ink-framed in it; frame the
+   browser card (10-project-browser.css) the same way. */
 .pm-browser-pane .folder-browser {
-  flex: 1; display: flex; flex-direction: column;
-  margin-bottom: 0; min-height: 0;
-  border-radius: var(--radius);
+  flex: 1;
+  --folder-browser-frame: var(--control-edge-inset) solid var(--border);
 }
-.pm-browser-pane .folder-browser-list { flex: 1 1 auto; max-height: none; min-height: 0; }
-.pm-browser-pane .folder-browser-header,
-.pm-browser-pane .folder-browser-footer { flex-shrink: 0; }
-.folder-browser-hint {
-  flex: 1; font-size: var(--font-size-xs); color: var(--text-tertiary);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+[data-theme="tofu"] .pm-browser-pane .folder-browser {
+  --folder-browser-frame: var(--project-panel-width) solid var(--project-ink);
+  --folder-browser-shadow: var(--clay-sm);
 }
-.folder-browser-footer .btn { display: inline-flex; align-items: center; gap: 5px; }
 
 /* Pinned status + action bar — never scrolls away */
 .pm-workbench #projectModalStatus:not(:empty) { flex-shrink: 0; margin: 0 var(--space-6); }
 .pm-workbench .modal-actions {
-  flex-shrink: 0; margin: 0; padding: 14px var(--space-6);
+  flex-shrink: 0; margin: 0; padding: calc(var(--space-3) + var(--space-1) / 2) var(--space-6);
   border-top: 1px solid var(--border);
   background: var(--bg-secondary);
 }
@@ -36,7 +33,7 @@
   background: var(--bg-primary);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 14px var(--space-4);
+  padding: calc(var(--space-3) + var(--space-1) / 2) var(--space-4);
   margin-bottom: var(--space-3);
 }
 .pm-section-label {
@@ -44,7 +41,7 @@
   font-size: var(--font-size-xs); font-weight: 700; letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-tertiary);
-  margin-bottom: 10px;
+  margin-bottom: calc(var(--space-2) + var(--space-1) / 2);
 }
 
 /* ── Multi-path folder tags ── */
@@ -60,7 +57,7 @@
   display: flex; gap: var(--space-2); align-items: center;
   flex-shrink: 0;
 }
-.pm-rail-workspace .mp-add-row { margin-bottom: 10px; }
+.pm-rail-workspace .mp-add-row { margin-bottom: calc(var(--space-2) + var(--space-1) / 2); }
 .mp-add-row .mp-path-input {
   flex: 1;
   min-width: 0;
@@ -81,12 +78,12 @@
 .mp-add-row .mp-path-input::placeholder { font-family: inherit; color: var(--text-tertiary); }
 /* Tofu: match the input's box model to the neo-brutalist Add button so the pair reads as one unit */
 [data-theme="tofu"] .mp-add-row .mp-path-input {
-  border: 2px solid #1a1814;
+  border: var(--project-panel-width) solid var(--project-ink);
   border-radius:var(--radius-sm);
-  background: #F5F3ED;
+  background: var(--project-surface);
 }
 [data-theme="tofu"] .mp-add-row .mp-path-input:focus {
-  border-color: #1a1814;
+  border-color: var(--project-ink);
   box-shadow:var(--clay-sm);
 }
 
@@ -106,4 +103,3 @@
   color: var(--text-primary);
   border-color: var(--border-light);
 }
-

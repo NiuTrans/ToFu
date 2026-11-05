@@ -99,7 +99,7 @@ win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 win.t = global.t = (k) => k;
 
-const calls = { start: [], lookup: [], cache: [] };
+const calls = { start: [], resolve: [] };
 global.Api = win.Api = { paper: {
   libraryList: async () => ({ ok: true, papers: [{ id: 'paper-1', title: 'P', paperHash: 'phash-1' }] }),
   // Venue list: NeurIPS first (so the resolved venue is 'neurips', NOT generic).
@@ -118,8 +118,7 @@ global.Api = win.Api = { paper: {
       { key: 'acl', name: 'ACL (ARR)' },
     ] };
   },
-  reportLookup: async (hash, lang) => { calls.lookup.push(lang || ''); return { ok: false }; },
-  reportCache:  async (body) => { calls.cache.push((body && body.lang) || ''); return { ok: false }; },
+  reportResolve: async (hash, lang) => { calls.resolve.push(lang || ''); return { ok: false }; },
   reportStart:  async (body) => { calls.start.push(body); return { ok: true, task_id: 'rvw_new_1', paper_hash: 'phash-1' }; },
   reportPoll:   async () => ({
     ok: true,
@@ -182,13 +181,13 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
   _generatePaperReview();
   for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
 
-  // DECISIVE (the venue-race guarantee): the tab-entry cache/lookup round-trips
+  // DECISIVE (the venue-race guarantee): the tab-entry resolving lookup
   // MUST run under the resolved venue, NOT 'generic'. This is what the await on
   // _populateReviewVenueDropdown() guarantees — the langKey used to look up an
   // existing review can never be built before the venue resolves. (Source no
   // longer AUTO-generates on entry — generation is user-initiated below — so we
   // assert on the deterministic on-entry lookup langKey, not a start.)
-  const lookupKeys = calls.lookup.concat(calls.cache);
+  const lookupKeys = calls.resolve;
   check('lookup_fired', lookupKeys.length >= 1);
   check('lookup_langkey_not_generic',
         lookupKeys.length >= 1 && lookupKeys.every(k => k === 'review:neurips:en'));
@@ -293,8 +292,6 @@ def _run_harness(
     return proc
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_review_first_entry_resolves_venue_before_generating():
     proc = _run_harness(PAPER_JS)
     out = proc.stdout.strip()
@@ -304,8 +301,6 @@ def test_review_first_entry_resolves_venue_before_generating():
     assert out.count('PASS') >= 11, f'expected >=11 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_source_level_negative_control_unawaited_ordering_reintroduces_skew():
     """Revert the fix (await → fire-and-forget) and prove the skew reappears.
 

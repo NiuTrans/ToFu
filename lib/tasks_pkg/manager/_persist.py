@@ -7,6 +7,9 @@ MUST stay facade-reachable + steerable.
 import json
 
 from lib.conversation_sync.attempt_identity import is_conversation_attempt
+from lib.conversation_sync.settled_rows import (
+    SettledDict, json_array_text, memo_get, memo_put, settle_unless_same,
+)
 from lib.error_envelope import to_json as _err_to_json
 from lib.log import get_logger
 
@@ -18,7 +21,8 @@ from lib.storage.storage_projection import (
     _USAGE_TRANSIENT_KEYS,  # noqa: F401 — manager facade re-export
     sanitize_api_rounds_for_persist,
     sanitize_usage_for_persist,
-    trim_tool_round_for_persist,
+    trim_tool_round_copy,
+    trim_tool_round_for_persist,  # noqa: F401 — manager facade re-export
 )
 from lib.task_replay.task_result_checkpoint_contract import (
     TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
@@ -33,9 +37,17 @@ from lib.task_replay.task_result_checkpoint_contract import (
 logger = get_logger(__name__)
 
 
-_NONTERMINAL_CHECKPOINT_DEADLINE_SECONDS = 0.5
 _RUNNING_CHECKPOINT_PRIORITY = "maintenance"
 _TERMINAL_CHECKPOINT_ATTEMPTS = 5
+#: Bounds of one nonterminal checkpoint RPC's budget. The budget itself is
+#: derived from the authority's observed service time
+#: (``lib.storage.deadline_policy``); these bounds only keep it finite, and
+#: they separate the read budget from the write budget so a slow preflight
+#: read cannot consume the durable write's own budget.
+_CHECKPOINT_READ_FLOOR_SECONDS = 0.25
+_CHECKPOINT_READ_CEILING_SECONDS = 2.0
+_CHECKPOINT_WRITE_FLOOR_SECONDS = 1.0
+_CHECKPOINT_WRITE_CEILING_SECONDS = 4.0
 
 
 def _nudge_int(value):
@@ -101,7 +113,21 @@ def _task_result_segments_json(task):
     if not segments:
         return None
     from lib.tasks_pkg.segments import segments_to_json
-    return json.dumps(segments_to_json(segments), ensure_ascii=False)
+    thin = []
+    for segment in segments:
+        if type(segment) is SettledDict:
+            # One settled thin twin per settled segment carries its JSON text.
+            twin = memo_get(segment, _THIN_SEGMENT_KEY)
+            if twin is None:
+                twin = memo_put(segment, _THIN_SEGMENT_KEY, settle_unless_same(
+                    segment, segments_to_json([segment])[0]))
+            thin.append(twin)
+        else:
+            thin.extend(segments_to_json([segment]))
+    return json_array_text(thin)
+
+
+_THIN_SEGMENT_KEY = ('task-result-thin-segment',)
 
 
 def terminal_state_log_summary(task, *, persisted: bool):
@@ -306,11 +332,12 @@ def _merge_tool_rounds(task):
     concatenation that the final-persist, partial-checkpoint, and both
     conversation-sync paths all need.
 
-    Returns a list of SHALLOW-COPIED round dicts. The copy is load-bearing for
-    thread-safety: the swarm driver thread stamps ``_swarmSnapshot`` onto a
-    live round dict (master._persist_agent_snapshot) while THIS path may be
-    running ``json_dumps_pg(messages)`` on the same rounds from the
-    orchestrator thread. Serializing a by-reference dict that another thread
+    Returns a list of SHALLOW-COPIED live round dicts; settled rows
+    (``lib.conversation_sync.settled_rows``) are immutable and shared. The
+    copy is load-bearing for thread-safety: the swarm driver thread stamps
+    ``_swarmSnapshot`` onto a live round dict (master._persist_agent_snapshot)
+    while THIS path may be running ``json_dumps_pg(messages)`` on the same
+    rounds from the orchestrator thread. Serializing a by-reference dict that another thread
     mutates raises ``RuntimeError: dictionary changed size during iteration``
     (silently swallowed by the sync's except → checkpoint dropped) or persists
     a half-stamped round. A shallow ``dict(r)`` copy is cheap — it duplicates
@@ -345,18 +372,20 @@ def _merge_tool_rounds(task):
     # trim on top so a DONE round's transient _partialOutput buffer never
     # reaches the DB. trim_tool_round_for_persist returns dict(r) when it strips,
     # so it subsumes the shallow copy for those rounds.
-    return [trim_tool_round_for_persist(dict(r)) if isinstance(r, dict) else r
-            for r in merged]
+    return [trim_tool_round_copy(r) for r in merged]
 
 
 def _upsert_task_row(task, conv_id, *, content, thinking, status,
                      error_json, tr_json, meta_json, segments_json=None,
-                     admission_budget_seconds=None):
+                     admission_budget_seconds=None, fresh_birth=False):
     """CAS-write one durable task checkpoint through the storage authority.
 
     Recovery-owned ``interrupted`` rows and every terminal row fence stale
     running writers. A conversation-backed task is also owner-scoped and is
     discarded when its parent was deleted; inline tasks need no parent.
+
+    ``fresh_birth`` declares a task id minted in this process and never
+    written: its expected version is 0 without a witness read.
     """
     if task.get('_transientRuntime'):
         return True
@@ -373,12 +402,41 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
     admission_checkpoint=admission_budget_seconds is not None
     nonterminal_checkpoint = status in {'pending', 'running'}
     best_effort_checkpoint=nonterminal_checkpoint and not admission_checkpoint
+    from lib.storage.deadline_policy import storage_write_deadline
+
+    def checkpoint_budget(operation, *, write):
+        """Return the budget one checkpoint RPC may ask the authority for.
+
+        The authority charges its FIFO queue wait against the caller's
+        deadline, so a budget smaller than the authority's observed service
+        tail refuses the write and the refusal repeats: the attempts inside
+        one congestion episode are correlated, because the availability
+        backoff only engages for a caller whose aggregate budget affords it.
+        The budget is therefore derived from the observed service time
+        (``lib.storage.deadline_policy``); these bounds only keep it finite.
+        """
+        if write:
+            return storage_write_deadline(
+                operation,
+                kind='command',
+                floor_seconds=_CHECKPOINT_WRITE_FLOOR_SECONDS,
+                ceiling_seconds=_CHECKPOINT_WRITE_CEILING_SECONDS,
+            )
+        return storage_write_deadline(
+            operation,
+            kind='query',
+            floor_seconds=_CHECKPOINT_READ_FLOOR_SECONDS,
+            ceiling_seconds=_CHECKPOINT_READ_CEILING_SECONDS,
+        )
+
     checkpoint_deadline = (
-        time.monotonic() + _NONTERMINAL_CHECKPOINT_DEADLINE_SECONDS
+        time.monotonic()
+        + checkpoint_budget('task_results.replay_get', write=False)
+        + checkpoint_budget('task_results.checkpoint', write=True)
         if best_effort_checkpoint else None
     )
 
-    def deadline_options():
+    def deadline_options(operation, *, write=False):
 
         if admission_checkpoint:
             # The bound is per RPC, not a deadline for accepting user work.
@@ -390,12 +448,12 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
             raise StorageError(
                 'database_timeout', 'Nonterminal checkpoint budget exhausted',
             )
-        return {'deadline': remaining}
+        return {'deadline': min(checkpoint_budget(operation, write=write), remaining)}
 
     from lib.tasks_pkg.persistence_wait import wait_for_persistence
 
     def checkpoint_query(operation, payload):
-        read = lambda: client.query(operation, payload, **deadline_options())
+        read = lambda: client.query(operation, payload, **deadline_options(operation))
         if best_effort_checkpoint:
             return read()
         return wait_for_persistence(task, read, label=operation,
@@ -470,10 +528,16 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
             logger.info('[Task %s] conv=%s skipping task result: parent absent',
                         task['id'][:8], conv_id[:8])
             return False
-        witness = witnessed_version_and_value()
-        if witness is None:
-            return False
-        expected_version, current_value = witness
+        if fresh_birth:
+            # No durable row can carry a just-minted id. The checkpoint
+            # creates version 1 only when no row exists; a concurrent writer
+            # surfaces as database_conflict, whose handler reads the witness.
+            expected_version, current_value = 0, {}
+        else:
+            witness = witnessed_version_and_value()
+            if witness is None:
+                return False
+            expected_version, current_value = witness
     else:
         expected_version = known_version
         current_value = {}
@@ -584,7 +648,8 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
             def write_checkpoint():
                 return client.command(
                     'task_results.checkpoint', checkpoint_payload, command_id,
-                    **command_options, **deadline_options())
+                    **command_options,
+                    **deadline_options('task_results.checkpoint', write=True))
             result = (write_checkpoint() if best_effort_checkpoint else
                       wait_for_persistence(task, write_checkpoint,
                           label='task_results.checkpoint',
@@ -735,7 +800,11 @@ _HEAVY_TERMINAL_FIELDS = (
     '_tool_call_id_receipts', '_working_file_sources',
     '_working_tool_source_starts', '_working_tool_sources',
     '_nativePreparedInvocation', '_model_routing_selection',
-    '_modelImageReuse', '_acceptedCompactionReceipt',
+    '_modelImageReuse', '_acceptedCompactionReceipt', '_requestTextCountMemo',
+    # An early memory listing no startup consumed (Stop before worker entry).
+    '_earlyMemoryListing',
+    # The latest Request Inspector snapshot's settled messages (reuse source).
+    '_snapshotMessages',
 )
 
 _CONVERSATION_TERMINAL_PROJECTION_FIELDS = (
@@ -744,6 +813,8 @@ _CONVERSATION_TERMINAL_PROJECTION_FIELDS = (
     # structural events can send revision patches without re-reading the
     # growing Turn. The settled Turn is authoritative after terminal.
     '_turnProjectionState',
+    # Projection capture's per-list memo of derived history rows.
+    '_projectionCaptureRows',
 )
 
 
@@ -791,6 +862,8 @@ def _release_heavy_task_state(task) -> int:
                 # separately and never reclaimed through this cache.
                 if f == '_modelImageReuse':
                     value.clear()
+                elif f == '_earlyMemoryListing':
+                    value.release()
                 task[f] = None
                 released += 1
         if released:
@@ -846,6 +919,11 @@ def _release_terminal_tool_state(task) -> int:
             released += 1
     if replacement is not None:
         task['config'] = replacement
+    from lib.tasks_pkg.delegate_mode import DELEGATION_VIEW_KEY
+    if task.get(DELEGATION_VIEW_KEY):
+        # Admitted workers already hold their own derived policy copies.
+        task[DELEGATION_VIEW_KEY] = {}
+        released += 1
     if released:
         try:
             from lib.tasks_pkg.manager._maintenance import request_released_task_heap_trim
@@ -1039,7 +1117,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
         # has no conversation row to hold it — see _tool_rounds_have_dedicated_home.
         # Conversation attempts already persist tool rounds in their turn
         # projection; duplicating them in task_results creates two authorities.
-        tr_json = None if _tool_rounds_have_dedicated_home(task) else json.dumps(_merged_tr, ensure_ascii=False)
+        tr_json = None if _tool_rounds_have_dedicated_home(task) else json_array_text(_merged_tr)
         meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
         # Persist segments only when task_results is their durable home.
         # Conversation attempts already commit the same stable timeline in

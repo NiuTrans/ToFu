@@ -14,12 +14,12 @@ execFileSync(process.execPath, [path.join(root, 'scripts/vite_test_bundle.mjs'),
   cwd: root, input: `export { createWorkUnitTracker } from ${JSON.stringify(path.join(root, 'frontend/src/conversation/ui/work-unit/tracker.ts'))};
 export { renderMotionCard } from ${JSON.stringify(path.join(root, 'frontend/src/conversation/ui/motion-card/index.ts'))};
 export { prefillWorkUnitComposer } from ${JSON.stringify(path.join(root, 'frontend/src/conversation/ui/work-unit/composer.ts'))};
-export { historicalTurnPlan } from ${JSON.stringify(path.join(root, 'frontend/src/conversation/ui/history-process.ts'))};
+export { groupedTurnLayout } from ${JSON.stringify(path.join(root, 'frontend/src/conversation/presentation/grouped-turn-layout.ts'))};
 export { blockRoundIdentity } from ${JSON.stringify(path.join(root, 'frontend/src/conversation/presentation/round-outline.ts'))};
 export { toolRoundAttention } from ${JSON.stringify(path.join(root, 'frontend/src/conversation/presentation/tool-execution-groups.ts'))};`,
   stdio: ['pipe', 'pipe', 'pipe'],
 });
-const { createWorkUnitTracker, renderMotionCard, prefillWorkUnitComposer, toolRoundAttention, historicalTurnPlan, blockRoundIdentity } = require(bundle);
+const { createWorkUnitTracker, renderMotionCard, prefillWorkUnitComposer, toolRoundAttention, groupedTurnLayout, blockRoundIdentity } = require(bundle);
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
@@ -222,13 +222,15 @@ test('untrusted titles and resource paths remain text; another guidance identity
 });
 
 
-test('a completed chat turn keeps accepted work outside Process and round disclosures', () => {
+test('a completed chat turn keeps accepted work outside the tool panel and round disclosures', () => {
   const work = { blockId: 'work', kind: 'tool', source: { llmRound: 0 }, round: { status: 'done', llmRound: 0, results: [{ workUnitRef: { taskId: 'deck', kind: 'slides-deck' } }] } };
   const ordinary = { blockId: 'ordinary', kind: 'tool', source: { llmRound: 0 }, round: { status: 'done', llmRound: 0, results: [{ task_id: 'not-authority' }] } };
   const final = { blockId: 'final', kind: 'text', terminal: true, markdown: 'The task has started.', source: { llmRound: 1 } };
-  const plan = historicalTurnPlan({ actor: 'assistant', role: 'assistant', status: 'completed', metadata: {}, blocks: [ordinary, work, final] });
-  assert.deepEqual(plan.outside.map(block => block.blockId), ['final', 'work']);
-  assert.deepEqual(plan.process.map(block => block.blockId), ['ordinary']);
+  const layout = groupedTurnLayout({ actor: 'assistant', role: 'assistant', status: 'completed', metadata: {}, blocks: [ordinary, work, final] });
+  assert.deepEqual(layout.content.map(block => block.blockId), ['final']);
+  assert.deepEqual(layout.trail.map(block => block.blockId), ['work']);
+  assert.deepEqual(layout.process.map(block => block.blockId), ['ordinary']);
+  assert.equal(layout.panel.toolCount, 1);
   assert.equal(blockRoundIdentity(work), null);
   assert.notEqual(blockRoundIdentity(ordinary), null);
 });

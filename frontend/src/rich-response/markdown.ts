@@ -63,7 +63,7 @@ export function renderRichMarkdown(host: HTMLElement, original: string, terminal
     else if (part.kind === 'partial') { disposeRichResponse(el); el.className = 'rich-pending'; el.textContent = `${ports.localizedText?.('rich.pending','Rich response is still arriving…') ?? 'Rich response is still arriving…'}\n${part.source.slice(0,8000)}`; }
     else {
       el.className = 'rich-response';
-      if (!renderRichResponse(el, part.source, { conversationId, surfaceContext: conversationId && turnId ? {conversationId,turnId} : undefined, choices: state!.choices, text: (key, fallback) => ports.localizedText?.(key, fallback) ?? fallback })) {
+      if (!renderRichResponse(el, part.source, { conversationId, surfaceContext: conversationId && turnId ? {conversationId,turnId} : undefined, choices: state!.choices, previewImage: ports.previewImage, text: (key, fallback) => ports.localizedText?.(key, fallback) ?? fallback })) {
         const fallback = host.ownerDocument.createElement('pre');
         fallback.className = 'rich-pending';
         fallback.textContent = part.source.slice(0, 8000) + (part.source.length > 8000 ? '\n[Source preview omitted after 8,000 characters]' : '');

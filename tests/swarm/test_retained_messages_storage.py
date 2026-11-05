@@ -1,5 +1,6 @@
 """Stable routing survives a new repository over a disposable real Sidecar."""
 import json
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -59,8 +60,14 @@ def test_real_identity_claim_and_terminal_dedup_survive_repository_reconstructio
 def test_real_roster_pages_every_identity_beyond_1000(chat_sidecar):
     scope = scope_for(conversation_id='real-roster', requested='conversation')
     repository = RetainedAgentRepository(1)
-    identities = {repository.create(scope, role='coder', name=f'Agent {index}')['id']
-                  for index in range(1101)}
+    # Each create is two durable commits. Serial seeding pays ~2,200 fsyncs
+    # one by one and outlasts the per-test deadline on a loaded disk;
+    # concurrent creates share the writer's group commit instead.
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        identities = set(pool.map(
+            lambda index: repository.create(scope, role='coder', name=f'Agent {index}')['id'],
+            range(1101)))
+    assert len(identities) == 1101
     restored = RetainedAgentRepository(1).list(scope)
     assert len(restored) == 1101
     assert {value['id'] for value in restored} == identities

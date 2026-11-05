@@ -374,11 +374,10 @@ def api_export_artifact(artifact_id):
     except ArtifactNotFoundError:
         return api_not_found('not_found')
 
-    try:
-        from lib.artifacts.pdf_export import PdfRenderError, render_artifact_pdf
-    except Exception as e:
-        logger.warning('[Artifacts] PDF subsystem import failed: %s', e, exc_info=True)
-        return api_error('pdf_subsystem_unavailable', status=503)
+    # Playwright availability is reported by render_artifact_pdf as the
+    # typed PdfRenderError; failing to import this first-party module is a
+    # server fault for the global boundary (logged, redacted 500).
+    from lib.artifacts.pdf_export import PdfRenderError, render_artifact_pdf
 
     try:
         pdf_bytes = render_artifact_pdf(artifact_id)

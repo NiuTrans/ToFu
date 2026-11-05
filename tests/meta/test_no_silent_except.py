@@ -69,6 +69,9 @@ ALLOWED: dict[str, int] = {
     # attempt can recurse into the same failure, so this last-resort swallow is
     # deliberately silent and prompt assembly remains authoritative.
     'lib/tasks_pkg/context_composer/_render.py': 1,
+    # CPython ignores at-fork callback errors. This barrier must finish without
+    # acquiring any logger locks held by another thread at the fork.
+    'lib/project_mod/workspace_lease.py': 2,
 }
 
 

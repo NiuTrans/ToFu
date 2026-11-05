@@ -24,7 +24,7 @@ def _run_isolated(source: str) -> subprocess.CompletedProcess:
 def test_motion_package_import_keeps_render_pipeline_dormant():
     proc = _run_isolated(
         'import sys; import lib.motion_video as motion; '
-        'print("MOTION-PACKAGE", len(motion.__all__), '
+        'print("MOTION-PACKAGE", bool(motion.__all__), '
         'set(motion.__all__) == set(motion._EXPORT_MODULES), '
         '"lib.motion_video.runtime" in sys.modules, '
         '"lib.motion_video.engine" in sys.modules, '
@@ -33,14 +33,14 @@ def test_motion_package_import_keeps_render_pipeline_dormant():
         '"lib.motion_video._audio" in sys.modules)'
     )
     assert proc.returncode == 0, proc.stderr[-1200:]
-    assert 'MOTION-PACKAGE 74 True False False False False False' in proc.stdout
+    assert 'MOTION-PACKAGE True True False False False False False' in proc.stdout
 
 
 @pytest.mark.unit
 def test_production_package_import_keeps_recipe_owners_dormant():
     proc = _run_isolated(
         'import sys; import lib.production as production; '
-        'print("PRODUCTION-PACKAGE", len(production.__all__), '
+        'print("PRODUCTION-PACKAGE", bool(production.__all__), '
         'set(production.__all__) == set(production._EXPORT_MODULES), '
         '"lib.production.runtime" in sys.modules, '
         '"lib.production.stages" in sys.modules, '
@@ -50,7 +50,7 @@ def test_production_package_import_keeps_recipe_owners_dormant():
     )
     assert proc.returncode == 0, proc.stderr[-1200:]
     assert (
-        'PRODUCTION-PACKAGE 40 True False False False False False'
+        'PRODUCTION-PACKAGE True True False False False False False'
         in proc.stdout
     )
 

@@ -30,6 +30,7 @@ from lib.tasks_pkg.tool_display._renderers import (  # noqa: E402,F401
     _tool_display_human_guidance,
     _tool_display_image_gen,
     _tool_display_inspect_image,
+    _tool_display_inspect_video,
     _tool_display_knowledge,
     _tool_display_mcp,
     _tool_display_memory,

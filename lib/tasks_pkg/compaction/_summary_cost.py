@@ -53,6 +53,10 @@ def _verified_rates(pricing, *, usd_to_cny=None):
                                   ('cacheWriteMul', 1.25))}
     if any(value is None for value in rates.values()):
         raise ValueError('pricing_unavailable')
+    # Optional: present only when 1-hour cache writes were priced at their own rate.
+    if ('cacheWrite1hMul' in pricing
+            and _nonnegative_finite(pricing['cacheWrite1hMul']) is None):
+        raise ValueError('pricing_unavailable')
     exchange_rate = _nonnegative_finite(usd_to_cny)
     if currency == 'CNY' and not exchange_rate:
         raise ValueError('exchange_rate_unavailable')
@@ -63,8 +67,9 @@ def _verified_rates(pricing, *, usd_to_cny=None):
 def _lookup_verified_pricing(model, provider_id, *, prompt_tokens):
     """Reject incomplete raw overrides before the display resolver fills zeros.
 
-    An execution pin is not a billing provider. A provider-scoped call must
-    have that provider's own rate card, never another supplier's model table.
+    A provider's own rate card wins. Without one, the model's maintained price
+    applies (owner decision 2026-11-02), as in native settlement; an execution
+    pin is never a billing provider, so it can only reach the model price.
     Reads the existing in-memory registry only; does not register any prices.
     """
     from lib.pricing import lookup_pricing
@@ -75,8 +80,6 @@ def _lookup_verified_pricing(model, provider_id, *, prompt_tokens):
     if not isinstance(pricing, Mapping):
         raise ValueError('pricing_unavailable')
     source = pricing.get('_pricingSource')
-    if provider_id and source != 'provider_override':
-        raise ValueError('provider_pricing_unavailable')
     if source == 'provider_override':
         raw = get_provider_pricing_snapshot().get(provider_id, {}).get(model)
     elif source == 'model_table':
@@ -245,7 +248,9 @@ def price_summary_call(usage, *, model, provider_id=None, declared_pricing=None)
             return _unknown('pricing_unavailable')
         return {'costUsd': round(amount, 9), 'known': True,
                 'pricingSource': cost.get('pricingSource'),
-                'pricingSnapshot': snapshot, 'costBasis': _COST_BASIS}
+                'pricingSnapshot': snapshot, 'costBasis': _COST_BASIS,
+                **({'cacheWrite1hTokens': cost['cacheWrite1hTokens']}
+                   if cost.get('cacheWrite1hTokens') else {})}
     except Exception as diagnostic_error:
         # Auxiliary accounting must never fail compaction or invent free usage.
         logger.debug('price_summary_call failure handled: %s', type(diagnostic_error).__name__)
@@ -262,7 +267,8 @@ def _recorded_cost(cost, *, model, provider, usage):
     snapshot = cost.get('pricingSnapshot')
     if (amount is None or cost.get('known') is False
             or cost.get('costBasis') != _COST_BASIS
-            or cost.get('pricingSource') not in ('provider_override', 'admitted_offering_price')
+            or cost.get('pricingSource') not in (
+                'provider_override', 'model_table', 'admitted_offering_price')
             or not isinstance(provider, str) or not provider
             or not isinstance(snapshot, Mapping)
             or snapshot.get('source') != cost.get('pricingSource')
@@ -272,10 +278,18 @@ def _recorded_cost(cost, *, model, provider, usage):
             or (snapshot.get('provider') or None) != (provider or None)):
         return _unknown('invalid_cost')
     try:
-        from lib.cost import split_input_tokens
+        from lib.cost import _cache_write_1h_tokens, normalize_usage, split_input_tokens
         prompt_tokens = snapshot.get('selectedPromptTokens')
         if (isinstance(prompt_tokens, bool) or not isinstance(prompt_tokens, int)
                 or prompt_tokens != split_input_tokens(usage)[1]):
+            return _unknown('invalid_cost')
+        # Absent on rows priced before 1h writes had their own rate; present,
+        # it must be the share the cost engine derives from this usage.
+        one_hour = cost.get('cacheWrite1hTokens')
+        if one_hour is not None and (
+                isinstance(one_hour, bool) or not isinstance(one_hour, int)
+                or one_hour != _cache_write_1h_tokens(
+                    usage, normalize_usage(usage)['cache_write'])):
             return _unknown('invalid_cost')
         _verified_rates({**snapshot.get('rates', {}),
                          'currency': snapshot.get('currency'),
@@ -285,7 +299,8 @@ def _recorded_cost(cost, *, model, provider, usage):
         return _unknown('invalid_cost')
     return {'costUsd': amount, 'known': True, 'costBasis': _COST_BASIS,
             'pricingSource': cost['pricingSource'],
-            'pricingSnapshot': dict(snapshot)}
+            'pricingSnapshot': dict(snapshot),
+            **({'cacheWrite1hTokens': one_hour} if one_hour else {})}
 
 
 def summary_cost_details(usage, *, fallback_model='', fallback_provider=None):
@@ -312,7 +327,8 @@ def summary_cost_details(usage, *, fallback_model='', fallback_provider=None):
         call_usage = row.get('usage')
         dispatch = call_usage.get('_dispatch') if isinstance(call_usage, Mapping) else None
         dispatch = dispatch if isinstance(dispatch, Mapping) else {}
-        model = dispatch.get('model') or row.get('model') or fallback_model
+        model = (dispatch.get('logical_model') or dispatch.get('model')
+                 or row.get('model') or fallback_model)
         provider = (dispatch.get('provider_id') or row.get('provider_id')
                     or fallback_provider)
         if not _complete_usage(call_usage):

@@ -75,10 +75,13 @@ def _load_lang_resolver():
     Importing routes.common boots the wider route graph. Slicing keeps this
     unit focused while still executing the shipped source text, not a copy.
     """
+    from lib.http_transport.ui_languages import DEFAULT_UI_LANGUAGE, UI_LANGUAGES
+
     src = _read(COMMON)
     start = src.index('_UI_LANG_COOKIE = ')
     end = src.index('\n_APP_ASSET_MARKER =')
-    ns = {'logger': types.SimpleNamespace(debug=lambda *a, **k: None)}
+    ns = {'logger': types.SimpleNamespace(debug=lambda *a, **k: None),
+          'UI_LANGUAGES': UI_LANGUAGES, 'DEFAULT_UI_LANGUAGE': DEFAULT_UI_LANGUAGE}
     exec(compile(src[start:end], 'common_slice', 'exec'), ns)
     return ns
 
@@ -93,9 +96,16 @@ def _resolve(ns, cookie_value):
 
 @_unit
 def test_known_languages_pass_through():
+    """Every language in the frontend manifest is selectable server-side."""
+    import json
+
     ns = _load_lang_resolver()
-    assert _resolve(ns, 'zh') == 'zh'
-    assert _resolve(ns, 'en') == 'en'
+    manifest_path = os.path.join(REPO, 'frontend', 'src', 'i18n', 'languages.json')
+    codes = [entry['code'] for entry in json.loads(_read(manifest_path))['languages']]
+    assert {'zh', 'en', 'ja', 'ko', 'fr', 'de', 'ru'} <= set(codes)
+    assert ns['_UI_LANGS'] == tuple(codes)
+    for code in codes:
+        assert _resolve(ns, code) == code
 
 
 @_unit
@@ -117,8 +127,8 @@ def test_hostile_and_unknown_values_collapse_to_the_default():
     ns = _load_lang_resolver()
     langs = ns['_UI_LANGS']
     default = ns['_UI_LANG_DEFAULT']
-    for hostile in ('../../etc/passwd', 'zh/../../secret', 'fr', 'zh-CN',
-                    '', 'zh\x00en', 'ZH;en', 'a' * 500):
+    for hostile in ('../../etc/passwd', 'zh/../../secret', 'pt', 'xx', 'zh-CN',
+                    '', 'zh\x00en', 'ZH;en', 'ja/../en', 'a' * 500):
         got = _resolve(ns, hostile)
         assert got in langs, (
             f'{hostile!r} resolved to {got!r}, which is NOT in the whitelist '

@@ -9,6 +9,12 @@ import hashlib
 import json
 from typing import Any, Iterable, Mapping
 
+from lib.tool_results.tool_round_status import FAILED_TOOL_ROUND_STATUSES
+
+# Round failure verdicts plus the 'failed'/'cancelled' spellings that captured
+# execution statuses use.
+_FAILED_EXECUTION_STATUSES = FAILED_TOOL_ROUND_STATUSES | {'failed', 'cancelled'}
+
 
 def _normalized_call(call: dict) -> dict:
     function = call.get('function')
@@ -64,8 +70,7 @@ def nonretryable_failure_signature(
         canonical = result if isinstance(result, CapturedToolResult) else getattr(result, 'canonical', None)
         if isinstance(canonical, CapturedToolResult):
             execution_status = canonical.execution_status
-    if execution_status is not None and execution_status not in {
-            'error', 'failed', 'rejected', 'aborted', 'cancelled', 'unanswerable'}:
+    if execution_status is not None and execution_status not in _FAILED_EXECUTION_STATUSES:
         return None
     from lib.tools.result_envelope import ToolResultEnvelopeV2, nonretryable_tool_error_code
     code = nonretryable_tool_error_code(result)

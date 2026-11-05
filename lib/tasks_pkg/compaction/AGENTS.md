@@ -18,7 +18,8 @@ L2. Their contract is `docs/CONTEXT_BUDGET_POLICY.md`; verify with
 `test_compaction_pressure_policy.py` and `test_route_context_budget.py`.
 `_budget.py` fits the final tool view, including host outcomes and recovery
 metadata; candidate finalizers are pure and retention stays outside the search.
-Verify final-result budget facts/backends and aggregate recovery tests.
+Verify final-result budget facts/backends, aggregate recovery and source round
+budget tests. Source-policy ceilings must agree across every fitting stage.
 Canonical verdict overrides must reconcile prior views and manifest references
 before fast returns; verify canonical-envelope verdict and backend tests.
 `_context_lifecycle.py` validates manual admission through the captured
@@ -46,3 +47,17 @@ verify manual-engine, coordinator-lifecycle and core-boundary tests.
 Run `test_compaction_invariants.py`, anchor/tool-pair/receipt/token tests, and the
 focused changed stage tests. Add manual-compaction route/reload or long-agent
 context-plan tests when those boundaries change.
+
+Local L2 stages live under `_layer2/`: `_source_plan.py` selects source units,
+`_candidate_policy.py` owns pre/post-summary economics, `_summary_acceptance.py`
+validates critical state, and `_projection.py` constructs/converges candidates.
+`_compact.py` retains cancellation, archive/adoption order and receipt settlement;
+its explicit ports preserve policy/fault injection. Verify the compaction suite,
+context-snapshot and long-agent contracts; `benchmarks/compaction_compare.py`
+checks frozen-source outcomes before measuring component CPU/allocation.
+
+Summary request preparation lives in `_summary_input.py`; `_summary_transport.py`
+retains observations and paid usage for one logical summary across authorized
+route attempts. `_summary.py` owns authority rechecks, credential grant cleanup
+and budget settlement. Verify summary-routing, route-cleanup, stream-completion,
+credential-failure and preservation contracts before changing these boundaries.

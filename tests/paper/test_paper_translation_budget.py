@@ -411,3 +411,31 @@ def test_cancel_fenced_translation_is_not_rejoined(monkeypatch):
     assert started['existed'] is False
     assert started['task_id'] != old_task_id
     assert submitted == [started['task_id']]
+
+
+def test_chunk_deadline_stop_surfaces_as_retryable_timeout(monkeypatch):
+    from lib.translate.errors import TranslationDeadlineExhausted
+    import lib.paper.translate_engine as engine
+    import lib.paper.translate_runtime as runtime
+
+    def stop_at_deadline(*_args, **_kwargs):
+        raise TranslationDeadlineExhausted(
+            deadline_seconds=600, dispatched_attempts=1, elapsed_seconds=600,
+            last_err='stopped at the caller deadline: provider stream is not '
+                     'verified complete (state=client_aborted)')
+
+    monkeypatch.setattr(engine, '_translate_one_chunk', stop_at_deadline)
+    task = runtime._new_translate_task(
+        'paper-translation-deadline',
+        'paper-deadline-hash',
+        'zh',
+        None,
+        user_id=TEST_OWNER_USER_ID,
+    )
+
+    engine._run_translate_task(task, 'A source paragraph that must translate.')
+
+    assert task['status'] == 'error'
+    assert task['error']['kind'] == 'timeout'
+    assert task['error']['retryable'] is True
+    assert task['full_text'] == ''

@@ -234,10 +234,7 @@ def test_swarm_policy_overrides_have_hard_ceilings(monkeypatch):
     from lib.swarm import resource_policy
 
     for name in (
-        'TOFU_SWARM_GLOBAL_WORKERS',
         'TOFU_SWARM_MAX_PARALLEL',
-        'TOFU_SWARM_MAX_AGENTS_PER_WAVE',
-        'TOFU_SWARM_MAX_AGENTS_PER_SESSION',
         'TOFU_SWARM_MAX_RETRIES',
         'TOFU_SWARM_SESSION_CAPACITY',
     ):

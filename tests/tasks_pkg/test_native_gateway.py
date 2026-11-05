@@ -569,3 +569,58 @@ def test_native_catalog_projects_inputs_and_retains_host_result_metadata():
         invalid=copy.deepcopy(definitions)
         invalid[0]['decoded_result_schema']=value
         with pytest.raises(ValueError):compile_native_tool_catalog(task(),invalid)
+
+
+def test_recycled_model_call_id_keeps_its_approved_identity(tmp_path, monkeypatch):
+    """A positional-ID provider repeats ``call`` in every response. The Auto
+    decision must bind the identity the canonical pipeline admits; otherwise the
+    pipeline remints the ID after approval and the write waits for a human."""
+    from lib.agent_core.native_process import RoundRequest, RoundSettlement
+    from lib.tasks_pkg.executor._finalize import _finalize_tool_round
+    from lib.tasks_pkg.tool_dispatch import _approval
+
+    def human(*_args, **_kwargs):
+        raise AssertionError('an approved native write fell back to a human decision')
+
+    monkeypatch.setattr(_approval, 'request_write_approval', human)
+    owner = task()
+    written = []
+
+    def write(task_, tc, name, call_id, args, rn, row, *_rest):
+        written.append(call_id)
+        _finalize_tool_round(task_, rn, row, [{'title': 'write', 'content': 'written', 'badge': 'done'}])
+        return call_id, 'wrote ' + args['path'], False
+
+    owner['_tool_env'] = SimpleNamespace(resolve=lambda name: write if name == 'write_file' else None,
+        write_names={'write_file'}, idempotent_names=set(), confirmation_names=set())
+    owner['_executable_tool_catalog'] = catalog()
+
+    async def run(executor):
+        gateway = NativeGateway(principal=principal(), task=owner, executor=executor,
+            configuration={'autoApply': True}, tool_list=catalog(), permissions={'write_file': 'write'},
+            project_path=str(tmp_path), project_enabled=True, model='fixture', round_source=None,
+            decision_policy=None, pending_calls=8, pending_bytes=1 << 20)
+        try:
+            results = []
+            for number, path in enumerate(['first.txt', 'second.txt']):
+                gateway.round_source = lambda number=number: number
+                arguments = json.dumps({'path': path, 'content': path})
+                call = {'id': 'call', 'type': 'function',
+                        'function': {'name': 'write_file', 'arguments': arguments}}
+                gateway.prepare_response(RoundSettlement(
+                    RoundRequest(principal(), owner['id'], f'round-{number}', number, 0),
+                    {'kind': 'returned', 'model_calls': [call]}))
+                assert await gateway.decide(ApprovalRequest(principal(), owner['id'], f'approval-{number}',
+                    'call', 'write_file', 'epoch', arguments.encode(), b'null', asyncio.Event(), 5)) == 'auto_write_mode'
+                results.append(await gateway.execute(ToolRequest(principal(), owner['id'], f'run-{number}',
+                    'write_file', json.loads(arguments), 'call', model_round=number, model_call_id='call')))
+            return results
+        finally:
+            gateway.close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        results = asyncio.run(run(executor))
+    assert ['wrote first.txt' in results[0], 'wrote second.txt' in results[1]] == [True, True]
+    assert written[0] == 'call' and len(written) == 2 and written[1] != 'call'
+    assert [row['toolCallId'] for row in owner['toolRounds']] == written
+    assert [row['status'] for row in owner['toolRounds']] == ['done', 'done']

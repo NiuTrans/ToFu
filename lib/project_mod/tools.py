@@ -74,7 +74,7 @@ from lib.project_mod.run_command import (  # noqa: E402,F401
     _snapshot_scope_rel_targets,
     _snapshot_targets,
     _split_pipeline,
-    _with_command_writer,
+    _with_command_execution_source,
     tool_run_command,
 )
 
@@ -89,6 +89,7 @@ from lib.project_mod.read_tools import (  # noqa: E402,F401
     tool_grep,
     tool_grep_batch,
     tool_inspect_image,
+    tool_inspect_video,
     tool_list_dir,
     tool_read_files,
 )
@@ -539,7 +540,25 @@ def _exec_inspect_image(fn_args, base_path, conv_id, task_id, kwargs):
     )
 
 
-def _exec_grep_search(fn_args, base_path, conv_id, task_id, kwargs):
+def _exec_inspect_video(fn_args, base_path, conv_id, task_id, kwargs):
+    task = kwargs.get('task') if isinstance(kwargs.get('task'), dict) else {}
+    raw_path = fn_args.get('path')
+    # Chat video refs (att_media_<id>) bypass project-root resolution like
+    # inspect_image's /api/images/ refs; the owner scope resolves them.
+    from lib.attachments import is_attachment_ref
+    if isinstance(raw_path, str) and raw_path and not is_attachment_ref(raw_path):
+        base_path, raw_path = _resolve_base(base_path, raw_path, conv_id=conv_id)
+    return tool_inspect_video(
+        base_path, raw_path,
+        start=fn_args.get('start'),
+        end=fn_args.get('end'),
+        messages=task.get('messages'),
+        user_id=task.get('_userId'),
+        model=str(task.get('model') or ''),
+    )
+
+
+def _exec_search_files(fn_args, base_path, conv_id, task_id, kwargs):
     def _rb(bp_arg, rp_arg):
         return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
 
@@ -888,12 +907,12 @@ def _plan_in_process_cp(command_str):
     if len(spans) != 1:
         return None
     segment = command_str[spans[0][0]:spans[0][1]]
-    if _has_dynamic_shell_syntax(segment):
+    from lib.project_mod import copy_engine
+    if _has_dynamic_shell_syntax(segment) or not copy_engine.literal_cp_segment(segment):
         return None
     words = _shell_words(segment)
     if not words or words[0].text not in ('cp', '/bin/cp', '/usr/bin/cp'):
         return None
-    from lib.project_mod import copy_engine
     return copy_engine.parse_cp_argv([w.text for w in words[1:]])
 
 
@@ -1011,12 +1030,18 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
     if cwd_error:
         return cwd_error
 
-    # cd-capture sink: after the command runs, remember the shell's final cwd
-    #   (so a trailing `cd subdir` inside the command also sticks). Captured via
-    #   a dedicated temp FILE, never stdout — so it cannot be spoofed by command
-    #   output. set_conv_cwd re-validates containment; a hop outside the conv's
-    #   roots is silently ignored (isolation preserved).
-    cwd_sink = (lambda captured: set_conv_cwd(conv_id, captured)) if sticky_on else None
+    # No in-command `cd` capture: a `cd subdir` inside a compound command is a
+    #   LOCAL idiom (scope one command), never an intent to move later calls.
+    #   Measured 2026-10-24 (conv mvl6adj1bcd1r1): a read-only
+    #   `cd frontend/src/styles/application && grep …` silently moved the sticky
+    #   anchor, and the next call's `ROOT=$(pwd)` resolved to the styles dir —
+    #   `git worktree add $ROOT/.tofu/…` built a worktree inside a source
+    #   folder. The sticky anchor moves ONLY via an explicit `working_dir`
+    #   (layer 1 above), which is stated on the tool call and read back in the
+    #   result, so hidden cwd state can no longer misplace later commands.
+    cwd_sink = None
+    resumed_via_sticky = bool(sticky_on and not working_dir
+                              and cwd != base_path)
 
     command_str = fn_args.get('command', '')
     if 'frozen_input_paths' in fn_args and not isinstance(fn_args['frozen_input_paths'], dict):
@@ -1080,19 +1105,24 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
                 f"modify files are not allowed there. Run it in a writable "
                 f"root, or use read-only commands only.")
 
-    return _exec_run_command_with_writer(
+    result = _exec_run_command_with_writer(
         cwd, command_str, fn_args=fn_args, base_path=base_path,
         conv_id=conv_id, task_id=task_id, kwargs=kwargs, cwd_sink=cwd_sink)
+    if resumed_via_sticky:
+        result += (f'\n[cwd: ran in {cwd} (sticky from an earlier explicit '
+                   'working_dir; pass working_dir to move, . for the project '
+                   'root)]')
+    return result
 
 
-@_with_command_writer
+@_with_command_execution_source
 def _exec_run_command_with_writer(cwd, command_str, *, fn_args, base_path,
                                   conv_id, task_id, kwargs, cwd_sink):
-    """Hold the command's checkout leases from preimage through undo history.
+    """Run one command and record its literal write targets for undo history.
 
-    Reuse the runner's target resolution and busy/detach refusals. The nested
-    subprocess runner reenters the same thread-owned leases; in-process cp
-    cannot bypass them. Read-only commands still run without writer exclusion.
+    No workspace lease is taken: the command starts at once whatever other
+    tasks run in the checkout. Tree-destroying Git commands are gated earlier
+    by ``git_guard`` in the tool pipeline.
     """
     from lib.project_mod.tool_admission import recorded_command_source
     original = recorded_command_source(command_str)
@@ -1255,6 +1285,10 @@ def _exec_run_command_with_writer(cwd, command_str, *, fn_args, base_path,
                 result += '\n[Undo unavailable for some changed files: original content was not captured.]'
             recorded = _record_run_command_changes(
                 cwd, changes, conv_id=conv_id, task_id=task_id)
+            sink = kwargs.get('recorded_file_changes')
+            if sink is not None:
+                journal_root = os.path.abspath(cwd)
+                sink.extend({'basePath': journal_root, **change} for change in recorded)
             if len(recorded) < len(changes):
                 result += '\n[File history unavailable: some changes could not be saved for undo.]'
             if recorded:
@@ -1268,7 +1302,9 @@ _EXEC_HANDLERS = {
     'list_dir': _exec_list_dir,
     'read_files': _exec_read_files,
     'inspect_image': _exec_inspect_image,
-    'grep_search': _exec_grep_search,
+    'inspect_video': _exec_inspect_video,
+    'search_files': _exec_search_files,
+    'grep_search': _exec_search_files,  # retired name, latched schemas
     'find_files': _exec_find_files,
     'write_file': _exec_write_file,
     'edit_file': _exec_edit_file,
@@ -1373,9 +1409,8 @@ def _scoped_freshness(scope, path, data, conv_id, *, require_read=False, record=
 def _execute_scoped_files(scope, fn_name, fn_args, conv_id, task_id, source_capture=None):
     """Actual first-party file-only handler; no generic path/converter fallbacks."""
     from contextlib import ExitStack
+    from lib.project_mod.file_edit_mutex import file_edit_mutex
     from lib.project_mod.post_commit import defer_publication
-    from lib.project_mod import workspace_lease as leases
-    from lib.project_mod.tool_admission import admission_timeout, cancellation
     from lib.project_mod.write_tools._ops import (
         _compute_diff, _compute_insert, _fail_tag, _AppliedWriteFailure)
     if fn_name == 'read_files':
@@ -1422,23 +1457,12 @@ def _execute_scoped_files(scope, fn_name, fn_args, conv_id, task_id, source_capt
         return '\n\n'.join(outputs)
     paths = list(dict.fromkeys(scope.paths))
     with defer_publication(), ExitStack() as stack:
-        # Discover trusted checkout metadata only from the owned root, never
-        # from realpath(model_target). The lower lease primitive accepts that
-        # fixed identity and does not re-resolve a raced leaf/ancestor alias.
-        from lib.project_mod.snapshot_content import anchored_directory
         scope.check(paths[0], write=True)
-        with anchored_directory(scope.root, '.', scope.root_identity):
-            identity = leases._checkout_identity(scope.root)
-        if identity is not None:
-            root, common = identity
-            if root != scope.root:
-                raise ValueError('Scoped checkout lease resolved a different owned root')
-            stack.enter_context(leases._lease(root, leases._FILE_BARRIER,
-                admission_timeout(), cancellation(), _identity=identity))
-            for path in sorted(paths):
-                target = os.path.join(scope.root, path)
-                stack.enter_context(leases._lease(target, leases._WRITE,
-                    admission_timeout(), cancellation(), _identity=(target, common)))
+        # The same resolved-path key as the write tools, so both routes
+        # serialize one file. Only a key: descriptor-confined I/O below still
+        # validates every component.
+        stack.enter_context(file_edit_mutex(
+            os.path.realpath(os.path.join(scope.root, path)) for path in paths))
         if fn_name == 'write_file':
             path = paths[0]
             original, fingerprint = scope.read(path, missing=True, write=True)
@@ -1451,8 +1475,8 @@ def _execute_scoped_files(scope, fn_name, fn_args, conv_id, task_id, source_capt
             _scoped_freshness(scope, path, data, conv_id, record=True)
             return (f"File {'created' if original is None else 'updated'}: {path} "
                     f"({len(data.splitlines())} lines, {_fmt_size(len(data))})")
-        # File grants share one root/journal. Hold its existing reentrant
-        # admission over the complete plan and publication, not once per file.
+        # File grants share one root/journal. Hold its journal admission over
+        # the complete plan and publication, not once per file.
         # Scoped workers never replay pending intents on ungranted paths.
         from lib.project_mod import modifications as mods
         from lib.project_mod.session_lock import locked_session
@@ -1464,12 +1488,14 @@ def _execute_scoped_files(scope, fn_name, fn_args, conv_id, task_id, source_capt
             raise IntentError('Nested scoped journal write is not allowed')
         if store.read():
             raise IntentError('Pending write recovery requires the trusted recovery owner; no scoped write ran')
-        mods._cache_get(session)
+        # Fail closed on an unreadable journal before planning, by identity:
+        # re-reading the whole history here would hold every writer back.
+        mods._assert_journal_ready(session)
         strings = {}
         plans = []
         # Every edit was already resolved to an explicit file when the profile
         # fence ran (batch path or its own); group by that resolution. `paths`
-        # above is deduped for leases, `scope.paths` keeps the per-edit order.
+        # above is deduped for the mutex, `scope.paths` keeps the per-edit order.
         edit_paths = list(scope.paths)
         for path in dict.fromkeys(edit_paths):
             ops = [(index, edit)
@@ -1650,7 +1676,8 @@ def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callbac
 #: ``create_project`` is display-only legacy: the tool was retired, but old
 #: tool rounds still need a readable label instead of a generic fallback.
 _PROJECT_DISPLAY_TOOLS = frozenset({
-    'list_dir', 'read_files', 'grep_search', 'find_files', 'create_project',
+    'list_dir', 'read_files', 'search_files', 'grep_search', 'find_files',
+    'create_project',
     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents', 'run_command',
 })
@@ -1752,7 +1779,7 @@ def project_tool_display(fn_name, fn_args):
                 parts.append(display_name)
         suffix = f' +{n_files - 4} more' if n_files > 4 else ''
         return f'Read {n_files} file{"s" if n_files != 1 else ""}: {"; ".join(parts)}{suffix}'
-    elif fn_name == 'grep_search':
+    elif fn_name in ('search_files', 'grep_search'):
         # Batch mode
         searches = fn_args.get('searches')
         if searches and isinstance(searches, list):
@@ -1762,7 +1789,7 @@ def project_tool_display(fn_name, fn_args):
                 if isinstance(s, dict):
                     pats.append(s.get('pattern', '?')[:30])
             suffix = f' +{n - 4} more' if n > 4 else ''
-            return f'grep {n} patterns: /{"; /".join(pats)}/{suffix}'
+            return f'Search {n} patterns: /{"; /".join(pats)}/{suffix}'
         pat = fn_args.get('pattern', '?')[:40]
         inc = fn_args.get('include', '')
         search_path = fn_args.get('path', '')
@@ -1773,7 +1800,7 @@ def project_tool_display(fn_name, fn_args):
             suffix = f' in {inc}'
         elif search_path:
             suffix = f' in {search_path}'
-        return f'grep /{pat}/' + suffix
+        return f'Search /{pat}/' + suffix
     elif fn_name == 'list_dir':
         return f'List {fn_args.get("path", ".")}'
     elif fn_name == 'find_files':

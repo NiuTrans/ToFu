@@ -2,6 +2,7 @@
 import { request } from './transport';
 import { evolutionRunsApi } from './evolution-runs';
 import { evolutionProgramsApi } from './evolution-programs';
+import { installedSkillOptions } from './endpoint-registry/skills';
 
 export interface EvolutionGoal {
   goal_id: string;
@@ -81,6 +82,7 @@ export interface EvolutionSkill {
 }
 
 export const evolutionApi = {
+  listInstalledSkills: (projectPath = '', signal?: AbortSignal) => installedSkillOptions(request, projectPath, signal),
   ...evolutionRunsApi,
   ...evolutionProgramsApi,
   listGoals: (signal?: AbortSignal) =>

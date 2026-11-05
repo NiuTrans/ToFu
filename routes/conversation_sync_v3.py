@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from contextlib import ExitStack
+from contextvars import copy_context
+from functools import partial
 import hmac
 import json
+import math
 import re
 import time
 
+import orjson
 from quart import Response, request
 
 from lib.api_v4 import NativeContractBlueprint
@@ -41,11 +45,12 @@ from lib.conversation_sync.turn_images import (
 )
 from lib.conversation_sync.snapshot_admission import snapshot_admission
 from lib.conversation_sync.validation import ContractViolation, decode
+from lib.error_envelope import BadRequest
 from lib.http_transport.request_lifecycle import request_execution_clock
 from lib.log import get_logger
 from lib.observability import record_stream_admission
-from lib.request_parser import parse_body
-from lib.storage.errors import StorageError
+from lib.request_parser import decode_proxy_json_value, parse_body
+from lib.storage.errors import StorageError, http_status_for_storage_error
 from lib.tasks_pkg.manager.runtime import push_withheld_for_conv
 from lib.turn_lifecycle import LifecycleConflict, LifecycleNotFound
 from lib.turn_lifecycle import cancel_queued_turn_pair
@@ -102,7 +107,7 @@ def _snapshot_segment_payload() -> str:
     if not values:
         return "full"
     if len(values) != 1 or values[0] not in _SNAPSHOT_SEGMENT_PAYLOADS:
-        raise ValueError("Invalid conversation segment payload")
+        raise BadRequest("Invalid conversation segment payload", field="segmentPayload")
     return values[0]
 
 
@@ -112,7 +117,7 @@ def _snapshot_tool_payload(segment_payload: str) -> str:
         return "full"
     if (len(values) != 1 or values[0] not in {"full", "lazy"}
             or (values[0] == "lazy" and segment_payload != "refs")):
-        raise ValueError("Invalid conversation tool payload")
+        raise BadRequest("Invalid conversation tool payload", field="toolPayload")
     return values[0]
 
 
@@ -121,14 +126,16 @@ def _snapshot_turn_limit() -> int | None:
     values = request.args.getlist("turnWindow")
     if not values:
         if request.args.getlist("windowLimit"):
-            raise ValueError("windowLimit requires a bounded conversation tail")
+            raise BadRequest(
+                "windowLimit requires a bounded conversation tail", field="windowLimit")
         return None
     if len(values) != 1 or values[0] not in _SNAPSHOT_TURN_WINDOWS:
-        raise ValueError("Invalid conversation snapshot turn window")
+        raise BadRequest("Invalid conversation snapshot turn window", field="turnWindow")
     limit = _SNAPSHOT_TURN_WINDOWS[values[0]]
     requested = _window_integer("windowLimit", 1, 96)
     if requested and limit is None:
-        raise ValueError("windowLimit requires a bounded conversation tail")
+        raise BadRequest(
+            "windowLimit requires a bounded conversation tail", field="windowLimit")
     return requested or limit
 
 
@@ -137,10 +144,10 @@ def _window_integer(name: str, minimum: int, maximum: int) -> int:
     if not values:
         return 0
     if len(values) != 1 or re.fullmatch(r"[0-9]+", values[0]) is None:
-        raise ValueError(f"Invalid conversation {name}")
+        raise BadRequest(f"Invalid conversation {name}", field=name)
     value = int(values[0])
     if not minimum <= value <= maximum:
-        raise ValueError(f"Invalid conversation {name}")
+        raise BadRequest(f"Invalid conversation {name}", field=name)
     return value
 
 
@@ -150,7 +157,7 @@ def _snapshot_artifact_hint() -> bool:
     if not values:
         return False
     if len(values) != 1 or values[0] != "has-any":
-        raise ValueError("Invalid conversation snapshot artifact hint")
+        raise BadRequest("Invalid conversation snapshot artifact hint", field="artifactHint")
     return True
 
 
@@ -158,44 +165,45 @@ def _turn_history_page_request() -> tuple[str, int, int | None, int, str]:
     """Decode one strict, bounded lane-history query."""
     lane_values = request.args.getlist("laneId")
     if len(lane_values) != 1:
-        raise ValueError("A conversation history laneId is required")
+        raise BadRequest("A conversation history laneId is required", field="laneId")
     lane_id = lane_values[0]
     if not lane_id or lane_id != lane_id.strip() or len(lane_id) > 128:
-        raise ValueError("Invalid conversation history laneId")
+        raise BadRequest("Invalid conversation history laneId", field="laneId")
 
     sync_values = request.args.getlist("syncSeq")
     if len(sync_values) != 1:
-        raise ValueError("A conversation history syncSeq is required")
+        raise BadRequest("A conversation history syncSeq is required", field="syncSeq")
     try:
         sync_sequence = int(sync_values[0])
     except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("Invalid conversation history syncSeq") from exc
+        raise BadRequest("Invalid conversation history syncSeq", field="syncSeq") from exc
     if not 0 <= sync_sequence <= _MAX_TURN_HISTORY_ORDINAL:
-        raise ValueError("Invalid conversation history syncSeq")
+        raise BadRequest("Invalid conversation history syncSeq", field="syncSeq")
 
     before_values = request.args.getlist("beforeOrdinal")
     if len(before_values) > 1:
-        raise ValueError("Invalid conversation history beforeOrdinal")
+        raise BadRequest("Invalid conversation history beforeOrdinal", field="beforeOrdinal")
     before_ordinal: int | None = None
     if before_values:
         try:
             before_ordinal = int(before_values[0])
         except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(
-                "Invalid conversation history beforeOrdinal"
+            raise BadRequest(
+                "Invalid conversation history beforeOrdinal", field="beforeOrdinal"
             ) from exc
         if not 0 <= before_ordinal <= _MAX_TURN_HISTORY_ORDINAL:
-            raise ValueError("Invalid conversation history beforeOrdinal")
+            raise BadRequest(
+                "Invalid conversation history beforeOrdinal", field="beforeOrdinal")
 
     limit_values = request.args.getlist("limit")
     if len(limit_values) > 1:
-        raise ValueError("Invalid conversation history limit")
+        raise BadRequest("Invalid conversation history limit", field="limit")
     try:
         limit = int(limit_values[0]) if limit_values else 64
     except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("Invalid conversation history limit") from exc
+        raise BadRequest("Invalid conversation history limit", field="limit") from exc
     if not 1 <= limit <= _MAX_TURN_HISTORY_PAGE:
-        raise ValueError("Invalid conversation history limit")
+        raise BadRequest("Invalid conversation history limit", field="limit")
     return (
         lane_id,
         sync_sequence,
@@ -217,22 +225,24 @@ def _turn_projection_fence(
         or not turn_id
         or len(turn_id) > 128
     ):
-        raise ValueError(f"Invalid {label} identity")
+        raise BadRequest(f"Invalid {label} identity")
     revision_values = request.args.getlist("projectionRevision")
     if len(revision_values) != 1:
-        raise ValueError(f"A {label} projectionRevision is required")
+        raise BadRequest(
+            f"A {label} projectionRevision is required", field="projectionRevision")
     try:
         projection_revision = int(revision_values[0])
     except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(f"Invalid {label} projectionRevision") from exc
+        raise BadRequest(
+            f"Invalid {label} projectionRevision", field="projectionRevision") from exc
     if not 1 <= projection_revision <= _MAX_TURN_HISTORY_ORDINAL:
-        raise ValueError(f"Invalid {label} projectionRevision")
+        raise BadRequest(f"Invalid {label} projectionRevision", field="projectionRevision")
     owner_scope_values = request.args.getlist("ownerScope")
     if (
         len(owner_scope_values) != 1
         or _OWNER_CACHE_SCOPE.fullmatch(owner_scope_values[0]) is None
     ):
-        raise ValueError(f"A valid {label} ownerScope is required")
+        raise BadRequest(f"A valid {label} ownerScope is required", field="ownerScope")
     return projection_revision, owner_scope_values[0]
 
 
@@ -240,7 +250,7 @@ def _turn_image_request(
     conversation_id: str, turn_id: str, image_index: int,
 ) -> tuple[int, str]:
     if not 0 <= image_index < MAX_TURN_IMAGES:
-        raise ValueError("Invalid conversation Turn image identity")
+        raise BadRequest("Invalid conversation Turn image identity", field="imageIndex")
     return _turn_projection_fence(conversation_id, turn_id, "Turn image")
 
 
@@ -256,18 +266,32 @@ def _snapshot_browser_page_id() -> str:
     return match.group(1) if match is not None else ""
 
 
+def _client_fault_response(exc: BadRequest):
+    """Answer the typed client fault exactly like the global boundary."""
+    return api_bad_request(str(exc), **({"field": exc.field} if exc.field else {}))
+
+
 def _command_response(
     operation: str, execute: Callable[[], CommandOutcome]
 ):
-    """Map application errors once; versioned handlers only bind DTOs."""
+    """Map application errors once; versioned handlers only bind DTOs.
+
+    Only typed outcomes choose a 4xx. A builtin ``TypeError``/``ValueError``
+    is a server fault, because Python raises those for programming errors
+    too: it is logged with its traceback and answered as a redacted 500.
+    """
     try:
         return api_ok(execute().value)
     except LifecycleConflict as exc:
         return lifecycle_conflict_response(exc)
     except LifecycleNotFound as exc:
         return api_not_found(str(exc))
-    except (TypeError, ValueError) as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return _client_fault_response(exc)
+    except ContractViolation as exc:
+        # Request bodies are schema-checked before ``execute``; a violation
+        # raised while executing is durable-data drift, a server fault.
+        return contract_violation_response(exc, operation=operation)
     except StorageError as exc:
         return storage_failure_response(exc, operation=operation)
     except AttemptStartFailure as exc:
@@ -279,7 +303,72 @@ def _command_response(
     except Exception as exc:
         logger.error("Conversation command failed op=%s: %s", operation, exc,
                      exc_info=True)
-        return api_internal_error("internal_error")
+        return api_internal_error(
+            exc, context=operation, source="conversation-turn-command",
+            log_traceback=False)
+
+
+async def _encode_transport(function: Callable, *args, **kwargs):
+    """Encode one demanded response/frame without abandoning its borrowed DTO.
+
+    The existing demand executor owns a finite encoder, not an eager replay
+    queue. Repeated cancellation joins that exact worker before the request or
+    stream can release its snapshot/subscription. Context preserves response
+    helper fallback behavior and correlation without touching request streams.
+    """
+    future = asyncio.get_running_loop().run_in_executor(
+        None, copy_context().run, partial(function, *args, **kwargs),
+    )
+    interrupted = None
+    while not future.done():
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError as error:
+            if interrupted is None:
+                interrupted = error
+        except BaseException as error:
+            # The completed encoder failure is re-raised below, including when
+            # cancellation and failure are independent outcomes of this call.
+            logger.debug('transport encoding wait ended: %s', type(error).__name__)
+            break
+    try:
+        result = future.result()
+    except BaseException as error:
+        if interrupted is not None:
+            raise BaseExceptionGroup(
+                "Conversation transport encoding interrupted and failed",
+                [interrupted, error],
+            ) from None
+        raise
+    if interrupted is not None:
+        raise interrupted
+    return result
+
+
+def _contains_nonfinite_json_number(value) -> bool:
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, dict):
+        return any(_contains_nonfinite_json_number(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_nonfinite_json_number(item) for item in value)
+    return False
+
+
+def _sse_json(event: dict) -> str:
+    try:
+        encoded_bytes = orjson.dumps(event)
+        # orjson silently converts NaN/Infinity to null. Inspect primitive
+        # containers only when that token is present; keep the old failure/data
+        # behavior rather than changing invalid numeric evidence into null.
+        if b"null" in encoded_bytes and _contains_nonfinite_json_number(event):
+            raise ValueError("non-finite JSON number")
+        return encoded_bytes.decode("utf-8")
+    except (TypeError, ValueError) as error:
+        # Keep the prior JSON primitive behavior (including oversized integers)
+        # rather than dropping a replay frame outside orjson's narrower domain.
+        logger.debug("SSE JSON fallback used: %s", type(error).__name__)
+        return json.dumps(event, ensure_ascii=False, separators=(",", ":"))
 
 
 def _sse_frame(event: dict, *, cursor: str | None = None) -> str:
@@ -287,10 +376,33 @@ def _sse_frame(event: dict, *, cursor: str | None = None) -> str:
     if cursor:
         lines.append(f"id: {cursor}")
     lines.append(f"event: {event['type']}")
-    lines.append(
-        "data: " + json.dumps(event, ensure_ascii=False, separators=(",", ":"))
-    )
+    lines.append("data: " + _sse_json(event))
     return "\n".join(lines) + "\n\n"
+
+
+def _multiplexed_sse_frame(
+    index: int, event: dict, *, cursor: str | None = None,
+) -> str:
+    """One multiplexed stream's frame; its data leads with the stream index.
+
+    The index needs no escaping, unlike a conversation ID, and the id field
+    stays that stream's own cursor.
+    """
+    lines = []
+    if cursor:
+        lines.append(f"id: {cursor}")
+    lines.append(f"event: {event['type']}")
+    lines.append(f"data: {index}")
+    lines.append("data: " + _sse_json(event))
+    return "\n".join(lines) + "\n\n"
+
+
+def _sized_frame(
+    frame: Callable[..., str], event: dict, *, cursor: str,
+) -> tuple[str, int]:
+    """Return one encoded frame with its UTF-8 size for catch-up accounting."""
+    encoded = frame(event, cursor=cursor)
+    return encoded, len(encoded.encode("utf-8"))
 
 
 def _stream_identity() -> tuple[str, int]:
@@ -302,16 +414,18 @@ def _stream_identity() -> tuple[str, int]:
         # remain globally bounded, but cannot supersede an exact predecessor.
         return "", 0
     if not stream_client_id or not raw_generation:
-        raise ValueError(
-            "streamClientId and streamGeneration must be supplied together")
+        raise BadRequest(
+            "streamClientId and streamGeneration must be supplied together",
+            field="streamGeneration" if stream_client_id else "streamClientId")
     if _STREAM_CLIENT_ID.fullmatch(stream_client_id) is None:
-        raise ValueError("Invalid conversation stream client id")
+        raise BadRequest("Invalid conversation stream client id", field="streamClientId")
     try:
         stream_generation = int(raw_generation)
     except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("Invalid conversation stream generation") from exc
+        raise BadRequest(
+            "Invalid conversation stream generation", field="streamGeneration") from exc
     if not 1 <= stream_generation <= _MAX_STREAM_GENERATION:
-        raise ValueError("Invalid conversation stream generation")
+        raise BadRequest("Invalid conversation stream generation", field="streamGeneration")
     return stream_client_id, stream_generation
 
 
@@ -339,10 +453,11 @@ async def conversation_sync_snapshot(conversation_id: str):
 
         max_projection_bytes = _window_integer("windowBytes", 65536, 16777216)
         if max_projection_bytes and turn_limit is None:
-            raise ValueError("windowBytes requires a bounded conversation tail")
+            raise BadRequest(
+                "windowBytes requires a bounded conversation tail", field="windowBytes")
         include_artifact_hint = _snapshot_artifact_hint()
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return _client_fault_response(exc)
     page_id = _snapshot_browser_page_id()
     admission = None
     if page_id:
@@ -392,7 +507,7 @@ async def conversation_sync_snapshot(conversation_id: str):
         )
         read_ms = (time.perf_counter() - read_started) * 1000
         encode_started = time.perf_counter()
-        response, status = api_prevalidated_payload(snapshot)
+        response, status = await _encode_transport(api_prevalidated_payload, snapshot)
         encode_ms = (time.perf_counter() - encode_started) * 1000
         response.headers["Server-Timing"] = (
             f"snapshot;dur={read_ms:.2f}, encode;dur={encode_ms:.2f}"
@@ -436,26 +551,34 @@ async def conversation_round_directory(conversation_id: str):
         lane = str(request.args.get("laneId") or "").strip()
         anchor = str(request.args.get("anchorTurnId") or "").strip()
         if not lane or len(lane) > 128 or len(anchor) > 128:
-            raise ValueError("Invalid laneId or anchorTurnId")
+            raise BadRequest(
+                "Invalid laneId or anchorTurnId",
+                field="laneId" if not lane or len(lane) > 128 else "anchorTurnId")
         def integer(name, default, maximum):
             raw = request.args.get(name)
             if raw is None and default is None:
-                raise ValueError(f"{name} is required")
-            value = int(raw) if raw is not None else default
+                raise BadRequest(f"{name} is required", field=name)
+            try:
+                value = int(raw) if raw is not None else default
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise BadRequest(f"Invalid {name}", field=name) from exc
             if value < (1 if name == "limit" else 0) or value > maximum:
-                raise ValueError(f"Invalid {name}")
+                raise BadRequest(f"Invalid {name}", field=name)
             return value
+        expected_sync_sequence = integer("syncSeq", None, 9223372036854775807)
+        offset = integer("offset", 0, 9223372036854775807)
+        limit = integer("limit", 50, 100)
+    except BadRequest as exc:
+        return _client_fault_response(exc)
+    try:
         result = await asyncio.to_thread(
             _service.round_directory, conversation_id, _request_user_id(),
-            lane_id=lane, expected_sync_sequence=integer("syncSeq", None, 9223372036854775807),
-            offset=integer("offset", 0, 9223372036854775807),
-            limit=integer("limit", 50, 100), anchor_turn_id=anchor,
+            lane_id=lane, expected_sync_sequence=expected_sync_sequence,
+            offset=offset, limit=limit, anchor_turn_id=anchor,
         )
         return api_prevalidated_payload(result)
     except ContractViolation as exc:
         return contract_violation_response(exc, operation="conversation.sync.round_directory")
-    except ValueError as exc:
-        return api_bad_request(str(exc))
     except ConversationSyncNotFound as exc:
         return api_not_found(str(exc))
     except StorageError as exc:
@@ -475,6 +598,9 @@ async def conversation_turn_history_page(conversation_id: str):
 
         max_projection_bytes = _window_integer("windowBytes", 65536, 16777216)
         tool_payload = _snapshot_tool_payload(segment_payload)
+    except BadRequest as exc:
+        return _client_fault_response(exc)
+    try:
         page = await asyncio.to_thread(
             _service.turn_page,
             conversation_id,
@@ -489,13 +615,9 @@ async def conversation_turn_history_page(conversation_id: str):
             tool_payload=tool_payload,
         )
         return api_prevalidated_payload(page)
-    # ContractViolation is a ValueError subclass: the durable-data drift must
-    # map to its typed 500 BEFORE request-shape ValueErrors degrade to a 400.
     except ContractViolation as exc:
         return contract_violation_response(
             exc, operation="conversation.sync.turn_page")
-    except ValueError as exc:
-        return api_bad_request(str(exc))
     except ConversationSyncNotFound as exc:
         return api_not_found(str(exc))
     except ConversationTurnPageStale as exc:
@@ -571,11 +693,11 @@ async def conversation_turn_tool_result(conversation_id: str, turn_id: str, roun
     user_id = _request_user_id()
     try:
         if not 0 <= round_index <= 2**31 - 1:
-            raise ValueError("Invalid tool result round index")
+            raise BadRequest("Invalid tool result round index", field="roundIndex")
         # Identity/revision/scope use the same generated bounds as Turn images.
         revision, supplied_scope = _turn_projection_fence(conversation_id, turn_id, "tool result")
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return _client_fault_response(exc)
     if not hmac.compare_digest(supplied_scope, turn_image_owner_scope(user_id, conversation_id)):
         return api_not_found("Conversation tool result not found")
     try:
@@ -614,8 +736,8 @@ async def conversation_turn_image(
         projection_revision, supplied_owner_scope = _turn_image_request(
             conversation_id, turn_id, image_index,
         )
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return _client_fault_response(exc)
     expected_owner_scope = turn_image_owner_scope(user_id, conversation_id)
     if not hmac.compare_digest(supplied_owner_scope, expected_owner_scope):
         return api_not_found("Conversation Turn image not found")
@@ -653,6 +775,169 @@ async def conversation_turn_image(
     return response
 
 
+def _diagnostic_options() -> dict[str, str]:
+    """Decode the diagnosticPayload selector shared by both event streams."""
+    diagnostic_values = request.args.getlist("diagnosticPayload")
+    if len(diagnostic_values) > 1 or (diagnostic_values and diagnostic_values[0] not in {"full", "none"}):
+        raise BadRequest(
+            "Invalid conversation diagnostic payload", field="diagnosticPayload")
+    return {"diagnostic_payload": "none"} if diagnostic_values == ["none"] else {}
+
+
+async def _conversation_change_frames(
+    conversation_id: str,
+    user_id,
+    subscription,
+    *,
+    after_sequence: int,
+    catch_up_budget: int | None,
+    diagnostic_options: dict[str, str],
+    frame: Callable[..., str],
+):
+    """Ordered replay of one subscription: catch-up budget, heartbeats, wedges.
+
+    ``frame(event, cursor=...)`` encodes one event for the owning response.
+    The caller owns the subscription and releases it after this generator
+    ends; a storage failure that cannot degrade to heartbeats propagates.
+    """
+    # ``sequence`` is the newest change read; ``delivered`` is the
+    # newest change written to the client, which heartbeats report.
+    sequence = delivered = after_sequence
+    heartbeat_interval = _service.heartbeat_interval_ms / 1000.0
+    # Confirm an idle subscription immediately. Wake hints are not
+    # delivered frames and cannot renew this liveness deadline.
+    heartbeat_at = time.monotonic()
+    storage_failures = 0
+    # Changes committed before the first page read are held until
+    # they reach that page's head or exceed the catch-up budget.
+    catch_up: list[str] | None = [] if catch_up_budget else None
+    catch_up_bytes = 0
+    catch_up_head: int | None = None
+    while not subscription.closed:
+        try:
+            page = await asyncio.to_thread(
+                _service.changes,
+                conversation_id,
+                user_id,
+                after_sequence=sequence,
+                limit=500,
+                **diagnostic_options,
+            )
+        except StorageError as exc:
+            if (not exc.retryable
+                    and exc.code not in _DEGRADABLE_READ_FAILURES):
+                raise
+            if subscription.closed:
+                return
+            storage_failures += 1
+            heartbeat = _service.heartbeat(
+                conversation_id, user_id, delivered, degraded=True,
+                push_withheld=(
+                    push_withheld_for_conv(conversation_id) is not None),
+            )
+            encoded = await _encode_transport(
+                frame, heartbeat, cursor=str(heartbeat["cursor"]),
+            )
+            if subscription.closed:
+                return
+            yield encoded
+            heartbeat_at = time.monotonic() + heartbeat_interval
+            await asyncio.sleep(min(0.25 * storage_failures, 2.0))
+            continue
+
+        if subscription.closed:
+            return
+        storage_failures = 0
+        reset = page.get("reset")
+        if isinstance(reset, dict):
+            encoded = await _encode_transport(
+                frame, reset, cursor=str(reset["cursor"]),
+            )
+            if subscription.closed:
+                return
+            yield encoded
+            return
+
+        if catch_up_head is None:
+            catch_up_head = int(page.get("head") or 0)
+        events = page.get("events") or []
+        for event in events:
+            if subscription.closed:
+                return
+            sequence = int(event["syncSeq"])
+            cursor = _service.cursor_for_sequence(
+                conversation_id, user_id, sequence)
+            if catch_up is None:
+                encoded = await _encode_transport(
+                    frame, event, cursor=cursor,
+                )
+                # Encoding stays physically owned until joined, but
+                # supersession withdraws permission to publish it.
+                if subscription.closed:
+                    return
+                yield encoded
+                delivered = sequence
+                heartbeat_at = time.monotonic() + heartbeat_interval
+                continue
+            encoded, encoded_bytes = await _encode_transport(
+                _sized_frame, frame, event, cursor=cursor,
+            )
+            if subscription.closed:
+                return
+            catch_up_bytes += encoded_bytes
+            if catch_up_bytes > catch_up_budget:
+                # The suffix costs more than the caller's snapshot
+                # window; its intermediate states are superseded.
+                reset = _service.reset_required(
+                    conversation_id, user_id, catch_up_head,
+                    reason="replay_exceeds_window",
+                )
+                encoded = await _encode_transport(
+                    frame, reset, cursor=str(reset["cursor"]),
+                )
+                if subscription.closed:
+                    return
+                yield encoded
+                return
+            catch_up.append(encoded)
+        if catch_up is not None and (
+                sequence >= catch_up_head or not page.get("hasMore")):
+            held, catch_up = catch_up, None
+            for held_frame in held:
+                if subscription.closed:
+                    return
+                yield held_frame
+            if held:
+                delivered = sequence
+                heartbeat_at = time.monotonic() + heartbeat_interval
+        if events:
+            if page.get("hasMore"):
+                continue
+        elif time.monotonic() >= heartbeat_at:
+            # A write-side wedge (withheld authoritative pushes) keeps
+            # the change log quiet, so heartbeats are the ONLY frame
+            # that can still reach the client — they carry the signal.
+            withheld = (
+                push_withheld_for_conv(conversation_id) is not None)
+            heartbeat = _service.heartbeat(
+                conversation_id, user_id, delivered, degraded=withheld,
+                push_withheld=withheld,
+            )
+            # The id lets a native reconnect of an idle stream
+            # resume from Last-Event-ID instead of its bootstrap URL.
+            encoded = await _encode_transport(
+                frame, heartbeat, cursor=str(heartbeat["cursor"]),
+            )
+            if subscription.closed:
+                return
+            yield encoded
+            heartbeat_at = time.monotonic() + heartbeat_interval
+
+        await subscription.wait(
+            max(0.0, heartbeat_at - time.monotonic())
+        )
+
+
 @conversation_sync_v3_bp.route(
     "/api/v4/conversations/<conversation_id>/events", methods=["GET"]
 )
@@ -661,13 +946,23 @@ async def conversation_sync_events(conversation_id: str):
     user_id = _request_user_id()
     try:
         stream_client_id, stream_generation = _stream_identity()
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+        diagnostic_options = _diagnostic_options()
+        catch_up_budget = _window_integer("windowBytes", 65536, 16777216) or None
+        cursor_sources = request.args.getlist("cursorSource")
+        if len(cursor_sources) > 1 or (cursor_sources and cursor_sources[0] != "snapshot"):
+            raise BadRequest("Invalid conversation cursor source", field="cursorSource")
+    except BadRequest as exc:
+        return _client_fault_response(exc)
     # Native EventSource reconnects preserve the newest delivered id in the
     # header while the original URL still contains its bootstrap cursor.
     # Header precedence is therefore required to avoid replaying from the
     # snapshot cursor on every transient reconnect.
-    supplied_cursor = request.headers.get("Last-Event-ID") or request.args.get("after")
+    last_event_id = request.headers.get("Last-Event-ID")
+    supplied_cursor = last_event_id or request.args.get("after")
+    if cursor_sources and not last_event_id:
+        # The first connection after a snapshot replays that snapshot's own
+        # round trip; another snapshot would only restart the same race.
+        catch_up_budget = None
     try:
         after_sequence = _service.sequence_from_cursor(
             conversation_id, user_id, supplied_cursor
@@ -705,6 +1000,7 @@ async def conversation_sync_events(conversation_id: str):
                 user_id,
                 after_sequence=after_sequence,
                 limit=1,
+                **diagnostic_options,
             )
         except ConversationSyncNotFound as exc:
             return api_not_found(str(exc))
@@ -719,68 +1015,24 @@ async def conversation_sync_events(conversation_id: str):
         subscription.arm_body_start_deadline(10.0)
 
         async def generate():
+            frames = _conversation_change_frames(
+                conversation_id,
+                user_id,
+                subscription,
+                after_sequence=after_sequence,
+                catch_up_budget=catch_up_budget,
+                diagnostic_options=diagnostic_options,
+                frame=_sse_frame,
+            )
             try:
                 subscription.mark_body_started()
-                sequence = after_sequence
-                heartbeat_due = False
-                storage_failures = 0
-                while not subscription.closed:
-                    try:
-                        page = await asyncio.to_thread(
-                            _service.changes,
-                            conversation_id,
-                            user_id,
-                            after_sequence=sequence,
-                            limit=500,
-                        )
-                    except StorageError as exc:
-                        if (not exc.retryable
-                                and exc.code not in _DEGRADABLE_READ_FAILURES):
-                            raise
-                        storage_failures += 1
-                        heartbeat = _service.heartbeat(
-                            conversation_id, user_id, sequence, degraded=True,
-                            push_withheld=(
-                                push_withheld_for_conv(conversation_id) is not None),
-                        )
-                        yield _sse_frame(heartbeat)
-                        await asyncio.sleep(min(0.25 * storage_failures, 2.0))
-                        continue
-
-                    storage_failures = 0
-                    reset = page.get("reset")
-                    if isinstance(reset, dict):
-                        yield _sse_frame(reset, cursor=str(reset["cursor"]))
-                        return
-
-                    events = page.get("events") or []
-                    if events:
-                        for event in events:
-                            sequence = int(event["syncSeq"])
-                            cursor = _service.cursor_for_sequence(
-                                conversation_id, user_id, sequence)
-                            yield _sse_frame(event, cursor=cursor)
-                        heartbeat_due = False
-                        if page.get("hasMore"):
-                            continue
-                    elif heartbeat_due:
-                        # A write-side wedge (withheld authoritative pushes) keeps
-                        # the change log quiet, so heartbeats are the ONLY frame
-                        # that can still reach the client — they carry the signal.
-                        withheld = (
-                            push_withheld_for_conv(conversation_id) is not None)
-                        yield _sse_frame(_service.heartbeat(
-                            conversation_id, user_id, sequence, degraded=withheld,
-                            push_withheld=withheld,
-                        ))
-                        heartbeat_due = False
-
-                    awakened = await subscription.wait(
-                        _service.heartbeat_interval_ms / 1000.0
-                    )
-                    heartbeat_due = not awakened
+                async for encoded in frames:
+                    yield encoded
             finally:
-                subscription.close("generator_closed")
+                try:
+                    await frames.aclose()
+                finally:
+                    subscription.close("generator_closed")
 
         response = sse_response(
             generate(),
@@ -794,6 +1046,208 @@ async def conversation_sync_events(conversation_id: str):
         # generator finalizer and the unconsumed-body deadline now own release.
         setup.pop_all()
         return response
+
+
+def _multiplexed_stream_request() -> tuple[str, list[dict]]:
+    """Decode the page's stream identity and its subscriptions, one each."""
+    stream_client_id = str(request.args.get("streamClientId") or "").strip()
+    if _STREAM_CLIENT_ID.fullmatch(stream_client_id) is None:
+        raise BadRequest(
+            "Invalid conversation stream client id", field="streamClientId")
+    raw_streams = request.args.getlist("streams")
+    if len(raw_streams) != 1:
+        raise BadRequest("streams must be supplied exactly once", field="streams")
+    try:
+        streams = decode(
+            "ConversationEventSubscriptions",
+            json.loads(decode_proxy_json_value(raw_streams[0])))
+    except ValueError as exc:  # malformed JSON or a ContractViolation
+        raise BadRequest(
+            "Invalid conversation stream subscriptions", field="streams") from exc
+    if not streams:
+        # The schema declares minItems, which the shared contract validators
+        # do not enforce; this boundary checks it explicitly.
+        raise BadRequest(
+            "At least one conversation stream is required", field="streams")
+    conversation_ids = [stream["conversationId"] for stream in streams]
+    if len(set(conversation_ids)) != len(conversation_ids):
+        raise BadRequest(
+            "Each conversation may be streamed once per response", field="streams")
+    return stream_client_id, streams
+
+
+def _stream_closed_event(conversation_id: str, status: int, code: str) -> dict:
+    return decode("ConversationStreamClosed", {
+        "contract": "tofu.conversation-sync.stream-closed/v1",
+        "type": "stream.closed",
+        "conversationId": conversation_id,
+        "status": status,
+        "code": (code or "closed")[:128],
+    })
+
+
+async def _multiplexed_stream_frames(
+    index: int,
+    stream: dict,
+    *,
+    user_id,
+    principal: str,
+    stream_client_id: str,
+    diagnostic_options: dict[str, str],
+):
+    """One conversation's replay on the multiplexed response.
+
+    Setup mirrors conversation_sync_events. Where that route answers a status,
+    this stream sends stream.closed with the same status and ends alone: one
+    conversation's refusal or failure never stops the others.
+    """
+    conversation_id = stream["conversationId"]
+    frame = partial(_multiplexed_sse_frame, index)
+
+    async def closed(status: int, code: str) -> str:
+        return await _encode_transport(
+            frame, _stream_closed_event(conversation_id, status, code))
+
+    # A received cursor resumes like Last-Event-ID and is budgeted; only a
+    # stream that has received nothing since its snapshot repeats
+    # cursorSource=snapshot, exactly as a native reconnect without the header.
+    catch_up_budget = None if stream.get("cursorSource") else stream.get("windowBytes")
+    try:
+        after_sequence = _service.sequence_from_cursor(
+            conversation_id, user_id, stream.get("after"))
+    except ConversationCursorError:
+        yield await closed(400, "invalid_cursor")
+        return
+    # Subscribe before the ownership/read probe, as the single stream does.
+    subscription = broker.subscribe(
+        user_id,
+        conversation_id,
+        principal_key=principal,
+        stream_client_id=stream_client_id,
+        stream_generation=stream["streamGeneration"],
+    )
+    frames = None
+    try:
+        if subscription.closed:
+            yield await closed(204, subscription.close_reason)
+            return
+        record_stream_admission("conversation-sync", "admitted")
+        try:
+            await asyncio.to_thread(
+                _service.changes,
+                conversation_id,
+                user_id,
+                after_sequence=after_sequence,
+                limit=1,
+                **diagnostic_options,
+            )
+        except ConversationSyncNotFound:
+            yield await closed(404, "not_found")
+            return
+        frames = _conversation_change_frames(
+            conversation_id,
+            user_id,
+            subscription,
+            after_sequence=after_sequence,
+            catch_up_budget=catch_up_budget,
+            diagnostic_options=diagnostic_options,
+            frame=frame,
+        )
+        async for encoded in frames:
+            yield encoded
+        yield await closed(
+            204, subscription.close_reason if subscription.closed else "ended")
+    except StorageError as exc:
+        logger.warning(
+            "Multiplexed conversation stream stopped on storage failure "
+            "conversation=%s code=%s", conversation_id, exc.code)
+        yield await closed(http_status_for_storage_error(exc), exc.code)
+    except ContractViolation:
+        logger.error(
+            "Multiplexed conversation stream violated its contract "
+            "conversation=%s", conversation_id, exc_info=True)
+        yield await closed(500, "contract_violation")
+    except Exception:
+        # Isolating the failure is the point of this boundary: the response
+        # carries every other conversation's stream.
+        logger.error(
+            "Multiplexed conversation stream failed conversation=%s",
+            conversation_id, exc_info=True)
+        yield await closed(500, "internal_error")
+    finally:
+        try:
+            if frames is not None:
+                await frames.aclose()
+        finally:
+            subscription.close("generator_closed")
+
+
+_FRAME_SOURCE_ENDED = object()
+
+
+async def _merged_frames(sources: list):
+    """Interleave ordered frame sources with one pending frame per source.
+
+    A source advances only after its previous frame was written, so each keeps
+    the response's backpressure. Ending the merge, including by client
+    disconnect, cancels pending reads and closes every source.
+    """
+    async def advance(source):
+        try:
+            return await anext(source)
+        except StopAsyncIteration:
+            return _FRAME_SOURCE_ENDED
+
+    pending = {asyncio.create_task(advance(source)): source for source in sources}
+    try:
+        while pending:
+            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                source = pending.pop(task)
+                encoded = task.result()
+                if encoded is _FRAME_SOURCE_ENDED:
+                    continue
+                pending[asyncio.create_task(advance(source))] = source
+                yield encoded
+    finally:
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for source in sources:
+            await source.aclose()
+
+
+@conversation_sync_v3_bp.route("/api/v4/conversation-events", methods=["GET"])
+@require_scope("chat")
+async def conversation_sync_multiplexed_events():
+    user_id = _request_user_id()
+    try:
+        stream_client_id, streams = _multiplexed_stream_request()
+        diagnostic_options = _diagnostic_options()
+    except BadRequest as exc:
+        return _client_fault_response(exc)
+    principal = principal_key(current_auth())
+    # Each stream subscribes when the body starts, so a response that is never
+    # consumed holds no subscription.
+    sources = [
+        _multiplexed_stream_frames(
+            index,
+            stream,
+            user_id=user_id,
+            principal=principal,
+            stream_client_id=stream_client_id,
+            diagnostic_options=diagnostic_options,
+        )
+        for index, stream in enumerate(streams)
+    ]
+    return sse_response(
+        _merged_frames(sources),
+        timeout_none=True,
+        extra_headers={
+            "X-Tofu-Task-Kind": "conversation-sync",
+            "X-Tofu-Contract": "tofu.conversation-sync.multiplexed-events/v1",
+        },
+    )
 
 
 @conversation_sync_v3_bp.route(
@@ -943,7 +1397,8 @@ def conversation_recover_usage_v3(conversation_id: str, turn_id: str):
         _validate_body("RecoverUsageRequest")
     except ContractViolation as exc:
         return api_bad_request(str(exc), violations=list(exc.violations))
-    body = parse_body()
+    body = parse_body(exact=(
+        'commandId', 'expectedProjectionRevision', 'confirmed', 'budget'))
     user_id = _request_user_id()
     principal = _request_principal()
     return _command_response("turn.usage_recovery", lambda:

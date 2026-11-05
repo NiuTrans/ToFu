@@ -18,12 +18,27 @@ fn cached(runtime: &EmbeddedRuntime, payload: &Value) -> Option<Value> {
     runtime.try_cached_json("record.get", &serde_json::to_vec(payload).unwrap(), None, now_unix_ms()+10000, || true)
         .map(|result| serde_json::from_slice(&result.unwrap()).unwrap())
 }
+/// Reuse is best-effort: a contended health lock (the 1 ms WAL barrier worker)
+/// declines a lookup or omits an observation, and maintenance may publish an
+/// equivalent snapshot between a read and its lookup. Identical reads of an
+/// unchanged key must still be served; exact admission counts are pinned by
+/// `query_result_cache_tests`.
+fn served_after_reads<T>(read: impl Fn() -> Value, lookup: impl Fn() -> Option<T>) -> (Value, T) {
+    for _ in 0..32 {
+        let answer = read();
+        if let Some(hit) = lookup() { return (answer, hit); }
+    }
+    panic!("identical reads of an unchanged key were never served from the cache");
+}
+fn served_get(runtime: &EmbeddedRuntime) -> Value {
+    let (answer, hit) = served_after_reads(|| execute(runtime,"record.get",key()), || cached(runtime,&key()));
+    assert_eq!(hit, answer); answer
+}
 fn warm(runtime: &EmbeddedRuntime) -> Value {
     let mut payload = key(); payload["value"] = json!({"v":1});
     assert_eq!(execute(runtime,"record.put",payload)["status"],0);
     let answer = execute(runtime,"record.get",key()); assert_eq!(answer["status"],0);
-    assert_eq!(execute(runtime,"record.get",key()),answer);
-    assert_eq!(cached(runtime,&key()).as_ref(),Some(&answer)); answer
+    assert_eq!(served_get(runtime),answer); answer
 }
 #[test]
 fn query_result_cache_tracks_writes_deletes_missing_results_and_ir_policy() {
@@ -33,11 +48,11 @@ fn query_result_cache_tracks_writes_deletes_missing_results_and_ir_policy() {
     assert!(cached(&runtime,&key()).is_none());
     let second = execute(&runtime,"record.get",key());
     assert_ne!(second,first); assert_eq!(second["payload"]["value"],json!({"v":2}));
-    assert_eq!(cached(&runtime,&key()),Some(second));
+    assert_eq!(served_get(&runtime),second);
     assert_eq!(execute(&runtime,"record.delete",key())["status"],0);
     assert!(cached(&runtime,&key()).is_none());
     let missing = execute(&runtime,"record.get",key()); assert!(missing["payload"].is_null());
-    assert_eq!(cached(&runtime,&key()),Some(missing));
+    assert_eq!(served_get(&runtime),missing);
     let task = json!({"namespace":"task_results","key":"absent","user_id":11});
     execute(&runtime,"record.get",task.clone()); assert!(cached(&runtime,&task).is_none());
     let payload = serde_json::to_vec(&key()).unwrap();
@@ -50,7 +65,9 @@ fn query_result_cache_preserves_scope_admission_and_no_permanent_pins() {
     let payload=serde_json::to_vec(&key()).unwrap();
     let lookup=crate::query_result_cache::Lookup {owner_id:11,tenant_id:Some(7),schema_id:STORAGE_SCHEMA_VERSION,operation:"record.get",payload:&payload};
     let view=runtime.dispatch_bindings.published_queries.as_ref().unwrap();
-    assert!(view.try_cached(lookup).is_some());
+    let (answer, hit)=served_after_reads(|| execute(&runtime,"record.get",key()),
+        || view.try_cached(lookup).map(|hit| serde_json::from_slice::<Value>(&hit.into_response()).unwrap()));
+    assert_eq!(hit,answer["payload"]);
     assert!(view.try_cached(crate::query_result_cache::Lookup{owner_id:12,..lookup}).is_none());
     assert!(view.try_cached(crate::query_result_cache::Lookup{tenant_id:Some(8),..lookup}).is_none());
     assert_eq!(runtime.database.lock().unwrap().snapshot_pin_metrics().unwrap().active_handles,0);
@@ -78,8 +95,9 @@ fn query_result_cache_wal_error_and_authority_poison_refuse_reuse() {
 fn query_result_cache_concurrent_writer_ack_invalidates_and_held_results_are_immutable() {
     let (_directory, runtime) = open(); warm(&runtime);
     let bytes=serde_json::to_vec(&key()).unwrap();
-    let old=runtime.dispatch_bindings.published_queries.as_ref().unwrap().try_cached(
-        crate::query_result_cache::Lookup {owner_id:11,tenant_id:Some(7),schema_id:STORAGE_SCHEMA_VERSION,operation:"record.get",payload:&bytes}).unwrap();
+    let view=runtime.dispatch_bindings.published_queries.as_ref().unwrap();
+    let (_, old)=served_after_reads(|| execute(&runtime,"record.get",key()), || view.try_cached(
+        crate::query_result_cache::Lookup {owner_id:11,tenant_id:Some(7),schema_id:STORAGE_SCHEMA_VERSION,operation:"record.get",payload:&bytes}));
     std::thread::scope(|scope| {
         let (acked, receive_ack)=std::sync::mpsc::channel();
         let (read, receive_read)=std::sync::mpsc::channel();
@@ -95,18 +113,26 @@ fn query_result_cache_concurrent_writer_ack_invalidates_and_held_results_are_imm
         for expected in 2..66 {
             assert_eq!(receive_ack.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),expected);
             assert!(cached(runtime,&key()).is_none(),"previous snapshot survived acknowledged write");
-            let answer=execute(runtime,"record.get",key());
-            assert_eq!(answer["payload"]["value"],json!({"v":expected}));
-            assert_eq!(cached(runtime,&key()),Some(answer));read.send(()).unwrap();
+            let (answer, hit)=served_after_reads(|| {
+                let answer=execute(runtime,"record.get",key());
+                assert_eq!(answer["payload"]["value"],json!({"v":expected})); answer
+            }, || cached(runtime,&key()));
+            assert_eq!(hit,answer);read.send(()).unwrap();
         }
         writer.join().unwrap();
     });
     let old:Value=serde_json::from_slice(&old.into_response()).unwrap();
     assert_eq!(old["value"],json!({"v":1}));
-    let closed=runtime.closed.lock().unwrap();
-    assert!(cached(&runtime,&key()).is_none(),"caller must not wait on lifecycle mutex");
-    drop(closed);
-    assert!(cached(&runtime,&key()).is_some());
+    // A maintenance publication can still stale the entry between serving it
+    // and the release; a lifecycle decline that evicted it fails every round.
+    let served_again=(0..32).any(|_| {
+        assert_eq!(served_get(&runtime)["payload"]["value"],json!({"v":65}));
+        let closed=runtime.closed.lock().unwrap();
+        assert!(cached(&runtime,&key()).is_none(),"caller must not wait on lifecycle mutex");
+        drop(closed);
+        cached(&runtime,&key()).is_some()
+    });
+    assert!(served_again,"a lifecycle decline must leave the served entry reusable");
 }
 
 #[test]
@@ -120,8 +146,9 @@ fn query_result_cache_snapshot_tracks_acknowledged_turns_and_exact_window_identi
     let missing = read(query(1));
     assert_eq!(missing["status"], 0);
     assert!(missing["payload"].is_null());
-    assert_eq!(read(query(1)), missing);
-    assert_eq!(lookup(&query(1)), Some(missing));
+    let (again, hit) = served_after_reads(|| read(query(1)), || lookup(&query(1)));
+    assert_eq!(again, missing);
+    assert_eq!(hit, missing);
     for ordinal in 0..3 {
         let payload = json!({"conversation_id":"cached-history","user_id":11,
             "actor":"human","status":"completed","projection":{"content":format!("turn {ordinal}")},
@@ -139,14 +166,16 @@ fn query_result_cache_snapshot_tracks_acknowledged_turns_and_exact_window_identi
         assert_eq!(answer["payload"]["turnWindow"]["totalTurns"], ordinal+1);
         assert_eq!(answer["payload"]["turnWindow"]["hasMore"], ordinal != 0);
         assert!(lookup(&query(1)).is_none(), "first read after a write must not refresh a copied snapshot");
-        assert_eq!(read(query(1)), answer);
-        assert_eq!(lookup(&query(1)), Some(answer));
+        let (again, hit) = served_after_reads(|| read(query(1)), || lookup(&query(1)));
+        assert_eq!(again, answer);
+        assert_eq!(hit, answer);
     }
     assert!(lookup(&query(2)).is_none(), "different window was incorrectly reused");
     let wider = read(query(2));
     assert_eq!(wider["payload"]["turns"].as_array().unwrap().len(), 2);
-    assert_eq!(read(query(2)), wider);
-    assert_eq!(lookup(&query(2)), Some(wider));
+    let (again, hit) = served_after_reads(|| read(query(2)), || lookup(&query(2)));
+    assert_eq!(again, wider);
+    assert_eq!(hit, wider);
     let bytes = serde_json::to_vec(&query(1)).unwrap();
     assert!(runtime.try_cached_json("turn.sync.snapshot", &bytes, None, 1, || true).is_none());
     assert!(runtime.try_cached_json("turn.sync.snapshot", &bytes, Some("command"), now_unix_ms()+10000, || true).is_none());

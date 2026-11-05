@@ -18,8 +18,15 @@ import pytest
 
 from tests._runtime_sections import (
     native_module_path,
+    native_module_graph,
     runtime_section,
     runtime_section_names,
+)
+from tests._jsdom import require_node_modules
+from tests.frontend.test_frontend_conversation_surface_vite import (
+    conversation_bundle as conversation_bundle,
+    test_surface_reuses_turn_and_block_nodes_across_revisions as exercise_keyed_nodes,
+    test_surface_hands_optimistic_turn_to_durable_identity_in_place as exercise_presentation_handoff,
 )
 
 
@@ -70,31 +77,42 @@ def test_retained_turn_adapter_uses_only_the_typed_role_asset_port():
         assert retired not in adapter
 
 
-def test_typed_runtime_composes_every_turn_domain_owner():
-    source = (ROOT / 'frontend/src/core/turn-runtime.ts').read_text(
-        encoding='utf-8')
-
-    for owner in (
-        "from './conversation-sync'",
-        "from './turn-command'",
-        "from './turn-projection'",
-        "from './turn-presentation'",
-        "from './turn-render'",
-        "from './turn-state'",
-    ):
-        assert owner in source
-    for public_operation in (
-        'emptyState: createTurnState',
-        'reducer: reduceTurnState',
-        'createStore: createTurnStore',
-        'renderInto: renderTurnStateInto',
-        'finishPresentation: presentTurnFinish',
-        'resumeOptions: resumeTurnOptions',
-        'hydrateConversation',
-        'submitConversation',
-        'operateConversation',
-    ):
-        assert public_operation in source
+def test_typed_runtime_reuses_owners_and_exposes_command_capabilities():
+    require_node_modules('vite')
+    bundle = native_module_graph([
+        ('.native/runtime-capabilities.js', 'frontend/src/core/turn-runtime.ts'),
+        ('.native/runtime-state-owner.js', 'frontend/src/core/turn-state.ts'),
+        ('.native/runtime-render-owner.js', 'frontend/src/core/turn-render.ts'),
+        ('.native/runtime-presentation-owner.js', 'frontend/src/core/turn-presentation.ts'),
+    ])
+    script = r"""
+global.window = globalThis;
+require(process.argv[1]);
+const runtime = createConversationTurnRuntime({ api: {} });
+const owners = {
+  emptyState: createTurnState, reducer: reduceTurnState, createStore: createTurnStore,
+  renderInto: renderTurnStateInto, finishPresentation: presentTurnFinish,
+  resumeOptions: resumeTurnOptions,
+};
+const commands = ['submit', 'runOperation', 'hydrateConversation', 'wakeConversation',
+  'submitConversation', 'submitBranch', 'operateConversation', 'executeConversationPlan',
+  'appendSettledConversationTurn', 'updateConversationTurn', 'mutateConversationFileChanges',
+  'createBranchLane', 'deleteBranchLane', 'deleteConversationTurns', 'cancelQueuedTurn',
+  'markCommandPending', 'markCommandFailed', 'abortConversation', 'abortAttempt'];
+console.log(JSON.stringify({
+  sharedOwners: Object.entries(owners).every(([name, owner]) => runtime[name] === owner),
+  callableCommands: commands.every(name => typeof runtime[name] === 'function'),
+  frozen: Object.isFrozen(runtime),
+}));
+"""
+    result = subprocess.run(
+        [shutil.which('node'), '-e', script, bundle], cwd=ROOT,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        'sharedOwners': True, 'callableCommands': True, 'frozen': True,
+    }
 
 
 def test_retained_turn_adapter_has_no_shadow_state_or_transport():
@@ -128,18 +146,10 @@ def test_loaded_turn_store_intercepts_every_retained_conversation_repaint():
     assert 'renderChat(' not in adapter
 
 
-def test_renderer_identity_is_projection_id_not_message_index():
-    renderer = (ROOT / 'frontend/src/conversation/ui/conversation-surface.ts').read_text(
-        encoding='utf-8')
-    assert "directKeyedChildren(turnsContainer, 'presentationId')" in renderer
-    assert 'turnNode.dataset.presentationId = presentationId' in renderer
-    assert 'turnNode.dataset.turnId = turn.turnId' in renderer
-    assert "directKeyedChildren(containerNode, 'blockId')" in renderer
-    assert 'node.dataset.blockId = block.blockId' in renderer
-    assert "getElementById('msg-'" not in renderer
-    assert 'activeTaskId' not in renderer
-    assert 'streaming-msg' not in renderer
-    assert 'data-msg-id' not in renderer
+def test_renderer_identity_is_projection_id_not_message_index(conversation_bundle):
+    """Verify the shipped graph, independent of the renderer's module layout."""
+    exercise_keyed_nodes(conversation_bundle)
+    exercise_presentation_handoff(conversation_bundle)
 
 
 def test_retained_scroll_adapter_has_no_parallel_surface_latches():
@@ -164,9 +174,28 @@ def test_retained_scroll_adapter_has_no_parallel_surface_latches():
 
 
 def test_main_bridge_does_not_export_turn_internals():
-    source = (ROOT / 'frontend/src/main.ts').read_text(encoding='utf-8')
-    bridge = source[source.index('export interface TofuModuleBridge'):
-                    source.index('connectFeatureRuntime(')]
+    require_node_modules('typescript')
+    script = r"""
+const ts = require('typescript');
+const config = ts.readConfigFile('tsconfig.json', ts.sys.readFile);
+if (config.error) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'));
+const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, process.cwd());
+const program = ts.createProgram(parsed.fileNames, parsed.options);
+const checker = program.getTypeChecker();
+const windowSymbol = checker.resolveName('Window', undefined, ts.SymbolFlags.Type, false);
+if (!windowSymbol) throw new Error('The browser Window contract is missing');
+const bridge = checker.getPropertyOfType(checker.getDeclaredTypeOfSymbol(windowSymbol), 'TofuModules');
+if (!bridge) throw new Error('The public Window.TofuModules contract is missing');
+const type = checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(bridge, bridge.valueDeclaration));
+console.log(JSON.stringify(checker.getPropertiesOfType(type).map(property => property.name)));
+"""
+    result = subprocess.run(
+        [shutil.which('node'), '-e', script], cwd=ROOT,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    bridge = set(json.loads(result.stdout))
+    assert {'version', 'collectDiagnostics', 'invokeFeature'} <= bridge
     for removed in (
         'createConversationTurnRuntime',
         'createAttemptEventStream',
@@ -182,8 +211,7 @@ def test_main_bridge_does_not_export_turn_internals():
 
 def test_turn_continue_affordance_reads_only_server_resume_options():
     node = shutil.which('node')
-    if not node:
-        pytest.skip('node not installed')
+    require_node_modules('vite')
     bundle = native_module_path(
         '.native/turn-actions.js',
         ROOT / 'frontend/src/conversation/presentation/view-model/turn-metadata.ts',

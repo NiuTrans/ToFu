@@ -89,6 +89,11 @@ function record(value: unknown): UnknownRecord | null {
 const ACTIVE_TOOL_STATUSES = new Set([
   'searching', 'executing', 'running', 'pending', 'queued',
 ]);
+
+/** Canonical in-flight tool statuses, shared with program card projection. */
+export function isActiveToolStatus(status: unknown): boolean {
+  return ACTIVE_TOOL_STATUSES.has(String(status ?? '').toLowerCase());
+}
 const ERROR_TOOL_STATUSES = new Set([
   'error', 'failed', 'rejected', 'aborted', 'interrupted',
   'cancelled', 'canceled',

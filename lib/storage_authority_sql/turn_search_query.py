@@ -17,6 +17,7 @@ from typing import Any
 from lib.storage.errors import StorageError
 from lib.storage_authority_sql.adapters.base import Session
 from lib.storage_authority_sql.operations_pkg._common import _integer
+from lib.storage_authority_sql.turn_search_sources import ARCHIVED_SOURCE_PREFIX
 
 QUERY_CHARACTERS = 512
 QUERY_TERMS = 32
@@ -53,7 +54,7 @@ def _decode_cursor(value: Any, binding: str) -> tuple[int, int | None, str]:
             raise ValueError()
         return data[2], data[3], data[4]
     except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
-        raise StorageError('database_protocol_error', 'Invalid conversation search cursor') from exc
+        raise StorageError('database_invalid_payload', 'Invalid conversation search cursor') from exc
 
 
 def _cursor(binding: str, phase: int, updated_at: int, conversation_id: str) -> str:
@@ -115,19 +116,25 @@ def _after(updated_at: int | None, conversation_id: str) -> tuple[str, list[Any]
     return ' AND (c.updated_at_ms<? OR (c.updated_at_ms=? AND c.id<?))', [updated_at, updated_at, conversation_id]
 
 
+def _header_hit(conversation_id: str, match_field: str) -> dict[str, Any]:
+    snippet = conversation_id if match_field == 'id' else ''
+    return {'id': conversation_id, 'snippet': snippet, 'role': None,
+            'match_field': match_field, 'turn_id': None, 'ordinal': None}
+
+
 def _snippet(session: Session, row: Mapping[str, Any], user_id: int,
              query: str, radius: int) -> dict[str, Any]:
     conversation_id = str(row['id'])
     title = str(row.get('title') or '')
     if query in title.lower():
-        return {'id': conversation_id, 'snippet': '', 'role': None, 'match_field': 'title'}
+        return _header_hit(conversation_id, 'title')
     if query in conversation_id.lower():
-        return {'id': conversation_id, 'snippet': conversation_id, 'role': None, 'match_field': 'id'}
+        return _header_hit(conversation_id, 'id')
     first = query.split()[0]
     # Original human wording wins among equivalent hits. Only one bounded
     # chunk crosses the database/Python boundary per visible conversation.
     chunk = session.fetch_one(
-        'SELECT search_text,role,match_field FROM storage_search_chunks '
+        'SELECT search_text,role,match_field,turn_id,ordinal FROM storage_search_chunks '
         'WHERE user_id=? AND conversation_id=? '
         "AND (folded_text LIKE ? ESCAPE '!' OR folded_text LIKE ? ESCAPE '!') "
         "ORDER BY CASE WHEN folded_text LIKE ? ESCAPE '!' THEN 0 ELSE 1 END, "
@@ -137,7 +144,7 @@ def _snippet(session: Session, row: Mapping[str, Any], user_id: int,
     )
     if chunk is None:
         # An all-words match can have its first word only in the title.
-        return {'id': conversation_id, 'snippet': '', 'role': None, 'match_field': 'title'}
+        return _header_hit(conversation_id, 'title')
     return _chunk_snippet(chunk, conversation_id, query, radius)
 
 
@@ -166,8 +173,12 @@ def _chunk_snippet(chunk: Mapping[str, Any], conversation_id: str, query: str, r
         start = max(0, start_index - radius)
         end = min(len(text), end_index + radius)
         snippet = '…' + text[start:end].replace('\n', ' ').strip() + '…'
+    turn_id = str(chunk['turn_id'])
+    live = not turn_id.startswith(ARCHIVED_SOURCE_PREFIX)
     return {'id': conversation_id, 'snippet': snippet,
-            'role': chunk['role'], 'match_field': chunk['match_field']}
+            'role': chunk['role'], 'match_field': chunk['match_field'],
+            'turn_id': turn_id if live else None,
+            'ordinal': int(chunk['ordinal']) if live else None}
 
 
 def _fast_page(session: Session, *, user_id: int, query: str, limit: int,
@@ -236,7 +247,7 @@ def _scan_state(value, query):
                     and isinstance(point[1], str) and len(point[1]) <= 1024
                     and type(point[2]) is int and 0 <= point[2] <= 9223372036854775807))
     if not valid:
-        raise StorageError('database_protocol_error', 'Invalid conversation search cursor')
+        raise StorageError('database_invalid_payload', 'Invalid conversation search cursor')
     return extension
 
 
@@ -335,12 +346,12 @@ def _portable_page(session, *, user_id, query, limit, radius, cursor):
             matched = phrase_hit if phase == 0 else mask == all_bits and not phrase_hit
             if matched:
                 if title_hit or (best is None and not id_hit):
-                    hit = {'id': cid, 'snippet': '', 'role': None, 'match_field': 'title'}
+                    hit = _header_hit(cid, 'title')
                 elif id_hit:
-                    hit = {'id': cid, 'snippet': cid, 'role': None, 'match_field': 'id'}
+                    hit = _header_hit(cid, 'id')
                 else:
                     chunk = best_chunk or session.fetch_one(
-                        'SELECT search_text,role,match_field FROM storage_search_chunks '
+                        'SELECT search_text,role,match_field,turn_id,ordinal FROM storage_search_chunks '
                         'WHERE user_id=? AND conversation_id=? AND turn_id=? AND chunk_index=?',
                         (user_id, cid, best[1], best[2]))
                     hit = _chunk_snippet(chunk, cid, query, radius) if chunk else None

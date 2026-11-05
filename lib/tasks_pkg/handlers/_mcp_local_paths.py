@@ -1,19 +1,18 @@
 """Route explicitly declared server-local MCP files through task workspace policy.
 
 Entry: call_with_local_paths, shared by direct and progressive MCP calls.
-Dependencies: MCP catalog/transport, project root admission and writer leases.
+Dependencies: MCP catalog/transport and project root/read-only admission. No
+workspace lease is taken; the tool starts once its paths are validated.
 Remote/undeclared parameters remain opaque; no parameter-name heuristics run.
 """
 from __future__ import annotations
 
-from contextlib import ExitStack
 from functools import lru_cache
 import json
 import os
 from pathlib import Path
 
 from lib.mcp.result_content import MCPToolResult
-from lib.project_mod.workspace_lease import WorkspaceBusyError
 
 
 @lru_cache(maxsize=1)
@@ -46,8 +45,12 @@ def _declaration(info):
     return declaration
 
 
-def call_with_local_paths(bridge, name, arguments, *, task, invoke):
-    """Validate all paths before side effects, preserving typed transport results."""
+def call_with_local_paths(bridge, name, arguments, *, task, invoke, runtime_context=None):
+    """Validate all paths before side effects, preserving typed transport results.
+
+    ``runtime_context`` is the executor's context for this call occurrence: a
+    cancelled call is refused before invocation.
+    """
     info = bridge.get_tool_info(name)
     if not isinstance(info, dict):
         return invoke(arguments)
@@ -81,15 +84,14 @@ def call_with_local_paths(bridge, name, arguments, *, task, invoke):
             policy = build_root_policy(config['projectPath'], config.get('projectPaths'), config.get('readOnlyPaths'))
         key = execution_root_key(task)
         from lib.project_mod.path_resolution import _resolve_base
-        from lib.project_mod.tool_admission import Cancellation, admission_timeout, tool_admission_scope
+        from lib.project_mod.tool_admission import Cancellation, tool_admission_scope
         from lib.project_mod.write_tools._paths import _resolve_write_path
-        from lib.project_mod.workspace_lease import (
-            workspace_write_lease, workspace_read_lease, lease_claim_order)
         routed = dict(arguments)
         plans = []
         limits = path_contract()['x-limits']
-        cancellation = Cancellation(task)
-        with execution_root_scope(key, policy), tool_admission_scope(task), ExitStack() as stack:
+        cancellation = Cancellation(task, runtime_context, tool_name=name)
+        with execution_root_scope(key, policy), \
+                tool_admission_scope(task, runtime_context, tool_name=name):
             for field, field_policy in fields.items():
                 value = arguments[field]
                 if not isinstance(value, str) or not value.strip() or len(value) > limits['path_chars'] or '\0' in value:
@@ -115,27 +117,15 @@ def call_with_local_paths(bridge, name, arguments, *, task, invoke):
                     raise ValueError(f'{field}: input file does not exist at {str(target)!r}; use the file write receipt')
                 routed[field] = str(target)
                 plans.append((target, field_policy, owner['path']))
-            leases = {}
-            for _, field_policy, root in plans:
-                leases[root] = leases.get(root, False) or field_policy['access'] == 'write'
-            for root, write in sorted(leases.items(), key=lambda item: lease_claim_order(('root', item[0]))):
-                factory = workspace_write_lease if write else workspace_read_lease
-                stack.enter_context(factory(root, timeout=admission_timeout(), cancel_event=cancellation))
             if cancellation.is_set():
                 raise ValueError('task cancelled before local MCP file preparation')
             for target, field_policy, root in plans:
-                if not target.resolve().is_relative_to(Path(root).resolve()):
-                    raise ValueError('local path changed root while waiting for admission')
-                if field_policy['access'] == 'write':
-                    # Check after admission and again after directory preparation.
-                    _resolve_write_path(policy['primaryPath'], str(target), conv_id=key)
-                    if field_policy.get('create_parents'):
-                        target.parent.mkdir(parents=True, exist_ok=True)
+                if field_policy['access'] == 'write' and field_policy.get('create_parents'):
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    # Directory preparation must not move the output elsewhere.
                     _resolve_write_path(policy['primaryPath'], str(target), conv_id=key)
                     if not target.resolve().is_relative_to(Path(root).resolve()):
                         raise ValueError('output path changed root during directory preparation')
-                elif not target.is_file():
-                    raise ValueError('input file disappeared while waiting for admission')
             if cancellation.is_set():
                 raise ValueError('task cancelled before MCP invocation')
             invocation_started = True
@@ -151,7 +141,7 @@ def call_with_local_paths(bridge, name, arguments, *, task, invoke):
                 else:
                     result = str(result) + receipt
             return result
-    except (ValueError, OSError, WorkspaceBusyError) as error:
+    except (ValueError, OSError) as error:
         if invocation_started:
             raise
         return MCPToolResult(f'MCP Error: Local path preparation refused: {error}. Command/tool was not started.', is_error=True)

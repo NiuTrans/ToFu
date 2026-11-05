@@ -75,6 +75,7 @@ def test_missing_or_malformed_source_pin_refuses(admitted, pin):
 @pytest.mark.parametrize('actual_source', ['a'*64, 'b'*64])
 def test_each_open_checks_actual_export_and_closes_rejected_runtime(admitted, monkeypatch, frozen, actual_source):
     from benchmarks.knowledge_html import durable
+    from serverctl_pkg.native_engine import EnginePreparationError
     original, engine, _ = admitted
     runtimes = []
 
@@ -102,7 +103,8 @@ def test_each_open_checks_actual_export_and_closes_rejected_runtime(admitted, mo
     corpus.runtime = corpus.client = None
     corpus.database_provenance = original if frozen else None
     if actual_source != original.source_sha256:
-        with pytest.raises(RuntimeError, match='not built from this checkout'):
+        # Typed, so test lanes apply the inherited-engine skip contract.
+        with pytest.raises(EnginePreparationError, match='not built from this checkout'):
             corpus.open()
         assert corpus.runtime is None and runtimes[-1].closed
     else:

@@ -91,6 +91,25 @@ def test_explicit_sse_status_preserves_gateway_semantics(run):
 
 
 @pytest.mark.parametrize('run', [_run_sync, _run_async])
+def test_anthropic_refusal_details_reach_stream_usage(run):
+    result = run([], protocol='anthropic', raw_chunks=[_wire([
+        {'type': 'message_start', 'message': {'usage': {'input_tokens': 9}}},
+        {'type': 'content_block_start', 'index': 0,
+         'content_block': {'type': 'text', 'text': 'Partial'}},
+        {'type': 'message_delta',
+         'delta': {'stop_reason': 'refusal', 'stop_details': {
+             'type': 'refusal', 'category': 'cyber',
+             'explanation': 'Declined: could enable cyber harm.'}},
+         'usage': {'output_tokens': 2}},
+        {'type': 'message_stop'},
+    ])])
+    assert result.state is ProviderStreamState.PROVIDER_FINISHED
+    assert result.finish_reason == 'content_filter'
+    assert result.usage['_model_refusal'] == {
+        'category': 'cyber', 'explanation': 'Declined: could enable cyber harm.'}
+
+
+@pytest.mark.parametrize('run', [_run_sync, _run_async])
 def test_responses_content_filter_is_typed(run):
     with pytest.raises(ContentFilterError):
         run([], protocol='responses', raw_chunks=[_wire([{
@@ -257,11 +276,11 @@ def test_nonstream_error_uses_same_classification(monkeypatch, code, expected, p
 def test_websocket_error_uses_the_shared_responses_translator(monkeypatch, code, expected, nested):
     from lib.llm import responses_websocket as ws
     from lib.llm._sse_core import prepare_request
-    from tests.llm.test_responses_websocket import _FakeConnection, _install_connection
+    from tests.llm.test_responses_websocket import _ScriptedConnection, _install_connection
 
     error = {'code': code, 'message': 'Synthetic provider failure'}
 
-    class Connection(_FakeConnection):
+    class Connection(_ScriptedConnection):
         def send(self, payload):
             self.events = [{'type': 'error', **({'error': error} if nested else error)}]
 

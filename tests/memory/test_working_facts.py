@@ -3,6 +3,7 @@ import pytest
 
 from tests.artifacts.test_artifact_review import artifact as artifact, storage as storage, turn_service, PRINCIPAL, requirements
 from lib.artifacts import core
+from lib.error_envelope import BadRequest
 from lib.memory.working_facts import repository, service, sources
 
 pytestmark = pytest.mark.unit
@@ -39,7 +40,7 @@ def dependency(fact):
 def test_observation_needs_exact_quote_inference_needs_owner_review(facts):
     with pytest.raises(ValueError, match='observation'):
         record(facts, text='The report is correct')
-    with pytest.raises(ValueError, match='quote'):
+    with pytest.raises(BadRequest, match='quote'):
         record(facts, evidence=[{'kind': 'artifact', 'id': facts['id'],
                'version': facts['content_sha256'], 'quote': 'invented evidence'}])
     observed = record(facts)['facts'][0]
@@ -85,7 +86,7 @@ def test_requirement_change_preserves_independent_observations(facts):
 def test_cycles_stale_edits_and_unknown_versions_are_refused(facts):
     a = record(facts)['facts'][0]
     b = record(facts, evidence=[dependency(a)])['facts'][0]
-    with pytest.raises(ValueError, match='acyclic'):
+    with pytest.raises(BadRequest, match='acyclic'):
         record(facts, id=a['id'], evidence=[dependency(b)])
     with pytest.raises(repository.FactConflict):
         record(facts, revision=0)

@@ -34,3 +34,5 @@ export function themeForRole(role:string):PodTheme {
 export function roomForRole(role:string):string {
   const theme=themeForRole(role);return theme==='analysis'?'general':theme;
 }
+/** Copy key of the localized job title for a free-form swarm role. */
+export function roleTitleKey(role:string):string {return 'memberTitle_'+themeForRole(role);}

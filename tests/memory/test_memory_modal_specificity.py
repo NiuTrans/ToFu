@@ -10,8 +10,9 @@ what silently regresses when someone later edits styles.css (e.g. widens the
 tofu rule back to `.modal input`, or drops the `:not()`). This encodes the
 invariant instead of asserting it. jsdom CANNOT do this — it resolves
 `classList` but does not apply the external stylesheet or resolve cascade
-specificity. So we parse the REAL styles.css and resolve the winning rule with a
-correct CSS specificity calculator (a,b,c tuple + source order tie-break).
+specificity. So we parse the REAL styles.css, followed by the Memory feature's
+deferred sheet, and resolve the winning rule with a correct CSS specificity
+calculator (a,b,c tuple + source order tie-break).
 
 Three things (owner-specified):
   1. DELETION — every `.memory-modal .memory-*` input rule carries NO !important.
@@ -32,6 +33,7 @@ resolved by the same engine as the baseline; no source writes or subprocesses.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -43,6 +45,8 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 CSS = os.path.join(ROOT, 'static', 'styles.css')
+STYLE_ROOT = os.path.join(ROOT, 'frontend', 'src', 'styles', 'application')
+MEMORY_FEATURE_ENTRY = 'frontend/src/features/memory/panel.ts'
 
 
 # ─────────────────────────── CSS specificity engine ───────────────────────────
@@ -281,6 +285,20 @@ def _css():
         return f.read()
 
 
+def _memory_modal_css():
+    """The cascade an open Memory modal runs under: the critical sheet, then
+    the deferred sheets its feature entry imports (the panel body moved out of
+    the critical sheet in e7f266f04; Vite admits it before the panel shows)."""
+    with open(os.path.join(STYLE_ROOT, 'manifest.json'), encoding='utf-8') as f:
+        manifest = json.load(f)
+    sheets = [_css()]
+    for row in manifest['deferredSections']:
+        if row.get('featureEntry') == MEMORY_FEATURE_ENTRY:
+            with open(os.path.join(STYLE_ROOT, row['path']), encoding='utf-8') as f:
+                sheets.append(f.read())
+    return '\n'.join(sheets)
+
+
 # A memory-modal search input under the tofu theme:
 #   <div data-theme="tofu"> … <div class="modal memory-modal"> <input class="memory-search-input">
 _MEM_INPUT = _Elem(
@@ -300,7 +318,7 @@ _TOFU_MEM_BORDER = '1px solid rgba(184,176,160,0.4)'  # the tofu bleed border
 
 @pytest.fixture(scope='module')
 def css_text():
-    return _css()
+    return _memory_modal_css()
 
 
 # ─────────────────────────── 1. DELETION ───────────────────────────
@@ -372,12 +390,14 @@ def test_generic_tofu_modal_input_still_gets_theme(css_text):
 # ─────────────────────────── NC-1 double-neuter (in memory) ───────────────────────────
 
 # NOTE: the shipped bleed selector also carries `:not(.recent-search-input)`
-# (see tests/search/test_recent_search_tofu_specificity.py) and `:not(.settings-panel)`
-# (2026-09-04 Settings soft redesign). This neuter removes ONLY
-# the `:not(.memory-modal)` carve-out (its purpose) and preserves the
-# other two, so it stays surgical.
-_NC1_FIND = '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input){'
-_NC1_REPL = '[data-theme="tofu"] .modal:not(.settings-panel) input:not(.recent-search-input){'
+# (see tests/search/test_recent_search_tofu_specificity.py), `:not(.settings-panel)`
+# (2026-09-04 Settings soft redesign) and `:not(.folder-browser-input)` (the
+# shared folder browser). This neuter removes ONLY the `:not(.memory-modal)`
+# carve-out (its purpose) and preserves the others, so it stays surgical.
+_NC1_FIND = ('[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
+             'input:not(.recent-search-input):not(.folder-browser-input){')
+_NC1_REPL = ('[data-theme="tofu"] .modal:not(.settings-panel) '
+             'input:not(.recent-search-input):not(.folder-browser-input){')
 
 
 def test_nc1_reverting_exclusion_reintroduces_bleed(css_text):

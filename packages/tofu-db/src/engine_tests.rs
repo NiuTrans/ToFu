@@ -238,6 +238,77 @@
     }
 
     #[test]
+    fn repeated_carried_history_recovery_verifies_each_content_once() {
+        let (vfs, mut engine) = initialized_simulated_engine();
+        let payload = b"repeated WAL reference with a published historical copy";
+        let id = engine.write_block(payload).unwrap();
+        engine.commit_references(b"history owner", &[id]).unwrap();
+        indexed_rotate(&mut engine);
+        assert!(engine.history_manifest.as_ref().unwrap().payload_index_root_id.is_some());
+        engine.blocks.set_cache_capacity_bytes(0).unwrap();
+        let mut lookup = engine.blocks.prepare_carried_recovery(BTreeSet::from([id])).unwrap();
+        assert_eq!(engine.blocks.restore_carried_with_lookup(payload, &mut lookup).unwrap(), id);
+        assert!(engine.blocks.pending_payload(id).unwrap().is_none());
+        vfs.arm_fault(None).unwrap();
+        let started = std::time::Instant::now();
+        for _ in 0..128 {
+            assert_eq!(engine.blocks.restore_carried_with_lookup(payload, &mut lookup).unwrap(), id);
+        }
+        let trace = vfs.trace().unwrap();
+        let reads = trace.iter().filter(|operation| **operation == Operation::Read).count();
+        eprintln!("repeated_history_recovery references=128 reads={reads} elapsed_us={}", started.elapsed().as_micros());
+        assert!(trace.is_empty(), "verified WAL content repeated history I/O: {reads} reads");
+        // Proofs belong to this exclusive recovery pass. A fresh pass still
+        // reaches the source and propagates a nonrepairable storage error.
+        let mut fresh = engine.blocks.prepare_carried_recovery(BTreeSet::from([id])).unwrap();
+        vfs.arm_fault(Some(FaultRule { operation_number: 1,
+            action: FaultAction::ErrorBefore(io::ErrorKind::PermissionDenied) })).unwrap();
+        assert_eq!(engine.blocks.restore_carried_with_lookup(payload, &mut fresh)
+            .unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        vfs.arm_fault(None).unwrap();
+        drop(engine);
+        vfs.crash().unwrap();
+        assert_eq!(Engine::open_with_vfs(Path::new("/data"), vfs).unwrap().read_block(id).unwrap(), payload);
+    }
+
+    #[test]
+    #[ignore = "explicit paired recovery I/O experiment on a disposable authority"]
+    fn repeated_carried_recovery_paired_measurement() {
+        let parent = std::env::var_os("TOFUDB_RESTART_BENCH_PARENT").map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let directory = tempfile::Builder::new().prefix("tofu-recovery-pair-")
+            .tempdir_in(parent).unwrap();
+        let payload = vec![29; 8192];
+        let mut engine = Engine::initialize(directory.path()).unwrap();
+        let id = engine.commit_transaction(b"paired history owner", &[&payload]).unwrap().block_ids[0];
+        indexed_rotate(&mut engine);
+        drop(engine);
+        // Both arms recover the same verified historical source. The old
+        // conservative port performs the same read formerly repeated by the
+        // per-open lookup; alternating order limits filesystem warming bias.
+        for (leg, use_lookup) in [false, true, true, false, false, true, true, false].into_iter().enumerate() {
+            let engine = Engine::open(directory.path()).unwrap();
+            engine.blocks.set_cache_capacity_bytes(0).unwrap();
+            let mut lookup = engine.blocks.prepare_carried_recovery(BTreeSet::from([id])).unwrap();
+            let started = std::time::Instant::now();
+            for _ in 0..128 {
+                let restored = if use_lookup {
+                    engine.blocks.restore_carried_with_lookup(&payload, &mut lookup)
+                } else {
+                    engine.blocks.restore_carried(&payload)
+                }.unwrap();
+                assert_eq!(restored, id);
+            }
+            let elapsed_us = started.elapsed().as_micros();
+            assert!(engine.blocks.pending_payload(id).unwrap().is_none());
+            assert_eq!(engine.read_block(id).unwrap(), payload);
+            assert_eq!(engine.state.durable_sequence, 1);
+            assert_eq!(engine.history_manifest.as_ref().unwrap().segments.len(), 1);
+            eprintln!("repeated_history_pair leg={leg} lookup={use_lookup} references=128 elapsed_us={elapsed_us}");
+        }
+    }
+
+    #[test]
     fn checkpointed_open_does_not_walk_cold_payload_catalog() {
         let (vfs, mut engine) = initialized_simulated_engine();
         let mut references = Vec::new();
@@ -3627,32 +3698,23 @@
     }
 
     #[test]
-    fn hard_ceiling_rejects_with_retryable_backpressure_then_rotation_completes() {
+    fn online_wal_crosses_former_ceiling_then_driver_completes_rotation() {
         let vfs = prepared_simulated_vfs();
         let mut engine = Engine::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
         engine.attach_rotation_driver();
-        // Test the actual hard boundary independently of soft-trigger refusal.
-        engine.set_rotation_threshold_bytes_for_test(ACTIVE_LOG_MAX_BYTES);
-        // Drive the active WAL toward the hard ceiling with unique inline
-        // payloads; the first commit that would exceed
-        // ACTIVE_LOG_MAX must reject with classified retryable backpressure,
-        // carrying no mutation.
-        let mut committed = 0_u64;
-        let error = loop {
-            committed += 1;
-            assert!(committed <= 300, "ceiling must trip within 300 commits");
+        // A delayed driver must not turn its trigger into write admission.
+        engine.set_rotation_threshold_bytes_for_test(ACTIVE_LOG_CHECKPOINT_BYTES);
+        for committed in 1..=300_u64 {
             let mut big = vec![7_u8; 250_000];
             big[..8].copy_from_slice(&committed.to_be_bytes());
-            match engine.commit_transaction(&big, &[]) {
-                Ok(_) => {}
-                Err(error) => break error,
-            }
-        };
-        assert!(crate::engine::is_rotation_backpressure(&error));
+            engine.commit_transaction(&big, &[]).unwrap();
+        }
+        assert_eq!(engine.state.durable_sequence, 300);
+        assert!(engine.wal.len() > 64 * 1024 * 1024);
         let prepared = match engine
             .take_prepared_rotation()
             .unwrap()
-            .expect("hard ceiling must prepare a rotation")
+            .expect("driver must capture the accumulated backlog")
         {
             crate::engine::RotationWork::Fresh(prepared) => prepared,
             crate::engine::RotationWork::Deferred(..) => {
@@ -3663,12 +3725,21 @@
         engine
             .finish_rotation_checkpoint(prepared, Ok(encoded))
             .unwrap();
-        engine.commit(b"over-ceiling").unwrap();
+        engine.commit(b"after-backlog-checkpoint").unwrap();
         let tail = engine
-            .transaction_at(committed)
+            .transaction_at(301)
             .unwrap()
             .unwrap();
-        assert_eq!(tail.envelope.inline_payload, b"over-ceiling");
+        assert_eq!(tail.envelope.inline_payload, b"after-backlog-checkpoint");
+        std::mem::forget(engine);
+        vfs.crash().unwrap();
+        let recovered = Engine::open_with_vfs(Path::new("/data"), vfs).unwrap();
+        assert_eq!(recovered.state.durable_sequence, 301);
+        for sequence in [1_u64, 150, 300] {
+            let mut expected = vec![7_u8; 250_000];
+            expected[..8].copy_from_slice(&sequence.to_be_bytes());
+            assert_eq!(recovered.transaction_at(sequence).unwrap().unwrap().envelope.inline_payload, expected);
+        }
     }
 
     #[test]
@@ -4061,7 +4132,7 @@
         for grouped in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let mut engine = Engine::initialize(directory.path()).unwrap();
-            engine.rotation_threshold_bytes = ACTIVE_LOG_MAX_BYTES;
+            engine.rotation_threshold_bytes = ACTIVE_LOG_CHECKPOINT_BYTES;
             // Hold the bounded handoff instead of running a worker, so the
             // real 64 MiB boundary also measures retained WAL disk capacity.
             let retirement_registration = engine.wal_retirement.register_worker().unwrap();
@@ -4077,7 +4148,7 @@
             }
             assert_eq!(engine.state.checkpoint_sequence, 0);
             let before_bytes = fs::metadata(engine.wal.path()).unwrap().len();
-            assert!(before_bytes > ACTIVE_LOG_MAX_BYTES - 2 * 1024 * 1024);
+            assert!(before_bytes > ACTIVE_LOG_CHECKPOINT_BYTES - 2 * 1024 * 1024);
             let payload = vec![0x7f; 2 * 1024 * 1024];
             let id = if grouped {
                 engine
@@ -4095,7 +4166,7 @@
             };
             assert_eq!(engine.state.checkpoint_sequence, 31);
             assert_eq!(engine.state.active_log_generation, 2);
-            assert!(fs::metadata(engine.wal.path()).unwrap().len() <= ACTIVE_LOG_MAX_BYTES);
+            assert!(fs::metadata(engine.wal.path()).unwrap().len() <= ACTIVE_LOG_CHECKPOINT_BYTES);
             let wal_sizes: Vec<u64> = fs::read_dir(directory.path())
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
@@ -4103,8 +4174,8 @@
                 .map(|path| fs::metadata(path).unwrap().len())
                 .collect();
             assert_eq!(wal_sizes.len(), 2);
-            assert!(wal_sizes.iter().all(|bytes| *bytes <= ACTIVE_LOG_MAX_BYTES));
-            assert!(wal_sizes.iter().sum::<u64>() <= 2 * ACTIVE_LOG_MAX_BYTES);
+            assert!(wal_sizes.iter().all(|bytes| *bytes <= ACTIVE_LOG_CHECKPOINT_BYTES));
+            assert!(wal_sizes.iter().sum::<u64>() <= 2 * ACTIVE_LOG_CHECKPOINT_BYTES);
             assert_eq!(
                 fs::metadata(directory.path().join("active.wal"))
                     .unwrap()
@@ -5031,3 +5102,86 @@
     include!("engine_generation_tests.rs");
 
     include!("engine_rotation_publication_tests.rs");
+    include!("engine_wal_progress_tests.rs");
+    include!("engine_recovery_memory_tests.rs");
+
+    impl Engine {
+        pub(crate) fn install_paged_history_for_test(&mut self) -> Vec<BlockId> {
+            let manifest = self.history_manifest.as_mut().unwrap();
+            let pages = manifest.encode_test_pages().unwrap();
+            assert!(pages.len() > 1);
+            let dependencies = manifest.manifest_page_ids.clone();
+            let root = HistoryManifest::publish_pages(&pages, &self.blocks).unwrap();
+            self.state.history_manifest_block_id = Some(root);
+            self.state.generation += 1;
+            self.control.lock().unwrap().publish(&self.state).unwrap();
+            self.control_dirty = false;
+            dependencies
+        }
+    }
+
+    #[test]
+    fn paged_history_reopen_backup_and_gc_retain_all_metadata_and_transactions() {
+        let (vfs, mut engine) = initialized_simulated_engine();
+        let mut payload_ids = Vec::new();
+        for index in 0..7 {
+            let payload = format!("history page payload {index}");
+            payload_ids.push(engine.commit_transaction(payload.as_bytes(), &[payload.as_bytes()]).unwrap().block_ids[0]);
+            indexed_rotate(&mut engine);
+        }
+        let dependencies = engine.install_paged_history_for_test();
+        let mut retained = BTreeSet::new();
+        engine.visit_gc_stable_transaction_blocks(|id| { retained.insert(id); Ok(()) }).unwrap();
+        assert!(dependencies.iter().all(|id| retained.contains(id)));
+        // The detached online-GC metadata selection must retain the same pages.
+        let selection = crate::block::HistoryPayloadMetadataSelection::capture(
+            engine.history_manifest.as_ref().unwrap(), u64::MAX).unwrap();
+        let mut selected = BTreeSet::new();
+        engine.blocks.visit_history_payload_metadata_selection(selection, |id| { selected.insert(id); Ok(()) }).unwrap();
+        assert!(dependencies.iter().all(|id| selected.contains(id)));
+        vfs.create_dir(Path::new("/backup")).unwrap();
+        vfs.create_dir(Path::new("/restored")).unwrap();
+        vfs.sync_directory(Path::new("/")).unwrap();
+        crate::backup::create_incremental_backup_with_vfs(&mut engine, Path::new("/backup"), vfs.clone()).unwrap();
+        crate::backup::prune_backup_with_vfs(Path::new("/backup"), 1, vfs.clone()).unwrap();
+        crate::backup::restore_latest_backup_with_vfs(Path::new("/backup"), Path::new("/restored"), vfs.clone()).unwrap();
+        std::mem::forget(engine);
+        vfs.crash().unwrap();
+        let mut restored = Engine::open_with_vfs(Path::new("/restored"), vfs.clone()).unwrap();
+        let mut reopened = Engine::open_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+        let missing = Arc::new(vfs.fork_durable().unwrap());
+        missing.remove_file(&indexed_block_path(dependencies[0])).unwrap();
+        assert!(Engine::open_with_vfs(Path::new("/data"), missing).is_err(),
+            "startup must not ignore a missing retained history page");
+        for (index, id) in payload_ids.iter().enumerate() {
+            let payload = format!("history page payload {index}");
+            for candidate in [&restored, &reopened] {
+                assert_eq!(candidate.read_block(*id).unwrap(), payload.as_bytes());
+                assert_eq!(candidate.transaction_at(index as u64 + 1).unwrap().unwrap().envelope.inline_payload, payload.as_bytes());
+            }
+        }
+        for candidate in [&mut restored, &mut reopened] {
+            candidate.commit(b"after paged recovery").unwrap();
+            indexed_rotate(candidate);
+            assert_eq!(candidate.transaction_at(8).unwrap().unwrap().envelope.inline_payload, b"after paged recovery");
+        }
+    }
+
+    #[test]
+    fn history_retention_accepts_multi_page_counts() {
+        let (vfs, mut engine) = initialized_simulated_engine();
+        let root = engine.write_block(b"authority root").unwrap();
+        engine.commit_references_with_authority_state(b"retained", &[], Some(root)).unwrap();
+        indexed_rotate(&mut engine);
+        // A retention target is not a physical leaf size. Automatic pruning
+        // also passes total-history-minus-one-slice through this entry point.
+        for retained in [crate::history::MAX_HISTORY_SEGMENTS + 1, usize::MAX] {
+            assert!(engine.try_prepare_history_compaction(retained).unwrap().is_none());
+            assert_eq!(engine.compact_history(retained).unwrap().retired_segments, 0);
+        }
+        assert!(engine.try_prepare_history_compaction(0).is_err());
+        engine.commit(b"still writable").unwrap();
+        drop(engine);
+        let reopened = Engine::open_with_vfs(Path::new("/data"), vfs).unwrap();
+        assert_eq!(reopened.transaction_at(2).unwrap().unwrap().envelope.inline_payload, b"still writable");
+    }

@@ -74,6 +74,7 @@ from urllib.parse import urlparse
 
 from lib.config_dir import config_path
 from lib.json_store import read_json, update_json_atomic
+from lib.error_envelope import BadRequest
 from lib.log import audit_log, get_logger
 from lib.ttl_cache import TTLCache
 from runtime_guards import resolve_resource_budget
@@ -433,13 +434,8 @@ def _persist() -> None:
     _cache_mtime = _store_mtime()
 
 
-def _redact(row: dict, knowledge: Optional[dict] = None) -> dict:
-    """Public view: replace cookie list with a count, drop raw values.
-
-    ``knowledge`` is the site_knowledge entry for this domain (or None),
-    injected by list_sources so a listing costs ONE store read —
-    projected to a small badge ``{pinned, version, verified_at}``.
-    """
+def _redact(row: dict) -> dict:
+    """Redacted credential metadata; owned executable rules need a scoped reader."""
     out = dict(row)
     cookies = out.get('cookies') or []
     out['cookie_count'] = len(cookies)
@@ -448,17 +444,7 @@ def _redact(row: dict, knowledge: Optional[dict] = None) -> dict:
     spec = source_spec(out.get('domain', ''))
     if not out.get('access_strategy'):
         out['access_strategy'] = spec.get('access_strategy') or 'browser_first'
-    # Site knowledge is now keyed by operation.  Keep accepting the legacy
-    # flat search entry so upgrades do not temporarily lose their badge.
-    operations = knowledge.get('operations') if isinstance(knowledge, dict) \
-        and isinstance(knowledge.get('operations'), dict) else {}
-    pinned = operations.get('search') if operations else knowledge
-    if isinstance(pinned, dict) and pinned.get('extractor_js'):
-        out['knowledge'] = {'pinned': True,
-                            'version': pinned.get('version'),
-                            'verified_at': pinned.get('verified_at')}
-    else:
-        out['knowledge'] = {'pinned': False}
+    out['knowledge'] = {'pinned': False}
     proxy = out.get('proxy') or ''
     out['has_proxy'] = bool(proxy)
     # Show only the proxy host, never embedded credentials.
@@ -486,13 +472,16 @@ def list_sources() -> list[dict]:
         rows = [dict(r) for r in _cache]
     rows.sort(key=lambda r: (not r.get('enabled'), r.get('label', r.get('domain', ''))))
     try:
-        from lib.site_knowledge import list_knowledge
-        knowledge_map = list_knowledge()
+        from lib.site_knowledge import legacy_candidates
+        knowledge_map = legacy_candidates()
     except Exception as e:
         logger.debug('[AuthSrc] site-knowledge map unavailable: %s', e)
         knowledge_map = {}
-    return [_redact(r, knowledge=knowledge_map.get(r.get('domain', '')))
-            for r in rows]
+    projected = [_redact(r) for r in rows]
+    for row in projected:
+        if row.get('domain') in knowledge_map:
+            row['knowledge']['migration_required'] = True
+    return projected
 
 
 def _with_spec(row: dict) -> dict:
@@ -597,31 +586,31 @@ def upsert_source(domain: str, *, label: Optional[str] = None,
     """
     dom = normalize_domain(domain)
     if not dom:
-        raise ValueError('domain is required')
+        raise BadRequest('domain is required', field='domain')
 
     if access_strategy is not None \
             and access_strategy not in _VALID_STRATEGIES:
-        raise ValueError(
-            f'access_strategy must be one of {_VALID_STRATEGIES}')
+        raise BadRequest(
+            f'access_strategy must be one of {_VALID_STRATEGIES}', field='access_strategy')
 
     if fields is not None:
         if not isinstance(fields, list):
-            raise ValueError('fields must be a list of declarations')
+            raise BadRequest('fields must be a list of declarations', field='fields')
         normalized_fields = []
         seen_names: set = set()
         for f in fields:
             if not isinstance(f, dict):
-                raise ValueError('each cookie field must be an object')
+                raise BadRequest('each cookie field must be an object', field='fields')
             name = str(f.get('name') or '').strip()
             importance = str(f.get('importance') or '').strip()
             if not name or len(name) > 128:
-                raise ValueError('cookie field name is required (max 128 chars)')
+                raise BadRequest('cookie field name is required (max 128 chars)', field='fields')
             if importance not in _VALID_IMPORTANCE:
-                raise ValueError(
+                raise BadRequest(
                     f'cookie field {name!r}: importance must be one of '
-                    f'{_VALID_IMPORTANCE}')
+                    f'{_VALID_IMPORTANCE}', field='fields')
             if name in seen_names:
-                raise ValueError(f'duplicate cookie field: {name!r}')
+                raise BadRequest(f'duplicate cookie field: {name!r}', field='fields')
             seen_names.add(name)
             normalized_fields.append({'name': name, 'importance': importance})
         fields = normalized_fields
@@ -634,7 +623,7 @@ def upsert_source(domain: str, *, label: Optional[str] = None,
     if cookies is not None and cookies:
         missing = missing_required_fields(cookies, dom, fields=fields)
         if missing:
-            raise ValueError('missing required cookie(s): ' + ', '.join(missing))
+            raise BadRequest('missing required cookie(s): ' + ', '.join(missing), field='cookies')
 
     _ensure_loaded()
     with _lock:

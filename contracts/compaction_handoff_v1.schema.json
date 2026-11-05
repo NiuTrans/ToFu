@@ -20,8 +20,26 @@
         "phase": {
           "enum": ["pre_turn", "mid_turn"],
           "description": "Source chronology before folding: pre_turn has no execution after latest human input; mid_turn has execution or a surviving mid-turn boundary. Not the fold mode, trigger or API round. A later human steer starts a new pre-turn boundary."
+        },
+        "coverage": {"$ref": "#/$defs/coverage"},
+        "scheduledRequestId": {
+          "type": "string", "minLength": 1, "maxLength": 64,
+          "description": "Owner-scheduled working-view compaction this summary served, inherited when a later summary folds it. Settlement retires the durable marker only when a stored checkpoint carries it."
         }
       }
+    },
+    "coverage": {
+      "type": "object",
+      "required": ["conversationId", "firstTurnId", "lastTurnId", "throughReply"],
+      "additionalProperties": false,
+      "properties": {
+        "conversationId": {"type": "string", "minLength": 1},
+        "firstTurnId": {"type": "string", "minLength": 1},
+        "lastTurnId": {"type": "string", "minLength": 1},
+        "throughReply": {"type": "boolean", "description": "The folded range also holds the reply Turn produced after lastTurnId."},
+        "before": {"type": "integer", "minimum": 2, "description": "get_conversation before= cursor (1-based message number) whose window ends at the last covered Turn; exact or an upper bound after Turn deletion."}
+      },
+      "description": "Folded Turn range named in the visible carrier, before the summary, with its get_conversation recall call. Absent when the folded rows carry no Turn identity."
     },
     "automaticContinuation": {
       "type": "object",

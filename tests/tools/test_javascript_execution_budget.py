@@ -13,6 +13,11 @@ from lib.tools.result_value import CanonicalReceipt
 pytestmark = pytest.mark.unit
 SELECTOR = '{ref:"input_' + 'a' * 32 + '"}'
 
+# (module (type (func)) (func) (start 0) (code (func))) — instantiation runs a
+# guest function while a program's Store is still being created.
+_START_FUNCTION_MODULE = bytes.fromhex(
+    '0061736d01000000' '010401600000' '03020100' '080100' '0a040102000b')
+
 
 def receipt(value):
     return CanonicalReceipt({"status": "done", "output": json.dumps(value),
@@ -36,6 +41,31 @@ def test_large_string_key_projection_exceeds_old_fuel_without_exhausting_memory(
     assert stats['wasm_memory_bytes'] < JavaScriptLimits().heap_bytes
     assert stats['guest_execution_seconds'] < JavaScriptLimits().execution_seconds
     assert stats['result_reads'] == 1 and stats['tool_calls'] == 0
+
+
+def test_instantiation_runs_inside_the_program_execution_budget(monkeypatch):
+    """Instantiation is the program's first WASM entry. A fresh Store carries
+    Wasmtime's already-expired default epoch deadline, so a host whose
+    instantiation path reaches a guest function must be armed before
+    `initialize` builds the reactor — not only around exported calls."""
+    import wasmtime
+
+    import lib.tools.javascript as runtime
+
+    _, engine, _, _ = runtime._compile()
+    start_function = wasmtime.Module(engine, _START_FUNCTION_MODULE)
+    instantiate = wasmtime.Instance
+
+    def instantiation_runs_a_guest_function(store, module, imports):
+        store.engine.increment_epoch()
+        # The probe instance only simulates a host that enters guest code while
+        # instantiating; it is not part of the program's own admission.
+        store.set_limits(instances=2)
+        instantiate(store, start_function, [])
+        return instantiate(store, module, imports)
+
+    monkeypatch.setattr(wasmtime, 'Instance', instantiation_runs_a_guest_function)
+    assert run('return 7;')[0] == 7
 
 
 @pytest.mark.parametrize('source', [

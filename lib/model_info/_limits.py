@@ -159,11 +159,20 @@ def _clamp_max_tokens(model: str, max_tokens: int) -> int:
     clamped to _DEFAULT_UNKNOWN_MAX_OUTPUT so the first request doesn't
     over-ask and get rejected.
     """
+    limit = _clamp_family_max_tokens(model, max_tokens)
+    learned = _LEARNED_MODEL_LIMITS.get(model)
+    if learned:
+        limit = min(limit, learned)
+    return limit
+
+
+def _clamp_family_max_tokens(model: str, max_tokens: int) -> int:
+    """Family (or unknown-family) output ceiling, without learned evidence."""
     # Defense-in-depth: a caller that passes a missing/None/invalid max_tokens
     # must never crash the clamp (``min(None, int)`` raises TypeError). Fall
-    # back to the conservative unknown-family ceiling and let the family/learned
+    # back to the conservative unknown-family ceiling and let the family
     # limits below refine it. The upstream config resolver is the primary guard;
-    # this keeps _clamp_max_tokens total for every caller.
+    # this keeps every clamp total for every caller.
     if not isinstance(max_tokens, int) or max_tokens <= 0:
         max_tokens = _DEFAULT_UNKNOWN_MAX_OUTPUT
     limit = max_tokens
@@ -180,10 +189,6 @@ def _clamp_max_tokens(model: str, max_tokens: int) -> int:
     # an over-large max_tokens and eat a guaranteed 400 on the first call.
     if not matched_family:
         limit = min(limit, _DEFAULT_UNKNOWN_MAX_OUTPUT)
-    # Check auto-learned model-specific limits (may lower the limit further)
-    learned = _LEARNED_MODEL_LIMITS.get(model)
-    if learned:
-        limit = min(limit, learned)
     return limit
 
 
@@ -193,9 +198,21 @@ def _clamp_route_max_tokens(
     *,
     route_key: str = '',
     declared_limit: int = 0,
+    wire_model: str = '',
 ) -> int:
-    """Clamp against family, declared Deployment and learned route limits."""
-    limit = _clamp_max_tokens(model, max_tokens)
+    """Clamp against family, declared Deployment and learned route limits.
+
+    ``model`` is the logical identity whose family knowledge applies.
+    Per-name learned limits are evidence about the request spelling that
+    provoked them, so only ``wire_model`` (default: ``model``) contributes
+    one: a limit learned where a Deployment's wire id equals the logical id
+    never clamps another gateway's spelling of that Model, and the wire
+    spelling never contributes a family guess.
+    """
+    limit = _clamp_family_max_tokens(model, max_tokens)
+    learned_name = _LEARNED_MODEL_LIMITS.get(wire_model or model)
+    if learned_name:
+        limit = min(limit, learned_name)
     if isinstance(declared_limit, int) and declared_limit > 0:
         limit = min(limit, declared_limit)
     learned = _LEARNED_ROUTE_LIMITS.get(str(route_key or ''))

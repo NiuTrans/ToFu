@@ -40,8 +40,12 @@ const messages = {
   'toolHumanGuidance.defaultQuestion': 'default-question-local',
   'toolHumanGuidance.identifierLimit': 'identifier-limit:{n}',
   'toolHumanGuidance.label': 'guidance-local',
+  'toolHumanGuidance.nonBlockingBadge': 'non-blocking-local',
+  'toolHumanGuidance.nonBlockingHint': 'non-blocking-hint-local',
   'toolHumanGuidance.optionFallback': 'option-local:{index}',
   'toolHumanGuidance.optionsLimit': 'options-limit:{shown}/{total}',
+  'toolHumanGuidance.repliedInChat': 'replied-in-chat-local',
+  'toolHumanGuidance.supersededRow': 'superseded-local',
 };
 function translate(key, params) {
   let value = messages[key] || key;
@@ -319,6 +323,156 @@ check('dependency_failures_degrade_without_exposing_html',
   && !fallbackHtml.includes('<plain>')
   && fallbackHtml.includes('project.hgPanelTitle'));
 
+// ── Non-blocking questions: answered by an ordinary quoted chat message ──
+check('reply_quote_limit_is_named_and_exported',
+  limits.replyQuoteUnits === 4096);
+
+const blockingChoiceHtml = presentation.renderGuidanceHtml(
+  { ...choiceRound, guidanceBlocking: true },
+  { iconHtml: '<trusted-icon>', toolDisplayLabel: 'Guidance' },
+);
+check('blocking_card_is_unchanged_and_never_chat_routed',
+  blockingChoiceHtml === choiceHtml
+  && !choiceHtml.includes('data-hg-reply')
+  && !choiceHtml.includes('data-hg-quote')
+  && !choiceHtml.includes('hg-reply-hint')
+  && choiceHtml.includes('reply-local'));
+
+const chatChoiceRound = Object.freeze({
+  status: 'done',
+  toolName: 'ask_human',
+  guidanceBlocking: false,
+  guidanceId: hostileId,
+  guidanceQuestion: '  <Pick a "plan"> & go\n',
+  guidanceType: 'choice',
+  guidanceOptions: Object.freeze([
+    Object.freeze({ label: hostileLabel }),
+    Object.freeze({ label: 'Safe second' }),
+  ]),
+});
+const chatChoiceBefore = JSON.stringify(chatChoiceRound);
+const chatChoiceHtml = presentation.renderGuidanceHtml(
+  chatChoiceRound,
+  { iconHtml: '<trusted-icon>', toolDisplayLabel: 'Guidance' },
+);
+document.body.innerHTML = chatChoiceHtml;
+const chatCard = document.querySelector('.hg-card');
+check('non_blocking_choice_is_an_interactive_chat_reply_card',
+  chatCard?.dataset.hgReply === 'chat'
+  && chatCard.dataset.gid === hostileId
+  && chatCard.dataset.hgQuote === '<Pick a "plan"> & go'
+  && chatChoiceHtml.includes(
+    'data-hg-quote="&lt;Pick a &quot;plan&quot;&gt; &amp; go"',
+  )
+  && chatCard.querySelector('.hg-badge').textContent === 'non-blocking-local'
+  && chatCard.querySelector('.hg-reply-hint').textContent
+    === 'non-blocking-hint-local'
+  && chatCard.querySelectorAll('.hg-option-group').length === 2
+  && chatCard.querySelectorAll('textarea.hg-option-note-input').length === 2
+  && occurrences(
+    chatChoiceHtml,
+    'event.stopPropagation();submitHumanGuidanceChoice(this)',
+  ) === 2
+  && !chatCard.classList.contains('hg-expired')
+  && !chatCard.hasAttribute('data-hg-late-answer')
+  && !chatChoiceHtml.includes('<script>')
+  && JSON.stringify(chatChoiceRound) === chatChoiceBefore);
+
+check('non_blocking_card_never_expires_regardless_of_status',
+  presentation.renderGuidanceHtml(
+    {
+      ...chatChoiceRound,
+      _turnSettled: true, _hgAnswerGuidance: true, _turnId: 'turn-x',
+    },
+    { iconHtml: '<trusted-icon>', toolDisplayLabel: 'Guidance' },
+  ) === chatChoiceHtml
+  && presentation.renderGuidanceHtml(
+    { ...chatChoiceRound, status: 'awaiting_human', _turnSettled: true },
+    { iconHtml: '<trusted-icon>', toolDisplayLabel: 'Guidance' },
+  ) === chatChoiceHtml);
+
+const chatFreeHtml = presentation.renderGuidanceHtml({
+  status: 'done',
+  toolName: 'ask_human',
+  guidanceBlocking: false,
+  guidanceId: 'chat-free',
+  guidanceQuestion: 'Q'.repeat(5000) + 'QUOTE_TAIL',
+  guidanceType: 'free_text',
+}, { iconHtml: '' });
+document.body.innerHTML = chatFreeHtml;
+const chatFreeQuote = document.querySelector('.hg-card').dataset.hgQuote;
+check('non_blocking_free_text_quote_is_bounded',
+  document.querySelector('textarea.hg-textarea[data-gid="chat-free"]') !== null
+  && chatFreeHtml.includes('submitHumanGuidanceFreeText(this)')
+  && chatFreeQuote.length === 4096
+  && chatFreeQuote.endsWith('…')
+  && !chatFreeQuote.includes('QUOTE_TAIL'));
+
+const chatBatchHtml = presentation.renderGuidanceHtml({
+  status: 'done',
+  toolName: 'ask_human',
+  guidanceBlocking: false,
+  guidanceId: 'chat-batch',
+  guidanceType: 'batch',
+  guidanceQuestion: 'summary',
+  guidanceBatchQuestions: [
+    { question: '  Pick  ', response_type: 'choice', options: [{ label: 'A' }] },
+    { question: '', response_type: 'free_text' },
+    { question: 'Explain', response_type: 'free_text' },
+  ],
+}, { iconHtml: '' });
+document.body.innerHTML = chatBatchHtml;
+check('non_blocking_batch_quotes_numbered_questions_by_form_position',
+  document.querySelector('.hg-card').dataset.hgQuote === '1. Pick\n\n3. Explain'
+  && document.querySelectorAll('.hg-batch-section').length === 3
+  && chatBatchHtml.includes('submitBatchAnswers(this)'));
+
+const repliedHtml = presentation.renderGuidanceHtml({
+  ...chatChoiceRound,
+  _hgRepliedInChat: '<' + 'R'.repeat(100) + 'REPLY_TAIL',
+}, { iconHtml: '<trusted-icon>', toolDisplayLabel: '<Guidance>' });
+check('replied_row_is_read_only_bounded_and_localized',
+  repliedHtml.includes('hg-replied-line')
+  && repliedHtml.includes('<trusted-icon>')
+  && repliedHtml.includes('&lt;Guidance&gt;')
+  && repliedHtml.includes('&lt;' + 'R'.repeat(79) + '…')
+  && repliedHtml.includes('replied-in-chat-local')
+  && !repliedHtml.includes('REPLY_TAIL')
+  && !repliedHtml.includes('hg-card')
+  && !repliedHtml.includes('data-tofu-action'));
+
+const supersededHtml = presentation.renderGuidanceHtml({
+  status: 'done',
+  toolName: 'ask_human',
+  guidanceId: 'superseded-id',
+  guidanceSuperseded: true,
+  guidanceType: 'choice',
+  guidanceOptions: [{ label: 'A' }],
+  guidanceQuestion: '<' + 'S'.repeat(80) + 'SUPERSEDED_TAIL',
+}, { iconHtml: '<trusted-icon>', toolDisplayLabel: '<Guidance>' });
+check('superseded_row_is_read_only_bounded_and_localized',
+  supersededHtml.includes('hg-superseded-line')
+  && supersededHtml.includes('ptool-badge-skip')
+  && supersededHtml.includes('superseded-local')
+  && supersededHtml.includes('&lt;Guidance&gt;')
+  && supersededHtml.includes('&lt;' + 'S'.repeat(59) + '…')
+  && !supersededHtml.includes('SUPERSEDED_TAIL')
+  && !supersededHtml.includes('hg-card')
+  && !supersededHtml.includes('data-tofu-action'));
+
+check('non_blocking_round_without_identity_fails_closed',
+  presentation.renderGuidanceHtml(
+    { status: 'done', toolName: 'ask_human', guidanceBlocking: false },
+    { iconHtml: '' },
+  ) === ''
+  && presentation.renderGuidanceHtml(
+    {
+      status: 'done', toolName: 'read_file',
+      guidanceBlocking: false, guidanceId: 'not-a-question',
+    },
+    { iconHtml: '' },
+  ) === '');
+
 const received = { choice: [], free: [] };
 globalThis.pwned = undefined;
 installActionRegistry((name) => {
@@ -374,6 +528,6 @@ def test_tool_human_guidance_owner_and_actions():
         target_js=str(OWNER_JS),
         extra_targets=[str(ACTION_REGISTRY_JS)],
         body_js=_OWNER_HARNESS,
-        expect_pass=24,
+        expect_pass=33,
         label='tool Human Guidance presentation owner',
     )

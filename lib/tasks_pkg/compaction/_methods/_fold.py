@@ -1,9 +1,9 @@
 # HOT_PATH
 """M2 — observation folding (structured one-line facts).
 
-Replace a cold ``grep_search`` / ``find_files`` / ``list_dir`` result with
+Replace a cold ``search_files`` / ``find_files`` / ``list_dir`` result with
 a one-line *structured fact* extracted cheaply (no LLM): e.g.
-``grep_search → 3 match line(s)``.  Preserves the *answer* the tool
+``search_files → 3 match line(s)``.  Preserves the *answer* the tool
 produced rather than just "it was compacted", so the model rarely needs to
 re-call it.
 """
@@ -24,7 +24,9 @@ logger = get_logger(__name__)
 
 
 # Tools whose output can be losslessly summarised to a one-line fact.
-_FOLDABLE_TOOLS = frozenset({'grep_search', 'find_files', 'list_dir'})
+# ``grep_search`` is the retired name of ``search_files``; history keeps it.
+_FOLDABLE_TOOLS = frozenset({'search_files', 'grep_search', 'find_files',
+                             'list_dir'})
 
 
 def _fold_fact(tool_name: str, text: str) -> str | None:
@@ -32,13 +34,13 @@ def _fold_fact(tool_name: str, text: str) -> str | None:
     None if we can't summarise it confidently (then leave it to the
     generic compactor)."""
     lines = [ln for ln in text.splitlines() if ln.strip()]
-    if tool_name == 'grep_search':
+    if tool_name in ('search_files', 'grep_search'):
         # Result lines look like "path:line: match" — count them.
         match_lines = [ln for ln in lines
                        if re.match(r'.+:\d+:', ln) or re.search(r':\d+:', ln)]
         n = len(match_lines) if match_lines else max(0, len(lines) - 1)
         sample = match_lines[0][:120] if match_lines else ''
-        fact = f'[grep_search folded — {n} match line(s)]'
+        fact = f'[{tool_name} folded — {n} match line(s)]'
         if sample:
             fact += f' first: {sample}'
         return fact

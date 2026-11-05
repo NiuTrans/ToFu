@@ -72,8 +72,7 @@ reexecute them through the same production compiler, compare complete state and
 check reopen/commit faults. This is not certification of a generic authenticated
 native passive replay target; that pre-existing product gap remains.
 
-**Alternatives.** Another producer batch was rejected because ready-event
-batching already exists and cannot help independent ACKs. Eager final checkpoints
+**Alternatives.** Eager final checkpoints
 were rejected by the earlier high-entropy WAL counterexample. Trusting producer
 `projection_segments_stable`, byte counts or types alone was rejected because
 legacy guidance repair, normalization and depth are observable semantics. An
@@ -205,6 +204,115 @@ the frozen binary, source manifest/patch, build/focused logs, work counts,
 `matrix.json`, `summary.json` and all 48 raw timing logs. `run_matrix.py` contains
 the complete orchestration and `summarize.py` the aggregation. The earlier
 frame-only build is separately labeled and is not the measured combined source.
+
+## Batched structural events (2026-11-01)
+
+**Problem.** Every structural task event (phase, tool start/result, round
+end) needs its own `turn.event.record`: one commit, one projection revision and
+one conversation-sync event. A delivery barrier waits until every queued event
+is durable, so a backlog of K events costs K serialized commits. During the
+storage congestion of 2026-10-31 09:00-10:40 one RPC took about 6.8 s while
+barriers waited on 19-136 queued events: 24 barriers waited 2 minutes or more,
+375 minutes in total, the worst 65.7 minutes. `task_event.preceding_events` is
+the only multi-row form and admits progress frames only, because each
+structural frame owns a revision and a sync event. The native engine already
+executes several `TurnEventRecord` steps in one transaction; its compiler
+produced exactly one per request. This supersedes the earlier rejection of a
+producer batch ("ready-event batching already exists"), which covered progress
+frames only.
+
+**Decision.** The receipt-free command `turn.event.record_batch` is K ordinary
+`turn.event.record` steps in one all-or-nothing transaction on both
+authorities, answered by one ordinary result per entry. Every entry is a
+non-terminal record of the same task attempt carrying its row; interaction,
+background-acknowledgement and tool-effect records keep their own transaction
+and barrier. Rows strictly ascend across entries and stay within the existing
+storage-event RPC bound (500 rows, 60 MiB; `structuralBatch` in
+`contracts/task_event_delivery_v1.json`, read by
+`resolve_storage_event_budget`). Any refused entry rolls back every entry. The
+SQL authority loops `_turn_event_record` in one session; native TofuDB compiles
+K `TurnEventRecord` steps with a `SlotArray` result and never commits a mixed
+applied/rejected outcome. K entries leave the same K revisions, K sync events
+and K rows as K sequential calls.
+
+Native execution also refuses (`database_resource_exhausted`, nothing written)
+a multi-entry batch as soon as it no longer fits one ordinary commit: its
+entity delta must fit the overlay envelope that `prepare_commit` uses, and its
+new blobs and rows must fit the WAL-carried ceiling minus the composition
+headroom already published as `resourceBudget.eventBatchComposition`. Without
+that test, a 500-entry batch of small frames (about 4.6 KiB of new pages and
+blobs per entry) drained every conversation's overlay through the tree path,
+then synchronized about 1,300 loose blocks one by one under the authority:
+10.6-21.4 s per batch with request profiling on, 111 s once under host load,
+and `deadline_elapsed` in the benchmark. That is beyond the 10 s
+authority-wedge threshold and the 5 s deadline of every concurrent request.
+256 entries with 4 KiB tool results spilled the same way (6.8 s), while 136 of
+them committed in 252 ms. A single entry is an ordinary record and is never refused
+for its size. SQL has no such representation and commits the whole run.
+
+`turn_lifecycle.record_task_events(task, entries)` is the producer. It projects
+each durable wire once in FIFO order and chains K patches from the cached
+committed revision r to r+K. Oversized inline diagnostics are shed per entry as
+on the single path. It checks every per-entry result and remembers projection
+state once per transaction. A refused composite commit records its first half
+alone; later chunks of the call start at the size that committed. After an
+unknown outcome the next call reads the exact rows before resending: all
+present and identical means committed, none means resend on the same base,
+some fails closed with `database_conflict`. A stale attempt revokes the whole
+batch. An authority without the command answers `unknown_operation` and the
+call uses the per-event path; that is a capability answer, not a flag. The
+task event delivery FIFO calls it for every queued run of structural frames
+([task event delivery](TASK_EVENT_DELIVERY.md#queued-structural-runs-persist-in-one-call)).
+
+`benchmarks/turn_event_batch.py` replays one prepared FIFO run per K through K
+`record_task_event` calls and through one `record_task_events` call on fresh
+attempts of disposable authorities; both modes committed one identical digest
+of projection, revisions, rows and sync patches. Medians of three alternating
+runs (2026-11-02, shared 91-CPU host at load average 40-50, authorities under
+`/tmp`); *contended* adds four background writers on their own conversations
+and four CPU-bound Python threads. Batch RPCs include refused composite commits.
+
+| Backend | Load | K | Sequential (RPCs) | Batch (RPCs) | Ratio |
+|---|---|---:|---:|---:|---:|
+| SQLite | idle | 1 | 29.7 ms (1) | 53.0 ms (1) | 0.6 |
+| SQLite | idle | 16 | 285 ms (16) | 22.8 ms (1) | 12.5 |
+| SQLite | idle | 64 | 1.27 s (64) | 79.1 ms (1) | 16.0 |
+| SQLite | idle | 500 | 6.29 s (500) | 523 ms (1) | 12.0 |
+| SQLite | contended | 1 | 324 ms (1) | 322 ms (1) | 1.0 |
+| SQLite | contended | 16 | 8.72 s (16) | 271 ms (1) | 32.2 |
+| SQLite | contended | 64 | 26.0 s (64) | 733 ms (1) | 35.5 |
+| SQLite | contended | 500 | 228 s (500) | 2.46 s (1) | 92.9 |
+| TofuDB | idle | 1 | 32.7 ms (1) | 17.7 ms (1) | 1.8 |
+| TofuDB | idle | 16 | 157 ms (16) | 36.9 ms (1) | 4.3 |
+| TofuDB | idle | 64 | 930 ms (64) | 83.6 ms (1) | 11.1 |
+| TofuDB | idle | 500 | 5.09 s (500) | 1.58 s (12) | 3.2 |
+| TofuDB | contended | 1 | 251 ms (1) | 223 ms (1) | 1.1 |
+| TofuDB | contended | 16 | 3.93 s (16) | 196 ms (1) | 20.0 |
+| TofuDB | contended | 64 | 16.3 s (64) | 393 ms (1) | 41.5 |
+| TofuDB | contended | 500 | 131 s (500) | 8.98 s (12) | 14.6 |
+
+K = 1 gains nothing; the run-to-run spread there exceeds the difference.
+Native K = 500 made three refused attempts (500, 250 and 125 entries) and nine
+ordinary commits (eight of 62 frames, one of 4) without a spilled block. These
+are persistence clocks of one component boundary, not barrier, delivery or
+application latency.
+
+**Alternatives considered.**
+
+- Extend `preceding_events` to structural frames: one Turn event would carry
+  several structural changes under one revision and one sync event, changing
+  the replay contract.
+- Group by an estimated native cost, like the raw-event composition model: a
+  structural record rewrites the Turn document and several indexes, and the
+  measured new bytes were 2.6-7.5 times the wire bytes across workloads. Any
+  estimate is either a magic factor or unsafe; the authority's own test is exact.
+- Let large batches take the existing spill path: it keeps every write but
+  holds the authority for seconds per batch.
+- A smaller fixed batch cap: a tuning knob that ignores payload size, and SQL
+  needs none.
+- Raise the carried ceiling: it bounds WAL records and replay memory.
+- Fuse the steps with the execution-frame experiment below: it is test-only,
+  has no replay compiler, and ordinary steps already amortize the commit.
 
 ## Historical experiment: status and scope
 

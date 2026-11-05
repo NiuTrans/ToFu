@@ -5,6 +5,9 @@ Responsibility
 Build one bounded set of allocation-light validators at process import.  The
 predicates answer only whether a JSON value satisfies the generated schema;
 the diagnostic validator remains the authority for public violation details.
+Each predicate is specialized at compile time: undeclared bounds cost nothing
+per value, exact ``dict``/``int``/``float`` values skip the ABC and
+bool-exclusion checks, and other Mappings keep the generic path.
 
 Entry points
 ------------
@@ -274,7 +277,7 @@ class _SuccessPredicateCompiler:
                     value: Any, *, tag_field: str = field,
                     branches: dict[str, SuccessPredicate] = dispatch,
                 ) -> bool:
-                    if not isinstance(value, Mapping):
+                    if type(value) is not dict and not isinstance(value, Mapping):
                         return False
                     tag_value = value.get(tag_field)
                     if not isinstance(tag_value, str):
@@ -314,7 +317,10 @@ class _SuccessPredicateCompiler:
             *,
             variant_checks: tuple[SuccessPredicate, ...] = checks,
         ) -> bool:
-            return any(check(value) for check in variant_checks)
+            for check in variant_checks:
+                if check(value):
+                    return True
+            return False
 
         return validate_any_of
 
@@ -345,18 +351,25 @@ class _SuccessPredicateCompiler:
             pattern = re.compile(raw_pattern) if isinstance(raw_pattern, str) else None
         except re.error:
             return _reject_all
+        minimum = minimum_length if isinstance(minimum_length, int) else None
+        maximum = maximum_length if isinstance(maximum_length, int) else None
+        if minimum is None and maximum is None and pattern is None:
+            def validate_plain_string(value: Any) -> bool:
+                return isinstance(value, str)
+
+            return validate_plain_string
 
         def validate_string(
             value: Any,
             *,
-            minimum: Any = minimum_length,
-            maximum: Any = maximum_length,
+            minimum: int | None = minimum,
+            maximum: int | None = maximum,
             declared_pattern: re.Pattern[str] | None = pattern,
         ) -> bool:
             return (
                 isinstance(value, str)
-                and (not isinstance(minimum, int) or len(value) >= minimum)
-                and (not isinstance(maximum, int) or len(value) <= maximum)
+                and (minimum is None or len(value) >= minimum)
+                and (maximum is None or len(value) <= maximum)
                 and (
                     declared_pattern is None
                     or declared_pattern.search(value) is not None
@@ -369,28 +382,38 @@ class _SuccessPredicateCompiler:
     def _compile_number(
         schema: Mapping[str, Any], *, integer: bool
     ) -> SuccessPredicate:
-        minimum = schema.get("minimum")
-        maximum = schema.get("maximum")
+        declared_minimum = schema.get("minimum")
+        declared_maximum = schema.get("maximum")
+        minimum = (
+            declared_minimum
+            if isinstance(declared_minimum, (int, float))
+            else None
+        )
+        maximum = (
+            declared_maximum
+            if isinstance(declared_maximum, (int, float))
+            else None
+        )
+        # Exact int (and float for numbers) is the decoded JSON shape; bool and
+        # other subclasses take the general check.
+        exact_types = (int,) if integer else (int, float)
+        general_types = int if integer else (int, float)
 
         def validate_number(
             value: Any,
             *,
-            require_integer: bool = integer,
-            declared_minimum: Any = minimum,
-            declared_maximum: Any = maximum,
+            exact: tuple[type, ...] = exact_types,
+            general: Any = general_types,
+            minimum: Any = minimum,
+            maximum: Any = maximum,
         ) -> bool:
+            if type(value) not in exact and (
+                not isinstance(value, general) or isinstance(value, bool)
+            ):
+                return False
             return (
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
-                and (not require_integer or isinstance(value, int))
-                and (
-                    not isinstance(declared_minimum, (int, float))
-                    or not value < declared_minimum
-                )
-                and (
-                    not isinstance(declared_maximum, (int, float))
-                    or not value > declared_maximum
-                )
+                (minimum is None or not value < minimum)
+                and (maximum is None or not value > maximum)
             )
 
         return validate_number
@@ -398,18 +421,22 @@ class _SuccessPredicateCompiler:
     def _compile_array(self, schema: Mapping[str, Any]) -> SuccessPredicate:
         item_predicate = self._compile_node(schema.get("items"))
         maximum_items = schema.get("maxItems")
+        maximum = maximum_items if isinstance(maximum_items, int) else None
 
         def validate_array(
             value: Any,
             *,
             check_item: SuccessPredicate = item_predicate,
-            maximum: Any = maximum_items,
+            maximum: int | None = maximum,
         ) -> bool:
-            return (
-                isinstance(value, list)
-                and (not isinstance(maximum, int) or len(value) <= maximum)
-                and all(check_item(item) for item in value)
-            )
+            if not isinstance(value, list) or (
+                maximum is not None and len(value) > maximum
+            ):
+                return False
+            for item in value:
+                if not check_item(item):
+                    return False
+            return True
 
         return validate_array
 
@@ -443,42 +470,73 @@ class _SuccessPredicateCompiler:
             else None
         )
 
+        minimum = minimum_properties if isinstance(minimum_properties, int) else None
+        maximum = maximum_properties if isinstance(maximum_properties, int) else None
+        required_set = frozenset(required_fields)
+
+        # One loop per additionalProperties mode keeps the per-field path to a
+        # lookup and a call; the envelope checks run once per object.
+        if reject_additional:
+            def validate_members(
+                value: Mapping[Any, Any],
+                *,
+                declared_properties: dict[Any, SuccessPredicate] = property_predicates,
+            ) -> bool:
+                for field, child_value in value.items():
+                    child_predicate = declared_properties.get(field)
+                    if child_predicate is None or not child_predicate(child_value):
+                        return False
+                return True
+        elif additional_predicate is not None:
+            def validate_members(
+                value: Mapping[Any, Any],
+                *,
+                declared_properties: dict[Any, SuccessPredicate] = property_predicates,
+                check_additional: SuccessPredicate = additional_predicate,
+            ) -> bool:
+                for field, child_value in value.items():
+                    child_predicate = declared_properties.get(field, check_additional)
+                    if not child_predicate(child_value):
+                        return False
+                return True
+        else:
+            def validate_members(
+                value: Mapping[Any, Any],
+                *,
+                declared_properties: dict[Any, SuccessPredicate] = property_predicates,
+            ) -> bool:
+                for field, child_value in value.items():
+                    child_predicate = declared_properties.get(field)
+                    if child_predicate is not None and not child_predicate(child_value):
+                        return False
+                return True
+
         def validate_object(
             value: Any,
             *,
-            declared_properties: dict[Any, SuccessPredicate] = property_predicates,
             required: tuple[str, ...] = required_fields,
-            minimum: Any = minimum_properties,
-            maximum: Any = maximum_properties,
+            required_keys: frozenset[str] = required_set,
+            minimum: int | None = minimum,
+            maximum: int | None = maximum,
             check_property_name: SuccessPredicate | None = property_name_predicate,
-            deny_additional: bool = reject_additional,
-            check_additional: SuccessPredicate | None = additional_predicate,
+            check_members: SuccessPredicate = validate_members,
         ) -> bool:
-            if not isinstance(value, Mapping):
-                return False
-            property_count = len(value)
-            if isinstance(minimum, int) and property_count < minimum:
-                return False
-            if isinstance(maximum, int) and property_count > maximum:
-                return False
-            if check_property_name is not None and not all(
-                check_property_name(field) for field in value
+            if type(value) is dict:
+                if required_keys and not value.keys() >= required_keys:
+                    return False
+            elif not isinstance(value, Mapping) or any(
+                field not in value for field in required
             ):
                 return False
-            if any(field not in value for field in required):
+            if minimum is not None and len(value) < minimum:
                 return False
-            for field, child_value in value.items():
-                child_predicate = declared_properties.get(field)
-                if child_predicate is not None:
-                    if not child_predicate(child_value):
+            if maximum is not None and len(value) > maximum:
+                return False
+            if check_property_name is not None:
+                for field in value:
+                    if not check_property_name(field):
                         return False
-                elif deny_additional:
-                    return False
-                elif check_additional is not None and not check_additional(
-                    child_value
-                ):
-                    return False
-            return True
+            return check_members(value)
 
         return validate_object
 

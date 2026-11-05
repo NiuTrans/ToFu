@@ -20,7 +20,9 @@ Semantics:
   the access's own credential proves the gateway serves it (``ok`` /
   ``rate_limited``, the same served verdicts template curation uses),
   routed per recipe through ``build_probe_work`` so a Claude candidate is
-  probed on the Anthropic face exactly like dispatch would. Ids the owner
+  probed on the Anthropic face exactly like dispatch would, and each cell
+  carries only its own face Connection's headers plus the credential
+  envelope (a face selector is rejected on any other face). Ids the owner
   cleaned up because they probed dead never resurrect; transient probe
   failures simply retry on the next boot.
 * **Insert-only for supply** — existing offerings, credentials and owner
@@ -62,6 +64,8 @@ _PROBE_TIMEOUT = 20
 
 __all__ = [
     'poll_if_due',
+    'probe_cell_connection_headers',
+    'recipe_probe_entry',
     'start_template_supply_sync',
     'stop_template_supply_sync',
     'sync_template_supply',
@@ -114,6 +118,11 @@ def _access_connections(document: dict, access_id: str) -> list[dict]:
         if isinstance(row, dict)
         and row.get('provider_access_id') == access_id
     ]
+
+
+def _gateway_namespace(row: dict) -> str:
+    """The template face that created this Connection; '' for an owner one."""
+    return str(row.get('gateway_namespace') or '').strip()
 
 
 def _recipe_keys(recipe: dict) -> frozenset:
@@ -223,33 +232,67 @@ def _resolve_api_key(repository, boundary, document: dict,
     return '', {}
 
 
+def recipe_probe_entry(recipe: dict) -> dict:
+    """``build_probe_work`` model entry for one template recipe.
+
+    Its wire pool and face pins (``face`` / ``request_faces``) choose each
+    wire's endpoint exactly as ``resolve_face`` does for the Deployment the
+    recipe installs.
+    """
+    return {
+        'model_id': recipe['model_id'],
+        'capabilities': [],
+        **({'request_ids': list(recipe['request_ids'])}
+           if recipe.get('request_ids') else {}),
+        **{field: recipe[field] for field in ('face', 'request_faces')
+           if recipe.get(field)},
+    }
+
+
+def probe_cell_connection_headers(item: tuple, *, default_url: str,
+                                  default_face_headers: dict | None) -> dict:
+    """Connection headers one ``build_probe_work`` cell may send.
+
+    A face selector (aigc's ``x-context-provider: kunlun``) is rejected on
+    every other face (400 该模型在 provider 下无可用账号), so a cell carries
+    only its own face's headers: a declared face's arrive in the cell
+    context, ``default_face_headers`` reach only cells sent to
+    ``default_url``, and a face that declares none sends none.
+    """
+    if len(item) > 7:
+        return dict(item[7].get('extra_headers') or {})
+    if _norm_url(item[5]) == _norm_url(default_url):
+        return dict(default_face_headers or {})
+    return {}
+
+
 def _live_prober(*, base_url: str, protocol: str, faces: dict,
                  api_key: str, extra_headers: dict,
-                 recipes: list[dict]) -> dict[str, str]:
-    """Probe each recipe's wire pool; return model_id → verdict."""
+                 recipes: list[dict],
+                 default_face_headers: dict | None = None) -> dict[str, str]:
+    """Probe each recipe's wire pool; return model_id → verdict.
+
+    ``extra_headers`` are the credential envelope's headers and ride every
+    cell. Connection headers stay per face: a declared face's arrive in its
+    cells' ``build_probe_work`` context, and ``default_face_headers`` reach
+    only cells sent to the default endpoint.
+    """
     from lib.provider.provider_probe import build_probe_work, probe_one_cell
 
     provider = {'base_url': base_url, 'protocol': protocol, 'faces': faces}
-    models = [
-        {
-            'model_id': recipe['model_id'],
-            'capabilities': [],
-            **({'request_ids': list(recipe['request_ids'])}
-               if recipe.get('request_ids') else {}),
-        }
-        for recipe in recipes
-    ]
+    models = [recipe_probe_entry(recipe) for recipe in recipes]
     work = build_probe_work(provider, models, [api_key])
     by_root: dict[str, str] = {}
 
     def _run(item):
         _idx, key, root, wire, _caps, url, proto = item[:7]
-        # A face may select its serving provider with a header (aigc kunlun).
-        # Keep the selector AND envelope authentication. As in dispatch,
-        # credential headers take precedence over transport headers.
-        cell_headers = item[7].get('extra_headers') if len(item) > 7 else None
+        # As in dispatch, credential headers take precedence over transport
+        # headers.
+        face_headers = probe_cell_connection_headers(
+            item, default_url=base_url,
+            default_face_headers=default_face_headers)
         return root, probe_one_cell(
-            url, key, wire, {**(cell_headers or {}), **extra_headers}, _PROBE_TIMEOUT,
+            url, key, wire, {**face_headers, **extra_headers}, _PROBE_TIMEOUT,
             protocol=proto)
 
     from lib.observability import InstrumentedThreadPoolExecutor
@@ -279,33 +322,63 @@ def _live_prober(*, base_url: str, protocol: str, faces: dict,
 
 def _probe_plan(document: dict, access: dict,
                 template: dict) -> tuple[str, str, dict, dict]:
-    """(base_url, protocol, faces, headers) for probing this access."""
+    """(base_url, protocol, faces, default_face_headers) for this access.
+
+    Headers are never unioned across the access, and a ``gateway_namespace``
+    Connection belongs to its face alone, whatever the Connection order.
+    Default-endpoint cells take the namespace-less (owner) Connection at the
+    template's base URL, else one at no declared face URL, else the
+    template's declared endpoint with no Connection headers. Each face
+    carries the headers of its Connection at the face's declared URL (the
+    one namespaced to it, else an unclaimed owner one) plus the selector the
+    template declares for it (backfill creates and converges template face
+    Connections with exactly that selector).
+    """
     access_id = access['provider_access_id']
     connections = _access_connections(document, access_id)
-    by_url = {_norm_url(row.get('base_url')): row for row in connections}
     template_base = _norm_url(template.get('base_url'))
-    primary = by_url.get(template_base) or (connections[0] if connections else {})
+    raw_faces = template.get('faces') or {}
+    declared_faces = {
+        name: face for name, face in raw_faces.items() if isinstance(face, dict)
+    } if isinstance(raw_faces, dict) else {}
+    face_urls = {_norm_url(face.get('base_url'))
+                 for face in declared_faces.values()}
+    owner_rows = [row for row in connections if not _gateway_namespace(row)]
+    primary = (
+        next((row for row in owner_rows
+              if _norm_url(row.get('base_url')) == template_base), None)
+        or next((row for row in owner_rows
+                 if _norm_url(row.get('base_url')) not in face_urls), None))
 
     faces: dict[str, dict] = {}
-    raw_faces = template.get('faces') or {}
-    if isinstance(raw_faces, dict):
-        for name, face in raw_faces.items():
-            if not isinstance(face, dict):
-                continue
-            matched = by_url.get(_norm_url(face.get('base_url')))
-            faces[name] = {
-                **face,
-                'base_url': (matched or face).get('base_url'),
-            }
+    for name, face in declared_faces.items():
+        face_url = _norm_url(face.get('base_url'))
+        at_url = [row for row in connections
+                  if _norm_url(row.get('base_url')) == face_url]
+        matched = (
+            next((row for row in at_url
+                  if _gateway_namespace(row) == name), None)
+            or next((row for row in at_url
+                     if not _gateway_namespace(row) and row is not primary),
+                    None)
+            or {})
+        faces[name] = {
+            **face,
+            'base_url': (matched or face).get('base_url'),
+            'extra_headers': {
+                **(matched.get('extra_headers') or {}),
+                **(face.get('extra_headers') or {}),
+            },
+        }
 
-    headers: dict = {}
-    for row in connections:
-        headers.update(row.get('extra_headers') or {})
+    if primary is None:
+        return (template_base, str(template.get('protocol') or 'openai'),
+                faces, {})
     return (
         _norm_url(primary.get('base_url')),
         str(primary.get('protocol') or 'openai'),
         faces,
-        headers,
+        dict(primary.get('extra_headers') or {}),
     )
 
 
@@ -905,13 +978,13 @@ def sync_template_supply(*, boundary=None, repository=None,
                 'template supply: %s has no usable api-key credential — skipped',
                 access['provider_access_id'])
             continue
-        base_url, protocol, faces, headers = _probe_plan(
+        base_url, protocol, faces, default_face_headers = _probe_plan(
             document, access, template)
-        headers.update(secret_headers)
         try:
             verdicts = prober(
                 base_url=base_url, protocol=protocol, faces=faces,
-                api_key=api_key, extra_headers=headers, recipes=missing)
+                api_key=api_key, extra_headers=secret_headers,
+                default_face_headers=default_face_headers, recipes=missing)
         except Exception as exc:
             logger.warning(
                 'template supply: probe failed for %s: %s',

@@ -32,7 +32,7 @@ function runtime() {
     escapeHtml: String, t: (key, params = {}) => (/^(bgActivity\.summary|swarm\.summary|swarm\.failure|swarm\.phase\.failed)/.test(key)
       ? locale[key] || key : key).replace(/\{(\w+)\}/g, (match, name) => params[name] ?? match), renderMarkdown: String,
     _toolIcon: () => '', _toolDisplayName: String,
-    _TOOL_DISPLAY: {},
+    _TOOL_DISPLAY: {}, toolRoundSvg: () => '<svg></svg>',
     _swEnsureTicker: () => {}, _swDemandReconciliation: () => {},
     SWARM_RECONCILIATION_POLICY: { intervalMs: 20000, fastMs: 1000 },
 
@@ -53,21 +53,112 @@ test('settled roster wins over stale live cards, equally after reload; rendering
   const c = runtime(), round = terminal(), before = JSON.stringify(round);
   const html = c._buildSwarmPanelHTML(round, [round]);
   assert.match(html, /2\/2 agents finished/);
-  assert.match(html, /> Complete</);
+  assert.match(html, /sw-pill-done/);
   assert.match(html, /final answer/);
   assert.doesNotMatch(html, /sw-a-running|sw-a-pending|data-sw-start=/);
   assert.equal(JSON.stringify(round), before);
   delete round._swarmAgents;
   assert.equal(c._buildSwarmPanelHTML(round, [round]), html);
 });
+test('the card states each run fact once: one verdict, one clock, counts and an accessible completion bar', () => {
+  const c = runtime(), start = Date.now() - 52000;
+  const round = { toolName: 'spawn_agents', _swarm: true, _swarmActive: true, _swarmStartTime: start,
+    _swarmStats: { totalTokens: 63209, totalCostUsd: 0.4123 },
+    _swarmAgents: [
+      { id: 'a', role: 'coder', status: 'running', _startedAt: start, objective: 'Port the envelope.\nKeep the contract.',
+        tools: ['read_files'], _toolCalls: [
+          { callId: 'c1', toolName: 'read_files', status: 'done', preview: 'first' },
+          { callId: 'c2', toolName: 'run_command', status: 'running', argsBrief: 'pytest' }] },
+      { id: 'b', role: 'reviewer', status: 'done', tools: ['grep_search'], elapsed: 31.5, tokens: 12877 },
+    ] };
+  const html = c._buildSwarmPanelHTML(round, [round]);
+  assert.match(html, /<span class="sw-header-title">swarm\.title<\/span>/);
+  assert.doesNotMatch(html, /Parallel Execution|parallel task|sw-progress-label/);
+  assert.equal((html.match(/class="sw-status-pill /g) || []).length, 1, 'one verdict for the run');
+  assert.match(html, /class="sw-progress" role="progressbar" aria-valuemin="0" aria-valuemax="2" aria-valuenow="1" aria-label="1\/2 agents finished"/);
+  assert.equal((html.match(new RegExp(`class="sw-header-timer" data-sw-start="${start}"`, 'g')) || []).length, 1);
+  assert.equal((html.match(/agents finished/g) || []).length, 1, 'completion is named once, to assistive technology');
+  // Usage keeps only run totals: the count and the clock live in the header.
+  assert.match(html, /<div class="sw-footer">63\.2k tok<span class="sw-footer-sep">·<\/span>\$0\.4123<\/div>/);
+  // A recorded per-call timeline replaces bare tool-name chips, reading
+  // chronologically: the brief, then earlier calls, then the latest call.
+  const agentA = html.slice(html.indexOf('data-agent-id="a"'), html.indexOf('data-agent-id="b"'));
+  assert.doesNotMatch(agentA, /sw-a-tool-tag/);
+  assert.match(agentA, /<span class="sw-a-task-brief">Port the envelope\.<\/span>/);
+  assert.ok(agentA.indexOf('sw-a-task') < agentA.indexOf('sw-a-tool-history'));
+  assert.ok(agentA.indexOf('sw-a-tool-history') < agentA.indexOf('sw-a-latest'));
+  // Without per-call records, tool names remain the only tool evidence; the
+  // row already shows elapsed time, so the body keeps only usage.
+  const agentB = html.slice(html.indexOf('data-agent-id="b"'));
+  assert.match(agentB, /sw-a-tool-tag/);
+  assert.match(agentB, /<span class="sw-a-timer">32s<\/span>/, 'a settled clock reads like the live one');
+  assert.match(agentB, /<div class="sw-a-meta">12\.9k tok<\/div>/);
+});
 test('aborted, stalled and partially unresolved rosters never claim Complete', () => {
   const c = runtime();
   for (const status of ['aborted', 'stalled', 'unknown']) {
     const round = terminal(); round._swarmSnapshot.agents[1].status = status;
     const html = c._buildSwarmPanelHTML(round, [round]);
-    assert.doesNotMatch(html, /> Complete</);
+    assert.doesNotMatch(html, /sw-pill-done/);
     assert.match(html, status === 'aborted' ? /2\/2 agents finished/ : /1\/2 agents finished/);
   }
+});
+test('swarm completion fill matches finished agents, never running or unresolved work', () => {
+  const c = runtime();
+  for (const [statuses, finished] of [
+    [['running', 'thinking', 'running'], 0],
+    [['done', 'running', 'pending'], 1],
+    [['completed', 'failed', 'running'], 2],
+    [['done', 'completed', 'done'], 3],
+    [['aborted', 'cancelled', 'canceled'], 3],
+    [['failed', 'error', 'unknown'], 2],
+    [['pending', 'interrupted', 'stalled', 'unknown'], 0],
+    [['done', 'done', 'done', 'done', 'done', 'done'], 6],
+    [[...Array(199).fill('done'), 'running'], 199],
+  ]) {
+    for (const source of ['live', 'snapshot']) {
+      const agents = statuses.map((status, index) => agent(`agent-${index}`, status));
+      const round = { toolName: 'spawn_agents', _swarm: true,
+        ...(source === 'live' ? { _swarmAgents: agents } : { _swarmSnapshot: { settled: false, agents } }) };
+      const before = JSON.stringify(round);
+      const html = c._buildSwarmPanelHTML(round, [round]);
+      const style = html.match(/class="sw-progress-fill[^"]*" style="([^"]*)"/)[1];
+      const width = Number(style.match(/width:([\d.]+)%/)[1]);
+      assert.ok(Math.abs(width - finished / statuses.length * 100) < 0.000001,
+        `${source}: ${statuses.join(',')}: width=${width}`);
+      assert.ok(html.includes(`${finished}/${statuses.length} agents finished`));
+      if (finished < statuses.length) assert.ok(width < 100, 'unfinished work cannot fill the bar');
+      assert.equal(JSON.stringify(round), before, 'completion rendering is read-only');
+    }
+  }
+});
+test('completion fill keeps failure and cancellation distinct from success in one valid style attribute', () => {
+  const { JSDOM } = require('jsdom');
+  const c = runtime();
+  for (const [statuses, successPercent] of [
+    [['done', 'failed', 'running'], 50],
+    [['done', 'done', 'aborted', 'pending'], 200 / 3],
+    [['failed', 'error'], 0],
+    [['cancelled', 'canceled'], 0],
+  ]) {
+    const round = { toolName: 'spawn_agents', _swarm: true,
+      _swarmSnapshot: { settled: true, agents: statuses.map((status, i) => agent(`agent-${i}`, status)) } };
+    const html = c._buildSwarmPanelHTML(round, [round]);
+    const dom = new JSDOM(html);
+    try {
+      const fill = dom.window.document.querySelector('.sw-progress-fill');
+      assert.ok(fill.classList.contains('has-errors'), statuses.join(','));
+      assert.ok(Math.abs(Number.parseFloat(fill.style.getPropertyValue('--ok-pct')) - successPercent) < 0.000001,
+        'success color is relative to the finished portion, not the full roster');
+      assert.equal((html.match(/class="sw-progress-fill[^>]+>/)[0].match(/ style=/g) || []).length, 1,
+        'the browser must receive both width and color in the same style');
+      assert.doesNotMatch(html, /sw-pill-done/);
+    } finally { dom.window.close(); }
+  }
+});
+test('an empty swarm has no determinate completion bar', () => {
+  const round = { toolName: 'spawn_agents', _swarm: true, _swarmActive: true, _swarmAgents: [] };
+  assert.doesNotMatch(runtime()._buildSwarmPanelHTML(round, [round]), /class="sw-progress/);
 });
 test('failed agent card distinguishes no-slot admission from generic errors and escapes expandable details', () => {
   const c = runtime();
@@ -223,6 +314,13 @@ test('pending capacity and dependency evidence survives snapshot reload without 
   assert.match(html, /swarm.wait.dependencies/);
   assert.doesNotMatch(html, /sw-a-running|sw-a-timer/);
   assert.equal(JSON.stringify(round), before);
+});
+test('snapshot reload keeps each agent round count for the background-agent row', () => {
+  const c = runtime();
+  const round = {toolName:'spawn_agents', _swarmSnapshot:{settled:true, agents:[
+    {id:'done', role:'coder', status:'done', round:94}, {id:'stub', role:'reviewer', status:'unknown'},
+  ]}};
+  assert.deepEqual(c._recoverSwarmAgents(round, []).map(agent => agent.round), [94, undefined]);
 });
 test('panel summaries are localized and omit zero counts; waits never claim queue or running', () => {
   for (const language of ['en', 'zh']) {
@@ -585,7 +683,7 @@ test('restart pause never seals a panel and a resumed child reuses the original 
   assert.equal(Boolean(projected._swarmSnapshot?.settled), false);
   let html = c._buildSwarmPanelHTML(projected, [projected]);
   assert.match(html, /swarm.phase.interrupted/);
-  assert.doesNotMatch(html, /sw-a-timer|sw-pill-complete|sw-a-running/);
+  assert.doesNotMatch(html, /sw-a-timer|sw-pill-done|sw-a-running/);
   h.send({type: 'swarm_agent_phase', agentId: 'a', phase: 'running', swarmId: 'exec-1'});
   projected = h.overlays.get('t').projection.toolRounds[0];
   assert.equal(projected._swarmAgents[0].status, 'running');
@@ -614,7 +712,7 @@ test('status pause is known awaiting Continue, not an inactive terminal roster',
   assert.equal(Boolean(paused._swarmSnapshot?.settled), false);
   const html = c._buildSwarmPanelHTML(paused, [paused]);
   assert.match(html, /swarm.phase.interrupted/);
-  assert.doesNotMatch(html, /sw-pill-complete|sw-a-running/);
+  assert.doesNotMatch(html, /sw-pill-done|sw-a-running/);
 });
 
 // Exercise real transport shapes without the legacy convId convenience wrapper.
@@ -1074,7 +1172,7 @@ test('internal silence failure shows an error card live and after reload while p
     assert.match(html, /sw-a-err-title/);
     assert.match(html, /Invocation stalled after 900 seconds without progress/);
     assert.match(html, /Partial edits may remain/);
-    assert.doesNotMatch(html, /swarm\.phase\.aborted|> Complete</);
+    assert.doesNotMatch(html, /swarm\.phase\.aborted|sw-pill-done/);
     assert.equal(JSON.stringify(round), before);
   }
   assert.match(c._buildSwarmPanelHTML(cold, [cold]), /Partial implementation evidence remains available/);
@@ -1176,7 +1274,7 @@ test('actual settled snapshot renderer keeps normalized tool records and omissio
     assert.match(html, /sw-tl-omitted/);
     assert.match(html, /sw-tl-truncated/);
     assert.doesNotMatch(html, /stale-call|Stale live detail|foreign-agent|sw-a-running|data-sw-start=/);
-    if (status !== 'completed') assert.doesNotMatch(html, /> Complete</);
+    if (status !== 'completed') assert.doesNotMatch(html, /sw-pill-done/);
     assert.equal(JSON.stringify(round), before);
   }
 });

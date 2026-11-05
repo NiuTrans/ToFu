@@ -19,6 +19,11 @@ from lib.tool_results.tool_rejection import (
     stamp_tool_rejection,
     tool_rejection_descriptor,
 )
+from lib.tool_results.tool_round_status import (
+    FAILED_TOOL_ROUND_STATUSES,
+    TERMINAL_TOOL_ROUND_STATUSES,
+)
+from lib.tasks_pkg.event_delivery import EventDeliveryError
 from lib.tasks_pkg.manager import append_event
 
 logger = get_logger(__name__)
@@ -64,14 +69,6 @@ def _attach_terminal_qr(results: list) -> None:
             meta['qrImages'] = imgs
             logger.info('[QR] attached %d scannable QR image(s) to a %s round',
                         len(imgs), meta.get('toolName'))
-
-
-#: Terminal verdicts a finalize may stamp. Anything else is normalized to
-#: 'done' — a finalize SETTLES a round, and the only honest settle states are
-#: success or one of these backend-assigned failure verdicts (the same set the
-#: client reducer treats as terminal, _TERMINAL_ROUND_STATUS).
-_FINALIZE_VERDICTS = frozenset(
-    {'done', 'error', 'rejected', 'aborted', 'unanswerable'})
 
 
 def _finalize_tool_round(
@@ -169,10 +166,12 @@ def _publish_tool_round(
                     stamp_tool_rejection(
                         result_meta, rejection, legacy_result_alias=True)
         round_entry['results'] = results
-        _status = status if status in _FINALIZE_VERDICTS else 'done'
+        # A finalize SETTLES a round: the only honest settle states are success
+        # or one of the backend-assigned failure verdicts.
+        _status = status if status in TERMINAL_TOOL_ROUND_STATUSES else 'done'
         _prior = round_entry.get('status')
         if (_status == 'done' and isinstance(_prior, str)
-                and _prior in _FINALIZE_VERDICTS and _prior != 'done'):
+                and _prior in FAILED_TOOL_ROUND_STATUSES):
             # Verdict protection: a failure verdict already recorded (e.g. the
             # pool-timeout lane stamped 'error') outranks a late success settle.
             _status = _prior
@@ -230,7 +229,15 @@ def _publish_tool_round(
             stamp_tool_rejection(event, rejection)
         if extra_event_fields:
             event.update(extra_event_fields)
-    append_event(task, event)
+    try:
+        append_event(task, event)
+    except EventDeliveryError as exc:
+        # The row already holds this presentation and the pipeline settles the
+        # outcome. A lane that stopped admitting frames (Stop, shutdown) loses
+        # only this display; raising would turn a returned result into an
+        # unknown effect.
+        logger.warning('[Finalize] %s round %s result frame not delivered '
+                       '(non-fatal): %s', _tool_name or '?', rn, exc)
 
 
 def _build_simple_meta(

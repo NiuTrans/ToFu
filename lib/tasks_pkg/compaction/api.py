@@ -23,6 +23,7 @@ from lib.tasks_pkg.compaction._layer2._compact import (
 from lib.tasks_pkg.compaction._pipeline import (
     recompose_context_after_compaction,
     run_compaction_pipeline,
+    settle_scheduled_compaction,
 )
 from lib.tasks_pkg.compaction._reactive import reactive_compact
 from lib.tasks_pkg.compaction._steps import (
@@ -71,4 +72,5 @@ __all__ = (
     'resolve_model_context_limit',
     'resolve_model_context_profile',
     'run_compaction_pipeline',
+    'settle_scheduled_compaction',
 )

@@ -3,7 +3,9 @@
  *
  * Responsibility: render memory-prefetch, My Context, related-conversation,
  * learned-preference, and MCP-login facts from a Conversation Sync provenance
- * block. Entry points are returned by `createTurnProvenancePresentation`.
+ * block. Each field becomes one structured fact; context disclosures render
+ * it as a receipt row or fold it into the note it witnesses. Entry points are
+ * returned by `createTurnProvenancePresentation`.
  * Dependencies: the generated translator, trusted shared-icon renderer, and
  * the shared HTML escaping policy. This module reads no DOM or browser state.
  */
@@ -15,17 +17,30 @@ type UnknownRecord = Readonly<Record<string, unknown>>;
 type IconHtml = (name: string, size?: number | string) => string;
 type ProvenanceState = 'running' | 'done' | 'skipped' | 'failed';
 
-type ProvenanceSegment = Readonly<{
-  state?: ProvenanceState;
-  segmentHtml: string;
-  detailHtml: string;
+/** One acquisition fact. Text fields are plain (callers escape them);
+ * `bodyHtml` is already-escaped list or snippet markup. */
+export type ContextProvenanceFact = Readonly<{
+  field: string;
+  state: ProvenanceState;
+  glyph: string;
+  /** Short tag, e.g. "2 memories". */
+  label: string;
+  /** Listed items (memories, entries, tools); 0 when not a count. */
+  count: number;
+  /** Sentence form, e.g. "Prefetched 2 memories". */
+  headline: string;
+  /** Secondary facts: candidates, timing, a reason or a path move. */
+  detail: string;
+  /** One-line glimpse of the listed items. */
+  peek: string;
+  bodyHtml: string;
 }>;
 
 export type TurnProvenancePresentation = Readonly<{
   inlineMarkdown(text: unknown): string;
   renderMcpLoginHintHtml(loginHint: unknown): string;
   renderTurnProvenanceHtml(provenance: unknown): string;
-
+  contextProvenanceFacts(provenance: unknown): readonly ContextProvenanceFact[];
   renderContextProvenanceHtml(provenance: unknown): string;
   renderPreferenceLearnedHtml(learned: unknown): string;
 }>;
@@ -36,6 +51,17 @@ export type TurnProvenancePresentationDependencies = Readonly<{
 }>;
 
 const EMPTY_RECORD: UnknownRecord = Object.freeze({});
+
+/* Legacy class hooks per field, kept on receipt rows for styling and tests. */
+const FIELD_CLASS: Readonly<Record<string, string>> = {
+  memoryPrefetch: 'tp-seg-mem',
+  preferencesApplied: 'tp-seg-prefs',
+  preferencesLearned: 'tp-seg-prefs-learned',
+  relatedConversations: 'tp-seg-convs',
+  mcpToolsDelta: 'tp-seg-mcp',
+  projectPathChange: 'tp-seg-path',
+  mcpLoginHint: 'tp-seg-login',
+};
 
 function record(value: unknown): UnknownRecord {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -82,12 +108,17 @@ function renderInlineMarkdown(text: unknown): string {
   }).join('');
 }
 
+/** Plain glimpse of inline-Markdown items: markers dropped, never parsed. */
+function plainGlimpse(items: readonly string[]): string {
+  return items.map((item) => item.replace(/[*`]/g, '').trim()).filter(Boolean).join(' · ');
+}
+
 export function createTurnProvenancePresentation(
   dependencies: TurnProvenancePresentationDependencies,
 ): TurnProvenancePresentation {
   const { translate, iconHtml } = dependencies;
 
-  function memoryPrefetchSegment(value: unknown): ProvenanceSegment | null {
+  function memoryPrefetchFact(value: unknown): ContextProvenanceFact | null {
     if (!value) return null;
     const memoryPrefetch = record(value);
     const phase = stringField(memoryPrefetch, 'phase') || 'started';
@@ -95,21 +126,21 @@ export function createTurnProvenancePresentation(
     const candidates = numberField(memoryPrefetch, 'candidates');
     const totalMs = numberField(memoryPrefetch, 'totalMs');
 
-    let icon = iconHtml('brain', 13);
+    let glyph = 'brain';
     let state: ProvenanceState = 'running';
     let headline = '';
-    let subline = '';
+    let detail = '';
     if (phase === 'started') {
       const totalMemories = numberField(memoryPrefetch, 'totalMemories');
       headline = translate('memPrefetch.surfacing');
-      subline = (totalMemories
+      detail = (totalMemories
         ? `${translate('memPrefetch.totalN', { n: totalMemories })} · `
         : '') + translate('memPrefetch.localLabel');
     } else if (phase === 'done') {
       state = 'done';
       if (selected === 0) {
         headline = translate('memPrefetch.none');
-        subline = `${translate('memPrefetch.candidatesN', { n: candidates })} · ${
+        detail = `${translate('memPrefetch.candidatesN', { n: candidates })} · ${
           translate('memPrefetch.localLabel')
         }`;
       } else {
@@ -125,103 +156,89 @@ export function createTurnProvenancePresentation(
         if (totalMs) {
           parts.push(`${translate('memPrefetch.totalLabel')} ${totalMs}ms`);
         }
-        subline = parts.join(' · ');
+        detail = parts.join(' · ');
       }
     } else if (phase === 'skipped') {
       state = 'skipped';
       headline = translate('memPrefetch.skipped');
-      subline = stringField(memoryPrefetch, 'reason');
+      detail = stringField(memoryPrefetch, 'reason');
     } else if (phase === 'failed') {
       state = 'failed';
-      icon = iconHtml('alertTriangle', 13);
+      glyph = 'alertTriangle';
       headline = translate('memPrefetch.failed');
-      subline = stringField(memoryPrefetch, 'reason');
+      detail = stringField(memoryPrefetch, 'reason');
     } else {
       headline = translate('memPrefetch.generic');
-      subline = phase;
+      detail = phase;
     }
 
-    let segmentLabel: string;
+    let label: string;
     if (state === 'running') {
-      segmentLabel = translate('memPrefetch.tag');
+      label = translate('memPrefetch.tag');
     } else if (phase === 'done' && selected > 0) {
-      segmentLabel = translate(
+      label = translate(
         selected === 1 ? 'memPrefetch.tagN' : 'memPrefetch.tagNs',
         { n: selected },
       );
     } else if (phase === 'done') {
-      segmentLabel = translate('memPrefetch.tagNone');
+      label = translate('memPrefetch.tagNone');
     } else if (state === 'skipped') {
-      segmentLabel = translate('memPrefetch.tagSkipped');
+      label = translate('memPrefetch.tagSkipped');
     } else if (state === 'failed') {
-      segmentLabel = translate('memPrefetch.tagFailed');
+      label = translate('memPrefetch.tagFailed');
     } else {
-      segmentLabel = translate('memPrefetch.tag');
+      label = translate('memPrefetch.tag');
     }
 
-    const segmentHtml = `<span class="tp-seg tp-seg-mem tp-${state}">${icon}`
-      + `<span class="tp-label">${escapeHtmlText(segmentLabel)}</span>`
-      + (state === 'running'
-        ? '<span class="mp-dots"><span>.</span><span>.</span><span>.</span></span>'
-        : '')
-      + '</span>';
-
-    let memoryList = '';
-    const memories = records(memoryPrefetch.memories);
-    if (phase === 'done' && selected > 0 && memories.length > 0) {
-      const items = memories.map((memory) => {
-        const name = escapeHtmlText(stringField(memory, 'name') || '?');
-        const scope = escapeHtmlText(stringField(memory, 'scope'));
-        const description = stringField(memory, 'description');
-        return `<li><span class="mp-mem-name">${name}</span>`
-          + (scope ? ` <span class="mp-mem-scope">${scope}</span>` : '')
-          + (description
-            ? `<div class="mp-mem-desc">${renderInlineMarkdown(description)}</div>`
-            : '')
-          + '</li>';
-      }).join('');
-      memoryList = `<ul class="mp-mem-list">${items}</ul>`;
-    }
-    const detailHtml = `<div class="tp-detail-row tp-detail-mem mp-${state}">`
-      + `<div class="mp-text"><span class="mp-headline">${escapeHtmlText(headline)}</span>`
-      + (subline ? `<span class="mp-sub">${escapeHtmlText(subline)}</span>` : '')
-      + memoryList
-      + '</div></div>';
-    return { state, segmentHtml, detailHtml };
+    const memories = phase === 'done' && selected > 0
+      ? records(memoryPrefetch.memories) : [];
+    const bodyHtml = memories.length ? `<ul class="mp-mem-list">${memories.map((memory) => {
+      const name = escapeHtmlText(stringField(memory, 'name') || '?');
+      const scope = escapeHtmlText(stringField(memory, 'scope'));
+      const description = stringField(memory, 'description');
+      return `<li><span class="mp-mem-name">${name}</span>`
+        + (scope ? ` <span class="mp-mem-scope">${scope}</span>` : '')
+        + (description
+          ? `<div class="mp-mem-desc">${renderInlineMarkdown(description)}</div>`
+          : '')
+        + '</li>';
+    }).join('')}</ul>` : '';
+    return {
+      field: 'memoryPrefetch', state, glyph, label, headline, detail, bodyHtml,
+      count: phase === 'done' ? selected : 0,
+      peek: memories.map((memory) => stringField(memory, 'name')).filter(Boolean).join(' · '),
+    };
   }
 
-  function preferencesAppliedSegment(value: unknown): ProvenanceSegment | null {
+  function preferencesAppliedFact(value: unknown): ContextProvenanceFact | null {
     if (!value) return null;
     const preferencesApplied = record(value);
     const items = Array.isArray(preferencesApplied.items)
-      ? preferencesApplied.items
+      ? preferencesApplied.items.map((item) => String(item ?? ''))
       : [];
     const count = items.length;
-    const headline = count > 0
-      ? translate('prefs.appliedN', { n: count })
-      : translate('prefs.applied');
-    const segmentLabel = count > 0
-      ? translate(count === 1 ? 'prefs.tagN' : 'prefs.tagNs', { n: count })
-      : translate('prefs.tagNone');
-    const segmentHtml = '<span class="tp-seg tp-seg-prefs tp-done">'
-      + iconHtml('sliders', 13)
-      + `<span class="tp-label">${escapeHtmlText(segmentLabel)}</span></span>`;
-    const preferenceList = count > 0
-      ? `<ul class="mp-mem-list pa-list">${items.map((item) => (
-        `<li>${renderInlineMarkdown(item)}</li>`
-      )).join('')}</ul>`
-      : '';
-    const detailHtml = '<div class="tp-detail-row tp-detail-prefs pa-chip">'
-      + `<div class="mp-text"><span class="mp-headline">${escapeHtmlText(headline)}</span>`
-      + (numberField(preferencesApplied, 'chars')
-        ? `<span class="mp-sub">${escapeHtmlText(translate('prefs.fromProfile'))}</span>`
-        : '')
-      + preferenceList
-      + '</div></div>';
-    return { state: 'done', segmentHtml, detailHtml };
+    return {
+      field: 'preferencesApplied',
+      state: 'done',
+      glyph: 'sliders',
+      label: count > 0
+        ? translate(count === 1 ? 'prefs.tagN' : 'prefs.tagNs', { n: count })
+        : translate('prefs.tagNone'),
+      count,
+      headline: count > 0
+        ? translate('prefs.appliedN', { n: count })
+        : translate('prefs.applied'),
+      detail: numberField(preferencesApplied, 'chars') ? translate('prefs.fromProfile') : '',
+      peek: plainGlimpse(items),
+      bodyHtml: count > 0
+        ? `<ul class="mp-mem-list pa-list">${items.map((item) => (
+          `<li>${renderInlineMarkdown(item)}</li>`
+        )).join('')}</ul>`
+        : '',
+    };
   }
 
-  function relatedConversationsSegment(value: unknown): ProvenanceSegment | null {
+  function relatedConversationsFact(value: unknown): ContextProvenanceFact | null {
     if (!value) return null;
     const relatedConversations = record(value);
     const items = records(relatedConversations.items);
@@ -231,9 +248,6 @@ export function createTurnProvenancePresentation(
       count === 1 ? 'relatedConvs.tagN' : 'relatedConvs.tagNs',
       { n: count },
     );
-    const segmentHtml = '<span class="tp-seg tp-seg-convs tp-done">'
-      + iconHtml('messageSquare', 13)
-      + `<span class="tp-label">${escapeHtmlText(label)}</span></span>`;
     const rows = items.map((item) => {
       const conversationId = stringField(item, 'id');
       const title = escapeHtmlText(stringField(item, 'title') || '(untitled)');
@@ -247,18 +261,20 @@ export function createTurnProvenancePresentation(
         + (summary ? `<div class="rc-conv-summary">${summary}</div>` : '')
         + '</li>';
     }).join('');
-    const conversationList = rows
-      ? `<ul class="mp-mem-list rc-list">${rows}</ul>`
-      : '';
-    const detailHtml = '<div class="tp-detail-row tp-detail-convs mp-done">'
-      + `<div class="mp-text"><span class="mp-headline">${escapeHtmlText(label)}</span>`
-      + `<span class="mp-sub">${escapeHtmlText(translate('relatedConvs.sub'))}</span>`
-      + conversationList
-      + '</div></div>';
-    return { state: 'done', segmentHtml, detailHtml };
+    return {
+      field: 'relatedConversations',
+      state: 'done',
+      glyph: 'messageSquare',
+      label,
+      count,
+      headline: label,
+      detail: translate('relatedConvs.sub'),
+      peek: items.map((item) => stringField(item, 'title')).filter(Boolean).join(' · '),
+      bodyHtml: rows ? `<ul class="mp-mem-list rc-list">${rows}</ul>` : '',
+    };
   }
 
-  function mcpToolsDeltaSegment(value: unknown): ProvenanceSegment | null {
+  function mcpToolsDeltaFact(value: unknown): ContextProvenanceFact | null {
     if (!value) return null;
     const delta = record(value);
     const namesOf = (field: string): readonly string[] => {
@@ -281,9 +297,6 @@ export function createTurnProvenancePresentation(
         ? translate('mcpDelta.removed')
         : translate('mcpDelta.removedN', { n: removed.length }));
     }
-    const segmentHtml = '<span class="tp-seg tp-seg-mcp tp-done">'
-      + iconHtml('wrench', 13)
-      + `<span class="tp-label">${escapeHtmlText(translate('mcpDelta.tag'))}</span></span>`;
     const rows = [
       ...added.map((name) => (
         `<li><span class="mp-mem-name">${escapeHtmlText(name)}</span>`
@@ -294,60 +307,70 @@ export function createTurnProvenancePresentation(
         + ` <span class="mp-mem-scope">${escapeHtmlText(translate('mcpDelta.removedTag'))}</span></li>`
       )),
     ].join('');
-    const detailHtml = '<div class="tp-detail-row tp-detail-mcp mp-done">'
-      + `<div class="mp-text"><span class="mp-headline">${escapeHtmlText(headlineParts.join(' · '))}</span>`
-      + `<span class="mp-sub">${escapeHtmlText(translate('mcpDelta.sub'))}</span>`
-      + `<ul class="mp-mem-list">${rows}</ul>`
-      + '</div></div>';
-    return { state: 'done', segmentHtml, detailHtml };
+    return {
+      field: 'mcpToolsDelta',
+      state: 'done',
+      glyph: 'plug',
+      label: translate('mcpDelta.tag'),
+      count: added.length + removed.length,
+      headline: headlineParts.join(' · '),
+      detail: translate('mcpDelta.sub'),
+      peek: [...added, ...removed].join(' · '),
+      bodyHtml: `<ul class="mp-mem-list">${rows}</ul>`,
+    };
   }
 
-  function projectPathChangeSegment(value: unknown): ProvenanceSegment | null {
+  function projectPathChangeFact(value: unknown): ContextProvenanceFact | null {
     if (!value) return null;
     const change = record(value);
     const from = stringField(change, 'from');
     const to = stringField(change, 'to');
     if (!from && !to) return null;
-    const segmentHtml = '<span class="tp-seg tp-seg-path tp-done">'
-      + iconHtml('folder', 13)
-      + `<span class="tp-label">${escapeHtmlText(translate('pathChange.tag'))}</span></span>`;
-    const detailHtml = '<div class="tp-detail-row tp-detail-path mp-done">'
-      + `<div class="mp-text"><span class="mp-headline">${escapeHtmlText(translate('pathChange.headline'))}</span>`
-      + `<span class="mp-sub">${escapeHtmlText(from || '(none)')} → ${escapeHtmlText(to || '(none)')}</span>`
-      + '</div></div>';
-    return { state: 'done', segmentHtml, detailHtml };
+    const move = `${from || '(none)'} → ${to || '(none)'}`;
+    return {
+      field: 'projectPathChange',
+      state: 'done',
+      glyph: 'folder',
+      label: translate('pathChange.tag'),
+      count: 0,
+      headline: translate('pathChange.headline'),
+      detail: move,
+      peek: move,
+      bodyHtml: '',
+    };
   }
-  function mcpLoginSegment(value: unknown): ProvenanceSegment | null {
+
+  function mcpLoginFact(value: unknown): ContextProvenanceFact | null {
     if (!value) return null;
     const loginHint = record(value);
     const phase = stringField(loginHint, 'phase') || 'awaiting_approval';
     if (phase === 'awaiting_approval') return null;
     const username = stringField(loginHint, 'username');
 
-    let icon: string;
+    let glyph: string;
     let state: ProvenanceState;
     let headline: string;
     if (phase === 'approved') {
-      icon = iconHtml('check', 13);
+      glyph = 'check';
       state = 'done';
       headline = username
         ? `${translate('login.approved')} · ${username}`
         : translate('login.approved');
     } else if (phase === 'denied') {
-      icon = iconHtml('ban', 13);
+      glyph = 'ban';
       state = 'failed';
       headline = translate('login.denied');
     } else if (phase === 'timeout') {
-      icon = iconHtml('alarm', 13);
+      glyph = 'alarm';
       state = 'failed';
       headline = translate('login.timeout');
     } else {
-      icon = iconHtml('check', 13);
+      glyph = 'check';
       state = 'done';
       headline = translate('login.finished');
     }
 
-    let snippet = '';
+    let bodyHtml = '';
     const rawSnippet = stringField(loginHint, 'snippet');
     if (rawSnippet && (phase === 'denied' || phase === 'timeout')) {
       let text = rawSnippet.trim();
@@ -359,28 +382,18 @@ export function createTurnProvenancePresentation(
       } catch {
         // A non-JSON diagnostic remains readable as escaped plain text.
       }
-      snippet = `<pre class="mp-snippet">${escapeHtmlText(text)}</pre>`;
+      bodyHtml = `<pre class="mp-snippet">${escapeHtmlText(text)}</pre>`;
     }
-    const segmentHtml = `<span class="tp-seg tp-seg-login tp-${state}">${icon}`
-      + `<span class="tp-label">${escapeHtmlText(headline)}</span></span>`;
-    const detailHtml = `<div class="tp-detail-row tp-detail-login mp-${state}">`
-      + `<div class="mp-text"><span class="mp-headline">${escapeHtmlText(headline)}</span>`
-      + snippet
-      + '</div></div>';
-    return { state, segmentHtml, detailHtml };
+    return {
+      field: 'mcpLoginHint', state, glyph, label: headline, headline,
+      count: 0, detail: '', peek: '', bodyHtml,
+    };
   }
 
-  function preferencesLearnedSegment(value: unknown): ProvenanceSegment | null {
+  function preferencesLearnedFact(value: unknown): ContextProvenanceFact | null {
     const informational = records(value).filter((preference) => !preference.pending);
     if (informational.length === 0) return null;
     const count = informational.length;
-    const segmentLabel = translate(
-      count === 1 ? 'prefs.learnedTagN' : 'prefs.learnedTagNs',
-      { n: count },
-    );
-    const segmentHtml = '<span class="tp-seg tp-seg-prefs-learned tp-done">'
-      + iconHtml('check', 13)
-      + `<span class="tp-label">${escapeHtmlText(segmentLabel)}</span></span>`;
     const rows = informational.map((preference) => {
       const lead = preference.kind === 'added'
         ? translate('prefs.added')
@@ -395,14 +408,20 @@ export function createTurnProvenancePresentation(
       return `<li><span class="pl-seg-lead">${escapeHtmlText(lead)}</span> `
         + `${renderInlineMarkdown(stringField(preference, 'summary'))}${undo}</li>`;
     }).join('');
-    const detailHtml = '<div class="tp-detail-row tp-detail-prefs-learned mp-done">'
-      + `<div class="mp-text"><span class="mp-headline">${
-        escapeHtmlText(translate('prefs.learnedHeadline'))
-      }</span>`
-      + `<span class="mp-sub">${escapeHtmlText(translate('prefs.editInSettings'))}</span>`
-      + `<ul class="mp-mem-list pa-list">${rows}</ul>`
-      + '</div></div>';
-    return { state: 'done', segmentHtml, detailHtml };
+    return {
+      field: 'preferencesLearned',
+      state: 'done',
+      glyph: 'check',
+      label: translate(
+        count === 1 ? 'prefs.learnedTagN' : 'prefs.learnedTagNs',
+        { n: count },
+      ),
+      count,
+      headline: translate('prefs.learnedHeadline'),
+      detail: translate('prefs.editInSettings'),
+      peek: plainGlimpse(informational.map((preference) => stringField(preference, 'summary'))),
+      bodyHtml: `<ul class="mp-mem-list pa-list">${rows}</ul>`,
+    };
   }
 
   function renderMcpLoginHintHtml(value: unknown): string {
@@ -423,46 +442,59 @@ export function createTurnProvenancePresentation(
       + '</div>';
   }
 
-  function provenanceSegments(value: unknown): ReadonlyArray<ProvenanceSegment & { field: string }> {
+  function contextProvenanceFacts(value: unknown): readonly ContextProvenanceFact[] {
     const provenance = record(value);
-    const renderers = {
-      mcpLoginHint: mcpLoginSegment,
-      mcpToolsDelta: mcpToolsDeltaSegment,
-      projectPathChange: projectPathChangeSegment,
-      memoryPrefetch: memoryPrefetchSegment,
-      preferencesApplied: preferencesAppliedSegment,
-      preferencesLearned: preferencesLearnedSegment,
-      relatedConversations: relatedConversationsSegment,
+    const builders = {
+      mcpLoginHint: mcpLoginFact,
+      mcpToolsDelta: mcpToolsDeltaFact,
+      projectPathChange: projectPathChangeFact,
+      memoryPrefetch: memoryPrefetchFact,
+      preferencesApplied: preferencesAppliedFact,
+      preferencesLearned: preferencesLearnedFact,
+      relatedConversations: relatedConversationsFact,
     };
-    return Object.entries(renderers).flatMap(([field, render]) => {
-      const segment = render(provenance[field]);
-      return segment ? [{ ...segment, field }] : [];
+    return Object.entries(builders).flatMap(([field, build]) => {
+      const fact = build(provenance[field]);
+      return fact ? [fact] : [];
     });
   }
 
+  /* A receipt is metadata about acquisition, not injected text: it never
+   * opens on its own, and its list is visible as soon as the context fold is. */
+  function receiptHtml(fact: ContextProvenanceFact): string {
+    return `<div class="sw-note-provenance-item sw-note-receipt ${FIELD_CLASS[fact.field] ?? ''} tp-${fact.state}"`
+      + ` data-provenance-field="${fact.field}" data-state="${fact.state}">`
+      + '<div class="sw-note-item-head">'
+      + `<span class="sw-note-sticker" data-glyph="${fact.glyph}" aria-hidden="true">${iconHtml(fact.glyph, 14)}</span>`
+      + `<span class="sw-note-item-title">${escapeHtmlText(fact.headline)}</span>`
+      + (fact.detail ? `<span class="sw-note-item-meta">${escapeHtmlText(fact.detail)}</span>` : '')
+      + '</div>'
+      + (fact.bodyHtml ? `<div class="sw-note-item-body">${fact.bodyHtml}</div>` : '')
+      + '</div>';
+  }
+
   function renderContextProvenanceHtml(value: unknown): string {
-    return provenanceSegments(value).map((segment) => (
-      `<div class="sw-note-provenance-item" data-provenance-field="${segment.field}">`
-      + segment.segmentHtml + segment.detailHtml + '</div>'
-    )).join('');
+    return contextProvenanceFacts(value).map(receiptHtml).join('');
   }
 
   /** Provenance-only legacy turns still use the SAME context disclosure,
    * not a competing turn-level strip. Status is metadata, never proof that
    * failed/skipped acquisition was injected into the model. */
   function renderTurnProvenanceHtml(value: unknown): string {
-    const segments = provenanceSegments(value);
-    if (!segments.length) return '';
-    const state = segments.some((segment) => segment.state === 'failed')
-      ? 'tp-has-failed' : segments.some((segment) => segment.state === 'running')
+    const facts = contextProvenanceFacts(value);
+    if (!facts.length) return '';
+    const state = facts.some((fact) => fact.state === 'failed')
+      ? 'tp-has-failed' : facts.some((fact) => fact.state === 'running')
         ? 'tp-running' : 'tp-done';
     return `<details class="sw-inbox-row sw-system-note-row sw-note-group ${state}" data-context-provenance="true">`
       + '<summary class="ptool-line sw-inbox-row-header">'
-      + `<span class="ptool-icon">${iconHtml('plus', 13)}</span>`
+      + `<span class="ptool-icon">${iconHtml('layers', 13)}</span>`
       + `<span class="ptool-text">${escapeHtmlText(translate('systemNote.groupLabel'))}</span>`
-      + `<span class="sw-note-group-count">${escapeHtmlText(translate('systemNote.groupItemsTitle', { n: segments.length }))}</span>`
+      + `<span class="sw-note-group-names">${escapeHtmlText(facts.map((fact) => fact.label).join(' · '))}</span>`
+      + `<span class="sw-note-group-count">${escapeHtmlText(translate('systemNote.groupItemsTitle', { n: facts.length }))}</span>`
       + '</summary><div class="sw-inbox-row-body sw-note-group-body">'
-      + renderContextProvenanceHtml(value) + '</div></details>';
+      + `<div class="sw-note-receipts">${facts.map(receiptHtml).join('')}</div>`
+      + '</div></details>';
   }
 
   function renderPreferenceLearnedHtml(value: unknown): string {
@@ -490,7 +522,7 @@ export function createTurnProvenancePresentation(
     inlineMarkdown: renderInlineMarkdown,
     renderMcpLoginHintHtml,
     renderTurnProvenanceHtml,
-
+    contextProvenanceFacts,
     renderContextProvenanceHtml,
     renderPreferenceLearnedHtml,
   });

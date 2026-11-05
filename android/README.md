@@ -126,8 +126,10 @@ path prefixes and cookie scopes must survive every native/browser handoff.
   refusal at that endpoint, proves the outer gate was passed. Public health/meta
   endpoints are insufficient. For a stopped Tofu, a configured supervisor can
   instead prove its versioned control-plane status contract. HTML, CSRF cookies and redirects cannot promote
-  a session. The repository's conditional write rejects an edited/deleted
-  profile; no Room schema migration is needed.
+  a session. The repository's conditional write compares id, alias, URL and
+  saved auth, rejecting edited/deleted profiles without a Room schema change.
+  Discovery rechecks the current profile and credential before password POST;
+  a rejected late stamp cannot be reported as a successful sign-in.
 - Native calls retain IPv6, explicit ports and the prefix before `/proxy/` or
   `/absproxy/`. Supervisor requests select cookies for their own sibling URL and never follow
   redirects. Its root control endpoints use the stripping `/proxy/` route,

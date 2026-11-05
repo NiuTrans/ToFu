@@ -376,6 +376,9 @@ function _renderUnifiedToolLine(round, isSearching) {
   const errorHtml = _renderErrorRow(round, ctx);
   if (errorHtml) return errorHtml;
 
+  const queuedHtml = _renderQueuedRow(round, ctx);
+  if (queuedHtml) return queuedHtml;
+
   const searchingHtml = _renderSearchingRow(round, ctx);
   if (searchingHtml) return searchingHtml;
 
@@ -834,6 +837,21 @@ async function _cmdInterruptClick(btn, ev) {
   }
 }
 
+// Announced while the model streams but not executing yet: no spinner, and no
+// command timer or interrupt control, until the backend enters its handler.
+function _renderQueuedRow(round, ctx) {
+  const { svg, q, rootPill, repairedBadge } = ctx;
+  if (round.status !== "queued") return "";
+  const label = escapeHtml(t('toolPanel.queued'));
+  return `<div class="ptool-line ptool-queued" data-rn="${round.roundNum}">
+         <span class="ptool-icon">${svg}</span>
+         ${rootPill}
+         <span class="ptool-text">${q}</span>
+         ${repairedBadge}
+         <span class="ptool-badge ptool-badge-queued">${label}</span>
+       </div>`;
+}
+
 // In-flight ("searching") states: running command with live output, search
 // orbit animation, or the generic active row.
 function _renderSearchingRow(round, ctx) {
@@ -942,6 +960,8 @@ function _cmdOutputOpenToggle(el, ev) {
   const open = !block.classList.contains('output-open');
   block.classList.toggle('output-open', open);
   if (el.setAttribute) el.setAttribute('aria-expanded', String(open));
+  const lazyOutput = block.querySelector(':scope > details[data-lazy-tool-result]');
+  if (lazyOutput) lazyOutput.open = open;
   const key = block.getAttribute('data-output-key') || '';
   if (key) {
     if (open) _cmdOutputExpanded.add(key);
@@ -1091,26 +1111,60 @@ const _SEG_NOTE_REASON_INTERVENTIONS = { active_checklist: true, modified_files:
 const _SEG_NOTE_REASON_CHIP = {
   active_checklist: { labelKey: 'systemNote.reasonActiveChecklist', tone: 'ok' },
   branch_context: { labelKey: 'systemNote.reasonBranch', tone: 'info' },
+  credential_vault: { labelKey: 'systemNote.reasonCredentialVault', tone: 'info' },
+  current_date: { labelKey: 'systemNote.reasonCurrentDate', tone: 'info' },
+  delegate_mode: { labelKey: 'systemNote.reasonDelegateMode', tone: 'info' },
+  disclosed_tools: { labelKey: 'systemNote.reasonDisclosedTools', tone: 'info' },
+  environment: { labelKey: 'systemNote.reasonEnvironment', tone: 'info' },
+  evolution_guidance: { labelKey: 'systemNote.reasonEvolutionGuidance', tone: 'info' },
   evolution_updates: { labelKey: 'systemNote.reasonEvolution', tone: 'info' },
   execution_allowance: { labelKey: 'systemNote.reasonExecutionAllowance', tone: 'info' },
   fallback_synthesis: { labelKey: 'systemNote.reasonFallback', tone: 'info' },
+  goal_objective: { labelKey: 'systemNote.reasonGoalObjective', tone: 'info' },
   goal_worker_directive: { labelKey: 'systemNote.reasonGoalDirective', tone: 'info' },
   goal_worker_review: { labelKey: 'systemNote.reasonGoalReview', tone: 'info' },
+  inbox_delivery: { labelKey: 'systemNote.reasonInboxDelivery', tone: 'info' },
   intent_stall: { labelKey: 'systemNote.reasonIntentStall', tone: 'warn' },
   intermediate_response: { labelKey: 'systemNote.reasonIntermediate', tone: 'info' },
   lifecycle_recovery: { labelKey: 'systemNote.reasonLifecycle', tone: 'warn' },
+  mcp_tools_delta: { labelKey: 'systemNote.reasonMcpTools', tone: 'info' },
+  memory_guidance: { labelKey: 'systemNote.reasonMemoryGuidance', tone: 'info' },
   modified_files: { labelKey: 'systemNote.reasonModifiedFiles', tone: 'warn' },
+  output_contract: { labelKey: 'systemNote.reasonOutputContract', tone: 'warn' },
+  paper_tool_guidance: { labelKey: 'systemNote.reasonPaperTools', tone: 'info' },
+  parallel_execution: { labelKey: 'systemNote.reasonParallelExecution', tone: 'info' },
   partial_stream_retry: { labelKey: 'systemNote.reasonStreamRetry', tone: 'info' },
+  plan_mode: { labelKey: 'systemNote.reasonPlanMode', tone: 'info' },
+  platform_static: { labelKey: 'systemNote.reasonPlatformStatic', tone: 'info' },
+  programmatic_execution: { labelKey: 'systemNote.reasonProgrammaticExecution', tone: 'info' },
+  programmatic_inputs: { labelKey: 'systemNote.reasonProgrammaticInputs', tone: 'info' },
+  project_context: { labelKey: 'systemNote.reasonProjectContext', tone: 'info' },
+  project_coordinator: { labelKey: 'systemNote.reasonProjectCoordinator', tone: 'info' },
+  project_path_change: { labelKey: 'systemNote.reasonPathChange', tone: 'info' },
+  project_presence: { labelKey: 'systemNote.reasonProjectPresence', tone: 'info' },
+  project_rules: { labelKey: 'systemNote.reasonProjectRules', tone: 'info' },
+  project_scoped_rules: { labelKey: 'systemNote.reasonProjectScopedRules', tone: 'info' },
+  relevant_memories: { labelKey: 'systemNote.reasonRelevantMemories', tone: 'info' },
+  role_directive: { labelKey: 'systemNote.reasonRoleDirective', tone: 'info' },
+  selected_skills: { labelKey: 'systemNote.reasonSelectedSkills', tone: 'info' },
+  session_context_committed: { labelKey: 'systemNote.reasonSessionContext', tone: 'info' },
+  skills_index: { labelKey: 'systemNote.reasonSkillsIndex', tone: 'info' },
+  task_state_v1: { labelKey: 'systemNote.reasonTaskState', tone: 'info' },
   terminal_recovery: { labelKey: 'systemNote.reasonTerminalRecovery', tone: 'info' },
   todo_incomplete: { labelKey: 'systemNote.reasonTodoIncomplete', tone: 'ok' },
   tool_progress: { labelKey: 'systemNote.reasonToolProgress', tone: 'warn' },
   tool_repeat_reminder: { labelKey: 'systemNote.reasonToolRepeat', tone: 'warn' },
   tool_stagnation: { labelKey: 'systemNote.reasonToolStagnation', tone: 'err' },
+  turn_requirements: { labelKey: 'systemNote.reasonTurnRequirements', tone: 'info' },
+  ui_nav_directory: { labelKey: 'systemNote.reasonUiNavDirectory', tone: 'info' },
   url_prefetch: { labelKey: 'systemNote.reasonUrlPrefetch', tone: 'info' },
+  user_context: { labelKey: 'systemNote.reasonUserContext', tone: 'info' },
   virtual_user_directive: { labelKey: 'systemNote.reasonVirtualUser', tone: 'info' },
   worker_artifacts: { labelKey: 'systemNote.reasonWorkerArtifacts', tone: 'info' },
   worker_dependencies: { labelKey: 'systemNote.reasonWorkerDeps', tone: 'info' },
+  worker_team: { labelKey: 'systemNote.reasonWorkerTeam', tone: 'info' },
   worker_wrapup: { labelKey: 'systemNote.reasonWorkerWrapup', tone: 'warn' },
+  working_facts: { labelKey: 'systemNote.reasonWorkingFacts', tone: 'info' },
 };
 /* END GENERATED */
 function _segNoteReasonChipHtml(reason) {
@@ -1134,6 +1188,7 @@ const _SEG_NOTE_ACTION_BADGE_KEY = {
  * is the verbatim text the model was sent (escaped, never markdown) so the
  * render cannot drift from the wire. */
 function _renderSegSystemNoteHTML(s) {
+  if (isContextInjectionNote(s)) return _renderSegContextNoteHTML(s);
   const noteKind = contextNoteDisplayKind(s);
   const reason = (typeof s.reason === 'string') ? s.reason : '';
   const presentation = (Object.prototype.hasOwnProperty.call(_SEG_NOTE_REASON_PRESENTATION, reason) && _SEG_NOTE_REASON_PRESENTATION[reason])
@@ -1155,45 +1210,73 @@ function _renderSegSystemNoteHTML(s) {
     `<div class="sw-card sw-stall-card-item"><div class="sw-card-head"><span class="sw-card-role">${escapeHtml(t('systemNote.detailsLabel'))}</span></div><pre class="sw-card-raw-pre">${escapeHtml(text)}</pre></div>` +
     `</div></details>`;
 }
-/* One note inside a merged group: a labelled header (its own reason /
- * noteKind title + action badge) above the same verbatim body card the solo
- * row uses. The inner details is purely visual (header row, not a second
- * disclosure), so the group's single disclosure governs expand/collapse. */
-function _renderSegSystemNoteItemHTML(s) {
+/* Context notes, parity with the typed surface (system-note-blocks.ts): one
+ * row per note — an authority-tinted glyph sticker, the registry label, a
+ * quiet line count and a one-line glimpse — instead of a repeated kind title,
+ * raw reason id and "appended" badge. The verbatim text keeps its exact bytes;
+ * only whole-line wrapper tags and headings are wrapped for styling. */
+function _segContextNoteLabel(facet) {
+  return facet.labelKey ? t(facet.labelKey) : facet.fallbackLabel;
+}
+function _segContextNoteTextHtml(text, inline) {
+  const runs = contextNoteTextRuns(text).map(run => (run.kind === 'text'
+    ? escapeHtml(run.text)
+    : `<span class="sw-note-text-${run.kind}">${escapeHtml(run.text)}</span>`)).join('');
+  return `<pre class="sw-note-text${inline ? ' sw-note-text--inline' : ''}">${runs}</pre>`;
+}
+function _segContextSummaryHTML(names, count) {
+  return `<summary class="ptool-line sw-inbox-row-header">` +
+    `<span class="ptool-icon">${Icon('layers', 14)}</span>` +
+    `<span class="ptool-text">${escapeHtml(t('systemNote.groupLabel'))}</span>` +
+    `<span class="sw-note-group-names">${escapeHtml(names.join(' · '))}</span>` +
+    (count === null ? '' : `<span class="sw-note-group-count">${escapeHtml(t('systemNote.groupItemsTitle', { n: count }))}</span>`) +
+    `</summary>`;
+}
+/* One note row. Multi-line text opens in place when `collapsible`; a single
+ * line is shown whole and needs no disclosure. */
+function _renderSegSystemNoteItemHTML(s, collapsible) {
+  const facet = contextNoteFacet(s);
   const noteKind = contextNoteDisplayKind(s);
-  const reason = (typeof s.reason === 'string') ? s.reason : '';
-  const presentation = (Object.prototype.hasOwnProperty.call(_SEG_NOTE_REASON_PRESENTATION, reason) && _SEG_NOTE_REASON_PRESENTATION[reason])
-    || (Object.prototype.hasOwnProperty.call(_SEG_NOTE_KIND_PRESENTATION, noteKind) && _SEG_NOTE_KIND_PRESENTATION[noteKind])
-    || _SEG_NOTE_KIND_PRESENTATION['system-intervention'];
-  const action = (typeof s.action === 'string') ? s.action : 'prompt';
-  const badgeKey = Object.prototype.hasOwnProperty.call(_SEG_NOTE_ACTION_BADGE_KEY, action)
-    ? _SEG_NOTE_ACTION_BADGE_KEY[action] : _SEG_NOTE_ACTION_BADGE_KEY.prompt;
   const text = (typeof s.text === 'string') ? s.text : '';
-  const reasonChip = _segNoteReasonChipHtml(reason);
-  return `<div class="sw-card sw-stall-card-item sw-note-group-item" data-note-kind="${escapeHtml(noteKind)}"${reason ? ` data-reason="${escapeHtml(reason)}"` : ''}>` +
-    `<div class="sw-note-group-item-head">` +
-    `<span class="ptool-icon">${presentation.icon}</span>` +
-    `<span class="ptool-text">${escapeHtml(t(presentation.labelKey))}</span>` +
-    reasonChip +
-    `<span class="ptool-badge ptool-badge-info">${escapeHtml(t(badgeKey))}</span>` +
-    `</div>` +
-    `<pre class="sw-card-raw-pre">${escapeHtml(text)}</pre>` +
-    `</div>`;
+  const multiline = facet.readableLines > 1;
+  const disclosure = multiline && collapsible;
+  const tag = disclosure ? 'details' : 'div';
+  const head = disclosure ? 'summary' : 'div';
+  const title = facet.reason
+    ? ` title="${escapeHtml(t('systemNote.reasonLabel'))}: ${escapeHtml(facet.reason)}"` : '';
+  const body = multiline
+    ? `<div class="sw-note-item-body">${_segContextNoteTextHtml(text, false)}</div>` : '';
+  return `<${tag} class="sw-note-group-item" data-note-kind="${escapeHtml(noteKind)}" data-glyph="${escapeHtml(facet.glyph)}"` +
+    (facet.reason ? ` data-reason="${escapeHtml(facet.reason)}"` : '') +
+    (facet.authority ? ` data-authority="${escapeHtml(facet.authority)}"` : '') + '>' +
+    `<${head} class="sw-note-item-head">` +
+    `<span class="sw-note-sticker" data-glyph="${escapeHtml(facet.glyph)}" aria-hidden="true">${Icon(facet.glyph, 14)}</span>` +
+    `<span class="sw-note-item-title"${title}>${escapeHtml(_segContextNoteLabel(facet))}</span>` +
+    (multiline ? `<span class="sw-note-item-meta">${escapeHtml(t('systemNote.lineCount', { n: facet.readableLines }))}</span>` : '') +
+    (disclosure && facet.peek ? `<span class="sw-note-item-peek">${escapeHtml(facet.peek)}</span>` : '') +
+    (!multiline && text ? _segContextNoteTextHtml(text, true) : '') +
+    `</${head}>` + body + `</${tag}>`;
+}
+/* A lone context note keeps the context fold's summary; its one row is
+ * already open inside it, so one click reads the text. */
+function _renderSegContextNoteHTML(s) {
+  const reason = (typeof s.reason === 'string') ? s.reason : '';
+  return `<details class="sw-inbox-row sw-system-note-row sw-note-solo" data-note-kind="${escapeHtml(contextNoteDisplayKind(s))}" data-context-note="true"${reason ? ` data-reason="${escapeHtml(reason)}"` : ''}>` +
+    _segContextSummaryHTML([_segContextNoteLabel(contextNoteFacet(s))], null) +
+    `<div class="sw-inbox-row-body sw-note-group-body"><div class="sw-note-list">${_renderSegSystemNoteItemHTML(s, false)}</div></div>` +
+    `</details>`;
 }
 /* A maximal run of adjacent context-injection notes (the session-start
  * context stack, or several injected together mid-turn) merged into ONE
- * disclosure row with a per-item list inside. Positions are unchanged — the
- * group still sits at the exact wire slot of its first note; only the count
- * of sibling rows shrinks. */
+ * disclosure row whose summary names what was injected, with a per-item list
+ * inside. Positions are unchanged — the group still sits at the exact wire
+ * slot of its first note; only the count of sibling rows shrinks. */
 function _renderSegSystemNoteGroupHTML(notes) {
-  const items = notes.map(_renderSegSystemNoteItemHTML).join('');
+  const items = notes.map(s => _renderSegSystemNoteItemHTML(s, true)).join('');
+  const names = notes.map(s => _segContextNoteLabel(contextNoteFacet(s)));
   return `<details class="sw-inbox-row sw-system-note-row sw-note-group" data-note-group="context-injection">` +
-    `<summary class="ptool-line sw-inbox-row-header">` +
-    `<span class="ptool-icon">${_NOTE_CONTEXT_ICON_SVG}</span>` +
-    `<span class="ptool-text">${escapeHtml(t('systemNote.groupLabel'))}</span>` +
-    `<span class="sw-note-group-count">${escapeHtml(t('systemNote.groupItemsTitle', { n: notes.length }))}</span>` +
-    `</summary>` +
-    `<div class="sw-inbox-row-body sw-note-group-body">${items}</div>` +
+    _segContextSummaryHTML(names, notes.length) +
+    `<div class="sw-inbox-row-body sw-note-group-body"><div class="sw-note-list">${items}</div></div>` +
     `</details>`;
 }
 /* Display-only regrouping of one batch's segments: merge each maximal run of

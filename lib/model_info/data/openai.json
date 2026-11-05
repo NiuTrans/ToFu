@@ -41,6 +41,17 @@
         "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
         "checked_at": "2026-09-30"
       },
+      "gpt-6.1-terra": {
+        "name": "GPT-6.1 Terra",
+        "role": "balanced",
+        "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+        "default_reasoning_effort": "medium",
+        "input": 1.00,
+        "cached_input": 0.05,
+        "output": 5.00,
+        "source": "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
+        "checked_at": "2026-10-28"
+      },
       "gpt-6-astra": {
         "name": "GPT-6 Astra",
         "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max", "ultra"],
@@ -98,6 +109,7 @@
   "offering_recipes": [
 
     {"model_id": "gpt-6.1-sol", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 60, "cost": 0.010},
+    {"model_id": "gpt-6.1-terra", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 60, "cost": 0.005},
     {"model_id": "gpt-6-astra", "capabilities": ["text", "vision", "thinking"], "rpm": 30, "cost": 0.050},
     {"model_id": "gpt-6-sol", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 60, "cost": 0.010},
     {"model_id": "gpt-6-luna", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 200, "cost": 0.0005},

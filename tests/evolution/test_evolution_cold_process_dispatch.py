@@ -75,6 +75,10 @@ finally:
 @pytest.mark.parametrize('backend', ['sqlite', 'tofudb'])
 @pytest.mark.parametrize('loss_state', ['bound', 'admitted'])
 def test_fresh_process_recovers_only_proven_unsubmitted_stage(tmp_path, backend, loss_state):
+    if backend == 'tofudb':
+        from tests.support.native_engine_prerequisite import require_native_engine_for_checkout
+        require_native_engine_for_checkout()
+
     def child(**fields):
         process = subprocess.run([sys.executable, '-c', CHILD],
             input=json.dumps({'root':str(tmp_path), 'backend':backend, 'loss_state':loss_state, **fields}),

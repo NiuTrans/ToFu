@@ -2,7 +2,7 @@
 
 Holds every environment-driven constant the swarm integration layer reads at
 import time (session TTL / ceiling / output dir / await hard-cap / auto-continue
-switches), plus the small pure helpers that don't touch shared session state:
+switch), plus the small pure helpers that don't touch shared session state:
 ``_env_truthy``, ``swarm_key_for``, and the durable-config snapshot
 (``_persist_config`` / ``_PERSIST_CFG_KEYS``).
 
@@ -57,12 +57,8 @@ def _env_truthy(name: str, default: bool) -> bool:
 
 
 SWARM_AUTOCONTINUE_ENABLED = _env_truthy('TOFU_SWARM_AUTOCONTINUE', True)
-
-#: Hard ceiling on CONSECUTIVE auto-continued turns per conversation. An
-#: auto-continued turn that itself spawns a fresh wave could otherwise
-#: re-trigger this indefinitely (a runaway token burn). The counter resets
-#: whenever a human-initiated turn runs in the conversation.
-SWARM_AUTOCONTINUE_MAX_CHAIN = int(os.environ.get('TOFU_SWARM_AUTOCONTINUE_MAX', '3') or '3')
+# The unattended loop has no count ceiling: work launched by a continuation
+# never wakes another one (``_autocontinue`` and docs/AGENT_LIFECYCLE.md).
 
 
 def swarm_key_for(task: dict | None) -> str:

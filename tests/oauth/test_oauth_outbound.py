@@ -113,7 +113,13 @@ class TestCodexResolve(unittest.TestCase):
         self.assertEqual(key, 'access-tok')
         self.assertEqual(hdrs['originator'], 'codex-tui')
         self.assertTrue(hdrs['User-Agent'].startswith('codex-tui/0.150.0'))
-        self.assertEqual(hdrs['OpenAI-Beta'], 'responses=experimental')
+        # Codex CLI 0.165 HTTP /responses: no OpenAI-Beta, SSE Accept, and
+        # the built-in provider's version header.
+        self.assertNotIn('OpenAI-Beta', hdrs)
+        self.assertEqual(hdrs['Accept'], 'text/event-stream')
+        self.assertEqual(hdrs['version'], '0.150.0')
+        self.assertNotIn('x-codex-routing-hint', hdrs)
+        self.assertNotIn('x-codex-turn-state', hdrs)
         self.assertEqual(hdrs['chatgpt-account-id'], 'acc-xyz')
         self.assertRegex(
             hdrs['session-id'],
@@ -142,6 +148,34 @@ class TestCodexResolve(unittest.TestCase):
 
         self.assertEqual(first['session-id'], same['session-id'])
         self.assertNotEqual(first['session-id'], different['session-id'])
+
+    def test_model_routing_hint_and_turn_scoped_sticky_routing(self):
+        from lib.oauth.codex_turn_state import (
+            observe_turn_state, release_turn_state)
+
+        def resolve(task_id):
+            with mock.patch('lib.oauth.codex.codex_get_valid_token',
+                            return_value='access-tok'), \
+                 mock.patch('lib.oauth.token_store.load_token',
+                            return_value={}):
+                return outbound.resolve_oauth_request('codex', {
+                    'model': 'gpt-6-sol', 'messages': [],
+                    '_conv_id': 'conv-a', '_task_id': task_id}, None)[1]
+
+        try:
+            self.assertEqual(resolve('turn-1')['x-codex-routing-hint'],
+                             'model=gpt-6-sol')
+            self.assertNotIn('x-codex-turn-state', resolve('turn-1'))
+            observe_turn_state('turn-1', 'routing-a')
+            observe_turn_state('turn-1', 'routing-b')  # first value wins
+            self.assertEqual(resolve('turn-1')['x-codex-turn-state'],
+                             'routing-a')
+            # Another turn of the same conversation never inherits it.
+            self.assertNotIn('x-codex-turn-state', resolve('turn-2'))
+            release_turn_state('turn-1')
+            self.assertNotIn('x-codex-turn-state', resolve('turn-1'))
+        finally:
+            release_turn_state('turn-1')
 
     def test_no_token_raises(self):
         with mock.patch('lib.oauth.codex.codex_get_valid_token', return_value=None):

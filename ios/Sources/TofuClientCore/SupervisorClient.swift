@@ -61,12 +61,12 @@ public final class SupervisorClient: Sendable {
         )
 
         var headers: [String: String] = [:]
-        if let cookie = await cookieProvider(base.origin) { headers["Cookie"] = cookie }
+        if let cookie = await cookieProvider(url) { headers["Cookie"] = cookie }
 
         let body: HTTPRequest.Body? = method == "POST"
             ? .json(Self.jsonBody(["projectPath": projectPath]))
             : nil
-        let request = HTTPRequest(url: url, method: method, headers: headers, body: body)
+        let request = HTTPRequest(url: url, method: method, headers: headers, body: body, followRedirects: false, maximumResponseBytes: GatewayHTTP.maximumResponseBytes)
 
         do {
             let resp = try await http.send(request)

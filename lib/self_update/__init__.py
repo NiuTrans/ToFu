@@ -91,11 +91,13 @@ from lib.self_update._config import (
 
 # ── git helpers ──
 from lib.self_update._git import (
+    RepositoryObservation,
     _git_exe,
     _head_sha,
     _run_git,
     _run_git_streaming,
     git_available,
+    observe_repository,
 )
 
 # ── version / release discovery ──
@@ -139,7 +141,8 @@ from lib.runtime.runtime_layout import (  # noqa: F401
 
 __all__ = [
     'UPDATE_REPO', 'UPDATE_REMOTE', 'UPDATE_BRANCH',
-    'git_available', 'current_version', 'fetch_latest_release',
+    'git_available', 'observe_repository', 'RepositoryObservation',
+    'current_version', 'fetch_latest_release',
     '_fetch_latest_release_detailed',
     'working_tree_status', 'check_for_update', 'apply_update',
     # Re-exported from lib.runtime.runtime_layout (single source of truth) so existing

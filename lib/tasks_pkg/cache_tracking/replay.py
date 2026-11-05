@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
 from lib.log import get_logger
@@ -46,7 +47,7 @@ logger = get_logger(__name__)
 # classify_verdict MUST be the SAME function the live per-round record emitter
 # uses, else offline (replay) and live counts drift — the exact bug class this
 # whole effort fights. We re-export rather than re-implement.
-from lib.tasks_pkg.cache_tracking._detect import (  # noqa: E402
+from lib.tasks_pkg.cache_tracking._policy import (  # noqa: E402
     classify_verdict,
 )
 
@@ -62,14 +63,15 @@ def build_round_usage(body: dict, *, cache_read: int, cache_write: int,
     functions, so a replayed round is byte-for-byte the input the live
     ``detect_cache_break`` would have seen. ``routing`` is a dict with
     ``key_hash`` / ``anthropic_beta`` / ``endpoint`` (as ``_sse_core`` builds
-    into ``_routing``); when ``capture_routing`` is False the ``_wire_routing``
+    into ``_routing``) and optionally ``affinity`` (the
+    ``cache_affinity_evidence`` string); when ``capture_routing`` is False the ``_wire_routing``
     key is omitted, reproducing a process that never captured it (the NEUTER /
     pre-fix state).
     """
     from lib.tasks_pkg.wire_fingerprint import (
-        canonical_messages, marker_signature, routing_fingerprint,
-        static_prefix_hash, system_fingerprint, wire_byte_field_prefix,
-        wire_byte_prefix, wire_byte_region,
+        cache_relevant_controls, canonical_messages, marker_signature,
+        routing_fingerprint, static_prefix_hash, system_fingerprint,
+        wire_byte_field_prefix, wire_byte_prefix, wire_byte_region,
     )
     msgs = body.get('messages') or []
     usage: dict[str, Any] = {
@@ -79,7 +81,8 @@ def build_round_usage(body: dict, *, cache_read: int, cache_write: int,
         '_wire_static': static_prefix_hash(msgs),
         '_wire_bytes': wire_byte_prefix(msgs),
         '_wire_field_bytes': wire_byte_field_prefix(msgs),
-        '_wire_region': wire_byte_region(body.get('system'), body.get('tools')),
+        '_wire_region': wire_byte_region(body.get('system'), body.get('tools'),
+                                         cache_relevant_controls(body)),
         '_wire_markers': marker_signature(body),
         '_wire_system': system_fingerprint(body.get('system'), body.get('tools')),
     }
@@ -87,7 +90,8 @@ def build_round_usage(body: dict, *, cache_read: int, cache_write: int,
         usage['_wire_routing'] = routing_fingerprint(
             key_hash=routing.get('key_hash', ''),
             anthropic_beta=routing.get('anthropic_beta', ''),
-            endpoint=routing.get('endpoint', routing.get('url', '')))
+            endpoint=routing.get('endpoint', routing.get('url', '')),
+            affinity=routing.get('affinity', ''))
     return usage
 
 
@@ -99,6 +103,8 @@ def replay_rounds(rounds: list[dict], *, user_id: int,
 
     Each round dict: ``{'body': <post-translation body>, 'cache_read': int,
     'cache_write': int, 'routing': {'key_hash','anthropic_beta','endpoint'}}``.
+    An optional ``gap_s`` replays that idle gap since the previous round, so
+    the TTL-window rule judges a replayed gap exactly as it judges a live one.
     ``source_tools`` may additionally carry the stable pre-projection tool list
     that the live orchestrator passes to ``detect_cache_break``.  This matters
     when a last-mile provider projection mutates the wire schema: replay must
@@ -124,6 +130,8 @@ def replay_rounds(rounds: list[dict], *, user_id: int,
     buckets: dict[str, int] = {}
     for i, rd in enumerate(rounds):
         body = rd['body']
+        if i > 0 and rd.get('gap_s') and _k in _cache_states:
+            _cache_states[_k].last_update_time = time.time() - float(rd['gap_s'])
         usage = build_round_usage(
             body, cache_read=int(rd.get('cache_read', 0)),
             cache_write=int(rd.get('cache_write', 0)),

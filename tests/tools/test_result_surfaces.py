@@ -135,7 +135,7 @@ def test_audit_traversal_and_inspector_output_are_bounded():
 
 
 def test_document_identity_filter_limit_and_notification_report():
-    payload = format_swarm_update(agent_id='worker', role='general', status='completed',
+    payload = format_swarm_update(agent_id='worker', swarm_run_id='run-1', role='general', status='completed',
                                   elapsed_seconds=1, tokens=2, result='Full\nReport', output_file='/audit.log')
     document = {'messages': [
         {'toolRounds': [{'toolName': 'read_files', 'toolCallId': 'same', 'toolContent': 'first'}]},

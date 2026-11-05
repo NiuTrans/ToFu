@@ -27,6 +27,11 @@ A TTL rebuild is NOT waste: the cache entry expired on its own schedule and
 had to be re-created. Bucketing it honestly is what lets a cost dashboard
 subtract it instead of chasing it.
 
+The expiry window is the previous round's shortest wire marker TTL. When
+every marker, the conversation tail included, carries ttl='1h', a 5-60 minute
+gap is not an expected expiry: a miss inside the hour is real (upstream) waste
+and must never hide in ``ttl_expiry``.
+
 GUARDS
   * The cause string the backend actually emits at >300s buckets as
     ``ttl_expiry`` under BOTH return keys it can arrive with
@@ -50,6 +55,10 @@ from lib.tasks_pkg.cache_tracking._detect import (
     _resolve_break_cause,
     classify_verdict,
 )
+from lib.tasks_pkg.cache_tracking._policy import (
+    DEFAULT_CACHE_TTL_S,
+    cache_ttl_window_s,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -60,7 +69,8 @@ _FAST_GAP_S = 30.0      # inside a live conversation, far short of TTL
 def _cause(**kw) -> str:
     """Derive a real cause string by CALLING the backend fn (never hardcoded)."""
     base = dict(client_changes={}, prefix_mutation_break=False,
-                elapsed=_FAST_GAP_S, cache_read=0, prefix_mutated=False,
+                elapsed=_FAST_GAP_S, cache_read=0, cache_write=0,
+                prefix_mutated=False,
                 prefix_culprits=[], wire_proven_identical=True,
                 namespace_switch=None,
                 namespace_verified_same=True)
@@ -94,6 +104,43 @@ class TestTtlExpiryBuckets:
         cause = _cause(elapsed=_TTL_GAP_S)
         for key in ('no_cache_reuse', 'server_side'):
             assert classify_verdict({key: cause}) != BUCKET_BODY_CHANGE
+
+
+class TestTtlWindowFollowsTheWireMarkers:
+    """The window is the SHORTEST marker TTL the previous round wrote."""
+
+    def test_all_markers_1h_give_an_hour(self):
+        sig = {'ttls': [('msg:user:ab', '1h'), ('sys', '1h'), ('tools', '1h')]}
+        assert cache_ttl_window_s(sig) == 3600
+
+    def test_one_bare_marker_bounds_the_window_at_five_minutes(self):
+        sig = {'ttls': [('msg:user:ab', ''), ('sys', '1h'), ('tools', '1h')]}
+        assert cache_ttl_window_s(sig) == 300
+
+    def test_json_round_tripped_pairs_are_read_the_same(self):
+        assert cache_ttl_window_s({'ttls': [['sys', '1h'], ['msg:x', '1h']]}) == 3600
+
+    @pytest.mark.parametrize('markers', [None, {}, {'ttls': []}, 'not-a-signature'])
+    def test_unknown_markers_keep_the_historical_five_minutes(self, markers):
+        assert cache_ttl_window_s(markers) == DEFAULT_CACHE_TTL_S == 300
+
+
+class TestOneHourTailGapInsideTheHourIsNotAnExpiry:
+    @pytest.mark.parametrize('gap', [_TTL_GAP_S, 1800.0, 3500.0])
+    @pytest.mark.parametrize('return_key', ['no_cache_reuse', 'server_side'])
+    def test_gap_inside_the_hour_buckets_upstream(self, gap, return_key):
+        cause = _cause(elapsed=gap, ttl_window_s=3600)
+        assert 'ttl expiry (>' not in cause.lower(), cause
+        assert classify_verdict({return_key: cause}) == BUCKET_UPSTREAM
+
+    def test_gap_beyond_the_hour_is_an_expiry(self):
+        cause = _cause(elapsed=3700.0, ttl_window_s=3600)
+        assert '(>1h gap)' in cause, cause
+        assert classify_verdict({'server_side': cause}) == BUCKET_TTL_EXPIRY
+
+    def test_default_window_keeps_the_five_minute_wording(self):
+        """The frontend phrase table translates this exact wording."""
+        assert '(>5min gap)' in _cause(elapsed=_TTL_GAP_S)
 
 
 class TestTheFixDoesNotSwallowNeighbours:

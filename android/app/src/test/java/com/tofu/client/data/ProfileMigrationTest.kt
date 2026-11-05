@@ -118,12 +118,28 @@ class ProfileMigrationTest {
             val id = dao.insert(Profile(alias = "test", baseUrl = "https://old.example/proxy/15000/"))
             val original = dao.getById(id)!!
             dao.update(original.copy(baseUrl = "https://new.example/proxy/15000/", alias = "renamed"))
-            assertEquals(0, dao.setCookieHostIfUrlMatches(id, original.baseUrl, "old.example"))
+            assertEquals(0, dao.setCookieHostIfCurrent(id, original.baseUrl, original.alias, original.authType, "old.example"))
             assertNull(dao.getById(id)!!.cookieHost)
-            assertEquals(1, dao.setCookieHostIfUrlMatches(id, "https://new.example/proxy/15000/", "new.example"))
+            assertEquals(1, dao.setCookieHostIfCurrent(id, "https://new.example/proxy/15000/", "renamed", original.authType, "new.example"))
             assertEquals("renamed", dao.getById(id)!!.alias)
             dao.deleteById(id)
-            assertEquals(0, dao.setCookieHostIfUrlMatches(id, "https://new.example/proxy/15000/", "new.example"))
+            assertEquals(0, dao.setCookieHostIfCurrent(id, "https://new.example/proxy/15000/", "renamed", original.authType, "new.example"))
+        } finally { db.close() }
+    }
+
+    @Test fun conditional_session_write_rejects_auth_and_alias_changes_at_same_url() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), ProfileDatabase::class.java)
+            .allowMainThreadQueries().build()
+        try {
+            val dao = db.profileDao()
+            val id = dao.insert(Profile(alias = "test", baseUrl = "https://host.example/", authType = AuthType.CODE_SERVER_PASSWORD))
+            val original = dao.getById(id)!!
+            for (edited in listOf(original.copy(alias = "renamed"), original.copy(authType = AuthType.NONE))) {
+                dao.update(edited)
+                assertEquals(0, dao.setCookieHostIfCurrent(id, original.baseUrl, original.alias, original.authType, "host.example"))
+                assertNull(dao.getById(id)!!.cookieHost)
+                assertEquals(edited, dao.getById(id))
+            }
         } finally { db.close() }
     }
 }

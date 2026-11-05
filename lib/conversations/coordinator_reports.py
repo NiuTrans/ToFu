@@ -3,7 +3,10 @@
 Entry points: publish/read/mark_read and recover_pending_reports. Portable CAS
 stores a transient publication intent before Turn ingestion; boot recovery uses
 the same idempotent command. The head stores pointers/read position, never a
-second transcript. No model, task, worker or periodic polling is started here.
+second transcript. No model, task, worker or periodic polling is started here,
+except that each published report of a project is relayed once to the owner's
+Global Router (lib/router/relay.py, docs/ROUTER.md R3) through the ordinary
+turn command.
 """
 from __future__ import annotations
 
@@ -51,7 +54,8 @@ def _intent_key(scope, request):
 
 
 class CoordinatorReports:
-    def __init__(self, owner, project, *, client=None, bindings=None, append_turn=None, get_turn=None, notify=None):
+    def __init__(self, owner, project, *, client=None, bindings=None, append_turn=None, get_turn=None, notify=None,
+                 relay=None):
         self.owner = require_user_id(owner, context='Coordinator reports')
         if not isinstance(project, str) or not project.strip() or len(project) > 4096:
             raise ValueError('Project path is required')
@@ -65,6 +69,7 @@ class CoordinatorReports:
         self.append_turn = append_turn
         self.get_turn = get_turn
         self.notify = notify if notify is not None else self._notify
+        self.relay = relay
 
     def _scope(self, expected=None):
         binding = self.bindings.read(self.project)
@@ -173,6 +178,9 @@ class CoordinatorReports:
         pointer.update(title=request['title'], kind=request['kind'])
         validate_report(pointer, 'reportPointer')
         self._change_head(scope, pointer=pointer)
+        # Before the intent retires: a crash here replays the relay at boot, and
+        # its per-Turn command id keeps the Global Router notice exactly once.
+        self._relay(scope, request, turn['turnId'])
         # Intent is reconstructible transport state only after both canonical
         # message and attention pointer have committed. Lost ACK replays safely.
         self._delete_intent(key, intent['version'])
@@ -242,6 +250,20 @@ class CoordinatorReports:
         self._change_head(scope, read_id=request['turnId'])
         self._hint(scope['coordinatorId'])
         return self.read()
+
+    def _relay(self, scope, request, turn_id):
+        relay = self.relay
+        if relay is None:
+            from lib.router.relay import relay_project_report as relay
+        try:
+            relay(self.owner, {'projectPath': scope['projectPath'], 'coordinatorId': scope['coordinatorId'],
+                               'turnId': turn_id, 'kind': request['kind'], 'title': request['title'],
+                               'message': request['message']}, client=self.client)
+        except Exception:
+            # The relay is a pointer to the canonical report; it never fails publication.
+            from lib.log import get_logger
+            get_logger(__name__).warning('Global Router report relay failed for %s', turn_id,
+                                         exc_info=True)
 
     def _hint(self, conversation_id):
         try:

@@ -2,77 +2,38 @@
  * Speech settings own one ProviderAccess bundle in model-routing v2.
  * Plaintext credentials exist only in the form until the provider bundle
  * operation stores them through the encrypted repository boundary.
+ * This adapter owns form intent and the form/status lifecycle. Pure bundle
+ * and activation policy lives in speech-provider; save commands join the
+ * existing model-routing-authority queue and complete-response adopter.
  */
 
 import { featureRegistry } from '../../feature-registry';
 import type { I18nKey } from '../../i18n';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
-import type {
-  ModelRoutingConnection,
-  ModelRoutingCredentialMetadata,
-  ModelRoutingDocument,
-  ModelRoutingModelRef,
-  ModelRoutingOffering,
-  ModelRoutingProvider,
-  ModelRoutingProviderAccess,
-  ProviderBundle as ContractProviderBundle,
-} from '../../api/api-v1-model-routing.generated';
+import {audioCapabilities, type AudioCapabilities} from '../voice/audio-capabilities';
+import {runModelRoutingMutation, type ModelRoutingMutationResult} from './model-routing-authority';
+import type {ModelRoutingDocument, ModelRoutingAuthorityResponse, ProviderResponse} from '../../api/api-v1-model-routing.generated';
+import {
+  STT_PROVIDER_ID, STT_PROVIDER_META, isKnownKind, kindForProjection,
+  findSttProvider as projectSttProvider, hasSttChanges as sttFormChanged,
+  buildSttProviderBundle as prepareSttBundle, captureSttActivation, buildSttActivationDocument,
+  type SttKind, type SttProviderMeta, type SttProjection, type SttForm, type ProviderBundle,
+} from './speech-provider';
 
-type SttKind = 'openai' | 'groq' | 'omni' | 'custom';
-type SttCapability = 'transcription' | 'audio_chat';
-
-interface SttProviderMeta {
-  cap: SttCapability;
-  needsKey: boolean;
-  defaultBase: string;
-  defaultModel: string;
-}
-
-type RoutingProvider = ModelRoutingProvider;
-type RoutingAccess = ModelRoutingProviderAccess;
-type RoutingConnection = ModelRoutingConnection;
-type RoutingCredential = ModelRoutingCredentialMetadata;
+export {STT_PROVIDER_ID, STT_PROVIDER_META} from './speech-provider';
 type RoutingDocument = ModelRoutingDocument;
 
-interface RoutingOffering extends ModelRoutingOffering {
-  identity_state: 'confirmed';
-  model: ModelRoutingModelRef;
-  stale: boolean;
-}
-
-interface ProviderBundle extends ContractProviderBundle {
-  provider_access: RoutingAccess;
-  credential_secrets: Record<string, string>;
-  offerings: RoutingOffering[];
-  creators: Array<{ creator_id: string; name: string }>;
-  models: RoutingDocument['models'];
-}
-
-interface AudioCapabilities {
-  available?: boolean;
-  models?: Array<{ model?: string }>;
-}
-
 interface ModelRoutingApi {
-  get(): Promise<{ model_routing?: RoutingDocument; revision?: number } | null>;
   createProvider(
     bundle: ProviderBundle,
     expectedRevision: number,
-  ): Promise<unknown>;
+  ): Promise<ProviderResponse | null>;
   saveProvider(
     providerId: string,
     bundle: ProviderBundle,
     expectedRevision: number,
-  ): Promise<unknown>;
-  deleteProvider(providerId: string, expectedRevision: number): Promise<unknown>;
-}
-
-interface SttProjection {
-  provider: RoutingProvider;
-  access: RoutingAccess;
-  connection: RoutingConnection | null;
-  credential: RoutingCredential | null;
-  offering: ModelRoutingOffering | null;
+  ): Promise<ProviderResponse | null>;
+  replace(document: RoutingDocument, expectedRevision: number): Promise<ModelRoutingAuthorityResponse | null>;
 }
 
 type SpeechWindow = Window & {
@@ -85,41 +46,17 @@ type SpeechWindow = Window & {
   _STT_PROVIDER_META?: Record<SttKind, SttProviderMeta>;
   _findSttProvider?: () => SttProjection | null;
   _populateSpeechTab?: (config?: unknown) => void;
+  _beginSpeechTabLoad?: typeof beginSpeechTabLoad;
   _sttSuffix?: (kind: string) => string;
   _switchSttProvider?: (kind: string) => void;
   _refreshSttStatus?: () => void;
-  _persistSttProvider?: () => Promise<void>;
+  _captureSttSaveIntent?: typeof captureSttSaveIntent;
+  _persistSttProvider?: (intent?: SttSaveIntent) => Promise<ModelRoutingMutationResult>;
+  _hasSttChanges?: () => boolean;
   _destroySpeechTab?: () => void;
   _stgModelRouting?: RoutingDocument | null;
-  _stgModelRoutingRevision?: number;
 };
 
-export const STT_PROVIDER_ID = 'stt';
-export const STT_PROVIDER_META: Record<SttKind, SttProviderMeta> = {
-  openai: {
-    cap: 'transcription', needsKey: true,
-    defaultBase: 'https://api.openai.com/v1',
-    defaultModel: 'gpt-4o-transcribe',
-  },
-  groq: {
-    cap: 'transcription', needsKey: true,
-    defaultBase: 'https://api.groq.com/openai/v1',
-    defaultModel: 'whisper-large-v3-turbo',
-  },
-  omni: {
-    cap: 'audio_chat', needsKey: false, defaultBase: '',
-    defaultModel: 'gemini-3-flash-preview',
-  },
-  custom: {
-    cap: 'transcription', needsKey: false, defaultBase: '',
-    defaultModel: 'whisper-1',
-  },
-};
-
-const ACCESS_ID = 'stt-access';
-const CONNECTION_ID = 'stt-connection';
-const CREDENTIAL_ID = 'stt-credential';
-const OFFERING_ID = 'stt-offering';
 let panelScope: LifecycleScope | null = null;
 let statusGeneration = 0;
 
@@ -154,47 +91,20 @@ function inputValue(id: string): string {
 
 function setValue(id: string, value: string): void {
   const control = document.getElementById(id);
+  if (control instanceof HTMLSelectElement && value
+      && !Array.from(control.options).some(option => option.value === value)) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value;
+    control.append(option);
+    panelScope?.add(() => option.remove());
+  }
   if (control instanceof HTMLInputElement
       || control instanceof HTMLSelectElement) control.value = value;
 }
 
-function isKnownKind(kind: string): kind is SttKind {
-  return Object.prototype.hasOwnProperty.call(STT_PROVIDER_META, kind);
-}
-
-function kindForProjection(projection: SttProjection): SttKind {
-  const branded = String(projection.provider.brand || '').replace(/^stt-/, '');
-  if (isKnownKind(branded)) return branded;
-  if (projection.offering?.capabilities.includes('audio_chat')) return 'omni';
-  const baseUrl = projection.connection?.base_url || '';
-  if (baseUrl.includes('groq.com')) return 'groq';
-  if (baseUrl.includes('api.openai.com')) return 'openai';
-  return 'custom';
-}
-
 export function sttSuffix(kind: string): string {
   return kind.charAt(0).toUpperCase() + kind.slice(1);
-}
-
-export function findSttProvider(): SttProjection | null {
-  const documentValue = routingDocument();
-  if (!documentValue) return null;
-  const provider = documentValue.providers.find(
-    (row) => row.provider_id === STT_PROVIDER_ID);
-  if (!provider) return null;
-  const access = documentValue.provider_accesses.find(
-    (row) => row.provider_id === STT_PROVIDER_ID);
-  if (!access) return null;
-  return {
-    provider,
-    access,
-    connection: documentValue.connections.find(
-      (row) => row.provider_access_id === access.provider_access_id) || null,
-    credential: documentValue.credentials.find(
-      (row) => row.provider_access_id === access.provider_access_id) || null,
-    offering: documentValue.offerings.find(
-      (row) => row.provider_access_id === access.provider_access_id) || null,
-  };
 }
 
 export function switchSttProvider(kind: string): void {
@@ -212,31 +122,30 @@ export function destroySpeechTab(): void {
   panelScope = null;
 }
 
+function projectSttStatus(capabilities: AudioCapabilities | null): void {
+  const banner = document.getElementById('sttStatusBanner');
+  const text = document.getElementById('sttStatusText');
+  if (!(banner instanceof HTMLElement) || !(text instanceof HTMLElement)) return;
+  banner.style.display = capabilities ? '' : 'none';
+  if (capabilities?.available) {
+    const models = capabilities.models.map(model => String(model?.model ?? '')).filter(Boolean).join(', ');
+    text.textContent = translate('settings.sttStatusOn', '✓ 语音输入已就绪') + (models ? ` — ${models}` : '');
+  } else {
+    text.textContent = translate('settings.sttStatusOff',
+      '语音输入未就绪 — 保存有效凭证后麦克风按钮才会出现');
+  }
+}
+
 export async function refreshSttStatus(): Promise<void> {
   const generation = ++statusGeneration;
   const banner = document.getElementById('sttStatusBanner');
-  const text = document.getElementById('sttStatusText');
   const api = globals().Api?.audio;
-  if (!(banner instanceof HTMLElement)
-      || !(text instanceof HTMLElement) || !api) return;
+  if (!(banner instanceof HTMLElement) || !api) return;
   try {
-    const capabilities = await api.capabilities();
+    const capabilities = await audioCapabilities.refresh();
     if (generation !== statusGeneration
         || document.getElementById('sttStatusBanner') !== banner) return;
-    banner.style.display = '';
-    if (capabilities?.available) {
-      const models = (capabilities.models ?? [])
-        .map((model) => String(model.model ?? ''))
-        .filter(Boolean)
-        .join(', ');
-      text.textContent = translate(
-        'settings.sttStatusOn', '✓ 语音输入已就绪')
-        + (models ? ` — ${models}` : '');
-    } else {
-      text.textContent = translate(
-        'settings.sttStatusOff',
-        '语音输入未就绪 — 保存有效凭证后麦克风按钮才会出现');
-    }
+    projectSttStatus(capabilities);
   } catch (error: unknown) {
     if (generation !== statusGeneration) return;
     console.debug('[Speech] capability probe failed', error);
@@ -244,10 +153,40 @@ export async function refreshSttStatus(): Promise<void> {
   }
 }
 
-export function populateSpeechTab(_config?: unknown): void {
-  panelScope?.destroy();
+function startSpeechPanelScope(): LifecycleScope {
+  destroySpeechTab();
   const scope = createLifecycleScope();
   panelScope = scope;
+  scope.add(audioCapabilities.subscribe(projectSttStatus));
+  for (const kind of Object.keys(STT_PROVIDER_META)) {
+    const key = document.getElementById(`settingSttKey${sttSuffix(kind)}`);
+    if (key instanceof HTMLInputElement) scope.add(() => { key.value = ''; });
+  }
+  return scope;
+}
+
+/** Controls become interactive only after this opening's authority/config
+ * load completes. Closing/reopening invalidates its completion callbacks.
+ */
+export function beginSpeechTabLoad(): {complete(config?: unknown): void; fail(): void} {
+  const scope = startSpeechPanelScope();
+  const root = document.getElementById('settingsTab_speech');
+  root?.setAttribute('aria-busy', 'true');
+  scope.add(() => root?.removeAttribute('aria-busy'));
+  for (const control of root?.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>(
+    'input, select, button') || []) {
+    const disabled = control.disabled;
+    control.disabled = true;
+    scope.add(() => { control.disabled = disabled; });
+  }
+  return {
+    complete(config) { if (panelScope === scope) populateSpeechTab(config); },
+    fail() { if (panelScope === scope) root?.removeAttribute('aria-busy'); },
+  };
+}
+
+export function populateSpeechTab(_config?: unknown): void {
+  const scope = startSpeechPanelScope();
 
   const projection = findSttProvider();
   const enabled = Boolean(projection?.access.enabled);
@@ -280,142 +219,91 @@ export function populateSpeechTab(_config?: unknown): void {
   void refreshSttStatus();
 }
 
-export function buildSttProviderBundle(): ProviderBundle | null {
+function readSttForm(): SttForm | null {
   const enabled = document.getElementById('settingSttEnabled');
-  if (!(enabled instanceof HTMLInputElement) || !enabled.checked) return null;
-  const documentValue = routingDocument();
-  if (!documentValue) throw new Error('model-routing v2 authority is not loaded');
-
+  // Disabled controls have no submitted intent while initial loading is
+  // pending or failed; their prior/default values cannot authorize deletion.
+  if (!(enabled instanceof HTMLInputElement) || enabled.disabled) return null;
   const requestedKind = inputValue('settingSttProvider') || 'openai';
   const kind: SttKind = isKnownKind(requestedKind) ? requestedKind : 'openai';
   const meta = STT_PROVIDER_META[kind];
   const suffix = sttSuffix(kind);
-  const modelId = inputValue(`settingSttModel${suffix}`).trim()
-    || meta.defaultModel;
-  const baseUrl = inputValue(`settingSttBase${suffix}`).trim()
-    || meta.defaultBase;
-  const plaintext = inputValue(`settingSttKey${suffix}`).trim();
-  const existing = findSttProvider();
-  const preservedCredential = existing?.credential;
-  if (!modelId || !baseUrl
-      || (meta.needsKey && !plaintext && !preservedCredential?.secret_reference)) {
-    return null;
-  }
-
-  const creatorId = meta.cap === 'audio_chat'
-    ? 'tofu-user-stt-audio' : 'tofu-user-stt-transcription';
-  const modelRef = { creator_id: creatorId, model_id: modelId };
-  const creatorExists = documentValue.creators.some(
-    (row) => row.creator_id === creatorId);
-  const modelExists = documentValue.models.some(
-    (row) => row.creator_id === creatorId && row.model_id === modelId);
-  const useStoredSecret = !plaintext
-    && preservedCredential?.kind === 'api_key'
-    && Boolean(preservedCredential.secret_reference);
-  const credentialKind = plaintext || useStoredSecret ? 'api_key' : 'local_identity';
-
-  return {
-    provider: {
-      provider_id: STT_PROVIDER_ID,
-      name: translate('settings.sttService', '语音识别'),
-      scope: 'owner',
-      brand: `stt-${kind}`,
-    },
-    provider_access: {
-      provider_access_id: ACCESS_ID,
-      provider_id: STT_PROVIDER_ID,
-      enabled: true,
-      quota_policy: { rpm: 60 },
-    },
-    connections: [{
-      connection_id: CONNECTION_ID,
-      provider_access_id: ACCESS_ID,
-      base_url: baseUrl,
-      protocol: 'openai',
-      enabled: true,
-      priority: 0,
-      extra_headers: {},
-    }],
-    credentials: [{
-      credential_id: CREDENTIAL_ID,
-      provider_access_id: ACCESS_ID,
-      kind: credentialKind,
-      secret_reference: useStoredSecret
-        ? preservedCredential?.secret_reference || '' : '',
-      key_hint: useStoredSecret ? preservedCredential?.key_hint || '' : '',
-      enabled: true,
-      authorization: {
-        connection_ids: [CONNECTION_ID],
-        models: [modelRef],
-      },
-      quota_policy: {},
-    }],
-    credential_secrets: plaintext ? { [CREDENTIAL_ID]: plaintext } : {},
-    offerings: [{
-      offering_id: OFFERING_ID,
-      provider_access_id: ACCESS_ID,
-      identity_state: 'confirmed',
-      model: modelRef,
-      enabled: true,
-      stale: false,
-      capabilities: [meta.cap],
-      context_window: 1_000_000,
-      priority: 0,
-    }],
-    deployments: [{
-      deployment_id: 'stt-deployment',
-      offering_id: OFFERING_ID,
-      connection_id: CONNECTION_ID,
-      wire_model_id: modelId,
-      identity_confidence: 'high',
-      probe_status: 'unprobed',
-      priority: 0,
-    }],
-    creators: creatorExists ? [] : [{ creator_id: creatorId, name: 'User STT models' }],
-    models: modelExists ? [] : [{
-      ...modelRef,
-      display_name: modelId,
-      capabilities: [meta.cap],
-      context_window: 1_000_000,
-      quality_rank: 0,
-    }],
-  };
+  return {enabled: enabled.checked, kind,
+    modelId: inputValue(`settingSttModel${suffix}`).trim() || meta.defaultModel,
+    baseUrl: inputValue(`settingSttBase${suffix}`).trim() || meta.defaultBase,
+    secret: inputValue(`settingSttKey${suffix}`)};
 }
 
-async function reloadRoutingAuthority(api: ModelRoutingApi): Promise<void> {
-  const authority = await api.get();
-  if (!authority?.model_routing) {
-    throw new Error('model-routing v2 authority reload failed');
-  }
-  const state = globals();
-  state._stgModelRouting = authority.model_routing;
-  state._stgModelRoutingRevision = Number(authority.revision || 0);
+export function findSttProvider(): SttProjection | null {
+  return projectSttProvider(routingDocument());
 }
 
-export async function persistSttProvider(): Promise<void> {
-  const api = globals().Api?.modelRouting;
+export function hasSttChanges(form = readSttForm()): boolean {
+  return sttFormChanged(routingDocument(), form);
+}
+
+export function buildSttProviderBundle(form = readSttForm()): ProviderBundle | null {
+  return prepareSttBundle(routingDocument(), form, translate('settings.sttService', '语音识别'));
+}
+
+function sttCredentialIds(): string[] {
   const documentValue = routingDocument();
-  if (!api || !documentValue) {
-    throw new Error('model-routing v2 authority is not ready');
-  }
-  const revision = Number(globals()._stgModelRoutingRevision || 0);
-  const existing = findSttProvider();
-  const enabled = document.getElementById('settingSttEnabled');
-  if (!(enabled instanceof HTMLInputElement) || !enabled.checked) {
-    if (existing) {
-      await api.deleteProvider(STT_PROVIDER_ID, revision);
-      await reloadRoutingAuthority(api);
+  const accesses = new Set(documentValue?.provider_accesses
+    .filter(row => row.provider_id === STT_PROVIDER_ID).map(row => row.provider_access_id));
+  return (documentValue?.credentials || []).filter(row => accesses.has(row.provider_access_id))
+    .map(row => row.credential_id);
+}
+
+export interface SttSaveIntent {
+  readonly form: SttForm | null;
+  readonly scope: LifecycleScope | null;
+  readonly activation: ReturnType<typeof captureSttActivation>;
+}
+
+/** Global Save captures Speech before any preceding feature write awaits. */
+export function captureSttSaveIntent(): SttSaveIntent {
+  const form = readSttForm();
+  const initialDocument = routingDocument();
+  return {form, scope: panelScope,
+    activation: initialDocument && form ? captureSttActivation(initialDocument, form) : null};
+}
+
+export async function persistSttProvider(intent = captureSttSaveIntent()): Promise<ModelRoutingMutationResult> {
+  const initialDocument = routingDocument();
+  if (!initialDocument) throw new Error('model-routing v2 authority is not ready');
+  const {form, scope, activation} = intent;
+  if (!form) return {refreshed: true};
+  const api = globals().Api?.modelRouting;
+  if (!api) throw new Error('model-routing v2 authority is not ready');
+  return runModelRoutingMutation(async revision => {
+    const current = routingDocument();
+    if (!current) throw new Error('model-routing v2 authority is not ready');
+    if (activation) {
+      const candidate = buildSttActivationDocument(current, activation);
+      if (!candidate) return {unchanged: true};
+      const response = await api.replace(candidate, revision);
+      if (!response?.model_routing || response.model_routing.contract_version !== 'tofu.model-routing/v2'
+          || !Number.isSafeInteger(response.revision) || response.revision <= revision) {
+        throw new Error('speech activation returned an invalid authority response');
+      }
+      return {revision: response.revision, authority: response};
     }
-    return;
-  }
-  const bundle = buildSttProviderBundle();
-  if (!bundle) throw new Error('speech provider configuration is incomplete');
-  if (existing) {
-    await api.saveProvider(STT_PROVIDER_ID, bundle, revision);
-  } else {
-    await api.createProvider(bundle, revision);
-  }
-  await reloadRoutingAuthority(api);
+    if (!hasSttChanges(form)) return {unchanged: true};
+    const existing = findSttProvider();
+    const credentialIds = sttCredentialIds();
+    const bundle = buildSttProviderBundle(form);
+    if (!bundle) throw new Error('speech provider configuration is incomplete');
+    const receipt = existing ? await api.saveProvider(STT_PROVIDER_ID, bundle, revision)
+      : await api.createProvider(bundle, revision);
+    if (!receipt || receipt.provider?.provider?.provider_id !== STT_PROVIDER_ID ||
+        !Number.isSafeInteger(receipt.revision) || receipt.revision <= revision) {
+      throw new Error('speech save returned an invalid receipt');
+    }
+    const keyId = `settingSttKey${sttSuffix(form.kind)}`;
+    if (panelScope === scope && inputValue(keyId) === form.secret) setValue(keyId, '');
+    return {revision: receipt.revision,
+      removedCredentialIds: credentialIds.filter(id => !bundle.credentials.some(row => row.credential_id === id))};
+  }, {persistDraft: true});
 }
 
 const bridge = globals();
@@ -423,8 +311,11 @@ bridge.STT_PROVIDER_ID = STT_PROVIDER_ID;
 bridge._STT_PROVIDER_META = STT_PROVIDER_META;
 bridge._findSttProvider = findSttProvider;
 bridge._populateSpeechTab = populateSpeechTab;
+bridge._beginSpeechTabLoad = beginSpeechTabLoad;
 bridge._sttSuffix = sttSuffix;
 bridge._switchSttProvider = switchSttProvider;
 bridge._refreshSttStatus = () => { void refreshSttStatus(); };
+bridge._captureSttSaveIntent = captureSttSaveIntent;
 bridge._persistSttProvider = persistSttProvider;
+bridge._hasSttChanges = hasSttChanges;
 bridge._destroySpeechTab = destroySpeechTab;

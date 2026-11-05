@@ -41,7 +41,7 @@ def mt_translate(text, source='', target='zh'):
 
     Raises:
         ValueError: If MT provider is not configured.
-        RuntimeError: If the API call fails.
+        MtProviderError: If the API call fails (a ``RuntimeError``).
     """
     cfg = _get_mt_config()
     if not cfg:

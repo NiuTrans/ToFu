@@ -123,3 +123,46 @@ def test_manager_builds_one_snapshot_for_llm_poll_and_audit(monkeypatch):
     decide.assert_called_once_with(
         _task(), status_snapshot='ONE SNAPSHOT')
     assert record.call_args.args[5] == 'ONE SNAPSHOT'
+
+
+@pytest.mark.parametrize('kind', ['hybrid', 'code'])
+def test_predicate_polls_decide_and_record_the_predicate_evidence(monkeypatch, kind):
+    """A hybrid poll LLM has no tools: unless the snapshot carries the
+    predicate's verdict and output, its 'authoritative' answer is blind and
+    agreement with the predicate is chance. One evaluation feeds the LLM, the
+    reconcile and the ledger."""
+    from lib.scheduler import proactive
+    from lib.scheduler._shared import PredicateResult, ReconcileOutcome
+    from lib.scheduler.manager import ScheduledTaskManager
+
+    result = PredicateResult(matched=True, output='NEW google/example-2', exit_code=0)
+    evaluate = mock.Mock(return_value=result)
+    decide = mock.Mock(return_value=(True, 'the watch lists a new model', 5))
+    reconcile = mock.Mock(return_value=ReconcileOutcome(
+        authoritative_ready=False, tier='llm', new_kind=kind, new_streak=1,
+        new_fallback_streak=0, predicate_matched=1, llm_agreed=1, note='agrees'))
+    record = mock.Mock()
+    monkeypatch.setattr(proactive, 'gather_system_status', lambda _task: 'ONE SNAPSHOT')
+    monkeypatch.setattr(proactive, 'evaluate_condition_predicate', evaluate)
+    monkeypatch.setattr(proactive, 'poll_decision', decide)
+    monkeypatch.setattr(proactive, 'apply_reconcile_poll', reconcile)
+    monkeypatch.setattr(proactive, 'record_poll', record)
+    monkeypatch.setattr(proactive, 'should_auto_disable', lambda _task: False)
+    monkeypatch.setattr(proactive, 'is_task_executing', lambda _task: False)
+    manager = ScheduledTaskManager()
+    manager.get_task = lambda *_args, **_kwargs: {'poll_count': 3}
+    manager.update_task = lambda *_args, **_kwargs: None
+
+    manager._run_proactive_poll({**_task(), 'condition_kind': kind,
+                                 'condition_command': 'release-watch'})
+
+    evaluate.assert_called_once()
+    assert reconcile.call_args.args[1] is result
+    snapshot = record.call_args.args[5]
+    assert snapshot.startswith('ONE SNAPSHOT')
+    assert 'Condition predicate: matched (exit=0)' in snapshot
+    assert 'NEW google/example-2' in snapshot
+    if kind == 'hybrid':
+        assert decide.call_args.kwargs['status_snapshot'] == snapshot
+    else:
+        decide.assert_not_called()

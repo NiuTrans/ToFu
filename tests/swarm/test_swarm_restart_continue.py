@@ -81,15 +81,94 @@ def test_authority_failure_is_visible_not_fresh_execution(authority, monkeypatch
 
 @pytest.mark.parametrize('messages,phase,expected', [
     ([], 'ready', ''),
-    ([{'role': 'assistant', 'tool_calls': [{'id': 'write'}]}], 'ready', 'restart_tool_outcome_unknown'),
+    # An open round is resumable: its own agent reconciles the outcome.
+    ([{'role': 'assistant', 'tool_calls': [{'id': 'write'}]}], 'ready', ''),
+    ([{'role': 'assistant', 'tool_calls': [{'id': 'write'}]}], 'tools_in_flight', ''),
     ([{'role': 'assistant', 'tool_calls': [{'id': 'write'}]},
-      {'role': 'tool', 'tool_call_id': 'write', 'content': 'receipt'}], 'ready', ''),
-    ([{'role': 'tool', 'tool_call_id': 'write', 'content': 'receipt'}], 'tools_in_flight', 'restart_tool_outcome_unknown'),
+      {'role': 'tool', 'tool_call_id': 'write', 'content': 'receipt'}], 'tools_in_flight', ''),
+    ([{'role': 'tool', 'tool_call_id': 'write', 'content': 'receipt'}], 'tools_in_flight', 'restart_checkpoint_invalid'),
+    # The phase claims calls the transcript does not show.
+    ([], 'tools_in_flight', 'restart_checkpoint_invalid'),
+    ([{'role': 'user', 'content': 'work'}], 'tools_in_flight', 'restart_checkpoint_invalid'),
     (['bad'], 'ready', 'restart_checkpoint_invalid'),
 ])
-def test_unacknowledged_tools_are_never_blindly_replayed(messages, phase, expected):
+def test_checkpoint_validity_is_structural_not_phase_based(messages, phase, expected):
     assert recovery.checkpoint_recovery_error({'messages': messages,
         'result': {'checkpoint_phase': phase}}) == expected
+
+
+def _open_round(*results, phase='tools_in_flight', reason='server_shutdown'):
+    messages = [{'role': 'user', 'content': 'objective'},
+                {'role': 'assistant', 'content': 'Running checks', 'tool_calls': [
+                    {'id': 'tests', 'type': 'function', 'function': {'name': 'run_command'}},
+                    {'id': 'shot', 'type': 'function', 'function': {'name': 'screenshot'}}]},
+                *results]
+    return {'messages': messages, 'rounds_used': 4,
+            'result': {'checkpoint_phase': phase, 'recovery_reason': reason}}
+
+
+def test_open_round_keeps_recorded_results_and_adds_recovery_notice():
+    agent = _open_round(
+        {'role': 'tool', 'tool_call_id': 'tests',
+         'content': '$ pytest\n[Command aborted by user]\n[exit code: -1]'},
+        {'role': 'tool', 'tool_call_id': 'shot',
+         'content': [{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AA'}}]},
+        {'role': 'user', 'content': 'team message after the round'})
+    original = deepcopy(agent)
+    settled = recovery.settle_interrupted_tool_round(agent)
+    assert agent == original
+    assert [m.get('tool_call_id') for m in settled[2:4]] == ['tests', 'shot']
+    assert settled[-1] == original['messages'][-1]
+    text = settled[2]['content']
+    assert text.startswith('$ pytest\n[Command aborted by user]')
+    assert 'Tofu recovery notice: A server restart' in text
+    assert 'not from a user decision' in text and 'did not run this call again' in text
+    assert settled[3]['content'][0] == original['messages'][3]['content'][0]
+    assert 'Tofu recovery notice' in settled[3]['content'][-1]['text']
+
+
+def test_open_round_without_results_gets_explicit_unknown_outcomes_in_call_order():
+    agent = _open_round({'role': 'tool', 'tool_call_id': 'shot', 'content': 'captured'},
+                        reason='')
+    settled = recovery.settle_interrupted_tool_round(agent)
+    assert [(m['role'], m['tool_call_id']) for m in settled[2:]] == [
+        ('tool', 'tests'), ('tool', 'shot')]
+    assert 'before the result of this call was recorded' in settled[2]['content']
+    assert 'A server restart or crash' in settled[2]['content']
+    assert settled[3]['content'].startswith('captured\n\n[Tofu recovery notice')
+
+
+def test_parent_stop_notice_names_the_stop_not_a_restart():
+    settled = recovery.settle_interrupted_tool_round(_open_round(reason='parent_stop'))
+    assert 'A Stop stopped this agent' in settled[2]['content']
+
+
+@pytest.mark.parametrize('phase', ['ready', 'model_in_flight'])
+def test_settled_round_is_left_untouched(phase):
+    agent = _open_round({'role': 'tool', 'tool_call_id': 'tests', 'content': 'ok'},
+                        {'role': 'tool', 'tool_call_id': 'shot', 'content': 'ok'}, phase=phase)
+    assert recovery.settle_interrupted_tool_round(agent) is None
+    assert recovery.surviving_command_error(agent, conv_id='conv') == ''
+
+
+def test_surviving_command_record_refuses_resume(monkeypatch):
+    seen = {}
+    def surviving(**kwargs):
+        seen.update(kwargs)
+        return [{'tool_call_id': 'tests', 'pgid': 4242, 'command': 'pytest'}]
+    monkeypatch.setattr('lib.project_mod.foreground_command_records.surviving_foreground_commands',
+                        surviving)
+    error = recovery.surviving_command_error(_open_round(), conv_id='conv')
+    assert error.startswith('restart_command_still_running:')
+    assert '4242' in error and 'tests' in error
+    assert seen == {'conv_id': 'conv', 'tool_call_ids': ['tests', 'shot']}
+
+
+def test_unreadable_command_records_refuse_resume(monkeypatch):
+    monkeypatch.setattr('lib.project_mod.foreground_command_records.surviving_foreground_commands',
+                        Mock(side_effect=PermissionError('denied')))
+    error = recovery.surviving_command_error(_open_round(), conv_id='conv')
+    assert error.startswith('restart_command_still_running:') and 'unreadable' in error
 
 
 @pytest.mark.parametrize('messages', [
@@ -164,6 +243,30 @@ def test_continue_rebuilds_current_authority_and_keeps_run_id(authority, monkeyp
     assert '_principalContext' not in saved.call_args.kwargs['config']['parent_cfg']
 
 
+@pytest.mark.parametrize('receipt,catalog,expected', [
+    (['grep_search'], ['search_files', 'new_privilege'], ['search_files']),
+    # A habit alias names a different capability and never inherits authority.
+    (['read_artifact'], ['read_tool_artifact'], []),
+])
+def test_restart_receipt_follows_pure_tool_renames_only(
+        authority, monkeypatch, receipt, catalog, expected):
+    row, task, *_ = authority
+    row['config']['parent_cfg']['_swarmToolNames'] = receipt
+    published = {}
+    factory = Mock(return_value=SimpleNamespace(rehydrate_in_background=Mock()))
+    monkeypatch.setattr(_rehydrate, '_get_session', lambda key: published.get(key))
+    monkeypatch.setattr(_rehydrate, '_set_session', lambda key, value, **kw: published.setdefault(key, value))
+    monkeypatch.setattr(_rehydrate, 'MasterOrchestrator', factory)
+    monkeypatch.setattr(_rehydrate, '_resolve_output_dir', lambda key: '')
+    monkeypatch.setattr('lib.swarm.integration._state.add_session_alias', Mock())
+    monkeypatch.setattr('lib.swarm.persistence.save_session', Mock())
+    monkeypatch.setattr('lib.agent_inbox.untombstone', Mock())
+    tools = [{'type': 'function', 'function': {'name': name}} for name in catalog]
+    assert _rehydrate._rehydrate_one(row, resume_task=task, tool_list=tools)
+    resumed = factory.call_args.kwargs['all_tools']
+    assert [tool['function']['name'] for tool in resumed] == expected
+
+
 def test_suspend_preserves_live_checkpoint_and_does_not_publish_false_result(monkeypatch):
     spec = SubTaskSpec(id='child', objective='work')
     master = MasterOrchestrator(task_id='original', conv_id='conv', user_id=7, specs=[spec])
@@ -199,7 +302,7 @@ def test_restored_prerequisite_satisfies_dag_without_rerun(monkeypatch):
     assert master._resume_rounds['waiting'] == 3
 
 
-def test_unknown_external_outcome_becomes_visible_failure_not_worker_launch(monkeypatch):
+def test_tool_phase_without_transcript_becomes_visible_failure_not_worker_launch(monkeypatch):
     spec = SubTaskSpec(id='write', objective='external mutation')
     master = MasterOrchestrator(task_id='original', conv_id='conv', user_id=7, specs=[spec])
     publish = Mock()
@@ -209,8 +312,47 @@ def test_unknown_external_outcome_becomes_visible_failure_not_worker_launch(monk
     master.rehydrate_in_background([{'agent_id': 'write', 'status': 'running',
         'result': {'checkpoint_phase': 'tools_in_flight'}, 'messages': []}])
     assert master._results_by_id['write'][1].status == 'failed'
-    assert 'restart_tool_outcome_unknown' in master._results_by_id['write'][1].error_message
+    assert 'restart_checkpoint_invalid' in master._results_by_id['write'][1].error_message
     publish.assert_called_once()
+    assert not master._resume_messages
+
+
+def test_interrupted_tool_round_resumes_its_agent_instead_of_failing(monkeypatch):
+    spec = SubTaskSpec(id='tests', objective='run the suite and fix failures')
+    master = MasterOrchestrator(task_id='original', conv_id='conv', user_id=7, specs=[spec])
+    scheduler = SimpleNamespace(_completed={}, add_specs=Mock())
+    publish = Mock()
+    monkeypatch.setattr(master, '_reenqueue_swarm_update', publish)
+    monkeypatch.setattr(master, '_build_scheduler', lambda: scheduler)
+    monkeypatch.setattr(master, '_start_driver', Mock())
+    monkeypatch.setattr('lib.project_mod.foreground_command_records.surviving_foreground_commands',
+                        lambda **kw: [])
+    row = {'agent_id': 'tests', 'status': 'running', **_open_round(
+        {'role': 'tool', 'tool_call_id': 'tests', 'content': '[Command aborted by user]'})}
+    original = deepcopy(row)
+    master.rehydrate_in_background([row])
+    assert row == original
+    assert scheduler.add_specs.call_args.args[0] == [spec]
+    assert 'tests' not in master._results_by_id
+    publish.assert_not_called()
+    resumed = master._resume_messages['tests']
+    assert 'Tofu recovery notice' in resumed[2]['content']
+    assert resumed[3]['tool_call_id'] == 'shot'
+    assert master._resume_rounds['tests'] == 5
+
+
+def test_interrupted_round_with_surviving_command_fails_visibly(monkeypatch):
+    spec = SubTaskSpec(id='tests', objective='run the suite')
+    master = MasterOrchestrator(task_id='original', conv_id='conv', user_id=7, specs=[spec])
+    monkeypatch.setattr(master, '_reenqueue_swarm_update', Mock())
+    monkeypatch.setattr(master, '_build_scheduler', lambda: SimpleNamespace(_completed={}))
+    monkeypatch.setattr(master, '_start_driver', Mock())
+    monkeypatch.setattr('lib.project_mod.foreground_command_records.surviving_foreground_commands',
+                        lambda **kw: [{'tool_call_id': 'tests', 'pgid': 99, 'command': 'pytest'}])
+    master.rehydrate_in_background([{'agent_id': 'tests', 'status': 'running', **_open_round()}])
+    result = master._results_by_id['tests'][1]
+    assert result.status == 'failed'
+    assert result.recovery_reason == 'restart_command_still_running'
     assert not master._resume_messages
 
 
@@ -713,17 +855,23 @@ def test_manual_stop_requires_exact_accepted_continue_not_cold_start(authority, 
     assert not recovery.continue_recovery_allowed(sess, task, user_id=7)
 
 
-def test_parent_stop_restores_only_marked_unfinished_work_and_keeps_tool_fence(monkeypatch):
+def test_parent_stop_restores_marked_unfinished_work_including_open_tool_round(monkeypatch):
     m = MasterOrchestrator(task_id='original', conv_id='conv', user_id=7,
         specs=[SubTaskSpec(id=ident, objective='work',
                            retained_agent_id='saved-colleague' if ident == 'retained' else '')
-               for ident in ['done', 'failed', 'stopped', 'individual', 'unsafe', 'retained', 'pending']])
+               for ident in ['done', 'failed', 'stopped', 'individual', 'interrupted',
+                             'retained', 'pending']])
     scheduler = SimpleNamespace(_completed={}, add_specs=Mock())
     monkeypatch.setattr(m, '_build_scheduler', lambda: scheduler)
     monkeypatch.setattr(m, '_start_driver', Mock())
     monkeypatch.setattr(m, '_reenqueue_swarm_update', Mock())
+    monkeypatch.setattr('lib.project_mod.foreground_command_records.surviving_foreground_commands',
+                        lambda **kw: [])
     messages = [{'role': 'user', 'content': 'prior work'}]
-    saved = [{'agent_id': ident, 'status': status, 'messages': deepcopy(messages),
+    open_round = [*messages, {'role': 'assistant', 'tool_calls': [{'id': 'write'}]},
+                  {'role': 'tool', 'tool_call_id': 'write', 'content': 'Task aborted by user.'}]
+    saved = [{'agent_id': ident, 'status': status,
+              'messages': deepcopy(open_round if ident == 'interrupted' else messages),
               'rounds_used': 3, 'delivered': ident == 'done',
               'result': {'status': status, 'checkpoint_phase': phase,
                          'recovery_reason': reason, 'total_tokens': 71,
@@ -733,10 +881,14 @@ def test_parent_stop_restores_only_marked_unfinished_work_and_keeps_tool_fence(m
                  ('failed', 'failed', 'ready', ''),
                  ('stopped', 'cancelled', 'ready', 'parent_stop'),
                  ('individual', 'cancelled', 'ready', ''),
-                 ('unsafe', 'cancelled', 'tools_in_flight', 'parent_stop'),
+                 ('interrupted', 'cancelled', 'tools_in_flight', 'parent_stop'),
                  ('retained', 'cancelled', 'ready', 'parent_stop')]]
     m.rehydrate_in_background(saved, resume_parent_stop=True)
-    assert [spec.id for spec in scheduler.add_specs.call_args.args[0]] == ['stopped', 'pending']
+    assert [spec.id for spec in scheduler.add_specs.call_args.args[0]] == [
+        'stopped', 'interrupted', 'pending']
+    resumed = m._resume_messages['interrupted']
+    assert resumed[-1]['content'].startswith('Task aborted by user.\n\n[Tofu recovery notice: A Stop')
+    assert m._resume_rounds['interrupted'] == 4
     assert m._resume_messages['stopped'] == messages
     assert m._resume_rounds['stopped'] == 3
     assert m._resume_results['stopped']['total_tokens'] == 71
@@ -745,7 +897,7 @@ def test_parent_stop_restores_only_marked_unfinished_work_and_keeps_tool_fence(m
     assert m._results_by_id['individual'][1].status == 'cancelled'
 
     assert m._results_by_id['retained'][1].status == 'cancelled'
-    assert 'restart_tool_outcome_unknown' in m._results_by_id['unsafe'][1].error_message
+    assert 'interrupted' not in m._results_by_id
 
 
 def test_continue_drains_old_driver_then_reloads_without_deleting_evidence(authority, monkeypatch):

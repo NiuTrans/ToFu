@@ -40,15 +40,21 @@ def _node_available() -> bool:
 
 # Load the typed HTML-safety owner + the real marked UMD, stub the few globals
 # renderMarkdown touches (BASE_PATH, _ensureKatex), then eval markdown.js
-# and exercise renderMarkdown directly.  DOMPurify / katex / projectState
-# are all guarded by `typeof … !== 'undefined'` in the source, so leaving
-# them undefined exercises the no-KaTeX fallback path — exactly what we
+# and exercise renderMarkdown directly with a real jsdom document and DOMPurify
+# sanitizer (the renderer fails closed without them).  katex / projectState are guarded
+# by `typeof … !== 'undefined'` in the source, so leaving them undefined
+# exercises the no-KaTeX fallback path — exactly what we
 # want to distinguish "rendered as code" from "routed to math".
 _HARNESS = r"""
 const fs = require('fs');
 function load(p){ return fs.readFileSync(p,'utf8'); }
 
 global.marked = require(process.argv[4]);   // marked CJS (same build the Vite graph bundles)
+// The renderer fails closed to escaped source without a DOM document and a
+// sanitizer; production always has both, so supply real ones from jsdom.
+const __dom = new (require('jsdom').JSDOM)('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
+global.document = __dom.window.document;
+global.DOMPurify = require('dompurify')(__dom.window);
 var BASE_PATH = '';
 var _ensureKatex = function(){};            // no-op: katex stays unloaded
 
@@ -81,7 +87,6 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_backtick_content_renders_as_code_not_math():
     harness = os.path.join(HERE, '_md_backtick_harness.js')
     with open(harness, 'w') as f:

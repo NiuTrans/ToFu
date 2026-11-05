@@ -1,4 +1,7 @@
-//! Immutable transaction-history segments and their bounded checkpoint manifest.
+//! Immutable transaction-history segments and bounded pages of a checkpoint manifest.
+
+#[path = "history_manifest_pages.rs"]
+mod manifest_pages;
 
 use std::io;
 
@@ -39,14 +42,28 @@ const SEGMENT_VERSION: u32 = 1;
 const LEGACY_MANIFEST_VERSION: u32 = 1;
 const MANIFEST_VERSION: u32 = 2;
 const INDEXED_MANIFEST_VERSION: u32 = 3;
+const COMPACT_MANIFEST_VERSION: u32 = 4;
 pub(crate) const SEGMENT_HEADER_BYTES: usize = 8 + 4 + 8 + 32 + 4;
 pub(crate) const TRANSACTION_HEADER_BYTES: usize = 8 + 32 + 4;
 const MANIFEST_HEADER_BYTES: usize = 8 + 4 + 8 + 32 + 4;
 const MANIFEST_ENTRY_BYTES: usize = 32 + 8 + 8 + 32 + 32;
 const INDEXED_MANIFEST_ENTRY_BYTES: usize = MANIFEST_ENTRY_BYTES + 1 + 32;
+const COMPACT_MANIFEST_HEADER_BYTES: usize = MANIFEST_HEADER_BYTES + 32;
+const COMPACT_MANIFEST_ENTRY_BYTES: usize = 32 + 8 + 32;
+const COMPACT_MANIFEST_INDEXED_ENTRY_BYTES: usize = COMPACT_MANIFEST_ENTRY_BYTES + 1 + 32;
+const COMPACT_MANIFEST_ROOT_BYTES: usize = 1 + 32;
 pub const HISTORY_SEGMENT_MAX_BYTES: usize =
     crate::generated_tofudb_ir::MAX_HISTORY_PREPARATION_BYTES;
-pub const MAX_HISTORY_SEGMENTS: usize = 32_768;
+/// Maximum unindexed entries in one compact leaf. Total retained history is
+/// represented by recursive pages and is not subject to this per-page bound.
+pub const MAX_HISTORY_SEGMENTS: usize = (HISTORY_SEGMENT_MAX_BYTES
+    - COMPACT_MANIFEST_HEADER_BYTES
+    - 1) // absent routing root still has a presence byte
+    / (COMPACT_MANIFEST_ENTRY_BYTES + 1); // each source has an index-presence byte
+const MAX_INDEXED_HISTORY_SEGMENTS: usize = (HISTORY_SEGMENT_MAX_BYTES
+    - COMPACT_MANIFEST_HEADER_BYTES
+    - COMPACT_MANIFEST_ROOT_BYTES)
+    / COMPACT_MANIFEST_INDEXED_ENTRY_BYTES;
 
 pub(crate) fn transaction_history_bytes(transaction: &CommittedTransaction) -> usize {
     TRANSACTION_HEADER_BYTES + transaction.encoded_envelope.len()
@@ -88,6 +105,8 @@ pub(crate) struct HistoryManifest {
     pub checkpoint_hash: [u8; 32],
     /// The bounded-level, immutable lookup directory for carried block bytes.
     pub payload_index_root_id: Option<BlockId>,
+    /// All immutable manifest descendants, excluding this manifest root.
+    pub manifest_page_ids: Vec<BlockId>,
     pub segments: Vec<HistorySegmentReference>,
 }
 
@@ -374,7 +393,6 @@ impl HistoryManifest {
         }
         if self.checkpoint_sequence == 0
             || self.segments.is_empty()
-            || self.segments.len() > MAX_HISTORY_SEGMENTS
         {
             return Err(invalid_input("invalid history manifest bounds"));
         }
@@ -409,8 +427,23 @@ impl HistoryManifest {
 
     pub fn encode(&self) -> io::Result<Vec<u8>> {
         self.validate_chain(false)?;
+        if self.segments.len() > MAX_HISTORY_SEGMENTS {
+            return Err(invalid_input("history manifest requires paged storage"));
+        }
         let indexed = self.payload_index_root_id.is_some();
         let entry_bytes = if indexed { INDEXED_MANIFEST_ENTRY_BYTES } else { MANIFEST_ENTRY_BYTES };
+        let legacy_len = MANIFEST_HEADER_BYTES
+            .checked_add(usize::from(indexed) * 32)
+            .and_then(|length| {
+                self.segments
+                    .len()
+                    .checked_mul(entry_bytes)
+                    .and_then(|entries| length.checked_add(entries))
+            })
+            .ok_or_else(|| invalid_input("history manifest length overflow"))?;
+        if legacy_len > HISTORY_SEGMENT_MAX_BYTES {
+            return self.encode_compact(indexed);
+        }
         let mut encoded =
             Vec::with_capacity(MANIFEST_HEADER_BYTES + self.segments.len() * entry_bytes);
         encoded.extend_from_slice(MANIFEST_MAGIC);
@@ -436,6 +469,123 @@ impl HistoryManifest {
         Ok(encoded)
     }
 
+    fn encode_compact(&self, indexed: bool) -> io::Result<Vec<u8>> {
+        let capacity = COMPACT_MANIFEST_HEADER_BYTES
+            .checked_add(COMPACT_MANIFEST_ROOT_BYTES)
+            .and_then(|length| {
+                self.segments
+                    .len()
+                    .checked_mul(COMPACT_MANIFEST_INDEXED_ENTRY_BYTES)
+                    .and_then(|entries| length.checked_add(entries))
+            })
+            .ok_or_else(|| invalid_input("history manifest length overflow"))?;
+        let mut encoded = Vec::with_capacity(capacity);
+        encoded.extend_from_slice(MANIFEST_MAGIC);
+        encoded.extend_from_slice(&COMPACT_MANIFEST_VERSION.to_le_bytes());
+        encoded.extend_from_slice(&self.checkpoint_sequence.to_le_bytes());
+        encoded.extend_from_slice(&self.checkpoint_hash);
+        encoded.extend_from_slice(&(self.segments.len() as u32).to_le_bytes());
+        encoded.extend_from_slice(&self.segments[0].parent_hash);
+        if indexed {
+            encoded.push(1);
+            encoded.extend_from_slice(&self.payload_index_root_id.unwrap().0);
+        } else {
+            encoded.push(0);
+        }
+        for segment in &self.segments {
+            encoded.extend_from_slice(&segment.block_id.0);
+            encoded.extend_from_slice(&segment.first_sequence.to_le_bytes());
+            encoded.extend_from_slice(&segment.terminal_hash);
+            if let Some(index_id) = segment.payload_index_block_id {
+                encoded.push(1);
+                encoded.extend_from_slice(&index_id.0);
+            } else {
+                encoded.push(0);
+            }
+        }
+        if encoded.len() > HISTORY_SEGMENT_MAX_BYTES {
+            return Err(invalid_input("history manifest exceeds block bound"));
+        }
+        Ok(encoded)
+    }
+
+    fn decode_compact(
+        encoded: &[u8],
+        checkpoint_sequence: u64,
+        checkpoint_hash: [u8; 32],
+        count: usize,
+    ) -> io::Result<Self> {
+        if count == 0 || count > MAX_HISTORY_SEGMENTS {
+            return Err(invalid_data("invalid history manifest header"));
+        }
+        let minimum_len = COMPACT_MANIFEST_HEADER_BYTES
+            .checked_add(1)
+            .and_then(|length| {
+                count
+                    .checked_mul(COMPACT_MANIFEST_ENTRY_BYTES)
+                    .and_then(|entries| length.checked_add(entries))
+            })
+            .ok_or_else(|| invalid_data("history manifest length overflow"))?;
+        if encoded.len() < minimum_len {
+            return Err(invalid_data("invalid history manifest header"));
+        }
+        let mut offset = MANIFEST_HEADER_BYTES;
+        let first_parent: [u8; 32] = take(encoded, &mut offset, 32)?.try_into().unwrap();
+        let payload_index_root_id = match take(encoded, &mut offset, 1)?[0] {
+            0 => None,
+            1 => Some(BlockId(take(encoded, &mut offset, 32)?.try_into().unwrap())),
+            _ => return Err(invalid_data("invalid history manifest payload root presence")),
+        };
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            let block_id = BlockId(take(encoded, &mut offset, 32)?.try_into().unwrap());
+            let first_sequence =
+                u64::from_le_bytes(take(encoded, &mut offset, 8)?.try_into().unwrap());
+            let terminal_hash = take(encoded, &mut offset, 32)?.try_into().unwrap();
+            let payload_index_block_id = match take(encoded, &mut offset, 1)?[0] {
+                0 => None,
+                1 => Some(BlockId(take(encoded, &mut offset, 32)?.try_into().unwrap())),
+                _ => return Err(invalid_data("invalid history payload index presence")),
+            };
+            entries.push((block_id, first_sequence, terminal_hash, payload_index_block_id));
+        }
+        if offset != encoded.len() {
+            return Err(invalid_data("invalid history manifest header"));
+        }
+        let mut segments = Vec::with_capacity(count);
+        let mut parent_hash = first_parent;
+        for (index, (block_id, first_sequence, terminal_hash, payload_index_block_id)) in
+            entries.iter().copied().enumerate()
+        {
+            let last_sequence = match entries.get(index + 1) {
+                Some((_, next_first_sequence, _, _)) => next_first_sequence
+                    .checked_sub(1)
+                    .ok_or_else(|| invalid_data("invalid history manifest sequence"))?,
+                None => checkpoint_sequence,
+            };
+            segments.push(HistorySegmentReference {
+                block_id,
+                payload_index_block_id,
+                first_sequence,
+                last_sequence,
+                parent_hash,
+                terminal_hash,
+            });
+            parent_hash = terminal_hash;
+        }
+        let manifest = Self {
+            manifest_page_ids: Vec::new(),
+            checkpoint_sequence,
+            checkpoint_hash,
+            payload_index_root_id,
+            segments,
+        };
+        manifest
+            .validate_chain(false)
+            .map_err(|_| invalid_data("invalid history manifest chain"))?;
+        Ok(manifest)
+    }
+
     pub fn decode(encoded: &[u8]) -> io::Result<Self> {
         if encoded.len() < MANIFEST_HEADER_BYTES
             || encoded.len() > HISTORY_SEGMENT_MAX_BYTES
@@ -447,6 +597,9 @@ impl HistoryManifest {
         let checkpoint_sequence = u64::from_le_bytes(encoded[12..20].try_into().unwrap());
         let checkpoint_hash = encoded[20..52].try_into().unwrap();
         let count = u32::from_le_bytes(encoded[52..56].try_into().unwrap()) as usize;
+        if version == COMPACT_MANIFEST_VERSION {
+            return Self::decode_compact(encoded, checkpoint_sequence, checkpoint_hash, count);
+        }
         let entry_bytes = if version == INDEXED_MANIFEST_VERSION { INDEXED_MANIFEST_ENTRY_BYTES } else { MANIFEST_ENTRY_BYTES };
         let expected_len = count
             .checked_mul(entry_bytes)
@@ -489,6 +642,7 @@ impl HistoryManifest {
             segments.push(reference);
         }
         let manifest = Self {
+            manifest_page_ids: Vec::new(),
             checkpoint_sequence,
             checkpoint_hash,
             payload_index_root_id,
@@ -651,6 +805,7 @@ mod tests {
             .unwrap()
             .remove(0);
         let manifest = HistoryManifest {
+            manifest_page_ids: Vec::new(),
             checkpoint_sequence: 1,
             checkpoint_hash: first.record_hash,
             payload_index_root_id: None,
@@ -672,6 +827,7 @@ mod tests {
             .unwrap()
             .remove(0);
         let suffix_manifest = HistoryManifest {
+            manifest_page_ids: Vec::new(),
             checkpoint_sequence: 2,
             checkpoint_hash: second.record_hash,
             payload_index_root_id: None,
@@ -693,7 +849,7 @@ mod tests {
         let first = transaction(1, [0; 32]);
         let reference = HistorySegmentReference { block_id: BlockId([1; 32]), payload_index_block_id: Some(BlockId([2; 32])),
             first_sequence: 1, last_sequence: 1, parent_hash: [0; 32], terminal_hash: first.record_hash };
-        let mut manifest = HistoryManifest { checkpoint_sequence: 1, checkpoint_hash: first.record_hash,
+        let mut manifest = HistoryManifest { manifest_page_ids: Vec::new(), checkpoint_sequence: 1, checkpoint_hash: first.record_hash,
             payload_index_root_id: Some(BlockId([3; 32])), segments: vec![reference] };
         let bytes = manifest.encode().unwrap();
         assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 3);
@@ -705,6 +861,110 @@ mod tests {
         let legacy = manifest.encode().unwrap();
         assert_eq!(u32::from_le_bytes(legacy[8..12].try_into().unwrap()), 2);
         assert_eq!(HistoryManifest::decode(&legacy).unwrap(), manifest);
+    }
+
+    fn chained_manifest(count: usize, indexed: bool, first_sequence: u64) -> HistoryManifest {
+        let mut segments = Vec::with_capacity(count);
+        let mut parent_hash = [0_u8; 32];
+        for index in 0..count {
+            let terminal_hash = [((index + 1) % 251) as u8; 32];
+            let sequence = first_sequence + index as u64;
+            segments.push(HistorySegmentReference {
+                block_id: BlockId([index as u8; 32]),
+                payload_index_block_id: indexed.then_some(BlockId([7; 32])),
+                first_sequence: sequence,
+                last_sequence: sequence,
+                parent_hash,
+                terminal_hash,
+            });
+            parent_hash = terminal_hash;
+        }
+        let last = segments.last().unwrap();
+        HistoryManifest {
+            manifest_page_ids: Vec::new(),
+            checkpoint_sequence: last.last_sequence,
+            checkpoint_hash: last.terminal_hash,
+            payload_index_root_id: indexed.then_some(BlockId([9; 32])),
+            segments,
+        }
+    }
+
+    #[test]
+    fn compact_manifest_admits_the_full_segment_capacity() {
+        let indexed_capacity = (HISTORY_SEGMENT_MAX_BYTES
+            - COMPACT_MANIFEST_HEADER_BYTES
+            - COMPACT_MANIFEST_ROOT_BYTES)
+            / COMPACT_MANIFEST_INDEXED_ENTRY_BYTES;
+        let manifest = chained_manifest(indexed_capacity, true, 1);
+        let bytes = manifest.encode().unwrap();
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            COMPACT_MANIFEST_VERSION
+        );
+        assert!(bytes.len() <= HISTORY_SEGMENT_MAX_BYTES);
+        assert!(bytes.len() + COMPACT_MANIFEST_INDEXED_ENTRY_BYTES > HISTORY_SEGMENT_MAX_BYTES);
+        assert_eq!(HistoryManifest::decode(&bytes).unwrap(), manifest);
+
+        let overflow = chained_manifest(indexed_capacity + 1, true, 1);
+        assert!(overflow.encode().is_err());
+
+        let unindexed = chained_manifest(MAX_HISTORY_SEGMENTS, false, 1);
+        let unindexed_bytes = unindexed.encode().unwrap();
+        assert_eq!(
+            u32::from_le_bytes(unindexed_bytes[8..12].try_into().unwrap()),
+            COMPACT_MANIFEST_VERSION
+        );
+        assert!(unindexed_bytes.len() <= HISTORY_SEGMENT_MAX_BYTES);
+        assert!(unindexed_bytes.len() + COMPACT_MANIFEST_ENTRY_BYTES > HISTORY_SEGMENT_MAX_BYTES);
+        assert_eq!(HistoryManifest::decode(&unindexed_bytes).unwrap(), unindexed);
+
+        assert_eq!(
+            u32::from_le_bytes(
+                chained_manifest(indexed_capacity - 1, true, 1)
+                    .encode()
+                    .unwrap()[8..12]
+                    .try_into()
+                    .unwrap()
+            ),
+            COMPACT_MANIFEST_VERSION
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                chained_manifest(28_925, true, 1).encode().unwrap()[8..12]
+                    .try_into()
+                    .unwrap()
+            ),
+            INDEXED_MANIFEST_VERSION
+        );
+    }
+
+    #[test]
+    fn compact_manifest_decode_rejects_truncation_trailing_bytes_and_corruption() {
+        let bytes = chained_manifest(32_768, true, 1).encode().unwrap();
+        assert!(HistoryManifest::decode(&bytes[..bytes.len() - 1]).is_err());
+        assert!(HistoryManifest::decode(&bytes[..COMPACT_MANIFEST_HEADER_BYTES]).is_err());
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(HistoryManifest::decode(&trailing).is_err());
+        let mut invalid_root_presence = bytes.clone();
+        invalid_root_presence[COMPACT_MANIFEST_HEADER_BYTES] = 2;
+        assert!(HistoryManifest::decode(&invalid_root_presence).is_err());
+        let mut invalid_entry_presence = bytes.clone();
+        invalid_entry_presence[COMPACT_MANIFEST_HEADER_BYTES + COMPACT_MANIFEST_ROOT_BYTES + 72] =
+            2;
+        assert!(HistoryManifest::decode(&invalid_entry_presence).is_err());
+        let mut zero_count = bytes.clone();
+        zero_count[52..56].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(HistoryManifest::decode(&zero_count).is_err());
+        let mut oversized_count = bytes.clone();
+        oversized_count[52..56].copy_from_slice(&(MAX_HISTORY_SEGMENTS as u32 + 1).to_le_bytes());
+        assert!(HistoryManifest::decode(&oversized_count).is_err());
+    }
+
+    #[test]
+    fn history_chain_is_valid_after_a_single_manifest_page_fills() {
+        let manifest = chained_manifest(MAX_HISTORY_SEGMENTS + 1, true, 1);
+        manifest.validate_chain(false).expect("valid history cannot acquire a lifetime segment ceiling");
     }
 
 }

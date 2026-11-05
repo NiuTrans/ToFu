@@ -14,8 +14,9 @@ Four steps, in order:
    second full-history sanitize; body-build failures retain the old diagnostic
    fallback from the untouched source messages.
 4. Attach validated prompt-admission evidence and internal task/conversation
-   context — the session-stable TTL latch, Responses prompt-cache namespace,
-   and user-approved economic working-set threshold. Protocol converters
+   context — the session-stable TTL latch, the prompt-cache lineage scope
+   (``lib/llm/cache_affinity.py``), and the user-approved economic working-set
+   threshold. Protocol converters
    consume these keys; none reach an upstream wire unchanged.
 
 Returns ``(_tools_this_round, body)``: the gated tool list is still
@@ -33,6 +34,7 @@ from lib.tasks_pkg.orchestrator._messages_snapshot import (
 )
 from lib.token_counter.evidence import (
     ADMITTED_INPUT_TOKENS_KEY,
+    TEXT_COUNT_VIEW_KEY,
     validated_admitted_input_tokens,
 )
 
@@ -130,10 +132,25 @@ def build_round_request(task, rs, messages, tool_list, *,
         admitted_input_tokens)
     if _validated_input_tokens is not None:
         body[ADMITTED_INPUT_TOKENS_KEY] = _validated_input_tokens
+    # Slot admission, ingress and the Anthropic recount still count this body
+    # from content; the task's memo spares them re-tokenizing known text.
+    from lib.tasks_pkg.compaction._tokens import _task_text_count_memo
+    _text_count_memo = _task_text_count_memo(task)
+    if _text_count_memo is not None:
+        body[TEXT_COUNT_VIEW_KEY] = _text_count_memo.view('provider')
     # Attach task_id for session-stable TTL latch in
     # add_cache_breakpoints (prevents mid-session cache key shift).
     body['_task_id'] = task['id']
     body['_conv_id'] = task.get('convId') or ''
+    # One cache lineage per prompt sequence: the conversation for a root, the
+    # invocation for a child — the scope Tofu's own key stickiness uses.
+    from lib.llm.cache_affinity import CACHE_AFFINITY_SCOPE_KEY
+    from lib.tasks_pkg.invocation import invocation_affinity_id
+    body[CACHE_AFFINITY_SCOPE_KEY] = invocation_affinity_id(task)
+    # The refusal switch-back probe rebuilds the body for the primary model
+    # and must inherit the round's real depth (a max-depth conversation must
+    # not silently downgrade to the route default on the probe round).
+    body['_thinking_depth'] = thinking_depth
     # Private transport metadata for the durable Request Inspector archive.
     # ``prepare_request`` removes it at the same boundary as every other
     # underscore key, after using it to bind the final provider-specific body

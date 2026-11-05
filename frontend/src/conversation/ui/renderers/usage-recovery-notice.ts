@@ -76,6 +76,7 @@ function paint(state: RecoveryState): void {
       not_applicable: ['usageRecovery.notApplicable', 'This record is no longer eligible for a new budget. Follow the latest replies in this conversation.'],
       operation_unconfirmed: ['usageRecovery.operationUnconfirmed', 'An earlier operation has an unconfirmed outcome. A new budget cannot be authorized while that outcome remains unresolved.'],
       configuration_unavailable: ['usageRecovery.configurationUnavailable', 'The model configuration is unavailable. Check the model connection in Settings, then continue again.'],
+      budget_insufficient: ['usageRecovery.budgetInsufficient', 'The saved limit is too small for the saved context and a new reply. No new work was started; this recovery cannot increase that limit.'],
       ready: ['usageRecovery.checkFailed', 'The conversation could not be read. Nothing was started. Try again.'],
     } as const;
     const [key, fallback] = phase === 'blocked'
@@ -90,8 +91,8 @@ function paint(state: RecoveryState): void {
   if (phase !== 'accepted') {
     for (const [key, fallback] of [
       ['usageRecovery.cost', 'Continuing may incur additional model and tool charges.'],
-      ['usageRecovery.preserve', 'Everything generated so far and the earlier unconfirmed-usage record stay exactly as they are; nothing is filled in or settled.'],
-      ['usageRecovery.scope', 'This starts a new reply in ordinary chat. It does not resend the earlier request or resume the earlier Goal or Flow.'],
+      ['usageRecovery.preserve', 'Everything generated so far and the earlier unconfirmed-usage record stay exactly as they are; earlier usage remains unknown, not filled in or settled.'],
+      ['usageRecovery.scope', 'This continues the original unfinished task from saved context and results with a newly confirmed finite budget, in a new ordinary-chat reply. It does not resend the earlier request or repeat completed operations, and does not restart the earlier automated Goal or Flow.'],
     ]) {
       const line = document.createElement('div');
       line.textContent = text(key, fallback);
@@ -114,11 +115,11 @@ function paint(state: RecoveryState): void {
   const actions = document.createElement('div');
   actions.className = 'ui-row ui-row--wrap';
   const busy = phase === 'checking' || phase === 'submitting';
-  /* These two blocks are permanent for this record: re-reading cannot change
-   * them, so offering the action again would be the same dead control the
-   * reader just came from. */
+  /* These blocks are permanent for this record: re-reading cannot change
+   * them or enlarge its saved cap, so offering the action again would be
+   * the same dead control the reader just came from. */
   const permanentlyBlocked = phase === 'blocked'
-    && ['not_applicable', 'operation_unconfirmed'].includes(
+    && ['not_applicable', 'operation_unconfirmed', 'budget_insufficient'].includes(
       state.observation?.reason ?? '');
   state.continueButton.textContent = phase === 'unknown'
     ? text('usageRecovery.retry', 'Retry the same request')

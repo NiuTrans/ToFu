@@ -79,6 +79,11 @@ EXPECTED_OPERATIONS = (
         "getProviderProbeCellsStatus",
     ),
     (
+        "POST",
+        "/api/v1/providers/{provider_id}/listed-models/import",
+        "importListedProviderModels",
+    ),
+    (
         "PUT",
         "/api/v1/model-routing/credentials/{credential_id}/secret",
         "putCredentialSecret",

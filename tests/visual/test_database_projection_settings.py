@@ -236,10 +236,22 @@ def test_native_fastpath_pending_and_locked_state_is_separate_from_index(page, l
 
 
 def _database_text_contrast(page):
-    return page.locator('''#settingsTab_database .settings-section-title,
+    # These shared status roles also serve OAuth feedback and field errors.
+    # Measure them on the actual Settings surface, independently of chat theme.
+    page.locator('#settingsModal .settings-panel').evaluate('''panel => {
+      for (const role of ['success','warning','error','info']) {
+        const probe=document.createElement('span');
+        probe.dataset.statusContrast=role; probe.textContent=role;
+        probe.style.color=`var(--${role}-text)`;
+        probe.style.backgroundColor=`var(--${role}-bg)`;
+        panel.appendChild(probe);
+      }
+    }''')
+    result = page.locator('''[data-status-contrast], #settingsTab_database .settings-section-title,
         #settingsTab_database .db-save-note, #settingsTab_database .db-card-title,
         #settingsTab_database .db-meta-label, #settingsTab_database .db-config-status,
-        #settingsTab_database .db-disclosure-action, #dbEngineState''').evaluate_all(r'''elements => {
+        #settingsTab_database .db-disclosure-action, #settingsTab_database .db-index-required,
+        #dbEngineState''').evaluate_all(r'''elements => {
       const color = value => {
         const values = value.match(/[\d.]+/g).map(Number);
         return [...values.slice(0,3).map(v => value.startsWith('color(srgb') ? v : v / 255), values[3] ?? 1];
@@ -259,6 +271,8 @@ def _database_text_contrast(page):
           return {text:el.textContent, ratio:(Math.max(a,b)+.05)/(Math.min(a,b)+.05)};
         });
     }''')
+    page.locator('[data-status-contrast]').evaluate_all('(elements) => elements.forEach(el => el.remove())')
+    return result
 
 
 @pytest.mark.parametrize('theme', ['tofu', 'light', 'dark'])
@@ -305,7 +319,8 @@ def test_database_layout_keyboard_and_read_only_refresh(
         assert not page.locator('#' + editor).is_visible()
     collapsed_heights = {}
     contrast = _database_text_contrast(page)
-    assert contrast and all(row['ratio'] >= 4.5 for row in contrast), contrast
+    assert contrast and all(row['ratio'] >= 4.5 for row in contrast), [
+        row for row in contrast if row['ratio'] < 4.5]
     page.screenshot(path=str(Path(screenshot_dir) / f'database-{theme}-{language}-summary.png'))
 
     for width in (1280, 768, 390, 320):

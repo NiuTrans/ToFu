@@ -21,7 +21,9 @@ def test_coordinator_graph_pages_reach_old_workers_with_bounded_dom(frontend_vis
     page.set_viewport_size({'width': width, 'height': 1000})
     page.emulate_media(reduced_motion='reduce')
     entry = tmp_path / 'history-entry.ts'
-    entry.write_text(f"export {{ createProjectCoordinationSurface }} from '{ROOT}/frontend/src/features/project-coordination-surface';\nexport {{ ready }} from '{ROOT}/frontend/src/i18n';\n")
+    # Worker sessions and the dependency graph live only in the explicit
+    # management drawer; the Coordinator chat itself shows just the task board.
+    entry.write_text(f"export {{ openProjectCoordination }} from '{ROOT}/frontend/src/features/project-coordination';\nexport {{ ready }} from '{ROOT}/frontend/src/i18n';\n")
     page.add_script_tag(path=native_module_path('.native/coordinator-history.js', entry))
     page.evaluate('async () => { await ready(); }')
     page.add_style_tag(path=str(ROOT / 'frontend/src/styles/application/33-project-coordination.css'))
@@ -38,24 +40,24 @@ def test_coordinator_graph_pages_reach_old_workers_with_bounded_dom(frontend_vis
           window.historyOffset=offset;
           return {olderCursor:offset<128?String(offset+32):null,newerCursor:offset?String(offset-32):null,
             assignments:Array.from({length:32},(_,index)=>({assignmentId:String(160-offset-index),
-              request:{projectPath:'/project',coordinatorId:'leader',recipientId:'worker-'+(160-offset-index),brief:index===0 && offset===0 ? 'Coordinate the project update / 汇总每个 Worker 的结果与证据。'.repeat(6) : 'Worker '+(160-offset-index),
-                authorizationSource:{conversationId:'leader',turnId:'human',projectionRevision:1},model:'test',budget:{maxTokens:1000,maxModelRequests:2,deadline:9999999999}},
+              request:{projectPath:'/project',coordinatorId:'leader',recipientId:'worker-'+(160-offset-index),brief:index===0 && offset===0 ? 'Coordinate the project update / 汇总每个 Worker 的结果与证据。'.repeat(6) : 'Worker '+(160-offset-index)},
               grantRevision:1,revoked:false,canonicalDelivery:false,review:null,
               execution:{turnId:'result',attemptId:'attempt',taskId:'task',status:offset?'completed':'running',resultRevision:1,result:{content:'A long Worker result with an error code and enough detail to require disclosure. '.repeat(12)}}}))};
         }}};
-      window.historySurface=createProjectCoordinationSurface({sidebar:document.querySelector('#sidebar'),canvas:document.querySelector('#canvas'),
-        scope:()=>scope,sidebarPath:()=>'/project',details:()=>{},create:()=>{}});
-      await window.historySurface.refresh();
+      // Resolves only when the drawer closes.
+      window.workspaceClosed=openProjectCoordination(scope);
     }''')
-    graph = page.locator('.coordination-task-graph')
+    workspace = page.locator('.coordination-workspace')
+    graph = workspace.locator('.coordination-task-graph')
+    graph.locator('.coordination-work-row').first.wait_for()
     assert graph.locator('[data-node-kind=task]').count() == 0
     assert graph.locator('.coordination-work-row').count() == 8
     assert not graph.locator('.coordination-topology').evaluate('node=>node.open')
     graph.locator('.coordination-topology > summary').click()
     graph.locator('[data-node-kind=task]').first.wait_for()
     assert graph.locator('[data-node-kind=task]').count() == 32
-    # Fixed graph geometry must contain long titles and summaries even when
-    # the canvas is nested inside the real conversation summary shell.
+    # Fixed graph geometry must contain long titles and summaries even inside
+    # the narrow drawer body.
     assert graph.locator('[data-node-id="assignment:160"]').evaluate('''node => {
       const bounds = node.getBoundingClientRect();
       return [...node.children, node.querySelector('.coordination-node-title')].every(child => {
@@ -72,7 +74,9 @@ def test_coordinator_graph_pages_reach_old_workers_with_bounded_dom(frontend_vis
     assert graph.locator('[data-node-id="assignment:1"]').count() == 1
     for theme in ('dark', 'light', 'tofu'):
         page.evaluate('theme=>document.documentElement.dataset.theme=theme', theme)
-        assert not page.locator('#canvas').evaluate('node=>node.scrollWidth > node.clientWidth + 1')
+        # The panel holding the graph never scrolls sideways; the kit's one-line
+        # tab strip above it may, on the narrowest screens.
+        assert not workspace.locator('.ui-tabs__panel:not([hidden])').evaluate('node=>node.scrollWidth > node.clientWidth + 1')
         output = tmp_path / 'history-evidence'; output.mkdir(exist_ok=True)
         page.screenshot(path=str(output / f'{theme}-{width}.png'), full_page=True)
     page.locator('[data-coordination-focus=history-newer]').click()
@@ -86,7 +90,9 @@ def test_coordinator_graph_pages_reach_old_workers_with_bounded_dom(frontend_vis
     page.screenshot(path=str(output / f'long-text-{width}.png'))
     inspector.locator('button').last.click()
     assert page.evaluate('window.navigation') == ['worker-160']
-    page.evaluate('window.historySurface.destroy()')
+    # Opening a Worker conversation closes the drawer and releases its DOM.
+    page.wait_for_selector('.coordination-workspace', state='detached')
+    page.evaluate('() => window.workspaceClosed')
 
 
 @pytest.mark.parametrize('width', [1440, 390, 320])
@@ -238,7 +244,7 @@ def test_large_coordinator_graph_keeps_dom_and_viewport_bounded(frontend_visual_
         execution:{status:'running',resultRevision:1,result:{content:'Verified evidence. '.repeat(50)}}
       }));
       const start = performance.now();
-      const graph = createCoordinationBoard({active:[],recent:[]},()=>{},0,{assignments,coordinatorId:'coordinator'});
+      const graph = createCoordinationBoard({active:[],recent:[]},()=>{},{assignments,coordinatorId:'coordinator'});
       document.body.append(graph);
       const defaultElements = graph.querySelectorAll('*').length;
       const initialGraphNodes = graph.querySelectorAll('[data-node-id]').length;
@@ -294,6 +300,22 @@ def test_coordinator_shell_reference_and_replacement_consent(frontend_visual_pag
     assert shell.locator('pre').inner_text() == 'conversationId: empty-worker'
     assert shell.get_by_role('button').count() >= 2
     dialog.get_by_role('tab').nth(4).click()
+    if width == 320:
+        tabs_geometry = dialog.locator('.ui-tabs__list').evaluate('''node => {
+          const bounds = node.getBoundingClientRect();
+          const dialogBounds = node.closest('dialog').getBoundingClientRect();
+          const selected = node.querySelector('[aria-selected="true"]').getBoundingClientRect();
+          return {left: bounds.left, right: bounds.right,
+            dialogLeft: dialogBounds.left, dialogRight: dialogBounds.right,
+            selectedLeft: selected.left, selectedRight: selected.right,
+            scrollable: getComputedStyle(node).overflowX === 'auto',
+            overflows: node.scrollWidth > node.clientWidth};
+        }''')
+        assert tabs_geometry['left'] >= tabs_geometry['dialogLeft'] - 1
+        assert tabs_geometry['right'] <= tabs_geometry['dialogRight'] + 1
+        assert tabs_geometry['scrollable'] and tabs_geometry['overflows']
+        assert tabs_geometry['selectedLeft'] >= tabs_geometry['left'] - 1
+        assert tabs_geometry['selectedRight'] <= tabs_geometry['right'] + 1
     replacement = dialog.locator('.coordination-management-section').nth(1).get_by_role('button').first
     assert page.evaluate('window.replacements.length') == 0
     # Unavailable context operations cannot silently invoke replacement.

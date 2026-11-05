@@ -1,10 +1,10 @@
 """The typed Debug wire owner keeps one request and one last-good feed per open epoch."""
 
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -14,8 +14,7 @@ SOURCE = ROOT / 'frontend/src/features/diagnostics-wire-controller.ts'
 
 
 def test_diagnostics_wire_controller_resilience(tmp_path: Path) -> None:
-    if not shutil.which('node') or not BUNDLER.is_file():
-        pytest.skip('Node test bundler unavailable')
+    require_node_modules('vite')
     module = tmp_path / 'diagnostics-wire-controller.cjs'
     result = subprocess.run([
         str(BUNDLER), str(SOURCE), '--bundle', '--format=cjs',

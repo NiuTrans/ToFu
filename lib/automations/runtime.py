@@ -21,7 +21,7 @@ def _storage(*, write=False):
 
 def create_service(*, client_factory=_storage, registry=None, max_workers=None,
                    now_ms=None, environ=None):
-    from runtime_guards import MAX_TASK_CONCURRENCY, resolve_resource_budget
+    from runtime_guards import UNLIMITED, resolve_resource_budget
     from .clock import AutomationClockHandler
     from .event_delivery import AutomationEventHandler
     from .execution import AutomationExecutionHandler
@@ -31,7 +31,7 @@ def create_service(*, client_factory=_storage, registry=None, max_workers=None,
     policy = runtime_policy()
     if max_workers is None:
         max_workers = resolve_resource_budget(policy['capacityResource'], environ,
-                                              maximum=MAX_TASK_CONCURRENCY)
+                                              maximum=UNLIMITED)
     if now_ms is None:
         now_ms = lambda: int(time.time() * 1000)
     if registry is None:

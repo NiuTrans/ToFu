@@ -8,6 +8,8 @@ import subprocess
 
 import pytest
 
+from tests._jsdom import require_node_modules
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SHEETS = (
@@ -46,6 +48,7 @@ def test_style_manifests_are_safe_ordered_and_byte_authoritative() -> None:
 
 
 def test_generated_styles_are_fresh_hidden_and_built_from_sources() -> None:
+    require_node_modules("postcss", "typescript")
     result = subprocess.run(
         ["node", "scripts/compose_frontend_styles.mjs", "--check"],
         cwd=ROOT,

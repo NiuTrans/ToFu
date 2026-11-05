@@ -333,6 +333,29 @@ class ConversationStore(Protocol):
         """
         ...
 
+    def schedule_working_view_compaction(
+        self, conv_id: str, *, user_id: Any, reason: str,
+    ) -> dict[str, Any]:
+        """Record a durable owner-scoped request for the next model call.
+
+        Idempotent while pending: the existing marker returns with
+        ``created=False``. Canonical Turns are never touched. Missing support
+        refuses scheduling as turn_protocol_unsupported.
+        """
+        ...
+
+    def scheduled_working_view_compaction(
+        self, conv_id: str, *, user_id: Any,
+    ) -> dict[str, Any] | None:
+        """Return the pending marker (``requestId``, ``requestedAt``) or None."""
+        ...
+
+    def clear_scheduled_working_view_compaction(
+        self, conv_id: str, *, user_id: Any, request_id: str,
+    ) -> bool:
+        """Retire exactly ``request_id`` once its summarized view is durable."""
+        ...
+
     def archive_transcript(
         self, conv_id: str, messages: list, *, user_id: Any,
         summary: str = '', trigger: str = 'force', task_id: str = '',
@@ -395,6 +418,10 @@ class ToolHandler(Protocol):
                                project_enabled, all_tools=None):
             ...
             return tc_id, tool_content, is_search
+
+    ``is_search`` declares the result web evidence for the no-prose fallback,
+    never success or failure: the dispatch pipeline admits a declared result
+    only for a ``SEARCH_EVIDENCE_TOOLS`` call that settled ``done``.
     """
 
     def __call__(

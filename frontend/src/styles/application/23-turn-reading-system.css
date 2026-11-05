@@ -11,7 +11,7 @@
  */
 
 .conversation-surface {
-  font-family: var(--font-ui);
+  font-family: var(--md-sans);
   font-size: var(--conversation-font-size-content);
   line-height: var(--leading-body);
   --turn-rule: color-mix(in srgb, var(--border) 78%, transparent);
@@ -36,11 +36,12 @@
 
 /* One calm reading column: compact identity at the left, prose on the page. */
 
+
 .conversation-surface .conversation-turn.message {
   position: relative;
   grid-template-columns: minmax(0, 1fr) var(--rail-w);
   column-gap: var(--space-3);
-  margin-bottom: var(--space-10);
+  margin-bottom: var(--space-6);
   overflow: visible;
 }
 
@@ -64,8 +65,8 @@
 
 .conversation-surface .conversation-turn-header.message-header {
   justify-content: flex-start;
-  min-height: var(--control-h-md);
-  margin: 0 0 var(--space-3);
+  min-height: var(--control-h-sm);
+  margin: 0 0 var(--space-1);
   gap: var(--space-2);
   line-height: 1.25;
 }
@@ -110,15 +111,15 @@
 /* Flush-left reading: with the avatar gutter removed, role text, actions and
  * footer all start at the page margin. */
 
-/* One spacing owner, including the demand-mounted historical process body.
+/* One spacing owner for every mounted Turn entry.
  * Adjacent process rows form a compact run. Prose gets a paragraph's breath
  * on either side without moving, grouping or recreating any keyed leaf. */
-.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block + .conversation-block {
+.conversation-surface .conversation-turn-blocks > .conversation-block + .conversation-block {
   margin-block-start: var(--conversation-flow-gap);
 }
 
-.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block--text + .conversation-block,
-.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block + .conversation-block--text {
+.conversation-surface .conversation-turn-blocks > .conversation-block--text + .conversation-block,
+.conversation-surface .conversation-turn-blocks > .conversation-block + .conversation-block--text {
   margin-block-start: var(--conversation-prose-gap);
 }
 
@@ -137,7 +138,7 @@
  * of icons out to the left. The old `data-process-edge` vertical spine and
  * its boxed side borders are gone — grouping is carried by shared alignment
  * and rhythm, not a rail. */
-.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge] {
+.conversation-surface .conversation-turn-blocks > .conversation-block[data-process-edge] {
   position: relative;
   margin-block-start: 0;
   /* Align the row's icon to the shared reading baseline. The row pads in by
@@ -147,8 +148,8 @@
   padding-inline-start: var(--conversation-reading-inset);
 }
 
-.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge]:is([data-process-edge="start"], [data-process-edge="single"]) {
-  margin-block-start: var(--space-4);
+.conversation-surface .conversation-turn-blocks > .conversation-block[data-process-edge]:is([data-process-edge="start"], [data-process-edge="single"]) {
+  margin-block-start: var(--space-2);
 }
 
 /* No vertical spine. The 2026-07-08 chrome-less card model removed the rail
@@ -181,71 +182,6 @@
   padding-inline-start: 0;
 }
 
-.conversation-surface .conversation-round-header {
-  margin: var(--space-1) 0 var(--space-2);
-  font: inherit;
-}
-
-.conversation-surface .conversation-round-header__toggle {
-  width: 100%;
-  min-width: 0;
-  height: auto;
-  justify-content: flex-start;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  text-align: start;
-  white-space: normal;
-}
-
-.conversation-surface .conversation-round-header__chevron {
-  width: var(--space-4);
-  height: var(--space-4);
-  flex: 0 0 auto;
-  color: var(--text-secondary);
-  transform: rotate(0deg);
-}
-
-.conversation-surface .conversation-round-header__toggle[aria-expanded="true"] .conversation-round-header__chevron {
-  transform: rotate(90deg);
-}
-
-.conversation-surface .conversation-round-header__title {
-  color: var(--text-secondary);
-  font-weight: var(--weight-medium);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--conversation-font-size-content);
-}
-
-.conversation-surface .conversation-round-header__summary {
-  flex-shrink: 0;
-}
-
-.conversation-surface .conversation-round-header__summary,
-.conversation-surface .conversation-round-header__status {
-  color: var(--text-secondary);
-  font-size: var(--conversation-font-size-meta);
-}
-
-.conversation-surface .conversation-round-header__status {
-  margin-inline-start: auto;
-  text-align: end;
-}
-
-.conversation-surface [data-round-state="active"] .conversation-round-header__status {
-  color: var(--accent);
-}
-
-.conversation-surface [data-round-state="attention"] .conversation-round-header__status {
-  color: var(--warning-text);
-}
-
-.conversation-surface .conversation-round-header__toggle:focus-visible {
-  box-shadow: var(--focus-ring);
-}
-
 /* Hidden disclosures must win over card display:flex/grid rules. */
 
 .conversation-surface .conversation-block[hidden] {
@@ -258,7 +194,7 @@
 
 .conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content {
   font-size: var(--conversation-font-size-body);
-  line-height: var(--leading-body);
+  line-height: var(--conversation-leading-prose);
   letter-spacing: .002em;
 }
 
@@ -303,25 +239,4 @@
 }
 .conversation-surface .conversation-action-state[data-state="background"] {
   color: var(--text-tertiary);
-}
-
-/* Recorded controls and metering are information, never an empty disclosure.
- * Keep the shared header row wrapping/selectable in desktop and narrow panes. */
-.conversation-surface .conversation-turn-header:has(.conversation-reasoning-status) {
-  flex-wrap: wrap;
-}
-.conversation-reasoning-status {
-  display: flex;
-  flex: 0 1 100%;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-3);
-  min-width: 0;
-  color: var(--text-secondary);
-  font-size: var(--conversation-font-size-meta);
-  line-height: var(--leading-title);
-  overflow-wrap: anywhere;
-  font-variant-numeric: tabular-nums;
-}
-.conversation-reasoning-summary {
-  font-weight: var(--weight-medium);
 }

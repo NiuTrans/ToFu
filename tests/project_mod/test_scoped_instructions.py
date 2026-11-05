@@ -31,6 +31,16 @@ def test_nearest_guidance_chain_excludes_siblings_and_server_ancestors(tmp_path)
     assert [row['content'] for row in read_scoped_guidance(str(project), str(project))] == ['root rules']
 
 
+def test_target_beneath_a_regular_file_has_no_nested_guidance(tmp_path):
+    # A linked worktree's `.git` is a file; shell targets such as
+    # `.git/info/exclude` pass through it. No rule can exist beneath a file.
+    from lib.project_mod.instructions import read_scoped_guidance
+    project, _ = _project(tmp_path)
+    (project / '.git').write_text('gitdir: /elsewhere\n')
+    rows = read_scoped_guidance(str(project), str(project / '.git' / 'info' / 'exclude'))
+    assert [row['content'] for row in rows] == ['root rules']
+
+
 def test_root_and_extra_root_guidance_are_labeled_not_inferred(tmp_path):
     from lib.project_mod.config import build_root_policy, execution_root_scope
     from lib.project_mod.indexer import get_context_for_prompt

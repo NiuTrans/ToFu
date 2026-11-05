@@ -4,7 +4,6 @@
   * ``force_compact_if_needed`` — gates on threshold + records accepted handoff.
 """
 
-import hashlib
 import json
 import math
 import re
@@ -18,8 +17,7 @@ from lib.tasks_pkg.compaction._constants import (
     _cooldown_lock,
     _MAX_PRESERVE_TURNS,
     _PRESERVE_BUDGET_RATIO,
-    _SUMMARY_MAX_TOKENS, _SUMMARY_DISPATCH_MAX_TOKENS,
-    _SUMMARY_TRIGGER_RATIO,
+    _SUMMARY_MAX_TOKENS,
     _AUTO_COMPACT_MIN_PAYBACK_ROUNDS,
     _AUTO_COMPACT_MIN_REDUCTION_RATIO,
     _summary_cooldowns,
@@ -34,6 +32,7 @@ from lib.tasks_pkg.compaction._tokens import (
 )
 from lib.tasks_pkg.compaction._cache_economics import (
     _proactive_cache_economics, _proactive_payback_policy,
+    main_route_pricing_verified as _main_route_pricing_verified,
 )
 from lib.tasks_pkg.compaction._receipt import (
     build_compaction_receipt,
@@ -46,24 +45,32 @@ from lib.tasks_pkg.compaction._layer2._anchor import (
     _plan_cross_turn_tail,
     _objective_anchor_index,
 )
-from lib.tasks_pkg.compaction._layer2._summary import _generate_query_aware_summary
+from lib.tasks_pkg.compaction._layer2._summary import (
+    _generate_query_aware_summary, _summary_request_input_tokens,
+)
+from lib.tasks_pkg.compaction._layer2._projection import (
+    _retained_projection as _retained_projection,
+    _with_restoration_reserve as _with_restoration_reserve,
+    converge_compaction_candidate,
+)
+from lib.tasks_pkg.compaction._layer2._summary_acceptance import accept_summary
+from lib.tasks_pkg.compaction._layer2._candidate_policy import (
+    EconomicPolicyPorts, admit_compaction_candidate, admit_compaction_sources,
+    defers_for_unverified_pricing,
+)
+from lib.tasks_pkg.compaction._layer2._source_plan import (
+    SourcePlanningPorts, plan_compaction_sources,
+)
 from lib.tasks_pkg.compaction._handoff import (
-    HANDOFF_FORMAT, compaction_phase, has_open_tool_batch,
+    HANDOFF_FIELD, HANDOFF_FORMAT, compaction_phase, has_open_tool_batch,
     insert_compaction_handoff, is_compaction_handoff, make_compaction_handoff,
 )
+from lib.tasks_pkg.compaction._coverage import summary_coverage
 from lib.tasks_pkg.compaction._history import (
-    collect_history_entries, history_entries, is_human_message,
+    history_entries, is_human_message,
     coalesce_history_carriers, make_history_carrier,
 )
-from lib.tasks_pkg.compaction._layer2._prompt import (
-    _SUMMARY_SYSTEM_PROMPT,
-    _build_summary_user_content,
-    _extract_latest_assistant_conclusions,
-    _extract_prior_receipt,
-    _extract_summary_objective,
-    _format_messages_for_summary,
-    _summary_input_char_budget,
-)
+from lib.tasks_pkg.compaction._layer2._prompt import _extract_summary_objective
 
 logger = get_logger(__name__)
 
@@ -71,37 +78,6 @@ _USER_VERBATIM_AUDIT_LATCH = {'done': False}
 _DETERMINISTIC_RECOVERY_SNAPSHOT_CHARS = 12_000
 _DETERMINISTIC_RECOVERY_EVIDENCE_CHARS = 8_000
 _DETERMINISTIC_RECOVERY_MAX_CHARS = 22_000
-
-
-def _retained_projection(old_messages, recent_messages, anchor_msg, retained_entries):
-    """Build the same attributed policy/user/execution shell for planning and adoption."""
-    result = [m for m in old_messages if m.get('role') in ('system', 'developer')]
-    wrapper = make_history_carrier(retained_entries)
-    if wrapper:
-        result.append(wrapper)
-    current = next((m for m in reversed(recent_messages) if is_human_message(m)), None)
-    for message in recent_messages:
-        if is_human_message(message) and message is not current:
-            kind = 'opening_request' if message is anchor_msg else 'earlier_request'
-            result.append(make_history_carrier([
-                {'kind': kind, 'content': message.get('content', '')}]))
-        else:
-            result.append(message)
-    from lib.tasks_pkg.context_composer import compact_context_snapshots
-    return compact_context_snapshots(coalesce_history_carriers(result))
-
-
-def _with_restoration_reserve(candidate, source):
-    """Account existing managed carriers that recomposition would restore."""
-    from lib.tasks_pkg.context_composer import compact_context_snapshots
-    kept = {id(m) for m in candidate}
-    # Recomposition restores current snapshots, never every historical version.
-    # Partial mixed carriers are copies; retire duplicate sections again after
-    # joining so those siblings consume their budget exactly once. A freshly
-    # carried checklist in the candidate supersedes the source's older state.
-    return compact_context_snapshots([
-        m for m in compact_context_snapshots(source)
-        if m.get('_contextComposer') and id(m) not in kept] + candidate)
 
 
 def _task_owner(task):
@@ -302,46 +278,21 @@ def _projected_summary_usage_tokens(
     anchor_text: str = '',
     source_messages: list | None = None,
 ) -> int:
-    """Conservative pre-dispatch cost estimate for proactive ROI gating.
+    """Pre-dispatch usage projection for proactive ROI gating.
 
     The old best-case check assumed a free summary, then sometimes paid for a
-    real summary only to reject it as cache-negative. Estimate the same bounded
-    prompt shape before dispatch, including the evidence-ledger reserve and the
-    advisory output projection, so economic declines happen before money
-    and wall time are spent.
+    real summary only to reject it as cache-negative. Price the request the
+    summary dispatch will send, plus the advisory output projection, so
+    economic declines happen before money and wall time are spent. Dispatch
+    refuses any re-quote above this one, so this must be the dispatched
+    composition (archived prior receipt and ledger policy included), not an
+    approximation of its shape.
     """
     try:
-        char_budget = _summary_input_char_budget(task)
-        evidence_chars = max(2_000, min(16_000, char_budget // 4))
-        receipt_messages = (source_messages if source_messages is not None
-                            else messages)
-        prior_receipt = _extract_prior_receipt(receipt_messages)
-        latest_assistant = _extract_latest_assistant_conclusions(
-            receipt_messages)
-        history_budget = max(
-            4_000,
-            char_budget - evidence_chars - len(current_query or '')
-            - len(anchor_text or '') - len(prior_receipt)
-            - len(latest_assistant) - 900,
-        )
-        formatted = _format_messages_for_summary(
-            messages, char_budget=history_budget)
-        user_content = _build_summary_user_content(
-            anchor_text=anchor_text,
-            latest_user_message=current_query,
-            formatted_history=formatted,
-            prior_receipt=prior_receipt,
-            latest_assistant_conclusions=latest_assistant,
-        )
-        base_prompt = [
-            {'role': 'system', 'content': _SUMMARY_SYSTEM_PROMPT},
-            {'role': 'user', 'content': user_content},
-        ]
-        base_tokens = _estimate_total_tokens(base_prompt)
-        # Evidence is structured JSON and paths: ~3 chars/token is a more
-        # realistic conservative reserve than repetitive filler through BPE.
-        evidence_tokens = (evidence_chars + 2) // 3
-        return max(1, base_tokens + evidence_tokens + _SUMMARY_MAX_TOKENS)
+        return max(1, _summary_request_input_tokens(
+            messages, current_query, task=task,
+            source_messages=source_messages, anchor_text=anchor_text,
+        ) + _SUMMARY_MAX_TOKENS)
     except Exception as exc:
         logger.debug('[Compact] summary-cost projection failed: %s', exc)
         return max(1, _SUMMARY_MAX_TOKENS * 2)
@@ -414,8 +365,8 @@ def _defer_proactive_retry(
     previous_floor = int(task.get('_autoCompactRetryAfterTokens') or 0)
     task['_autoCompactRetryAfterTokens'] = max(floor, previous_floor)
     if floor >= previous_floor:
-        cache_read = int((economics or {}).get('cache_read_tokens') or 0)
-        if reason == 'cache_negative' and cache_read > 0:
+        warm_prefix = int((economics or {}).get('warm_prefix_tokens') or 0)
+        if reason == 'cache_negative' and warm_prefix > 0:
             try:
                 payback_limit = float((economics or {}).get(
                     'payback_limit_rounds',
@@ -424,7 +375,7 @@ def _defer_proactive_retry(
                 payback_limit = float(_AUTO_COMPACT_MIN_PAYBACK_ROUNDS)
             task['_autoCompactRetryWitness'] = {
                 'reason': reason,
-                'cacheReadTokens': cache_read,
+                'warmPrefixTokens': warm_prefix,
                 'paybackLimitRounds': payback_limit,
             }
         else:
@@ -598,6 +549,35 @@ def _settle_failed_compaction_attempt(task, result_meta, messages, *, conv_id: s
     except Exception as exc:
         logger.debug('[Compact] failed-attempt settlement failed: %s', exc)
 
+def _announce_summary_start(task: dict | None, pfx: str) -> None:
+    """Publish accepted summary work without making telemetry a prerequisite."""
+    if task is not None:
+        try:
+            from lib.agent_core.events import Phase, build_phase
+            from lib.tasks_pkg.manager import append_event
+            append_event(task, build_phase(
+                Phase.COMPACTING,
+                detail='Compressing earlier context to fit the window…',
+                detailKey='stream.phase.compactingWindow'))
+        except Exception as exc:
+            logger.debug('%s [Compact] phase emit failed: %s', pfx, exc)
+
+
+def _compaction_handoff(compact_result: str, phase, task, messages, summary_input, kwargs) -> dict:
+    """The handoff naming the Turns it folds and the owner-scheduled request it settles.
+
+    An owner-scheduled request stays proven when a later summary folds it.
+    """
+    scheduled_request = kwargs.get('_scheduled_request_id') or next((
+        message[HANDOFF_FIELD]['scheduledRequestId']
+        for message in reversed(summary_input)
+        if is_compaction_handoff(message)
+        and isinstance(message[HANDOFF_FIELD].get('scheduledRequestId'), str)), '')
+    return make_compaction_handoff(
+        compact_result, phase=phase, coverage=summary_coverage(task, messages, summary_input),
+        scheduled_request_id=scheduled_request)
+
+
 def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> str:
     """Build and adopt one local continuation projection at a closed boundary.
 
@@ -688,308 +668,83 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             f'{file_list}'
         )
 
+    # An optional attempt without verified main-route rates defers whatever it
+    # plans. It builds no continuation, so it skips the journal-backed turn
+    # diff and summary-route selection; one verdict serves both skips.
+    _unverified_pricing_deferral = defers_for_unverified_pricing(
+        task, kwargs, tokens_before=tokens_before, usable=usable,
+        pricing_verified=_main_route_pricing_verified)
+
     # Codex-inspired (turn_diff_tracker.rs): the summary must preserve WHAT
     # changed this turn, not just WHICH files. Journal pre-images make this
     # free of extra writes; failures are advisory-only.
     _turn_diff_included = False
     _diff_block = ''
-    try:
-        from lib.tasks_pkg.commit_round._turn_diff import build_turn_diff_block
-        _cfg = (task or {}).get('config', {}) or {}
-        _diff_block = build_turn_diff_block(
-            task, _cfg.get('projectPath') or '',
-            _cfg.get('projectPaths') or None)
-        if _diff_block:
-            _turn_diff_included = True
-    except Exception as e:
-        logger.debug('%s [Compact] turn-diff block failed: %s', pfx, e)
+    if not _unverified_pricing_deferral:
+        try:
+            from lib.tasks_pkg.commit_round._turn_diff import build_turn_diff_block
+            _cfg = (task or {}).get('config', {}) or {}
+            _diff_block = build_turn_diff_block(
+                task, _cfg.get('projectPath') or '',
+                _cfg.get('projectPaths') or None)
+            if _diff_block:
+                _turn_diff_included = True
+        except Exception as e:
+            logger.debug('%s [Compact] turn-diff block failed: %s', pfx, e)
 
 
-    boundary, recent_messages, cold_round_msgs = _plan_cross_turn_tail(
-        messages, budget_tokens=budget_tokens, max_turns=max_turns)
-
-    from lib.tasks_pkg.compaction._skills import active_skill_message_ids
-    protected_skills = active_skill_message_ids(messages, task)
-    def protect_skill_tail(recent, cold):
-        recent_ids = {id(message) for message in recent} | protected_skills
-        return ([message for message in messages if id(message) in recent_ids],
-                [message for message in cold if id(message) not in protected_skills])
-    recent_messages, cold_round_msgs = protect_skill_tail(recent_messages, cold_round_msgs)
-
-    # Old handoffs feed the summarizer through source_messages, but do not
-    # accumulate as execution shells in the next accepted projection.
-    folded_handoffs = [m for m in recent_messages if is_compaction_handoff(m)]
-    recent_messages = [m for m in recent_messages if not is_compaction_handoff(m)]
-
-
-    if boundary >= len(messages):
-        logger.error(
-            '%s [Compact] REFUSING — no user message found to anchor preservation. '
-            'msg_count=%d  tokens=%d  model=%s',
-            pfx, msg_count_before, tokens_before,
-            (task.get('config', {}) or {}).get('model', '?') if task else '?',
-        )
-        if isinstance(_result_meta, dict):
-            _result_meta['compacted'] = False
-        return ('Context compaction skipped — no user message found to '
-                'anchor preservation. Messages preserved as-is.')
-
-    system_end = 0
-    for i, m in enumerate(messages):
-        if m.get('role') in ('system', 'developer'):
-            system_end = i + 1
-        else:
-            break
-
-    if boundary >= len(messages) - 0 and boundary <= system_end:
-        logger.error(
-            '%s [Compact] REFUSING — boundary=%d would preserve 0 live messages '
-            '(system_end=%d, total=%d)',
-            pfx, boundary, system_end, msg_count_before,
-        )
-        if isinstance(_result_meta, dict):
-            _result_meta['compacted'] = False
-        return ('Context compaction skipped — boundary calculation would '
-                'preserve no live messages. Bailing out to prevent data loss.')
-
-    old_messages = [message for message in messages[:boundary]
-                    if id(message) not in protected_skills]
-    anchor_idx = _objective_anchor_index(messages)
-    anchor_msg = messages[anchor_idx] if anchor_idx is not None else None
-    retained_entries = collect_history_entries(
-        old_messages, opening_message=anchor_msg)
-    dispatch_measure = kwargs.get('_dispatch_prompt_measure')
-    dispatch_target = kwargs.get('_dispatch_prompt_target')
-    if (not callable(dispatch_measure)
-            and kwargs.get('_compaction_trigger') in {'working_set', 'window', 'dispatch_guard'}):
-        from lib.tasks_pkg.compaction._admission_budget import resolve_admission_budget
-        from lib.tasks_pkg.compaction._tokens import _count_tokens_authoritative
-        _, dispatch_target = resolve_admission_budget(
-            task, round_num=int(kwargs.get('_compaction_round') or 0))
-        dispatch_measure = lambda candidate: _count_tokens_authoritative(candidate, task)[0]
-    summary_output_budget = None
-    if callable(dispatch_measure) and isinstance(dispatch_target, int):
-        summary_output_budget = min(_SUMMARY_DISPATCH_MAX_TOKENS,
-                                    max(_SUMMARY_MAX_TOKENS, dispatch_target // 4))
-        # Plan BEFORE the one model call. Reserve its actual output ceiling,
-        # deterministic decorations, tools (inside measure), history wrappers
-        # and managed context. Smaller suffix trials only select source units;
-        # they neither summarize nor mutate the original projection.
-        from lib.tasks_pkg.context_composer.checklist import carry_checklist_through_compaction
-        while True:
-            preview = _retained_projection(
-                old_messages, recent_messages, anchor_msg, retained_entries)
-            insert_compaction_handoff(preview, make_compaction_handoff(
-                '## Context Compacted — Selective Summary\n\n'
-                + _recent_files_block + ('\n\n' + _diff_block if _diff_block else ''),
-                phase=_handoff_phase))
-            carry_checklist_through_compaction(preview, task)
-            retained_tokens = dispatch_measure(
-                _with_restoration_reserve(preview, messages))
-            reserved_tokens = retained_tokens + summary_output_budget
-            if reserved_tokens <= dispatch_target:
-                break
-            if budget_tokens <= 1:
-                # Preferred transport allowance is not required state. At the
-                # smallest whole-unit tail, use the remaining room when the
-                # nominal summary target fits. Complete-output validation and
-                # final candidate admission still reject truncated/overfull
-                # summaries without changing the source.
-                available_summary_tokens = dispatch_target - retained_tokens
-                if available_summary_tokens >= _SUMMARY_MAX_TOKENS:
-                    summary_output_budget = min(
-                        summary_output_budget, available_summary_tokens)
-                    reserved_tokens = retained_tokens + summary_output_budget
-                    break
-                if isinstance(_result_meta, dict):
-                    _result_meta.update(compacted=False,
-                        summaryFailureReason='irreducible_prompt_floor',
-                        plannedPromptTokens=reserved_tokens,
-                        targetPromptTokens=dispatch_target)
-                return ('Context compaction refused before summary: required '
-                        'execution state and summary output cannot fit. Messages preserved as-is.')
-            budget_tokens = max(1, budget_tokens // 2)
-            boundary, recent_messages, cold_round_msgs = _plan_cross_turn_tail(
-                messages, budget_tokens=budget_tokens, max_turns=max_turns)
-            recent_messages, cold_round_msgs = protect_skill_tail(recent_messages, cold_round_msgs)
-            folded_handoffs = [m for m in recent_messages if is_compaction_handoff(m)]
-            recent_messages = [m for m in recent_messages if not is_compaction_handoff(m)]
-            old_messages = [message for message in messages[:boundary]
-                    if id(message) not in protected_skills]
-            retained_entries = collect_history_entries(old_messages, opening_message=anchor_msg)
-        if isinstance(_result_meta, dict):
-            _result_meta.update(plannedPromptTokens=reserved_tokens,
-                               targetPromptTokens=dispatch_target)
-    # Keep source chronology for summary evidence. The opener is supplied
-    # separately; previously retained entries stay available as attributed
-    # history, never as a new human turn.
-    summary_input = [message for message in old_messages
-                     if message.get('role') not in ('system', 'developer')
-                     and (message is not anchor_msg or history_entries(message))]
-    folded_ids = {id(m) for m in summary_input + cold_round_msgs + folded_handoffs}
-    summary_input = [m for m in messages if id(m) in folded_ids]
-
-
-    # Safety is mandatory even when this entry came from the economic pipeline.
-    _proactive = bool(kwargs.get('_proactive_economic')) and tokens_before < usable
-    _payback_limit, _payback_policy = _proactive_payback_policy(
-        task,
-        current_round=kwargs.get('_compaction_round'),
-        remaining_api_rounds=kwargs.get('_compaction_remaining_api_rounds'),
+    sources = plan_compaction_sources(
+        messages, task, budget_tokens=budget_tokens, max_turns=max_turns,
+        handoff_phase=_handoff_phase, recent_files_block=_recent_files_block,
+        turn_diff_block=_diff_block, options=kwargs, result_meta=_result_meta,
+        tokens_before=tokens_before, log_prefix=pfx,
+        ports=SourcePlanningPorts(
+            plan_tail=_plan_cross_turn_tail, anchor_index=_objective_anchor_index,
+            retained_projection=_retained_projection,
+            restoration_reserve=_with_restoration_reserve,
+        ),
     )
+    if isinstance(sources, str):
+        return sources
 
-    # Nothing to summarize: no old region with real content AND the preserved
-    # turn had too few tool-call rounds to fold (or is one fat non-tool
-    # message). A summary_input of only leading ``system`` rows carries no
-    # foldable history — summarizing it would waste a cheap-model call and
-    # inject a contentless summary, so decline gracefully — mirrors the manual
-    # path's "decline rather than risk a cross-message break".
-    # _result_meta.compacted stays False so the reactive head-truncate net
-    # still engages.
-    if not any(m.get('role') != 'system' for m in summary_input):
-        # The dispatch-guard admission pass MUST leave the prompt under its
-        # ceiling.  When the whole conversation is one giant in-progress
-        # turn (every message sits inside the preserved hot tail), a summary
-        # has nothing to fold — but refusing here surfaces a fatal
-        # ContextCompactionError for a turn the user is still watching.
-        # Fall through so force_compact_if_needed's over-window deterministic
-        # head-truncate can bound the context instead.
-        from lib.tasks_pkg.compaction._summary_budget import (
-            bounded_summary_task as _bst_gate)
-        if (kwargs.get('_compaction_trigger') == 'dispatch_guard'
-                and kwargs.get('_allow_head_truncate_fallback')
-                and not _bst_gate(task)):
-            logger.info('%s [Compact] dispatch_guard: nothing foldable — '
-                        'deferring to the over-window deterministic head '
-                        'truncate (context must be bounded)', pfx)
-            return ''
-        logger.info('%s [Compact] Nothing foldable — no old region and preserved '
-                    'turn has <= hot-tail tool rounds; skipping', pfx)
-        if isinstance(_result_meta, dict):
-            _result_meta.update({
-                'compacted': False,
-                'reason': 'nothing_foldable',
-            })
-        if _proactive:
-            _defer_proactive_retry(
-                task, tokens_before, reason='nothing_foldable')
-        return ('Context compaction skipped — no foldable history '
-                '(preserved turn within the hot-round tail). '
-                'Messages preserved as-is.')
+    economic_ports = EconomicPolicyPorts(
+        estimate_tokens=_estimate_total_tokens,
+        projected_summary_usage=_projected_summary_usage_tokens,
+        payback_policy=_proactive_payback_policy, defer_retry=_defer_proactive_retry,
+        cache_economics=_proactive_cache_economics,
+        summary_usage_tokens=_summary_usage_tokens,
+    )
+    policy = admit_compaction_sources(
+        messages, task, sources, options=kwargs, tokens_before=tokens_before,
+        usable=usable, current_query=current_query, anchor_text=anchor_text,
+        result_meta=_result_meta, log_prefix=pfx, ports=economic_ports,
+        unverified_pricing_deferral=_unverified_pricing_deferral,
+    )
+    if isinstance(policy, str):
+        return policy
 
-    # Proactive L2 must earn the cache-prefix rewrite. Project the foldable
-    # region vanishing while charging a conservative summary-call estimate.
-    # This keeps an uneconomic attempt from buying a summary and rejecting it
-    # only afterwards. Forced manual/reactive paths bypass this because their
-    # goal is user intent or window correctness.
-    _foldable_tokens = _estimate_total_tokens(summary_input)
-    _projected_summary_cost = _projected_summary_usage_tokens(
-        summary_input, current_query, task,
-        anchor_text=anchor_text,
-        source_messages=messages) if _proactive else 0
-    if _proactive:
-        # Managed snapshots are restored later. Do not sell their removal as
-        # permanent savings, even during optimistic preflight.
-        _restored_context_reserve = _estimate_total_tokens([
-            message for message in summary_input if message.get('_contextComposer')])
-        _best_candidate_tokens = max(0, tokens_before - _foldable_tokens
-                                     + _restored_context_reserve)
-        from lib.tasks_pkg.compaction._summary_routing import select_summary_route
-        _projected_route = select_summary_route(
-            task or {}, input_tokens=max(
-                0, _projected_summary_cost - _SUMMARY_MAX_TOKENS),
-            output_tokens=_SUMMARY_MAX_TOKENS,
-            capacity_output_tokens=(summary_output_budget or _SUMMARY_DISPATCH_MAX_TOKENS))
-        _best_econ = _proactive_cache_economics(
-            task, tokens_before=tokens_before,
-            candidate_tokens=_best_candidate_tokens,
-            summary_usage_tokens=_projected_summary_cost,
-            summary_cost={'costUsd': _projected_route.get('projectedCostUsd')})
-        _best_econ.update({
-            'payback_limit_rounds': _payback_limit,
-            'restored_context_reserve_tokens': _restored_context_reserve,
-            'candidate_measurement_scope': 'compaction_result_plus_restore_reserve',
-            'payback_policy': _payback_policy,
-        })
-        _best_reduction = (_best_econ['dropped_tokens']
-                           / max(1, tokens_before))
-        if _best_reduction < _AUTO_COMPACT_MIN_REDUCTION_RATIO:
-            logger.info(
-                '%s [Compact] Proactive low-yield decline before summary: '
-                'foldable=%d total=%d projected_reduction=%.1f%% < %.1f%%',
-                pfx, _foldable_tokens, tokens_before,
-                _best_reduction * 100,
-                _AUTO_COMPACT_MIN_REDUCTION_RATIO * 100)
-            if isinstance(_result_meta, dict):
-                _result_meta.update({
-                    'compacted': False,
-                    'reason': 'low_yield',
-                    'foldable_tokens': _foldable_tokens,
-                    'projected_reduction_ratio': _best_reduction,
-                })
-            _defer_proactive_retry(
-                task, tokens_before, reason='low_yield',
-                economics=_best_econ)
-            return ('Context compaction skipped — foldable history is below '
-                    'the automatic minimum reduction. Messages preserved '
-                    'as-is.')
-        if _best_econ['payback_rounds'] > _payback_limit:
-            logger.info(
-                '%s [Compact] Proactive uneconomic decline before summary: '
-                'foldable=%d total=%d cache_read=%d projected_rewrite=%d '
-                'summary_estimate=%d payback=%.2f rounds > %.2f — preserving '
-                'cache prefix',
-                pfx, _foldable_tokens, tokens_before,
-                _best_econ['cache_read_tokens'],
-                _best_econ['cache_rewrite_tokens'],
-                _projected_summary_cost,
-                _best_econ['payback_rounds'],
-                _payback_limit)
-            if isinstance(_result_meta, dict):
-                _result_meta.update({
-                    'compacted': False,
-                    'reason': 'cache_negative',
-                    'foldable_tokens': _foldable_tokens,
-                    'projected_summary_cost_tokens': _projected_summary_cost,
-                    'economics': _best_econ,
-                })
-            _defer_proactive_retry(
-                task, tokens_before, reason='cache_negative',
-                economics=_best_econ)
-            return ('Context compaction skipped — foldable history cannot '
-                    'repay the warm-cache rewrite. Messages preserved as-is.')
-
-    preserved_turns = sum(is_human_message(m) for m in recent_messages)
+    preserved_turns = sum(is_human_message(m) for m in sources.recent_messages)
 
     logger.info('%s [Compact] Summarizing %d messages (%d old + %d cold intra-turn '
                 'rounds), preserving %d recent (%d turns), query=%.100s',
-                pfx, len(summary_input), len(old_messages), len(cold_round_msgs),
-                len(recent_messages), preserved_turns, current_query)
+                pfx, len(sources.summary_input), len(sources.old_messages), len(sources.cold_round_msgs),
+                len(sources.recent_messages), preserved_turns, current_query)
 
     _summary_usage: dict = {}
     _summary_started = time.monotonic()
     _summary_pipeline_failure_reason = ''
     # Economic/eligibility preflights above may decline without model I/O.
     # Once accepted, announce the blocking work BEFORE it starts.
-    if task is not None:
-        try:
-            from lib.agent_core.events import Phase, build_phase
-            from lib.tasks_pkg.manager import append_event
-            append_event(task, build_phase(
-                Phase.COMPACTING,
-                detail='Compressing earlier context to fit the window…',
-                detailKey='stream.phase.compactingWindow'))
-        except Exception as exc:
-            logger.debug('%s [Compact] phase emit failed: %s', pfx, exc)
+    _announce_summary_start(task, pfx)
     try:
         summary_text = _generate_query_aware_summary(
-            summary_input, current_query, pfx, conv_id=conv_id, task=task,
+            sources.summary_input, current_query, pfx, conv_id=conv_id, task=task,
             usage_out=_summary_usage,
             anchor_text=anchor_text,
             source_messages=messages,
-            **({'output_budget_tokens': summary_output_budget}
-               if summary_output_budget is not None else {}),
-            **({'expected_route': _projected_route} if _proactive else {}),
+            **({'output_budget_tokens': sources.summary_output_budget}
+               if sources.summary_output_budget is not None else {}),
+            **({'expected_route': policy.summary_route} if policy.active else {}),
         )
     except Exception as exc:
         if not kwargs.get('_allow_deterministic_summary_fallback'):
@@ -1062,116 +817,28 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
         return ('Context compaction attempted but summary generation failed. '
                 'Messages preserved as-is.')
 
-    _recovery_base_summary = summary_text if _summary_fallback else ''
+    accepted_summary = accept_summary(
+        summary_text, messages, task, fallback=_summary_fallback,
+        recent_files_block=_recent_files_block, turn_diff_block=_diff_block,
+        turn_diff_included=_turn_diff_included, result_meta=_result_meta,
+        log_prefix=pfx, missing_state_fields=_summary_missing_task_state_fields,
+        recovery_max_chars=_DETERMINISTIC_RECOVERY_MAX_CHARS,
+        is_bounded=bounded_summary_task,
+    )
+    if isinstance(accepted_summary, str):
+        return accepted_summary
+    summary_text = accepted_summary.text
+    _turn_diff_included = accepted_summary.turn_diff_included
 
-    # V2 validates critical state before accepting lossy model prose. If the
-    # model omitted unfinished work or grounded mutation/test evidence, reject
-    # that prose and continue with a deterministic transcript-derived state
-    # projection. This evicts cold history without claiming the rejected
-    # summary was faithful.
-    _comp_cfg = ((task or {}).get('config', {}) or {}).get('compaction') or {}
-    if (not _summary_fallback
-            and str(_comp_cfg.get('strategy') or '').lower() == 'adaptive'):
-        try:
-            import json as _json
-            from lib.tasks_pkg.context_composer.task_state import (
-                derive_task_state_snapshot,
-            )
-            _ledger = (task or {}).get('_contextEvidenceLedger') or {}
-            _critical_types = {
-                'test_result', 'error', 'mutation_result', 'modified_file',
-                'unfinished',
-            }
-            _critical = [entry for entry in (_ledger.get('entries') or [])
-                         if entry.get('type') in _critical_types]
-            _missing_ids = [str(entry.get('id') or '') for entry in _critical
-                            if str(entry.get('id') or '') not in summary_text]
-            _snapshot = derive_task_state_snapshot(messages, task)
-            _missing_fields = _summary_missing_task_state_fields(
-                summary_text, _snapshot)
-            _state_block = (
-                '## TaskStateSnapshotV1\n' + _snapshot.to_context_text())
-            _evidence_block = (
-                '## Critical Evidence\n' + '\n'.join(
-                    f"[EVIDENCE {entry.get('id')}] "
-                    + _json.dumps(entry, ensure_ascii=False,
-                                  sort_keys=True, separators=(',', ':'))
-                    for entry in _critical[:32]))
-            if _missing_ids or _missing_fields:
-                if bounded_summary_task(task):
-                    if isinstance(_result_meta, dict):
-                        _result_meta.update(
-                            compacted=False, summaryRejected=True,
-                            summaryFailureReason='critical_state_missing',
-                            summaryRejectionReason='critical_state_missing',
-                            missingEvidenceIds=_missing_ids,
-                            missingTaskStateFields=_missing_fields)
-                    return ('Summary omitted critical state; original context '
-                            'preserved without replacement.')
-                _rejected_digest = hashlib.sha256(
-                    summary_text.encode('utf-8')).hexdigest()[:16]
-                summary_text = _state_block + '\n\n' + _evidence_block
-                logger.warning(
-                    '%s [Compact] rejected lossy summary digest=%s '
-                    'missing_critical=%d missing_fields=%s; using '
-                    'deterministic state projection', pfx, _rejected_digest,
-                    len(_missing_ids), ','.join(_missing_fields))
-                if isinstance(_result_meta, dict):
-                    _result_meta.update({
-                        'summaryRejected': True,
-                        'summaryRejectedDigest': _rejected_digest,
-                        'summaryRejectionReason': 'critical_state_missing',
-                        'missingEvidenceIds': _missing_ids,
-                        'missingTaskStateFields': _missing_fields,
-                    })
-            else:
-                # Adaptive L2 always carries the versioned state projection;
-                # accepted model prose is only the short narrative layer.
-                summary_text = (
-                    _state_block + '\n\n## Narrative Summary\n'
-                    + summary_text + '\n\n' + _evidence_block)
-        except Exception as exc:
-            logger.warning('%s [Compact] v2 summary validation failed closed: %s',
-                           pfx, exc)
-            if isinstance(_result_meta, dict):
-                _result_meta.update({
-                    'compacted': False,
-                    'summaryRejected': True,
-                    'summaryRejectionReason': 'validation_failed',
-                })
-            return ('Context compaction attempted but summary validation '
-                    'failed. Messages preserved as-is.')
-
-    summary_text += _recent_files_block
-    if _diff_block:
-        summary_text += f'\n\n{_diff_block}'
-
-    if (_summary_fallback
-            and len(summary_text) > _DETERMINISTIC_RECOVERY_MAX_CHARS):
-        # Optional freshness hints must not break the emergency receipt's one
-        # global budget. Prefer the bounded recovery state, then add recent
-        # file handles only if the complete block still fits; drop the turn
-        # diff whole rather than cutting any record mid-entry.
-        summary_text = _recovery_base_summary
-        _turn_diff_included = False
-        if (_recent_files_block
-                and len(summary_text + _recent_files_block)
-                <= _DETERMINISTIC_RECOVERY_MAX_CHARS):
-            summary_text += _recent_files_block
-        logger.warning(
-            '%s [Compact] Recovery receipt extras exceeded %d chars; '
-            'dropped optional blocks to preserve the global budget',
-            pfx, _DETERMINISTIC_RECOVERY_MAX_CHARS)
-
-    retained_wrapper = make_history_carrier(retained_entries)
+    retained_wrapper = make_history_carrier(sources.retained_entries)
     if retained_wrapper:
         _audit_user_verbatim_once()
     new_messages = _retained_projection(
-        old_messages, recent_messages, anchor_msg, retained_entries)
+        sources.old_messages, sources.recent_messages, sources.anchor_msg, sources.retained_entries)
 
     protected_history_count = sum(
         len(history_entries(message)) for message in new_messages
-    ) - len(retained_entries)
+    ) - len(sources.retained_entries)
     new_messages = coalesce_history_carriers(new_messages)
     all_history_carriers = [message for message in new_messages
                             if history_entries(message)]
@@ -1179,113 +846,36 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                                  for message in all_history_carriers)
 
     compacted_message_count = sum(
-        1 for message in summary_input if message.get('role') not in ('system', 'developer'))
+        1 for message in sources.summary_input if message.get('role') not in ('system', 'developer'))
 
     # Counts/reduction belong to archive + event telemetry, not model prose.
     # The accepted projection includes its handoff: no later caller may append
     # an uncounted summary or publish a folded history without continuation.
     compact_result = '## Context Compacted — Selective Summary\n\n' + summary_text
-    insert_compaction_handoff(new_messages, make_compaction_handoff(
-        compact_result, phase=_handoff_phase))
+    insert_compaction_handoff(new_messages, _compaction_handoff(
+        compact_result, _handoff_phase, task, messages, sources.summary_input, kwargs))
     # Task progress is a maintained state projection, not disposable prose.
     # Carry it BEFORE admission/accounting; otherwise every compaction deletes
     # and re-injects the same state as a spurious new intervention next round.
     from lib.tasks_pkg.context_composer.checklist import carry_checklist_through_compaction
     carry_checklist_through_compaction(new_messages, task)
     _candidate_tokens = _estimate_total_tokens(new_messages)
-    if (callable(dispatch_measure) and isinstance(dispatch_target, int)
-            and dispatch_measure(_with_restoration_reserve(new_messages, messages))
-            > dispatch_target):
+    if (callable(sources.dispatch_measure) and isinstance(sources.dispatch_target, int)
+            and sources.dispatch_measure(_with_restoration_reserve(new_messages, messages))
+            > sources.dispatch_target):
         if isinstance(_result_meta, dict):
             _result_meta.update(compacted=False,
                 summaryFailureReason='summary_projection_over_budget')
         return ('Complete summary projection exceeds the final request budget; '
                 'original context preserved without adoption.')
 
-    # A bounded, conservative reserve from existing managed carriers; no
-    # provider reads or live-task mutation during an economic dry run. Multiple
-    # old versions can over-reserve, but cannot invent savings from restoration.
-    _kept_ids = {id(message) for message in new_messages}
-    _restored_context_reserve = _estimate_total_tokens([
-        message for message in messages
-        if message.get('_contextComposer') and id(message) not in _kept_ids])
-    _economic_candidate_tokens = _candidate_tokens + _restored_context_reserve
-
-    _summary_cost_tokens = _summary_usage_tokens(_summary_usage)
-    _accounting_econ = None
-    _adoption_econ = None
-    if _proactive:
-        _accounting_econ = _proactive_cache_economics(
-            task, tokens_before=tokens_before,
-            candidate_tokens=_economic_candidate_tokens,
-            summary_usage_tokens=_summary_cost_tokens,
-            summary_usage=_summary_usage)
-        # Once generated, summary tokens are sunk. Adoption must compare only
-        # future cache rewrite cost with future savings; otherwise a paid,
-        # faithful candidate can be discarded and regenerated on a later turn.
-        _adoption_econ = _proactive_cache_economics(
-            task, tokens_before=tokens_before,
-            candidate_tokens=_economic_candidate_tokens,
-            summary_usage_tokens=0)
-        for _economics in (_accounting_econ, _adoption_econ):
-            _economics['restored_context_reserve_tokens'] = _restored_context_reserve
-            _economics['candidate_measurement_scope'] = 'compaction_result_plus_restore_reserve'
-            _economics.update({
-                'payback_limit_rounds': _payback_limit,
-                'payback_policy': _payback_policy,
-            })
-        _realized_reduction = (_accounting_econ['dropped_tokens']
-                               / max(1, tokens_before))
-        if _realized_reduction < _AUTO_COMPACT_MIN_REDUCTION_RATIO:
-            logger.info(
-                '%s [Compact] Proactive candidate rejected: projected=%d '
-                'before=%d realized_reduction=%.1f%% < %.1f%% — preserving '
-                'messages and cache prefix',
-                pfx, _candidate_tokens, tokens_before,
-                _realized_reduction * 100,
-                _AUTO_COMPACT_MIN_REDUCTION_RATIO * 100)
-            if isinstance(_result_meta, dict):
-                _result_meta.update({
-                    'compacted': False,
-                    'reason': 'low_yield',
-                    'candidate_tokens': int(_candidate_tokens),
-                    'realized_reduction_ratio': _realized_reduction,
-                    'economics': _accounting_econ,
-                    'adoptionEconomics': _adoption_econ,
-                })
-            _defer_proactive_retry(
-                task, tokens_before, reason='low_yield',
-                economics=_accounting_econ)
-            return ('Context compaction skipped — generated summary is below '
-                    'the automatic minimum reduction. Messages preserved '
-                    'as-is.')
-        if (_adoption_econ['cache_read_tokens'] > 0
-                and _adoption_econ['payback_rounds']
-                > _payback_limit):
-            logger.info(
-                '%s [Compact] Proactive candidate rejected: projected=%d '
-                'before=%d dropped=%d cache_read=%d rewrite=%d '
-                'summary_cost_sunk=%d future_payback=%.2f rounds > %.2f — '
-                'preserving cache prefix',
-                pfx, _candidate_tokens, tokens_before,
-                _adoption_econ['dropped_tokens'],
-                _adoption_econ['cache_read_tokens'],
-                _adoption_econ['cache_rewrite_tokens'],
-                _summary_cost_tokens, _adoption_econ['payback_rounds'],
-                _payback_limit)
-            if isinstance(_result_meta, dict):
-                _result_meta.update({
-                    'compacted': False,
-                    'reason': 'cache_negative',
-                    'candidate_tokens': int(_candidate_tokens),
-                    'economics': _accounting_econ,
-                    'adoptionEconomics': _adoption_econ,
-                })
-            _defer_proactive_retry(
-                task, tokens_before, reason='cache_negative',
-                economics=_accounting_econ)
-            return ('Context compaction skipped — generated summary would not '
-                    'repay the warm-cache rewrite. Messages preserved as-is.')
+    candidate_economics = admit_compaction_candidate(
+        messages, new_messages, task, policy, candidate_tokens=_candidate_tokens,
+        tokens_before=tokens_before, summary_usage=_summary_usage,
+        result_meta=_result_meta, log_prefix=pfx, ports=economic_ports,
+    )
+    if isinstance(candidate_economics, str):
+        return candidate_economics
 
     _round_num = kwargs.get('_compaction_round')
     if _round_num is None:
@@ -1345,8 +935,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             'trigger': kwargs.get('_compaction_trigger') or 'force',
             'reason': kwargs.get('_compaction_reason') or '',
             'round_num': _round_num,
-            'summary_usage_tokens': int(_summary_cost_tokens),
-            'projected_summary_usage_tokens': int(_projected_summary_cost),
+            'summary_usage_tokens': int(candidate_economics.summary_cost_tokens),
+            'projected_summary_usage_tokens': int(policy.projected_summary_cost),
             'summary_usage': dict(_summary_usage),
             'summary_duration_ms': int(_summary_duration_ms),
             'summaryFallback': bool(_summary_fallback),
@@ -1354,16 +944,16 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             'summarized_messages': int(compacted_message_count),
             'preserved_turns': int(preserved_turns),
             'folded_tool_rounds': sum(
-                1 for message in cold_round_msgs
+                1 for message in sources.cold_round_msgs
                 if isinstance(message, dict)
                 and message.get('role') == 'assistant'
                 and message.get('tool_calls')
             ),
-            'objective_anchored': anchor_msg is not None,
+            'objective_anchored': sources.anchor_msg is not None,
             'durable_objective_applied': bool(
                 _extract_summary_objective(summary_text)),
             'retained_user_messages': retained_history_count,
-            'selected_history_messages': len(retained_entries),
+            'selected_history_messages': len(sources.retained_entries),
             'protected_shell_history_messages': protected_history_count,
             'retained_history_estimated_tokens': _estimate_total_tokens(
                 all_history_carriers),
@@ -1371,88 +961,20 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             'turn_diff_included': bool(_turn_diff_included),
             'mode': (
                 'turns_and_intra_turn'
-                if cold_round_msgs and any(
+                if sources.cold_round_msgs and any(
                     message.get('role') != 'system'
-                    for message in old_messages)
-                else 'intra_turn' if cold_round_msgs else 'turns'
+                    for message in sources.old_messages)
+                else 'intra_turn' if sources.cold_round_msgs else 'turns'
             ),
-            'economics': _accounting_econ,
-            'adoptionEconomics': _adoption_econ,
+            'economics': candidate_economics.accounting,
+            'adoptionEconomics': candidate_economics.adoption,
         })
 
-    # ── SUCCESS-PATH CONVERGENCE CHECK (post-fold hot-tail overflow) ──
-    #   The fold + summary succeeded, but ``_find_turn_boundary`` preserves the
-    #   hot-tail rounds WHOLE. If those surviving rounds are themselves so large
-    #   that the complete request — including its already-installed handoff — STILL
-    #   exceeds the same trigger ceiling, sending it would only be bounded next
-    #   round or by the reactive 413 net. In an OOM-kill-prone deploy the "next
-    #   round" may never arrive, so converge NOW with the pairing-safe
-    #   head-truncate rather than emit an over-window request. Measured with the
-    #   SAME yardstick as ``_should_force_compact`` (authoritative count vs
-    #   ``usable × _SUMMARY_TRIGGER_RATIO``) so the check and the trigger agree.
-    def _project_tokens() -> tuple[int, str]:
-        try:
-            # Local import (same pattern as the _allow_ht block below): the
-            # bare name was never bound in this module, so EVERY projection
-            # raised NameError into the except and silently ran 'heuristic'.
-            from lib.tasks_pkg.compaction._tokens import (
-                _count_tokens_authoritative)
-            return _count_tokens_authoritative(messages, task)
-        except Exception as _pe:
-            logger.debug('%s [Compact] convergence projection count failed '
-                         '(%s) — using heuristic', pfx, _pe)
-            return _estimate_total_tokens(messages), 'heuristic'
-
-    window_ceiling = int(usable * _SUMMARY_TRIGGER_RATIO)
-    effective_trigger, _window_trigger, _working_set_trigger = (
-        _compaction_trigger_threshold(task))
-    ceiling = (min(window_ceiling, int(effective_trigger))
-               if _proactive else window_ceiling)
-
-    if kwargs.get('_compaction_trigger') in {'working_set', 'window', 'dispatch_guard'}:
-        from lib.tasks_pkg.compaction._admission_budget import resolve_admission_budget
-        _, admission_target = resolve_admission_budget(
-            task, round_num=int(kwargs.get('_compaction_round') or 0))
-        ceiling = min(ceiling, admission_target)
-    ceiling_kind = 'effective automatic target' if _proactive else 'window safety'
-    proj_tokens, proj_method = _project_tokens()
-    if proj_tokens > ceiling and bounded_summary_task(task):
-        # A complete summary is not permission to delete the preserved tail.
-        # Final rendered-prompt admission refuses an overfull request safely.
-        logger.warning('%s [Compact] Complete candidate exceeds safety target; '
-                       'retaining hot tail for final admission', pfx)
-    elif proj_tokens > ceiling:
-        logger.warning(
-            '%s [Compact] Post-fold STILL over ceiling: projected=%d (via %s) '
-            '> ceiling=%d (%s; usable=%d) — preserved hot-tail rounds are '
-            'oversized; converging with pairing-safe head-truncate',
-            pfx, proj_tokens, proj_method, ceiling, ceiling_kind, usable)
-        from lib.tasks_pkg.compaction._reactive import _head_truncate
-        _tok_pre = _estimate_total_tokens(messages)
-        _dropped = _head_truncate(
-            messages, task,
-            token_target=max(1, ceiling - max(0, proj_tokens - _tok_pre)),
-            event_name='post_compact_converge')
-        _tok_post = _estimate_total_tokens(messages)
-        logger.warning(
-            '%s [Compact] Post-fold head-truncate dropped %d message(s): '
-            'preserved-region tokens %d → %d (conv=%s round=%s)',
-            pfx, _dropped, _tok_pre, _tok_post, log_id,
-            (task.get('round_num') if task else '?'))
-        # Re-measure. If STILL over (pathological: a single hot round bigger
-        # than the window — head-truncate is floored at system_end+4 messages),
-        # do NOT raise and abort the round. Log an ERROR so this boundary is
-        # visible in error.log, and pass through: the reactive 413 net is the
-        # last resort this round.
-        proj_after, _ = _project_tokens()
-        if proj_after > ceiling:
-            logger.error(
-                '%s [Compact] Post-fold convergence INCOMPLETE — projected still '
-                '%d > ceiling=%d after head-truncate (dropped=%d; only the system '
-                'prefix + an oversized hot round remain). Passing through; the '
-                'reactive 413 net must bound this request. conv=%s round=%s',
-                pfx, proj_after, ceiling, _dropped, log_id,
-                (task.get('round_num') if task else '?'))
+    converge_compaction_candidate(
+        messages, task, usable=usable, proactive=policy.active, options=kwargs,
+        log_prefix=pfx, log_id=log_id, estimate_tokens=_estimate_total_tokens,
+        trigger_threshold=_compaction_trigger_threshold, is_bounded=bounded_summary_task,
+    )
 
     if cancelled():
         return 'Context compaction cancelled — messages preserved as-is.'
@@ -1492,6 +1014,50 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Force compact: inject context_compact tool call when over threshold
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def _settle_head_truncate_recovery(
+        archive_id, messages, task, *, conv_id, trigger, round_num,
+        tokens_before, msgs_before, tokens_after, receipt, summary_usage,
+        adopted, pfx):
+    """Publish an explicit utility recovery outcome after its mutation decision.
+
+    Only an adopted projection supplies a detached post snapshot. Receipt and
+    live-event failures remain independent best-effort observations; admission,
+    archival, cancellation and mutation stay in the calling coordinator.
+    """
+    if archive_id is None:
+        return
+    failure_label = '' if adopted else 'failed '
+    try:
+        from lib.agent_core.store import get_conversation_store
+        get_conversation_store().update_archive_summary(
+            archive_id, '', int(tokens_after), len(messages),
+            user_id=_task_owner(task),
+            archive_scope=(task or {}).get('_archiveScope', ''),
+            receipt=receipt,
+            **({'post_messages': deepcopy(messages)} if adopted else {}))
+    except Exception as exc:
+        logger.debug('%s [ForceCompact] %sfallback receipt update failed: %s',
+                     pfx, failure_label, exc)
+    if task is not None:
+        try:
+            from lib.agent_core.events import EventType, build_event
+            from lib.tasks_pkg.manager import append_event
+            reduction_pct = (
+                (1 - tokens_after / max(1, tokens_before)) * 100
+                if adopted else 0.0)
+            append_event(task, build_event(
+                EventType.COMPACTION_DONE,
+                archiveId=str(archive_id), convId=conv_id, trigger=trigger,
+                tokensBefore=int(tokens_before), tokensAfter=int(tokens_after),
+                tokenCountKind='estimated', msgsBefore=int(msgs_before),
+                msgsAfter=len(messages), reductionPct=round(reduction_pct, 1),
+                roundNum=int(round_num or 0), receipt=receipt,
+                summaryDispatchCalls=summary_dispatch_calls(summary_usage)))
+        except Exception as exc:
+            logger.debug('%s [ForceCompact] %sfallback done event failed: %s',
+                         pfx, failure_label, exc)
+
 
 def force_compact_if_needed(messages: list, task: dict | None = None,
                             keep_recent_pairs: int | None = None,
@@ -1601,6 +1167,7 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
         _compaction_round=kwargs.get('_compaction_round'),
         _compaction_remaining_api_rounds=kwargs.get(
             '_compaction_remaining_api_rounds'),
+        _scheduled_request_id=kwargs.get('_scheduled_request_id'),
         _dispatch_prompt_target=kwargs.get('_dispatch_prompt_target'),
         _dispatch_prompt_measure=kwargs.get('_dispatch_prompt_measure'),
         _proactive_economic=(not force and int(
@@ -1634,54 +1201,13 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
         if ((task and task.get('aborted'))
                 or _meta.get('reason') in {'aborted', 'open_tool_batch'}):
             return False
-        # Deterministic proactive safety net (fix for the OOM fatal loop).
-        #   The summary LLM is the ONLY mechanism the proactive path had; on
-        #   a vanilla/exported deploy the cheap-model dispatch can fail
-        #   outright (no model tagged 'cheap', saturated single model,
-        #   summary input itself too big). Historically force-compact then
-        #   returned False and did nothing, so the context stayed pinned near
-        #   the window every round — and the reactive head-truncate net never
-        #   fired because the max_tokens clamp keeps the request just under
-        #   the hard ceiling (no API rejection). Nothing bounded the context
-        #   → unbounded re-send → OOM (SIGKILL).
-        #
-        #   So when the proactive pipeline opts in (_allow_head_truncate_fallback)
-        #   AND we are genuinely over the usable window, fall through to the
-        #   same last-resort _head_truncate the reactive path already trusts,
-        #   right here. This is bounded, logged (audit_log
-        #   'proactive_head_truncate') context loss — strictly better than a
-        #   process death. The empty-summary→False contract is preserved for
-        #   the NON-critical case (still headroom before the window): we only
-        #   head-truncate when estimated input >= usable window.
-        _allow_ht = bool(kwargs.get('_allow_head_truncate_fallback')
-                         if isinstance(kwargs, dict) else False)
+        # Only explicit utility callers may opt into lossy recovery after
+        # a failed summary, and only above the usable window. Live/transient
+        # tasks preserve their source even when a legacy caller sets the flag.
         from lib.tasks_pkg.compaction._summary_budget import bounded_summary_task
+        _allow_ht = bool(kwargs.get('_allow_head_truncate_fallback'))
         if bounded_summary_task(task):
             _allow_ht = False
-        # The dispatch-guard admission pass is the LAST local boundary; when
-        # it fails the turn dies with ContextCompactionError even though the
-        # conversation is undispatched.  Reaching it already proves the prompt
-        # is over the admission ceiling, so when its summary cannot run
-        # (credential outage / model unavailable) the bounded deterministic
-        # head-truncate is the honest last resort — strictly better than a
-        # fatal turn, and the reactive path already trusts the same net.  The
-        # proactive working_set pass keeps the summary-only path: it has
-        # round headroom and its own `_allow_head_truncate_fallback` opt-in.
-        # The dispatch-guard admission pass is the LAST local boundary; when
-        # it fails the turn dies with ContextCompactionError even though the
-        # conversation is undispatched.  Reaching it already proves the prompt
-        # is over the admission ceiling, so when its summary cannot run
-        # (credential outage / model unavailable) the bounded deterministic
-        # head-truncate is the honest last resort — strictly better than a
-        # fatal turn, and the reactive path already trusts the same net.  The
-        # proactive working_set pass keeps the summary-only path: it has
-        # round headroom and its own `_allow_head_truncate_fallback` opt-in.
-        # Live/transient bounded tasks keep their no-lossy-recovery
-        # discipline (their source must survive a failed summary intact).
-        if (_trigger == 'dispatch_guard'
-                and kwargs.get('_allow_head_truncate_fallback')
-                and not bounded_summary_task(task)):
-            _allow_ht = True
         if _allow_ht:
             _est_tokens = int(
                 (_measurement_out or {}).get('gate_tokens') or 0)
@@ -1771,46 +1297,16 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                             if _meta.get('reason') == 'nothing_foldable'
                             else 'summary_failed_over_window'),
                     )
-                    if _fallback_archive_id is not None:
-                        try:
-                            from lib.agent_core.store import get_conversation_store
-                            get_conversation_store().update_archive_summary(
-                                _fallback_archive_id, '',
-                                int(_fallback_tokens_after), len(messages),
-                                user_id=_task_owner(task),
-                                archive_scope=(task or {}).get('_archiveScope', ''),
-                                receipt=_fallback_receipt,
-                                post_messages=deepcopy(messages))
-                        except Exception as _up_e:
-                            logger.debug('%s [ForceCompact] fallback receipt '
-                                         'update failed: %s', pfx, _up_e)
-                        if task is not None:
-                            try:
-                                from lib.agent_core.events import EventType, build_event
-                                from lib.tasks_pkg.manager import append_event
-                                _fallback_reduction = (
-                                    1 - _fallback_tokens_after
-                                    / max(1, _fallback_tokens_before)) * 100
-                                append_event(task, build_event(
-                                    EventType.COMPACTION_DONE,
-                                    archiveId=str(_fallback_archive_id),
-                                    convId=conv_id,
-                                    trigger=_trigger,
-                                    tokensBefore=int(_fallback_tokens_before),
-                                    tokensAfter=int(_fallback_tokens_after),
-                                    tokenCountKind='estimated',
-                                    msgsBefore=int(_fallback_msgs_before),
-                                    msgsAfter=len(messages),
-                                    reductionPct=round(_fallback_reduction, 1),
-                                    roundNum=int(
-                                        kwargs.get('_compaction_round') or 0),
-                                    receipt=_fallback_receipt,
-                                    summaryDispatchCalls=summary_dispatch_calls(
-                                        _meta.get('summary_usage')),
-                                ))
-                            except Exception as _ev_e:
-                                logger.debug('%s [ForceCompact] fallback done '
-                                             'event failed: %s', pfx, _ev_e)
+                    _settle_head_truncate_recovery(
+                        _fallback_archive_id, messages, task,
+                        conv_id=conv_id, trigger=_trigger,
+                        round_num=kwargs.get('_compaction_round'),
+                        tokens_before=_fallback_tokens_before,
+                        msgs_before=_fallback_msgs_before,
+                        tokens_after=_fallback_tokens_after,
+                        receipt=_fallback_receipt,
+                        summary_usage=_meta.get('summary_usage'),
+                        adopted=True, pfx=pfx)
                     # Context was bounded — surface as a real compaction so
                     # the pipeline notifies the cache tracker (prefix changed)
                     # and the round proceeds with a smaller prompt.
@@ -1836,40 +1332,16 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                             _meta.get('summary_duration_ms') or 0),
                         outcome_reason='no_safe_messages_to_drop',
                     )
-                    try:
-                        from lib.agent_core.store import get_conversation_store
-                        get_conversation_store().update_archive_summary(
-                            _fallback_archive_id, '',
-                            _fallback_tokens_before, len(messages),
-                            user_id=_task_owner(task), receipt=_failed_receipt,
-                            archive_scope=(task or {}).get('_archiveScope', ''))
-                    except Exception as _up_e:
-                        logger.debug('%s [ForceCompact] failed fallback receipt '
-                                     'update failed: %s', pfx, _up_e)
-                    if task is not None:
-                        try:
-                            from lib.agent_core.events import EventType, build_event
-                            from lib.tasks_pkg.manager import append_event
-                            append_event(task, build_event(
-                                EventType.COMPACTION_DONE,
-                                archiveId=str(_fallback_archive_id),
-                                convId=conv_id,
-                                trigger=_trigger,
-                                tokensBefore=int(_fallback_tokens_before),
-                                tokensAfter=_fallback_tokens_before,
-                                tokenCountKind='estimated',
-                                msgsBefore=int(_fallback_msgs_before),
-                                msgsAfter=len(messages),
-                                reductionPct=0.0,
-                                roundNum=int(
-                                    kwargs.get('_compaction_round') or 0),
-                                receipt=_failed_receipt,
-                                summaryDispatchCalls=summary_dispatch_calls(
-                                    _meta.get('summary_usage')),
-                            ))
-                        except Exception as _ev_e:
-                            logger.debug('%s [ForceCompact] failed fallback done '
-                                         'event failed: %s', pfx, _ev_e)
+                    _settle_head_truncate_recovery(
+                        _fallback_archive_id, messages, task,
+                        conv_id=conv_id, trigger=_trigger,
+                        round_num=kwargs.get('_compaction_round'),
+                        tokens_before=_fallback_tokens_before,
+                        msgs_before=_fallback_msgs_before,
+                        tokens_after=_fallback_tokens_before,
+                        receipt=_failed_receipt,
+                        summary_usage=_meta.get('summary_usage'),
+                        adopted=False, pfx=pfx)
         _decline_reason = str(_meta.get('reason') or '')
         if _decline_reason in {
                 'cache_negative', 'low_yield', 'nothing_foldable'}:

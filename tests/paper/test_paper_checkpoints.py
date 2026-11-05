@@ -18,7 +18,6 @@ Proves fully offline:
 Run standalone: ``python3 tests/paper/test_paper_checkpoints.py``
 """
 
-import asyncio
 import json
 import os
 import sys
@@ -273,37 +272,23 @@ def _import_routes_paper():
 
 def test_read_path_payload():
     rp = _import_routes_paper()
-    phash = 'cpr'
     from lib.paper.artifact_repository import PaperReport
-    rows = {(phash, ce.checkpoints_lang_key('en')): PaperReport(
-        paper_hash=phash,
-        lang=ce.checkpoints_lang_key('en'),
-        report='x',
+    key = ce.checkpoints_lang_key('en')
+    siblings = {key: PaperReport(
+        paper_hash='cpr', lang=key, report='x',
         meta={'kind': 'checkpoints', 'v': 2,
               'items': [{'section': 'X', 'anchor_idx': 1,
                          'question': 'q', 'answer': 'a'}]},
     )}
-
-    class _Repository:
-        def __init__(self, owner_user_id):
-            assert owner_user_id == TEST_OWNER_USER_ID
-
-        def get_report(self, paper_hash, lang):
-            return rows.get((paper_hash, lang))
-
-    orig = rp.PaperArtifactRepository
-    rp.PaperArtifactRepository = _Repository
-    try:
-        payload = asyncio.new_event_loop().run_until_complete(
-            rp._load_cached_checkpoints_payload(
-                phash, 'en', user_id=TEST_OWNER_USER_ID))
-        none_payload = asyncio.new_event_loop().run_until_complete(
-            rp._load_cached_checkpoints_payload(
-                'missing', 'en', user_id=TEST_OWNER_USER_ID))
-    finally:
-        rp.PaperArtifactRepository = orig
-    assert payload and payload['items'][0]['anchor_idx'] == 1, f'payload: {payload}'
-    assert none_payload is None
+    body, _, _, payload = rp._project_prefetched_report_siblings(
+        _REPORT, None, 'cpr', 'en', siblings)
+    assert payload and payload['items'][0]['anchor_idx'] == 1
+    assert payload['lang'] == 'en'
+    assert body == _REPORT
+    assert rp._project_prefetched_report_siblings(
+        _REPORT, None, 'cpr', 'en', {})[3] is None
+    assert rp._project_prefetched_report_siblings(
+        _REPORT, None, 'cpr', 'review:neurips:en', siblings)[3] is None
     _ok('读路径:持久行 → 结构化负载;无行 → None(不合并、不重算)')
 
 

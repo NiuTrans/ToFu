@@ -163,3 +163,42 @@ def test_followup_with_runtime_cache_completes_real_child_loop(runtime):
     assert result.total_tokens == 140
     assert parent['config']['_mcpToolSearchTextByName'] is cache
     assert '_mcpToolSearchTextByName' not in agent.parent_task['config']
+
+
+def test_spawn_after_fallback_round_delegates_admitted_route(monkeypatch):
+    from threading import Event
+    import json
+    from lib.swarm.integration import execute_swarm_tool, get_active_session
+    from lib.tasks_pkg.child_invocation import resolve_child_config
+    from tests.swarm.test_swarm_async import _FakeAgent, _reset_global_state
+    key = 'fallback-route-spawn'
+    _reset_global_state(key)
+    observed = {}
+    built = Event()
+
+    def factory(spec, **kwargs):
+        observed.update(kwargs)
+        built.set()
+        return _FakeAgent(spec)
+
+    monkeypatch.setattr('lib.swarm.master._build_sub_agent', factory)
+    ref = {'creator_id': 'creator', 'model_id': 'selected-model'}
+    # Admission binds config to the selection; a successful fallback round
+    # then stamps only the task's live model.
+    parent = {'id': key, '_userId': 771, 'status': 'running', 'model': 'fallback-model',
+              '_requestedModelRef': dict(ref),
+              'config': {'model': 'selected-model', 'modelRef': dict(ref)}}
+    try:
+        receipt = json.loads(execute_swarm_tool('spawn_agents',
+            {'agents': [{'id': 'scout', 'role': 'general', 'objective': 'Scout'}]},
+            task=parent, model=parent['config']['model'], all_tools=[tool('read_files')]))
+        assert receipt['status'] == 'async_launched', receipt
+        assert built.wait(5), 'launched assignment did not reach its worker'
+        assert observed['model'] == 'selected-model'
+        child_cfg = resolve_child_config(observed['parent_task'], model=observed['model'])
+        assert (child_cfg['model'], child_cfg['modelRef']) == ('selected-model', ref)
+    finally:
+        session = get_active_session(key)
+        if session is not None:
+            session.abort()
+        _reset_global_state(key)

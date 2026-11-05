@@ -307,3 +307,101 @@ class TestTimeWindowMakesTheSnapshotReproducible:
         rep = cwr.build_report(cwr.load_records(log), 20000, 0.001, 0.0001)
         assert rep['window_first'] == '2026-07-29 10:00:00'
         assert rep['window_last'] == '2026-07-29 20:00:00'
+
+
+def _round(rid, call, read, write, *, ts, bucket='no_break', tools=54,
+           affinity=None):
+    record = {'_rid': rid, '_ts': ts, 'conv': 'conv0001', 'call': call,
+              'cache_read': read, 'cache_write': write, 'bucket': bucket,
+              'model': 'claude-opus-5.5', 'lane': 'isolated', 'tools': tools}
+    if affinity:
+        record['affinity'] = affinity
+    return record
+
+
+class TestReadSource:
+    """Which earlier cache entry each round read back.
+
+    The 2026-10-28 sibling audit found 54-tool swarm rounds that read an OLDER
+    round's prompt instead of the previous one: consecutive rounds served by
+    different upstream cache domains. Every such round carried the same
+    ``upstream_identical`` bucket as an ordinary miss, so the report must
+    classify the read source itself (docs/LLM_COST_OPTIMIZATION.md, "Sibling
+    cache affinity").
+    """
+
+    @staticmethod
+    def _only_row(rows):
+        assert len(rows) == 1, rows
+        return rows[0]
+
+    def test_reads_are_matched_against_their_own_invocation_chain(self):
+        records = [
+            _round('a', 1, 0, 1000, ts='2026-10-28 10:00:00'),
+            # A sibling in the same conversation whose prompt totals coincide
+            # with chain a must not lend it a match.
+            _round('b', 1, 0, 1100, ts='2026-10-28 10:00:01'),
+            _round('a', 2, 1000, 100, ts='2026-10-28 10:00:10'),   # previous
+            _round('a', 3, 1000, 300, ts='2026-10-28 10:00:20'),   # older (call 1)
+            _round('a', 4, 0, 1400, ts='2026-10-28 10:00:30'),     # none
+            _round('a', 5, 600, 900, ts='2026-10-28 10:00:40'),    # unmatched
+        ]
+        row = self._only_row(cwr.read_sources(records))
+        assert (row['model'], row['lane'], row['tools']) == ('claude-opus-5.5', 'isolated', '54')
+        assert {key: row[key] for key in cwr.READ_SOURCES} == {
+            'previous': 1, 'older': 1, 'unmatched': 1, 'none': 1}
+        assert row['rounds'] == 4
+
+    def test_records_are_chained_in_log_time_not_file_order(self):
+        # load_records reads app.log before its rotated predecessors.
+        records = [
+            _round('a', 3, 1100, 50, ts='2026-10-28 10:00:20'),
+            _round('a', 1, 0, 1000, ts='2026-10-28 10:00:00'),
+            _round('a', 2, 1000, 100, ts='2026-10-28 10:00:10'),
+        ]
+        row = self._only_row(cwr.read_sources(records))
+        assert row['previous'] == 2 and row['rounds'] == 2
+
+    def test_expiry_and_discontinuous_rounds_are_not_classified(self):
+        records = [
+            _round('a', 1, 0, 1000, ts='2026-10-28 10:00:00'),
+            _round('a', 2, 0, 1100, ts='2026-10-28 10:10:00', bucket='ttl_expiry'),
+            _round('a', 3, 1100, 50, ts='2026-10-28 10:10:10'),    # previous
+            _round('a', 5, 0, 1200, ts='2026-10-28 10:10:20'),     # gap in calls
+            # A resumed invocation restarts its call numbers: a new chain.
+            _round('a', 1, 0, 900, ts='2026-10-28 11:00:00'),
+            _round('a', 2, 1000, 10, ts='2026-10-28 11:00:10'),    # unmatched
+        ]
+        row = self._only_row(cwr.read_sources(records))
+        assert {key: row[key] for key in cwr.READ_SOURCES} == {
+            'previous': 1, 'older': 0, 'unmatched': 1, 'none': 0}
+
+    def test_load_records_keeps_the_invocation_id(self, tmp_path):
+        log = tmp_path / 'app.log'
+        log.write_text(
+            '2026-10-28 10:00:00 [INFO] x [swarm-stream_0]: [rid:28696a68] '
+            f'{cwr.RECORD_MARKER} {{"bucket": "no_break", "call": 2, "conv": "c", '
+            '"cache_read": 1, "cache_write": 2}\n')
+        [record] = cwr.load_records(str(log))
+        assert record['_rid'] == '28696a68'
+
+    def test_rounds_are_split_by_affinity_carrier(self):
+        # Before/after a carrier ships, the same route must be comparable.
+        records = [
+            _round('a', 1, 0, 1000, ts='2026-11-02 10:00:00'),
+            _round('a', 2, 0, 1100, ts='2026-11-02 10:00:10'),     # none
+            _round('b', 1, 0, 1000, ts='2026-11-02 11:00:00',
+                   affinity='Mt-Session-Id'),
+            _round('b', 2, 1000, 100, ts='2026-11-02 11:00:10',
+                   affinity='Mt-Session-Id'),                    # previous
+        ]
+        rows = {row['affinity']: row for row in cwr.read_sources(records)}
+        assert set(rows) == {'-', 'Mt-Session-Id'}
+        assert rows['-']['none'] == 1 and rows['-']['rounds'] == 1
+        assert rows['Mt-Session-Id']['previous'] == 1
+
+    def test_report_carries_the_read_sources(self):
+        records = [_round('a', 1, 0, 1000, ts='2026-10-28 10:00:00'),
+                   _round('a', 2, 1000, 100, ts='2026-10-28 10:00:10')]
+        rep = cwr.build_report(records, 20000, 0.001, 0.0001)
+        assert rep['read_sources'][0]['previous'] == 1

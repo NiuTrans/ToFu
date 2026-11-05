@@ -4,6 +4,11 @@
 //! compact covering indexes serve metadata lists without hydrating bodies.
 //! Tenant-global identity and usage witnesses serialize quota admission while
 //! owner/Attempt counters keep deletion and retry work bounded.
+//!
+//! Archives are reconstructible diagnostic evidence, not durable user state: a
+//! live put that would meet the owner or conversation ceiling or the tenant
+//! byte budget first reclaims the oldest archives (`reclaim_for_put`, ordered
+//! by the owner age index), so capture never stops at a ceiling.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -19,13 +24,15 @@ use crate::versioned_document::{self, PutRequest};
 
 use crate::generated_tofudb_ir::{
     MAX_RAW_ARCHIVES_PER_CONVERSATION, MAX_RAW_ARCHIVES_PER_OWNER,
+    MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT, MAX_RAW_ARCHIVE_AGE_BACKFILL_ROWS_PER_PUT,
     MAX_RAW_ARCHIVE_DECODED_PART_BYTES, MAX_RAW_ARCHIVE_DOCUMENT_BYTES, MAX_RAW_ARCHIVE_LIST_ROWS,
     MAX_RAW_ARCHIVE_READ_CHUNK_BYTES, MAX_RAW_ARCHIVE_STORED_BYTES, MAX_RAW_ARCHIVE_SUMMARY_BYTES,
     MAX_RAW_ARCHIVE_SUMMARY_KEYS, MAX_RAW_ARCHIVE_TENANT_BUDGET_BYTES,
     RAW_ARCHIVE_ATTEMPT_INDEX_NAMESPACE, RAW_ARCHIVE_ATTEMPT_USAGE_NAMESPACE,
     RAW_ARCHIVE_CONVERSATION_INDEX_NAMESPACE, RAW_ARCHIVE_CONVERSATION_STATS_NAMESPACE,
     RAW_ARCHIVE_DOCUMENT_NAMESPACE, RAW_ARCHIVE_FREE_SPACE_WIRE_MAX_BYTES,
-    RAW_ARCHIVE_ID_CLAIM_NAMESPACE, RAW_ARCHIVE_OWNER_COUNT_NAMESPACE,
+    RAW_ARCHIVE_ID_CLAIM_NAMESPACE, RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE,
+    RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE, RAW_ARCHIVE_OWNER_COUNT_NAMESPACE,
     RAW_ARCHIVE_TASK_INDEX_NAMESPACE, RAW_ARCHIVE_TASK_ROUND_INDEX_NAMESPACE,
     RAW_ARCHIVE_TENANT_USAGE_NAMESPACE,
 };
@@ -45,10 +52,6 @@ fn invalid_data(message: &str) -> io::Error {
 
 fn conflict(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, message)
-}
-
-fn exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
 }
 
 fn push_text(raw: &mut Vec<u8>, value: &str) -> io::Result<()> {
@@ -287,7 +290,7 @@ impl Request {
                 let stored = request_blob
                     .len()
                     .checked_add(response_blob.len())
-                    .ok_or_else(|| exhausted("raw archive byte count overflow"))?;
+                    .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("raw archive byte count overflow"))?;
                 if request_blob.len() > MAX_RAW_ARCHIVE_STORED_BYTES
                     || response_blob.len() > MAX_RAW_ARCHIVE_STORED_BYTES
                     || stored > MAX_RAW_ARCHIVE_STORED_BYTES
@@ -318,7 +321,7 @@ impl Request {
                 ]
                 .into_iter()
                 .try_fold(0usize, usize::checked_add)
-                .ok_or_else(|| exhausted("raw archive metadata byte count overflow"))
+                .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("raw archive metadata byte count overflow"))
             }
             Self::List {
                 task_id,
@@ -499,6 +502,421 @@ struct RemovalRecord {
     stored_bytes: u64,
 }
 
+/// Removal identity of one archive: the owner age index value and the unit
+/// that reclamation, Attempt cleanup and conversation deletion retire.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ArchiveIdentity {
+    archive_id: String,
+    conversation_id: String,
+    task_id: String,
+    attempt_id: String,
+    round_num: u64,
+    created_at_ms: u64,
+    stored_bytes: u64,
+}
+
+impl ArchiveIdentity {
+    fn from_removal(conversation_id: &str, record: &RemovalRecord) -> Self {
+        Self {
+            archive_id: record.archive_id.clone(),
+            conversation_id: conversation_id.to_owned(),
+            task_id: record.task_id.clone(),
+            attempt_id: record.attempt_id.clone(),
+            round_num: record.round_num,
+            created_at_ms: record.created_at_ms,
+            stored_bytes: record.stored_bytes,
+        }
+    }
+
+    fn from_document(document: &ArchiveDocument) -> Self {
+        Self {
+            archive_id: document.archive_id.clone(),
+            conversation_id: document.conversation_id.clone(),
+            task_id: document.task_id.clone(),
+            attempt_id: document.attempt_id.clone(),
+            round_num: document.round_num,
+            created_at_ms: document.created_at_ms,
+            stored_bytes: document.stored_bytes,
+        }
+    }
+
+    fn attempt_key(&self, transaction: &AuthorityTransaction) -> io::Result<EntityKey> {
+        index_key(
+            transaction,
+            RAW_ARCHIVE_ATTEMPT_INDEX_NAMESPACE,
+            &attempt_index_prefix(&self.attempt_id)?,
+            self.created_at_ms,
+            &self.archive_id,
+        )
+    }
+
+    fn conversation_key(&self, transaction: &AuthorityTransaction) -> io::Result<EntityKey> {
+        index_key(
+            transaction,
+            RAW_ARCHIVE_CONVERSATION_INDEX_NAMESPACE,
+            &conversation_index_prefix(&self.conversation_id)?,
+            self.created_at_ms,
+            &self.archive_id,
+        )
+    }
+
+    fn age_key(&self, transaction: &AuthorityTransaction) -> io::Result<EntityKey> {
+        index_key(
+            transaction,
+            RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE,
+            &[],
+            self.created_at_ms,
+            &self.archive_id,
+        )
+    }
+
+    fn encode(&self) -> io::Result<Vec<u8>> {
+        serde_json::to_vec(self)
+            .map_err(|_| invalid_data("raw archive age index cannot be encoded"))
+    }
+}
+
+/// Splits a conversation removal index key into conversation, timestamp and
+/// archive identity (the inverse of `index_key` over `conversation_index_prefix`).
+fn decode_conversation_index_key(raw: &[u8]) -> io::Result<(&str, u64, &str)> {
+    fn text(raw: &[u8], at: usize) -> Option<(&str, usize)> {
+        let start = at.checked_add(2)?;
+        let length = usize::from(u16::from_be_bytes(raw.get(at..start)?.try_into().ok()?));
+        let end = start.checked_add(length)?;
+        Some((std::str::from_utf8(raw.get(start..end)?).ok()?, end))
+    }
+    (|| {
+        let (conversation_id, at) = text(raw, 0)?;
+        let created_at_ms = u64::from_be_bytes(raw.get(at..at.checked_add(8)?)?.try_into().ok()?);
+        let (archive_id, end) = text(raw, at + 8)?;
+        (end == raw.len()).then_some((conversation_id, created_at_ms, archive_id))
+    })()
+    .ok_or_else(|| invalid_data("raw archive conversation index key is malformed"))
+}
+
+/// Retires one archive's document, identity claim and all five covering
+/// indexes. Callers repair the usage counters of the set they remove.
+fn retire_archive(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    identity: &ArchiveIdentity,
+) -> io::Result<()> {
+    let archive_claim_key = claim_key(transaction, &identity.archive_id)?;
+    let claim_owner = database
+        .entity_get(transaction, &archive_claim_key)?
+        .ok_or_else(|| invalid_data("raw archive identity claim is missing"))?;
+    if claim_owner.as_slice() != transaction.owner_user_id().to_be_bytes() {
+        return Err(invalid_data("raw archive identity claim owner differs"));
+    }
+    versioned_document::delete(
+        database,
+        transaction,
+        document_key(transaction, &identity.archive_id)?,
+        "raw_archives",
+        &identity.archive_id,
+        None,
+    )?;
+    database.entity_delete(transaction, archive_claim_key)?;
+    let task_prefix = index_prefix(&identity.task_id, None)?;
+    let round_prefix = index_prefix(&identity.task_id, Some(identity.round_num))?;
+    for key in [
+        index_key(
+            transaction,
+            RAW_ARCHIVE_TASK_INDEX_NAMESPACE,
+            &task_prefix,
+            identity.created_at_ms,
+            &identity.archive_id,
+        )?,
+        index_key(
+            transaction,
+            RAW_ARCHIVE_TASK_ROUND_INDEX_NAMESPACE,
+            &round_prefix,
+            identity.created_at_ms,
+            &identity.archive_id,
+        )?,
+        identity.attempt_key(transaction)?,
+        identity.conversation_key(transaction)?,
+        identity.age_key(transaction)?,
+    ] {
+        database.entity_delete(transaction, key)?;
+    }
+    Ok(())
+}
+
+/// Retires one archive and repairs every counter it was charged to.
+fn reclaim_archive(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    identity: &ArchiveIdentity,
+) -> io::Result<()> {
+    retire_archive(database, transaction, identity)?;
+    let owner_count_key = counter_key(transaction, RAW_ARCHIVE_OWNER_COUNT_NAMESPACE, b"count")?;
+    let owner_count = read_u64(database, transaction, &owner_count_key, "owner count")?;
+    write_u64(
+        database,
+        transaction,
+        owner_count_key,
+        owner_count
+            .checked_sub(1)
+            .ok_or_else(|| invalid_data("raw archive owner count underflow"))?,
+    )?;
+    let tenant_key = global_key(transaction, TENANT_USAGE_NAMESPACE, b"bytes")?;
+    let tenant_usage = read_u64(database, transaction, &tenant_key, "tenant usage")?;
+    write_u64(
+        database,
+        transaction,
+        tenant_key,
+        tenant_usage
+            .checked_sub(identity.stored_bytes)
+            .ok_or_else(|| invalid_data("raw archive tenant usage underflow"))?,
+    )?;
+    let attempt_key = counter_key(
+        transaction,
+        RAW_ARCHIVE_ATTEMPT_USAGE_NAMESPACE,
+        identity.attempt_id.as_bytes(),
+    )?;
+    let attempt_remaining = read_u64(database, transaction, &attempt_key, "Attempt usage")?
+        .checked_sub(identity.stored_bytes)
+        .ok_or_else(|| invalid_data("raw archive Attempt usage underflow"))?;
+    if attempt_remaining == 0 {
+        database.entity_delete(transaction, attempt_key)?;
+    } else {
+        write_u64(database, transaction, attempt_key, attempt_remaining)?;
+    }
+    let (count, bytes) = read_conversation_stats(database, transaction, &identity.conversation_id)?;
+    let next_count = count
+        .checked_sub(1)
+        .ok_or_else(|| invalid_data("raw archive conversation count underflow"))?;
+    let next_bytes = bytes
+        .checked_sub(identity.stored_bytes)
+        .ok_or_else(|| invalid_data("raw archive conversation usage underflow"))?;
+    if next_count == 0 {
+        database.entity_delete(
+            transaction,
+            conversation_stats_key(transaction, &identity.conversation_id)?,
+        )?;
+    } else {
+        write_conversation_stats(
+            database,
+            transaction,
+            &identity.conversation_id,
+            next_count,
+            next_bytes,
+        )?;
+    }
+    Ok(())
+}
+
+const AGE_BACKFILL_CURSOR_KEY: &[u8] = b"cursor";
+const AGE_BACKFILL_RESUME_AFTER: u8 = 0;
+const AGE_BACKFILL_COMPLETE: u8 = 1;
+
+fn age_backfill_cursor_key(transaction: &AuthorityTransaction) -> io::Result<EntityKey> {
+    owner_key(
+        transaction,
+        RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE,
+        AGE_BACKFILL_CURSOR_KEY,
+    )
+}
+
+/// Whether every archive of the owner is in the age index; until then an
+/// archive written before the index existed may still lack its age row.
+fn owner_age_index_complete(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+) -> io::Result<bool> {
+    let cursor_key = age_backfill_cursor_key(transaction)?;
+    Ok(database.entity_get(transaction, &cursor_key)?.as_deref()
+        == Some(&[AGE_BACKFILL_COMPLETE][..]))
+}
+
+/// Indexes archives written before the owner age index existed. Each call
+/// reads at most `page_rows` conversation removal rows after the persistent
+/// owner cursor; rewriting an already indexed row stores the identical value.
+fn backfill_owner_age_index(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    page_rows: usize,
+) -> io::Result<()> {
+    let cursor_key = age_backfill_cursor_key(transaction)?;
+    let (namespace_start, end) = EntityKey::prefix_range(
+        transaction.tenant_id(),
+        transaction.owner_user_id(),
+        RAW_ARCHIVE_CONVERSATION_INDEX_NAMESPACE,
+        b"",
+    )?;
+    let start = match database.entity_get(transaction, &cursor_key)?.as_deref() {
+        None => namespace_start,
+        Some([AGE_BACKFILL_COMPLETE]) => return Ok(()),
+        Some([AGE_BACKFILL_RESUME_AFTER, last @ ..]) if !last.is_empty() => {
+            let mut successor = last.to_vec();
+            successor.push(0);
+            owner_key(
+                transaction,
+                RAW_ARCHIVE_CONVERSATION_INDEX_NAMESPACE,
+                &successor,
+            )?
+        }
+        Some(_) => return Err(invalid_data("raw archive age backfill cursor is malformed")),
+    };
+    let page = database.entity_scan(transaction, &start, &end, page_rows)?;
+    for (key, raw) in &page {
+        let (conversation_id, created_at_ms, archive_id) =
+            decode_conversation_index_key(key.key_bytes())?;
+        let record: RemovalRecord = serde_json::from_slice(raw)
+            .map_err(|_| invalid_data("raw archive removal index is malformed"))?;
+        if record.created_at_ms != created_at_ms || record.archive_id != archive_id {
+            return Err(invalid_data("raw archive removal index key differs"));
+        }
+        let identity = ArchiveIdentity::from_removal(conversation_id, &record);
+        database.entity_put(
+            transaction,
+            identity.age_key(transaction)?,
+            identity.encode()?,
+        )?;
+    }
+    let cursor = match page.last() {
+        Some((last, _)) if page.len() == page_rows => {
+            let mut cursor = vec![AGE_BACKFILL_RESUME_AFTER];
+            cursor.extend_from_slice(last.key_bytes());
+            cursor
+        }
+        _ => vec![AGE_BACKFILL_COMPLETE],
+    };
+    database.entity_put(transaction, cursor_key, cursor)
+}
+
+fn owner_reclaim_needed(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    attempt_id: &str,
+    requested: u64,
+    budget_bytes: u64,
+    body_storable: bool,
+) -> io::Result<bool> {
+    let owner_count_key = counter_key(transaction, RAW_ARCHIVE_OWNER_COUNT_NAMESPACE, b"count")?;
+    if read_u64(database, transaction, &owner_count_key, "owner count")?
+        >= MAX_RAW_ARCHIVES_PER_OWNER
+    {
+        return Ok(true);
+    }
+    if !body_storable {
+        return Ok(false);
+    }
+    let attempt_key = counter_key(
+        transaction,
+        RAW_ARCHIVE_ATTEMPT_USAGE_NAMESPACE,
+        attempt_id.as_bytes(),
+    )?;
+    if read_u64(database, transaction, &attempt_key, "Attempt usage")?.saturating_add(requested)
+        > MAX_RAW_ARCHIVE_STORED_BYTES as u64
+    {
+        return Ok(false);
+    }
+    let tenant_key = global_key(transaction, TENANT_USAGE_NAMESPACE, b"bytes")?;
+    Ok(
+        read_u64(database, transaction, &tenant_key, "tenant usage")?.saturating_add(requested)
+            > budget_bytes,
+    )
+}
+
+/// Makes room for one live put instead of refusing at a count ceiling or
+/// scrubbing a body the budget could hold: that conversation's oldest archives
+/// for its ceiling, then the owner's oldest for the owner ceiling and the byte
+/// budget, at most `MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT` in total. A body that
+/// is scrubbed anyway (free space, Attempt budget, parts above the budget)
+/// never reclaims for bytes. Whatever is still exceeded afterwards keeps the
+/// existing refusal or scrub, and the next put continues reclaiming.
+// TODO(enterprise): the byte budget is tenant-wide while reclamation only
+// retires the putting owner's archives, so another owner's usage can make this
+// owner reclaim its own oldest evidence without fitting the new body.
+// Multi-user tenants need per-owner byte budgets.
+fn reclaim_for_put(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    attempt_id: &str,
+    requested: u64,
+    budget_bytes: u64,
+    space_exhausted: bool,
+) -> io::Result<()> {
+    backfill_owner_age_index(
+        database,
+        transaction,
+        MAX_RAW_ARCHIVE_AGE_BACKFILL_ROWS_PER_PUT,
+    )?;
+    let mut remaining = MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT;
+    let (conversation_count, _) = read_conversation_stats(database, transaction, conversation_id)?;
+    let conversation_excess = conversation_count
+        .saturating_add(1)
+        .saturating_sub(MAX_RAW_ARCHIVES_PER_CONVERSATION as u64);
+    if conversation_excess > 0 {
+        let (start, end) = EntityKey::prefix_range(
+            transaction.tenant_id(),
+            transaction.owner_user_id(),
+            RAW_ARCHIVE_CONVERSATION_INDEX_NAMESPACE,
+            &conversation_index_prefix(conversation_id)?,
+        )?;
+        let limit = usize::try_from(conversation_excess)
+            .unwrap_or(usize::MAX)
+            .min(remaining);
+        for (key, raw) in database.entity_scan(transaction, &start, &end, limit)? {
+            let record: RemovalRecord = serde_json::from_slice(&raw)
+                .map_err(|_| invalid_data("raw archive removal index is malformed"))?;
+            let identity = ArchiveIdentity::from_removal(conversation_id, &record);
+            if identity.conversation_key(transaction)? != key {
+                return Err(invalid_data("raw archive removal index key differs"));
+            }
+            reclaim_archive(database, transaction, &identity)?;
+            remaining -= 1;
+        }
+    }
+    let body_storable = !space_exhausted && requested <= budget_bytes;
+    let (start, end) = EntityKey::prefix_range(
+        transaction.tenant_id(),
+        transaction.owner_user_id(),
+        RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE,
+        b"",
+    )?;
+    let mut oldest = None;
+    while remaining > 0
+        && owner_reclaim_needed(
+            database,
+            transaction,
+            attempt_id,
+            requested,
+            budget_bytes,
+            body_storable,
+        )?
+    {
+        if oldest.is_none() {
+            oldest = Some(
+                database
+                    .entity_scan(transaction, &start, &end, remaining)?
+                    .into_iter(),
+            );
+        }
+        let Some((key, raw)) = oldest.as_mut().and_then(|candidates| candidates.next()) else {
+            break;
+        };
+        let identity: ArchiveIdentity = serde_json::from_slice(&raw)
+            .map_err(|_| invalid_data("raw archive age index is malformed"))?;
+        if identity.age_key(transaction)? != key {
+            return Err(invalid_data("raw archive age index key differs"));
+        }
+        let claim = claim_key(transaction, &identity.archive_id)?;
+        if database.entity_get(transaction, &claim)?.is_none() {
+            // An engine that predates the age index retired this archive and
+            // left its row behind; the row alone is stale, not corruption.
+            database.entity_delete(transaction, key)?;
+        } else {
+            reclaim_archive(database, transaction, &identity)?;
+        }
+        remaining -= 1;
+    }
+    Ok(())
+}
+
 fn put(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -508,7 +926,9 @@ fn put(
 }
 
 // Offline restoration preserves detached history and refuses quota overflow;
-// ordinary writes retain the active-parent fence and partial-archive behavior.
+// ordinary writes retain the active-parent fence, reclaim the oldest archives
+// before a ceiling or the budget would refuse them, and keep partial-archive
+// behavior for what reclamation cannot cure.
 fn put_contents(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -573,15 +993,30 @@ fn put_contents(
             ));
         }
     }
+    let requested = u64::try_from(request_blob.len() + response_blob.len()).unwrap();
+    let space_exhausted = *available_free_bytes > 0
+        && (requested > *available_free_bytes
+            || *available_free_bytes - requested < *min_free_bytes);
+    if !restoring {
+        reclaim_for_put(
+            database,
+            transaction,
+            conversation_id,
+            attempt_id,
+            requested,
+            *budget_bytes,
+            space_exhausted,
+        )?;
+    }
     let owner_count_key = counter_key(transaction, RAW_ARCHIVE_OWNER_COUNT_NAMESPACE, b"count")?;
     let owner_count = read_u64(database, transaction, &owner_count_key, "owner count")?;
     if owner_count >= MAX_RAW_ARCHIVES_PER_OWNER {
-        return Err(exhausted("raw archive owner capacity is exhausted"));
+        return Err(crate::resource_exhaustion::raw_archive_owner_capacity("raw archive owner capacity is exhausted"));
     }
     let (conversation_count, conversation_bytes) =
         read_conversation_stats(database, transaction, conversation_id)?;
     if conversation_count >= MAX_RAW_ARCHIVES_PER_CONVERSATION as u64 {
-        return Err(exhausted("raw archive conversation capacity is exhausted"));
+        return Err(crate::resource_exhaustion::raw_archive_conversation_capacity("raw archive conversation capacity is exhausted"));
     }
     let tenant_usage_key = global_key(transaction, TENANT_USAGE_NAMESPACE, b"bytes")?;
     let tenant_usage = read_u64(database, transaction, &tenant_usage_key, "tenant usage")?;
@@ -591,18 +1026,15 @@ fn put_contents(
         attempt_id.as_bytes(),
     )?;
     let attempt_usage = read_u64(database, transaction, &attempt_usage_key, "Attempt usage")?;
-    let requested = u64::try_from(request_blob.len() + response_blob.len()).unwrap();
     let quota = tenant_usage
         .checked_add(requested)
         .is_none_or(|next| next > *budget_bytes)
-        || (*available_free_bytes > 0
-            && (requested > *available_free_bytes
-                || *available_free_bytes - requested < *min_free_bytes));
+        || space_exhausted;
     let attempt_exhausted = attempt_usage
         .checked_add(requested)
         .is_none_or(|next| next > MAX_RAW_ARCHIVE_STORED_BYTES as u64);
     if restoring && (quota || attempt_exhausted) {
-        return Err(exhausted(
+        return Err(crate::resource_exhaustion::raw_archive_restore_budget(
             "raw archive snapshot exceeds retained-byte budget",
         ));
     }
@@ -713,6 +1145,20 @@ fn put_contents(
         })
         .map_err(|_| invalid_data("raw archive removal index cannot be encoded"))?,
     )?;
+    let identity = ArchiveIdentity::from_document(&document);
+    database.entity_put(
+        transaction,
+        identity.age_key(transaction)?,
+        identity.encode()?,
+    )?;
+    if owner_count == 0 {
+        // No older archive exists, so none can be missing from the age index.
+        database.entity_put(
+            transaction,
+            age_backfill_cursor_key(transaction)?,
+            vec![AGE_BACKFILL_COMPLETE],
+        )?;
+    }
     database.entity_put(
         transaction,
         claim_key(transaction, archive_id)?,
@@ -817,7 +1263,7 @@ pub(crate) fn delete_conversation(
     if indexed.len() != expected_count as usize {
         return Err(invalid_data("raw archive conversation index count differs"));
     }
-    let mut records = Vec::with_capacity(indexed.len());
+    let mut identities = Vec::with_capacity(indexed.len());
     let mut observed_bytes = 0_u64;
     for (key, raw) in &indexed {
         let record: RemovalRecord = serde_json::from_slice(raw)
@@ -825,63 +1271,23 @@ pub(crate) fn delete_conversation(
         observed_bytes = observed_bytes
             .checked_add(record.stored_bytes)
             .ok_or_else(|| invalid_data("raw archive removal bytes overflow"))?;
-        records.push((key.clone(), record));
+        let identity = ArchiveIdentity::from_removal(conversation_id, &record);
+        if identity.conversation_key(transaction)? != *key {
+            return Err(invalid_data("raw archive removal index key differs"));
+        }
+        identities.push(identity);
     }
     if observed_bytes != expected_bytes {
         return Err(invalid_data("raw archive conversation byte count differs"));
     }
     let mut removed_by_attempt = BTreeMap::<String, u64>::new();
-    for (conversation_key, record) in &records {
-        let archive_claim_key = claim_key(transaction, &record.archive_id)?;
-        let claim_owner = database
-            .entity_get(transaction, &archive_claim_key)?
-            .ok_or_else(|| invalid_data("raw archive identity claim is missing"))?;
-        if claim_owner.as_slice() != transaction.owner_user_id().to_be_bytes() {
-            return Err(invalid_data("raw archive identity claim owner differs"));
-        }
-        versioned_document::delete(
-            database,
-            transaction,
-            document_key(transaction, &record.archive_id)?,
-            "raw_archives",
-            &record.archive_id,
-            None,
-        )?;
-        database.entity_delete(transaction, archive_claim_key)?;
-        let task_prefix = index_prefix(&record.task_id, None)?;
-        let round_prefix = index_prefix(&record.task_id, Some(record.round_num))?;
-        let attempt_prefix = attempt_index_prefix(&record.attempt_id)?;
-        for key in [
-            index_key(
-                transaction,
-                RAW_ARCHIVE_TASK_INDEX_NAMESPACE,
-                &task_prefix,
-                record.created_at_ms,
-                &record.archive_id,
-            )?,
-            index_key(
-                transaction,
-                RAW_ARCHIVE_TASK_ROUND_INDEX_NAMESPACE,
-                &round_prefix,
-                record.created_at_ms,
-                &record.archive_id,
-            )?,
-            index_key(
-                transaction,
-                RAW_ARCHIVE_ATTEMPT_INDEX_NAMESPACE,
-                &attempt_prefix,
-                record.created_at_ms,
-                &record.archive_id,
-            )?,
-            conversation_key.clone(),
-        ] {
-            database.entity_delete(transaction, key)?;
-        }
+    for identity in &identities {
+        retire_archive(database, transaction, identity)?;
         let removed = removed_by_attempt
-            .entry(record.attempt_id.clone())
+            .entry(identity.attempt_id.clone())
             .or_default();
         *removed = removed
-            .checked_add(record.stored_bytes)
+            .checked_add(identity.stored_bytes)
             .ok_or_else(|| invalid_data("raw archive Attempt removal bytes overflow"))?;
     }
     for (attempt_id, removed) in removed_by_attempt {
@@ -967,51 +1373,11 @@ pub(crate) fn delete_attempt(
     }
     let removed_count = documents.len() as u64;
     for (attempt_key, document) in documents {
-        let archive_claim_key = claim_key(transaction, &document.archive_id)?;
-        let claim_owner = database
-            .entity_get(transaction, &archive_claim_key)?
-            .ok_or_else(|| invalid_data("raw archive identity claim is missing"))?;
-        if claim_owner.as_slice() != transaction.owner_user_id().to_be_bytes() {
-            return Err(invalid_data("raw archive identity claim owner differs"));
+        let identity = ArchiveIdentity::from_document(&document);
+        if identity.attempt_key(transaction)? != attempt_key {
+            return Err(invalid_data("raw archive Attempt index key differs"));
         }
-        versioned_document::delete(
-            database,
-            transaction,
-            document_key(transaction, &document.archive_id)?,
-            "raw_archives",
-            &document.archive_id,
-            None,
-        )?;
-        database.entity_delete(transaction, archive_claim_key)?;
-        let task_prefix = index_prefix(&document.task_id, None)?;
-        let round_prefix = index_prefix(&document.task_id, Some(document.round_num))?;
-        let conversation_prefix = conversation_index_prefix(&document.conversation_id)?;
-        for key in [
-            index_key(
-                transaction,
-                RAW_ARCHIVE_TASK_INDEX_NAMESPACE,
-                &task_prefix,
-                document.created_at_ms,
-                &document.archive_id,
-            )?,
-            index_key(
-                transaction,
-                RAW_ARCHIVE_TASK_ROUND_INDEX_NAMESPACE,
-                &round_prefix,
-                document.created_at_ms,
-                &document.archive_id,
-            )?,
-            attempt_key,
-            index_key(
-                transaction,
-                RAW_ARCHIVE_CONVERSATION_INDEX_NAMESPACE,
-                &conversation_prefix,
-                document.created_at_ms,
-                &document.archive_id,
-            )?,
-        ] {
-            database.entity_delete(transaction, key)?;
-        }
+        retire_archive(database, transaction, &identity)?;
     }
     if removed_count == 0 {
         return Ok(Some(0));
@@ -1373,94 +1739,594 @@ mod tests {
         let replay = document.public_value(Some(true));
         assert_eq!(replay["idempotentReplay"], true);
     }
-    #[test]
-    fn conversation_archive_capacity_remains_atomically_deletable() {
-        use super::*;
+    /// Reclamation lifecycle: archives are reconstructible evidence, so the
+    /// ceilings and the byte budget retire the oldest instead of refusing.
+    mod lifecycle {
+        use super::super::*;
         use crate::vfs::{DeterministicVfs, Vfs};
         use std::{path::Path, sync::Arc};
-        // Each archive needs two point reads, up to one distinct Attempt counter,
-        // and six deletes plus that counter. Reserve space for outer lifecycle work.
-        assert!(u32::try_from(7 * MAX_RAW_ARCHIVES_PER_CONVERSATION + 1024).is_ok());
-        let vfs = Arc::new(DeterministicVfs::new(None));
-        let root = Path::new("/raw-capacity");
-        vfs.create_dir(root).unwrap();
-        vfs.sync_directory(Path::new("/")).unwrap();
-        let mut db = AuthorityDatabase::initialize_with_vfs(root, vfs).unwrap();
-        let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
-        crate::conversation_header::create(
-            &db,
-            &mut tx,
-            &crate::conversation_header::CreateRequest {
-                conversation_id: "conv".into(),
-                title: "Conversation".into(),
-                settings_json: b"{}".to_vec(),
-                created_at_ms: 1,
-                updated_at_ms: 1,
-                committed_at_ms: 1,
-            },
-        )
-        .unwrap();
-        db.commit(tx).unwrap();
-        crate::turn::attempt_migration::execute(&mut db,7,11,"migration.attempt.restore",json!({
-            "attempt_id":"attempt","conversation_id":"conv","turn_id":"turn","command_id":"command",
-            "task_id":"task","operation":"generate","dispatch_mode":"","queue_id":"","queue_state":"",
-            "status":"completed","base_projection_revision":1,"resume_anchor":{},"config":{},"error":{},
-            "timing_trace":{},"created_at":1,"started_at":2,"settled_at":3,"superseded_at":null
-        })).unwrap();
-        crate::turn::migration::execute(&mut db,7,11,"migration.turn.restore",json!({
-            "turn_id":"turn","conversation_id":"conv","presentation_id":"","lane_id":"main",
-            "parent_turn_id":null,"ordinal":1,"actor":"assistant","kind":"reply","run_id":"",
-            "status":"completed","current_attempt_id":"attempt","projection":{},"projection_revision":1,
-            "settlement":{},"created_at":1,"updated_at":3
-        })).unwrap();
-        for index in 0..=MAX_RAW_ARCHIVES_PER_CONVERSATION {
-            let request = Request::Put {
-                archive_id: format!("archive-{index:04}"),
-                conversation_id: "conv".into(),
-                turn_id: "turn".into(),
-                attempt_id: "attempt".into(),
-                task_id: "task".into(),
+
+        const BUDGET: u64 = 1024 * 1024;
+
+        const ROOT: &str = "/raw-lifecycle";
+
+        fn database_on(vfs: &Arc<DeterministicVfs>) -> AuthorityDatabase {
+            vfs.create_dir(Path::new(ROOT)).unwrap();
+            vfs.sync_directory(Path::new("/")).unwrap();
+            AuthorityDatabase::initialize_with_vfs(Path::new(ROOT), vfs.clone()).unwrap()
+        }
+
+        fn database() -> AuthorityDatabase {
+            database_on(&Arc::new(DeterministicVfs::new(None)))
+        }
+
+        fn seed_parent(db: &mut AuthorityDatabase, conversation: &str) {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            crate::conversation_header::create(
+                db,
+                &mut tx,
+                &crate::conversation_header::CreateRequest {
+                    conversation_id: conversation.into(),
+                    title: "Conversation".into(),
+                    settings_json: b"{}".to_vec(),
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                    committed_at_ms: 1,
+                },
+            )
+            .unwrap();
+            db.commit(tx).unwrap();
+            crate::turn::attempt_migration::execute(db, 7, 11, "migration.attempt.restore", json!({
+                "attempt_id":format!("{conversation}-attempt"),"conversation_id":conversation,
+                "turn_id":format!("{conversation}-turn"),"command_id":format!("{conversation}-command"),
+                "task_id":format!("{conversation}-task"),"operation":"generate","dispatch_mode":"",
+                "queue_id":"","queue_state":"","status":"completed","base_projection_revision":1,
+                "resume_anchor":{},"config":{},"error":{},"timing_trace":{},"created_at":1,
+                "started_at":2,"settled_at":3,"superseded_at":null
+            }))
+            .unwrap();
+            crate::turn::migration::execute(
+                db,
+                7,
+                11,
+                "migration.turn.restore",
+                json!({
+                    "turn_id":format!("{conversation}-turn"),"conversation_id":conversation,
+                    "presentation_id":"","lane_id":"main","parent_turn_id":null,"ordinal":1,
+                    "actor":"assistant","kind":"reply","run_id":"","status":"completed",
+                    "current_attempt_id":format!("{conversation}-attempt"),"projection":{},
+                    "projection_revision":1,"settlement":{},"created_at":1,"updated_at":3
+                }),
+            )
+            .unwrap();
+        }
+
+        fn put_request(
+            conversation: &str,
+            archive: &str,
+            created_at_ms: u64,
+            body_bytes: usize,
+            budget_bytes: u64,
+            available_free_bytes: u64,
+        ) -> Request {
+            Request::Put {
+                archive_id: archive.into(),
+                conversation_id: conversation.into(),
+                turn_id: format!("{conversation}-turn"),
+                attempt_id: format!("{conversation}-attempt"),
+                task_id: format!("{conversation}-task"),
                 round_num: 1,
                 transport_attempt: 0,
-                request_blob: Vec::new(),
+                request_blob: vec![7; body_bytes],
                 response_blob: Vec::new(),
-                request_bytes: 0,
+                request_bytes: body_bytes as u64,
                 response_bytes: 0,
-                request_sha256: "0".repeat(64),
-                response_sha256: "0".repeat(64),
-                integrity: "partial".into(),
-                truncation_reason: "quota_exhausted".into(),
+                request_sha256: "a".repeat(64),
+                response_sha256: "b".repeat(64),
+                integrity: "complete".into(),
+                truncation_reason: String::new(),
                 summary: Map::new(),
-                budget_bytes: 1024,
+                budget_bytes,
                 min_free_bytes: 0,
-                available_free_bytes: 0,
-                created_at_ms: index as u64 + 10,
-            };
-            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
-            let outcome = execute(&db, &mut tx, &request);
-            if index == MAX_RAW_ARCHIVES_PER_CONVERSATION {
-                assert!(outcome.is_err());
-            } else {
-                outcome.unwrap();
-                db.commit(tx).unwrap();
+                available_free_bytes,
+                created_at_ms,
             }
         }
-        let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
-        assert_eq!(
-            read_conversation_stats(&db, &mut tx, "conv").unwrap().0,
-            MAX_RAW_ARCHIVES_PER_CONVERSATION as u64
-        );
-        delete_conversation(&db, &mut tx, "conv").unwrap();
-        db.commit(tx).unwrap();
-        let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
-        assert_eq!(
-            read_conversation_stats(&db, &mut tx, "conv").unwrap(),
-            (0, 0)
-        );
-        assert!(load_document(&db, &mut tx, "archive-0000")
+
+        fn put(
+            db: &mut AuthorityDatabase,
+            conversation: &str,
+            archive: &str,
+            created_at_ms: u64,
+            body_bytes: usize,
+            budget_bytes: u64,
+        ) -> Value {
+            commit(
+                db,
+                &put_request(
+                    conversation,
+                    archive,
+                    created_at_ms,
+                    body_bytes,
+                    budget_bytes,
+                    0,
+                ),
+            )
+        }
+
+        fn commit(db: &mut AuthorityDatabase, request: &Request) -> Value {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let response = execute(db, &mut tx, request).unwrap().unwrap();
+            db.commit(tx).unwrap();
+            serde_json::from_slice(&response).unwrap()
+        }
+
+        fn age_order(db: &mut AuthorityDatabase) -> Vec<String> {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let (start, end) =
+                EntityKey::prefix_range(7, 11, RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE, b"").unwrap();
+            db.entity_scan(&mut tx, &start, &end, 1000)
+                .unwrap()
+                .into_iter()
+                .map(|(_, raw)| {
+                    serde_json::from_slice::<ArchiveIdentity>(&raw)
+                        .unwrap()
+                        .archive_id
+                })
+                .collect()
+        }
+
+        fn retained(db: &mut AuthorityDatabase, archive: &str) -> bool {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let claim = claim_key(&tx, archive).unwrap();
+            let claimed = db.entity_get(&mut tx, &claim).unwrap().is_some();
+            let stored = load_document(db, &mut tx, archive).unwrap().is_some();
+            assert_eq!(claimed, stored, "claim and document of {archive} diverge");
+            stored
+        }
+
+        fn listed(db: &mut AuthorityDatabase, task: &str) -> Vec<String> {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let request = Request::List {
+                task_id: task.into(),
+                round_num: Some(1),
+                limit: MAX_RAW_ARCHIVE_LIST_ROWS,
+            };
+            let raw = execute(db, &mut tx, &request).unwrap().unwrap();
+            serde_json::from_slice::<Value>(&raw).unwrap()["archives"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["archiveId"].as_str().unwrap().to_owned())
+                .collect()
+        }
+
+        fn owner_count(db: &mut AuthorityDatabase) -> u64 {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let key = counter_key(&tx, RAW_ARCHIVE_OWNER_COUNT_NAMESPACE, b"count").unwrap();
+            read_u64(db, &mut tx, &key, "owner count").unwrap()
+        }
+
+        fn tenant_usage(db: &mut AuthorityDatabase) -> u64 {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let key = global_key(&tx, TENANT_USAGE_NAMESPACE, b"bytes").unwrap();
+            read_u64(db, &mut tx, &key, "tenant usage").unwrap()
+        }
+
+        fn conversation(db: &mut AuthorityDatabase, conversation: &str) -> (u64, u64) {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            read_conversation_stats(db, &mut tx, conversation).unwrap()
+        }
+
+        /// Stands in for an owner already holding the full ceiling: only the
+        /// archives the test wrote exist, so reclamation must find them by age.
+        fn fill_owner_ceiling(db: &mut AuthorityDatabase) {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let key = counter_key(&tx, RAW_ARCHIVE_OWNER_COUNT_NAMESPACE, b"count").unwrap();
+            write_u64(db, &mut tx, key, MAX_RAW_ARCHIVES_PER_OWNER).unwrap();
+            db.commit(tx).unwrap();
+        }
+
+        /// Returns the owner to the state of archives written before the age
+        /// index existed: no age rows and no backfill cursor.
+        fn forget_age_index(db: &mut AuthorityDatabase) {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let (start, end) =
+                EntityKey::prefix_range(7, 11, RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE, b"").unwrap();
+            for (key, _) in db.entity_scan(&mut tx, &start, &end, 1000).unwrap() {
+                db.entity_delete(&mut tx, key).unwrap();
+            }
+            let cursor = owner_key(
+                &tx,
+                RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE,
+                AGE_BACKFILL_CURSOR_KEY,
+            )
+            .unwrap();
+            db.entity_delete(&mut tx, cursor).unwrap();
+            db.commit(tx).unwrap();
+        }
+
+        fn backfill_cursor(db: &mut AuthorityDatabase) -> Option<Vec<u8>> {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let cursor = owner_key(
+                &tx,
+                RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE,
+                AGE_BACKFILL_CURSOR_KEY,
+            )
+            .unwrap();
+            db.entity_get(&mut tx, &cursor).unwrap()
+        }
+
+        #[test]
+        fn owner_ceiling_reclaims_the_oldest_archives_instead_of_refusing() {
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            seed_parent(&mut db, "conv-b");
+            put(&mut db, "conv-a", "a-10", 10, 4, BUDGET);
+            put(&mut db, "conv-b", "b-20", 20, 4, BUDGET);
+            put(&mut db, "conv-a", "a-30", 30, 4, BUDGET);
+            fill_owner_ceiling(&mut db);
+
+            let stored = put(&mut db, "conv-b", "b-40", 40, 4, BUDGET);
+            assert_eq!(stored["integrity"], "complete");
+            assert_eq!(stored["idempotentReplay"], false);
+            assert!(!retained(&mut db, "a-10"));
+            assert_eq!(age_order(&mut db), ["b-20", "a-30", "b-40"]);
+            assert_eq!(listed(&mut db, "conv-a-task"), ["a-30"]);
+            assert_eq!(owner_count(&mut db), MAX_RAW_ARCHIVES_PER_OWNER);
+            assert_eq!(conversation(&mut db, "conv-a"), (1, 4));
+            assert_eq!(tenant_usage(&mut db), 12);
+
+            // An identical replay is answered from its claim and reclaims nothing.
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let replay = execute(
+                &db,
+                &mut tx,
+                &put_request("conv-b", "b-40", 40, 4, BUDGET, 0),
+            )
             .unwrap()
-            .is_none());
-        let count_key = counter_key(&tx, RAW_ARCHIVE_OWNER_COUNT_NAMESPACE, b"count").unwrap();
-        assert_eq!(read_u64(&db, &mut tx, &count_key, "owner").unwrap(), 0);
+            .unwrap();
+            drop(tx);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&replay).unwrap()["idempotentReplay"],
+                true
+            );
+            assert_eq!(age_order(&mut db), ["b-20", "a-30", "b-40"]);
+
+            put(&mut db, "conv-a", "a-50", 50, 4, BUDGET);
+            assert!(!retained(&mut db, "b-20"));
+            assert_eq!(age_order(&mut db), ["a-30", "b-40", "a-50"]);
+            assert_eq!(conversation(&mut db, "conv-b"), (1, 4));
+            assert_eq!(owner_count(&mut db), MAX_RAW_ARCHIVES_PER_OWNER);
+        }
+
+        #[test]
+        fn conversation_ceiling_reclaims_its_own_oldest_and_stays_atomically_deletable() {
+            // Each archive needs two point reads, up to one distinct Attempt
+            // counter, and seven deletes plus that counter. Reserve space for
+            // outer lifecycle work.
+            assert!(u32::try_from(8 * MAX_RAW_ARCHIVES_PER_CONVERSATION + 1024).is_ok());
+            let mut db = database();
+            seed_parent(&mut db, "conv");
+            seed_parent(&mut db, "other");
+            // Older than every archive of "conv": its ceiling must not reach it.
+            put(&mut db, "other", "other-0", 5, 0, BUDGET);
+            for index in 0..=MAX_RAW_ARCHIVES_PER_CONVERSATION {
+                let archive = format!("archive-{index:04}");
+                let stored = put(&mut db, "conv", &archive, index as u64 + 10, 0, BUDGET);
+                assert_eq!(stored["archiveId"], archive.as_str());
+            }
+            assert_eq!(
+                conversation(&mut db, "conv"),
+                (MAX_RAW_ARCHIVES_PER_CONVERSATION as u64, 0)
+            );
+            assert!(!retained(&mut db, "archive-0000"));
+            assert!(retained(&mut db, "archive-0001"));
+            assert!(retained(&mut db, "other-0"));
+            assert_eq!(
+                owner_count(&mut db),
+                MAX_RAW_ARCHIVES_PER_CONVERSATION as u64 + 1
+            );
+
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            delete_conversation(&db, &mut tx, "conv").unwrap();
+            db.commit(tx).unwrap();
+            assert_eq!(conversation(&mut db, "conv"), (0, 0));
+            assert!(!retained(&mut db, "archive-0001"));
+            assert_eq!(owner_count(&mut db), 1);
+            assert_eq!(age_order(&mut db), ["other-0"]);
+        }
+
+        #[test]
+        fn byte_budget_reclaims_oldest_bodies_and_scrubs_only_what_it_cannot_cure() {
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            seed_parent(&mut db, "conv-b");
+            put(&mut db, "conv-a", "a-10", 10, 100, 1000);
+            put(&mut db, "conv-b", "b-20", 20, 200, 1000);
+
+            let stored = put(&mut db, "conv-a", "a-30", 30, 300, 400);
+            assert_eq!(stored["integrity"], "complete");
+            assert_eq!(stored["storedBytes"], 300);
+            assert!(!retained(&mut db, "a-10") && !retained(&mut db, "b-20"));
+            assert_eq!(age_order(&mut db), ["a-30"]);
+            assert_eq!(tenant_usage(&mut db), 300);
+            assert_eq!(conversation(&mut db, "conv-b"), (0, 0));
+
+            // Parts larger than the whole budget cannot be cured by reclaiming.
+            let oversized = put(&mut db, "conv-b", "b-40", 40, 500, 400);
+            assert_eq!(oversized["truncationReason"], "quota_exhausted");
+            assert_eq!(oversized["storedBytes"], 0);
+            // Nor can free-space pressure: retired blobs are not free space yet.
+            let space = commit(&mut db, &put_request("conv-b", "b-50", 50, 50, 400, 1));
+            assert_eq!(space["truncationReason"], "quota_exhausted");
+            assert_eq!(age_order(&mut db), ["a-30", "b-40", "b-50"]);
+            assert_eq!(tenant_usage(&mut db), 300);
+        }
+
+        #[test]
+        fn reclamation_is_bounded_per_put_and_the_next_put_continues() {
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            for index in 0..70 {
+                put(
+                    &mut db,
+                    "conv-a",
+                    &format!("s-{index:02}"),
+                    10 + index,
+                    1,
+                    70,
+                );
+            }
+            let first = put(&mut db, "conv-a", "large-0", 100, 70, 70);
+            assert_eq!(first["truncationReason"], "quota_exhausted");
+            let order = age_order(&mut db);
+            assert_eq!(order.len(), 70 - MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT + 1);
+            assert_eq!(
+                order[0],
+                format!("s-{MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT:02}")
+            );
+
+            let second = put(&mut db, "conv-a", "large-1", 101, 70, 70);
+            assert_eq!(second["storedBytes"], 70);
+            assert_eq!(age_order(&mut db), ["large-0", "large-1"]);
+            assert_eq!(tenant_usage(&mut db), 70);
+        }
+
+        #[test]
+        fn age_rows_left_by_an_engine_without_the_index_are_dropped_not_fatal() {
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            put(&mut db, "conv-a", "a-10", 10, 4, BUDGET);
+            put(&mut db, "conv-a", "a-20", 20, 4, BUDGET);
+            let stale = ArchiveIdentity {
+                archive_id: "gone-5".into(),
+                conversation_id: "conv-a".into(),
+                task_id: "conv-a-task".into(),
+                attempt_id: "conv-a-attempt".into(),
+                round_num: 1,
+                created_at_ms: 5,
+                stored_bytes: 4,
+            };
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let key = stale.age_key(&tx).unwrap();
+            db.entity_put(&mut tx, key, stale.encode().unwrap())
+                .unwrap();
+            db.commit(tx).unwrap();
+            fill_owner_ceiling(&mut db);
+
+            put(&mut db, "conv-a", "a-30", 30, 4, BUDGET);
+            assert!(!retained(&mut db, "a-10"));
+            assert_eq!(age_order(&mut db), ["a-20", "a-30"]);
+            assert_eq!(owner_count(&mut db), MAX_RAW_ARCHIVES_PER_OWNER);
+            assert_eq!(tenant_usage(&mut db), 8);
+        }
+
+        #[test]
+        fn legacy_archives_are_backfilled_into_the_age_index_by_a_bounded_cursor() {
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            seed_parent(&mut db, "conv-b");
+            put(&mut db, "conv-b", "b-10", 10, 4, BUDGET);
+            put(&mut db, "conv-a", "a-20", 20, 4, BUDGET);
+            put(&mut db, "conv-a", "a-30", 30, 4, BUDGET);
+            assert_eq!(backfill_cursor(&mut db), Some(vec![AGE_BACKFILL_COMPLETE]));
+            forget_age_index(&mut db);
+            assert!(age_order(&mut db).is_empty());
+
+            // The cursor walks conversation removal rows: conv-a sorts first.
+            for expected in [vec!["a-20", "a-30"], vec!["b-10", "a-20", "a-30"]] {
+                let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+                backfill_owner_age_index(&db, &mut tx, 2).unwrap();
+                db.commit(tx).unwrap();
+                assert_eq!(age_order(&mut db), expected);
+            }
+            assert_eq!(backfill_cursor(&mut db), Some(vec![AGE_BACKFILL_COMPLETE]));
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            backfill_owner_age_index(&db, &mut tx, 2).unwrap();
+            assert_eq!(age_order(&mut db), ["b-10", "a-20", "a-30"]);
+        }
+
+        #[test]
+        fn a_live_put_backfills_legacy_archives_before_reclaiming_the_oldest() {
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            seed_parent(&mut db, "conv-b");
+            put(&mut db, "conv-b", "b-10", 10, 4, BUDGET);
+            put(&mut db, "conv-a", "a-20", 20, 4, BUDGET);
+            put(&mut db, "conv-a", "a-30", 30, 4, BUDGET);
+            forget_age_index(&mut db);
+            fill_owner_ceiling(&mut db);
+
+            put(&mut db, "conv-a", "a-40", 40, 4, BUDGET);
+            assert!(!retained(&mut db, "b-10"));
+            assert_eq!(age_order(&mut db), ["a-20", "a-30", "a-40"]);
+            assert_eq!(conversation(&mut db, "conv-b"), (0, 0));
+            assert_eq!(backfill_cursor(&mut db), Some(vec![AGE_BACKFILL_COMPLETE]));
+        }
+
+        #[test]
+        fn every_reclaiming_put_fault_commits_reclamation_and_insert_together() {
+            use crate::vfs::{FaultAction, FaultRule, Operation};
+            let seeded = || {
+                let vfs = Arc::new(DeterministicVfs::new(None));
+                let mut db = database_on(&vfs);
+                seed_parent(&mut db, "conv-a");
+                seed_parent(&mut db, "conv-b");
+                put(&mut db, "conv-b", "b-10", 10, 100, 400);
+                put(&mut db, "conv-a", "a-20", 20, 100, 400);
+                vfs.arm_fault(None).unwrap();
+                (vfs, db)
+            };
+            // 200 retained plus 300 requested exceeds the budget by b-10 alone.
+            let reclaiming = put_request("conv-a", "a-30", 30, 300, 400, 0);
+            let observe = |db: &mut AuthorityDatabase| {
+                (
+                    age_order(db),
+                    tenant_usage(db),
+                    owner_count(db),
+                    conversation(db, "conv-b"),
+                    retained(db, "b-10"),
+                    retained(db, "a-30"),
+                )
+            };
+            let before = (
+                vec!["b-10".to_owned(), "a-20".to_owned()],
+                200,
+                2,
+                (1, 100),
+                true,
+                false,
+            );
+            let after = (
+                vec!["a-20".to_owned(), "a-30".to_owned()],
+                400,
+                2,
+                (0, 0),
+                false,
+                true,
+            );
+            let (vfs, mut baseline) = seeded();
+            commit(&mut baseline, &reclaiming);
+            let trace = vfs.trace().unwrap();
+            drop(baseline);
+            vfs.crash().unwrap();
+            let mut recovered = AuthorityDatabase::open_with_vfs(Path::new(ROOT), vfs).unwrap();
+            assert_eq!(observe(&mut recovered), after);
+            let mut cells = Vec::new();
+            for (index, operation) in trace.iter().enumerate() {
+                let operation_number = index as u64 + 1;
+                cells.push((
+                    operation_number,
+                    FaultAction::ErrorBefore(io::ErrorKind::Interrupted),
+                ));
+                if *operation == Operation::Write {
+                    cells.push((operation_number, FaultAction::ShortWrite(7)));
+                }
+            }
+            assert!(!cells.is_empty());
+            for (operation_number, action) in cells {
+                let (vfs, mut db) = seeded();
+                vfs.arm_fault(Some(FaultRule {
+                    operation_number,
+                    action,
+                }))
+                .unwrap();
+                if let Ok(mut tx) = db.begin_with_identity_claim_scopes(7, 11) {
+                    if execute(&db, &mut tx, &reclaiming).is_ok() {
+                        let _ = db.commit(tx);
+                    }
+                }
+                drop(db);
+                vfs.crash().unwrap();
+                vfs.arm_fault(None).unwrap();
+                let mut db = AuthorityDatabase::open_with_vfs(Path::new(ROOT), vfs).unwrap();
+                let state = observe(&mut db);
+                assert!(
+                    state == before || state == after,
+                    "{action:?} before operation {operation_number} left {state:?}"
+                );
+            }
+        }
+
+        #[test]
+        #[ignore = "measurement"]
+        fn measure_reclaiming_put_cost() {
+            use crate::vfs::Operation;
+            use std::time::Instant;
+            let vfs = Arc::new(DeterministicVfs::new(None));
+            let mut db = database_on(&vfs);
+            seed_parent(&mut db, "conv-a");
+            let budget = 64 * BUDGET;
+            for index in 0..600 {
+                put(
+                    &mut db,
+                    "conv-a",
+                    &format!("w-{index:04}"),
+                    10 + index,
+                    2048,
+                    budget,
+                );
+            }
+            let ops = |vfs: &Arc<DeterministicVfs>| {
+                let trace = vfs.trace().unwrap();
+                let writes = trace.iter().filter(|op| **op == Operation::Write).count();
+                (trace.len(), writes)
+            };
+            vfs.arm_fault(None).unwrap();
+            let started = Instant::now();
+            for index in 0..300 {
+                put(
+                    &mut db,
+                    "conv-a",
+                    &format!("x-{index:04}"),
+                    10_000 + index,
+                    2048,
+                    budget,
+                );
+            }
+            let plain = (started.elapsed() / 300, ops(&vfs));
+            fill_owner_ceiling(&mut db);
+            vfs.arm_fault(None).unwrap();
+            let started = Instant::now();
+            for index in 0..300 {
+                put(
+                    &mut db,
+                    "conv-a",
+                    &format!("y-{index:04}"),
+                    20_000 + index,
+                    2048,
+                    budget,
+                );
+            }
+            let reclaiming = (started.elapsed() / 300, ops(&vfs));
+            forget_age_index(&mut db);
+            vfs.arm_fault(None).unwrap();
+            let started = Instant::now();
+            put(&mut db, "conv-a", "z-0", 30_000, 2048, budget);
+            let backfill = (started.elapsed(), ops(&vfs));
+            eprintln!(
+                "MEASURE plain/put {plain:?} reclaiming/put {reclaiming:?} first-backfill-put {backfill:?}"
+            );
+        }
+
+        #[test]
+        fn attempt_cleanup_retires_age_rows_with_its_archives() {
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            seed_parent(&mut db, "conv-b");
+            put(&mut db, "conv-a", "a-10", 10, 4, BUDGET);
+            put(&mut db, "conv-b", "b-20", 20, 4, BUDGET);
+            put(&mut db, "conv-a", "a-30", 30, 4, BUDGET);
+
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let removed = delete_attempt(&db, &mut tx, "conv-a", "conv-a-attempt", 64).unwrap();
+            db.commit(tx).unwrap();
+            assert_eq!(removed, Some(8));
+            assert_eq!(age_order(&mut db), ["b-20"]);
+            assert_eq!(owner_count(&mut db), 1);
+            assert_eq!(tenant_usage(&mut db), 4);
+            assert_eq!(conversation(&mut db, "conv-a"), (0, 0));
+        }
     }
 }

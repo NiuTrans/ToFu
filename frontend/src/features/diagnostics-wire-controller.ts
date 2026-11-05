@@ -1,7 +1,8 @@
 /*
  * Responsibility: own the open Debug drawer's flat-wire request lifecycle.
- * Entry point: createDiagnosticsWireController. The retained presenter owns
- * DOM/polling; this controller owns request coalescing and last-good evidence.
+ * Entry point: createDiagnosticsWireController. inspector-session owns opening
+ * and polling; inspector-feed owns the selected presentation. This controller
+ * owns request coalescing and last-good evidence.
  */
 
 export interface DiagnosticsWire {

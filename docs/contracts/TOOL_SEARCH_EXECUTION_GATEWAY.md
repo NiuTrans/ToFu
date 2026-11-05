@@ -110,6 +110,10 @@ return JSON.parse(second.output);
 
 **Problem:** 扩展断线使工具消失，模型无法区分未知名称、暂不可用和任务策略限制。**Decision:** `lib/browser/availability.py` 从 owner-scoped bridge registry 只读投影连接证据，注册器、每轮 `environment`、普通/程序内本地搜索共用此来源。搜索返回 `capability_availability`（`capability`、`namespace`、`available`、`reason_code`、`message`、`recovery_hint`，精确已知工具额外返回 `tool_name`）。原因分别为 `browser_extension_disconnected`、已连接但目录不允许的 `browser_tools_outside_task_catalog`、缺少身份的 `browser_owner_required` 和探测失败的 `browser_extension_status_unknown`；不附可调用 schema、不授予权限、不暴露客户端或其他用户。服务端无法读取未连接扩展的配置地址，只建议检查服务地址和认证，不断言地址填错。独立的服务端页面预览不依赖扩展。目录逐轮更新，连接恢复后下一轮重新判断；重复查询计数按目录名称指纹隔离。精确名（含单个前导 `+`）缺失返回零候选，不拆词推荐；namespace 是否存在按完整目录判定，不受可见/已披露排除影响。前端只展示同一结果的 `tool_catalog_availability` 最小原因/恢复投影，不另查连接真值。**Alternatives:** 仅前端告警无法让模型感知；给未连接工具 schema 混淆权限；查询全局客户端越过用户边界；断言地址填错缺少证据，均不采用。
 
+## 内置可选插件能力可用性
+
+**Problem:** 打包可选插件（`production`/`papers`/`image_generation`/`local_models`）由 allow-list 控制，部署未启用时工具从可执行目录消失，模型搜索 `produce_slides` / PPT 只得到零结果，无法区分“工具名不存在”和“能力未启用”，也不知道应开哪个开关。**Decision:** `lib/tools/optional_plugins.py::bundled_plugin_search_availability` 复用 `resolve_enabled_plugins` 的同一判定，只读投影到 `capability_availability`，按插件聚合（`namespace`=插件名，`reason_code=bundled_plugin_not_enabled`，`tool_name`/`matched_tools` 指向命中的休眠工具，`recovery_hint` 携带该插件声明的 `gate` 与 `TOFU_DEFAULT_TOOL_PLUGINS` / `config.plugins` 启用方式）。namespace 等于插件名或查询含声明的独有工具/产品别名时才触发；插件已启用、工具已在可执行目录或无关查询不产生证据，命中真实休眠名时清除 `missing_name`。普通 `search_tools` 与程序内 `catalog.search` 走同一路径（`task_cfg` 传入请求配置）。**Alternatives rejected:** 默认开启内置插件破坏本契约的 fail-closed 隔离；披露休眠 schema 误导权限；BM25/关键词匹配会在通用能力词上误报。证据不授予执行权限、不启动插件。Verify with `tests/tools/test_bundled_plugin_discovery.py`。
+
 ## 搜索结果展示
 
 Previously saved generic cached search rows may recover their presentation from the same round’s successful retained `toolContent` JSON (at most 65,536 characters). This is a bounded, render-only compatibility adapter: native catalog/availability rows and explicit totals take precedence; malformed, oversized, non-search or unfinished rounds are not reinterpreted. It never writes Turn state, changes revisions, or reruns tools. A revision-free server read repair of running Turns was rejected because it would alter the base of subsequent projection patches.
@@ -163,8 +167,8 @@ The observed empty-input `.ref` failure was one avoidable authoring failure;
 better diagnostics alone cannot establish a model's JavaScript proficiency.
 
 **Decision:** `tools.programmaticCalling` defaults to `auto`. Local routes keep
-ordinary tools and use JSON `execute_tools.calls` when batching is selected;
-discovery uses the same JSON gateway. Independent calls with known arguments
+ordinary tools; the batch tier uses JSON `execute_tools.calls`, and discovery
+uses the same JSON gateway. Independent calls with known arguments
 can run in parallel. Sequential batching preserves order but does not substitute
 prior results into arguments: the model must inspect a prerequisite result
 before supplying dependent arguments. Both interfaces use the same task
@@ -190,34 +194,48 @@ reuse still apply. Alternatives rejected: copying the first receipt invents
 execution evidence for writes; dropping receipts silently changes batch shape.
 Verify `test_gateway_child_occurrences.py` and `test_tool_call_flood_admission.py`.
 
-Explicit `on` enables the local `execute_program` action alongside ordinary
-tools. Where discovery already exposes `execute_tools`, it remains a JSON-only
-recovery path. Existing explicit `on` settings remain explicit; only absent or
-invalid settings default to `auto`. `TOFU_PTC_TIER=program|batch` remains an
-operator/evaluation override; `off` wins over it. A batch override also disables
-hosted programs. Auto may use provider-native PTC only through the existing
-selected-route support and reviewed-tool gates. A fallback route defaults to
-JSON; native support is not evidence of local code proficiency.
+**Default program tier (owner decision 2026-11-02).** Problem: `auto` resolved
+to the JSON batch tier and activated only when the request wording matched
+reduction keywords or earlier rounds showed read fan-out, so ordinary
+conversations never saw the code action and no adoption evidence accrued.
+Decision: the default `auto` and explicit `on` resolve identically. Whenever a
+task has executable tools, local routes expose `execute_program` additively
+beside the unchanged ordinary tools; where discovery exposes `execute_tools`,
+it remains a JSON-only recovery path. Request wording, observed history, model
+names and context windows neither enable nor demote the action. Repeated
+JavaScript authoring failures move one task to the batch tier (the existing
+per-task fallback); coordinator and delegating roots still run no programs.
+`TOFU_PTC_TIER=program|batch` remains an operator/evaluation override; `off`
+wins over it, and a batch override also disables hosted programs. Active modes
+may use provider-native PTC only through the existing selected-route support and
+reviewed-tool gates; a fallback route uses the local program tier.
 
 Gateway contract admission, context guidance, local execution and final wire
-projection follow this policy. A stale `program` tier alone cannot promote an
-auto request at the provider boundary. Prompt latches record the requested mode:
-unchanged settings keep schemas stable across rounds; changing the setting or
-loading a legacy latch recomputes the decision. Programs cannot bypass `auto`
-batch policy through the legacy `execute_tools.program` parameter.
+projection follow this policy. Route support or fallback never promotes a task
+whose tier is latched to `batch`. Prompt latches record the requested mode:
+unchanged settings keep schemas stable across rounds (an authoring fallback
+refuses programs at execution without rewriting the cached tool prefix);
+changing the setting or loading a legacy latch recomputes the decision.
+Programs cannot bypass `off`, the batch override or batch recovery through the
+legacy `execute_tools.program` parameter.
 
-**Alternatives considered:** model-name/size/context heuristics are not execution
-evidence; forcing code for all models adds unnecessary failure modes; removing
-JSON from explicit program mode removes recovery without proving a quality gain.
-No new model capability is registered. Promoting additional local routes needs
-paired task success, authoring failures, model usage and latency evidence.
+**Alternatives considered:** keeping `auto` on JSON until per-route paired
+evaluations exist left the capability invisible, so that evidence never
+accrued; keyword or fan-out activation guesses intent from wording;
+model-name/size/context heuristics are not execution evidence; code-only
+exposure (hiding direct tools, as Codex `code_mode_only` does) forces code for
+every action and adds failure modes for weak JavaScript authors; removing JSON
+from the program tier removes recovery without proving a quality gain. The
+accepted cost is the larger default gateway schema measured below. No new
+model capability is registered.
 
 Offline schema measurement against `8d9926433` uses the repository token counter
 on the same discovery/execution gateway schemas. The former resident program
 surface costs 614 tokens for the Kimi/DeepSeek counters and 632 for GPT-5.4;
 the default JSON surface costs 326 and 341 respectively (46–47% less).
 These are gateway-only local estimates, excluding ordinary tools and messages,
-not provider billing or live small-model success/latency measurements.
+not provider billing or live small-model success/latency measurements. Since
+the 2026-11-02 default change, active modes pay the program-surface cost.
 
 **Problem:** Live optional-adoption diagnostics showed programs used after
 ordinary reads, still fetching known inputs sequentially. Compact output alone
@@ -226,8 +244,8 @@ code action. **Decision:** local program tier exposes `execute_program` with
 one required `code` field. Discovery retains a separate batch `execute_tools`
 gateway. Ordinary tools stay available; the action is not forced. The adapter
 uses the existing gateway normalizer, task catalog, replay ledger, approvals,
-JavaScript engine and settlement. `programmaticCalling=off|auto` local batch policy and batch recovery
-reject programs at execution, including legacy requests.
+JavaScript engine and settlement. `programmaticCalling=off`, the batch override
+and batch recovery reject programs at execution, including legacy requests.
 
 `tools.EXACT_NAME(args)` and dynamic property calls through `tools[name]` use the same complete-value
 bridge as `tools.invoke(name,args)`. Property access grants no authority; the
@@ -370,7 +388,7 @@ This follows [Anthropic's workload boundaries](https://www.anthropic.com/enginee
 and [Cloudflare's composition and control flow guidance](https://developers.cloudflare.com/agents/tools/codemode/).
 
 ## Isolated full JavaScript adapter
-**Problem:** Additive exposure can remain unused or receive copied literals; complete API documents cannot fit large catalogs. Model observation and exact schema discovery must remain available without a predetermined call sequence. **Decision:** `tools.programmaticExposure='code_api'` is an explicit local experiment, frozen with the task's first orchestration decision. Its program description carries `tools.invoke` overloads and exact argument/declared decoded-result schemas for small wire catalogs. Only equal descriptions, arguments and results share one definition with every exact name retained; parameters and constraints are never merged. Large catalogs carry a bounded exact-name/purpose index, with explicit listed/total counts; unlisted methods remain searchable. `catalog.search` full-name lookups preserve complete schemas or return `arguments_schema_too_large`. Discovery and invocation may share one program. Both keep controls; execution still uses the complete task-owned catalog and its ordinary permission/schema/ approval gates. Optional `ToolContractV2.decoded_result_schema` describes successful local `tools.invoke` values; exact discovery preserves it and direct wire projects it into description text. It is producer documentation, not validation, freshness or coverage; absent outputs stay unknown. MCP structured-content schemas and hosted text envelopes are never inferred as decoded contracts. The compiler adds no cache or worker; full documents allow 64 methods/32 KiB metadata. Decoded-result schemas allow 32 KiB each within existing catalog bounds; all modes share 1,200 action-schema tokens. Index summaries use at most 120 characters per entry and 32 KiB of encoded metadata. Invalid/hosted/ambiguous catalogs, undiscoverably large schemas and required native schemas (`tool_choice`) retain additive exposure, with explicit reasons and effective exposure. Batch tier retains its recovery surface; default exposure remains additive. **Alternatives considered:** guessing fields from samples or MCP envelopes invents return guarantees; more prose left dataflow unchanged; aliases weaken identities; changing exposure breaks cache stability. Generated documents change no authority or call sequence; grouping avoids duplicate definitions. The projection records documentation mode, schema groups, index coverage and tokens. Code-only adoption is constrained and cannot be reported as a voluntary choice. Compare complete answers/source reads, child calls, model rounds, total tokens and latency; a program invocation alone is not a win. This follows the API pattern in the [Cloudflare Code Mode documentation](https://developers.cloudflare.com/agents/model-context-protocol/codemode/).
+**Problem:** Additive exposure can remain unused or receive copied literals; complete API documents cannot fit large catalogs. Model observation and exact schema discovery must remain available without a predetermined call sequence. **Decision:** `tools.programmaticExposure='code_api'` is an explicit local experiment, frozen with the task's first orchestration decision. Its program description carries `tools.invoke` overloads and exact argument/declared decoded-result schemas for small wire catalogs. Only equal descriptions, arguments and results share one definition with every exact name retained; parameters and constraints are never merged. Large catalogs carry a bounded exact-name/purpose index, with explicit listed/total counts; unlisted methods remain searchable. `catalog.search` full-name lookups preserve complete schemas or return `arguments_schema_too_large`. Discovery and invocation may share one program. Both keep controls; execution still uses the complete task-owned catalog and its ordinary permission/schema/ approval gates. Optional `ToolContractV2.decoded_result_schema` describes successful local `tools.invoke` values; exact discovery preserves it and direct wire projects it into description text. It is producer documentation, not validation, freshness or coverage; absent outputs stay unknown. MCP structured-content schemas and hosted text envelopes are never inferred as decoded contracts. The compiler adds no cache or worker; full documents allow 64 methods/32 KiB metadata. Decoded-result schemas allow 32 KiB each within existing catalog bounds. One 1,200-token inline target (`CODE_API_INLINE_TARGET_TOKENS`) chooses complete documentation versus discovery and sizes the discovery index; it is not a schema limit, so fixed action text above it still compiles discovery with an empty index instead of reverting to additive exposure, which would carry the same text plus every direct schema. Index summaries use at most 120 characters per entry and 32 KiB of encoded metadata. Invalid/hosted/ambiguous catalogs, undiscoverably large schemas and required native schemas (`tool_choice`) retain additive exposure, with explicit reasons and effective exposure. Batch tier retains its recovery surface; default exposure remains additive. **Alternatives considered:** guessing fields from samples or MCP envelopes invents return guarantees; more prose left dataflow unchanged; aliases weaken identities; changing exposure breaks cache stability. Generated documents change no authority or call sequence; grouping avoids duplicate definitions. The projection records documentation mode, schema groups, index coverage and tokens. Code-only adoption is constrained and cannot be reported as a voluntary choice. Compare complete answers/source reads, child calls, model rounds, total tokens and latency; a program invocation alone is not a win. This follows the API pattern in the [Cloudflare Code Mode documentation](https://developers.cloudflare.com/agents/model-context-protocol/codemode/).
 
 **Problem:** The retired hand-written ToolScript subset rejected familiar JavaScript syntax and adds authoring friction before any measured program benefit. **Decision:** `lib/tools/javascript.execute_javascript_program` supplies a separately verified async-function-body engine in a fresh Wasmtime Store and pinned QuickJS-NG WASM reactor. `tools.invoke(name,args)` yields decoded complete evidence; `tools.call` yields receipts, `tools.value` unwraps them, and `Promise.all` sibling calls enter one existing parallel batch callback after the VM yields. The callback ports must still be bound to the owning task gateway; the engine grants no independent catalog or execution authority. Batch preflight rejects the entire group before dispatch if any name, schema, or authority check fails. It returns one receipt per input in the original order: invalid inputs keep their typed error; valid siblings receive `batch_rejected` with the first rejection as `cause`. Attempts count toward the program quota, successes remain zero, and unwrapping hands the actual rejection and progress back to the model. A shortened error-only list is not a valid callback result. Independently settled execution failures still retain any successful sibling receipts; preflight rejection never dispatches those siblings. **Alternative considered:** executing valid siblings despite a preflight error would change existing effect authority; reporting `invalid_result` hides the repairable name/schema error. Both are rejected. `program_contract.py` is the shared evidence, handoff, search-input and bounds owner for the JavaScript runtime. Host terminal signals belong to one instance and escape guest `try/catch/finally` after returning from WASM; they never pass through Wasmtime's process-global callback-exception slot. The private guest bridge preserves original receipt identity and mutations for gateway witness checks; spread/JSON copies do not gain canonical provenance. Guest dynamic evaluation has only the same bounded JS capabilities. There is no module loader, filesystem, process, inherited descriptor, environment, timer or direct network capability.
 
@@ -431,6 +449,19 @@ post-hook snapshot with exact arguments; `tools.result({ref})` reads a versioned
 `input_` handle. Neither executes a source tool or recovers model previews.
 `artifactRef`/`tool-result:` belongs to artifact recovery. Wrong namespaces return typed recovery guidance. Use directory references as variables to avoid copying IDs. Returns are decoded data, not receipts or manifests.
 **Problem:** a program can mistake retained lookup for a first page fetch. **Decision:** the schema distinguishes fresh `tools.invoke` calls from historical `tools.result` reads; missing-result guidance permits an explicit new authorized read while preserving unknown prior effects. Absence is not proof that an operation never ran. **Alternative rejected:** implicit invocation on a lookup miss can repeat effects and invent historical evidence. Retained reads still stop the program before later effects.
+**Problem:** with programs on by default, every recapture minted a random
+handle into partial model views, so a byte-identical prefetch or dedup replay of
+the same call no longer produced the same model text; no-prose fallback evidence
+then carried one 120 KB page twice, and unchanged-result and prompt-cache
+identity broke. **Decision:** a recapture of the same call with byte-identical
+output keeps its handle; a dedup replay, which settles the earlier internal
+envelope rather than the original capture, re-advertises the capture that
+envelope names while the bank still binds it to the same call. Changed output
+still mints a new version and retires the old handle. **Alternatives
+rejected:** handles shared across different calls would outlive their binding;
+stripping the metadata only in the fallback builder leaves every other identity
+consumer broken. Verify `test_program_input_references.py`,
+`test_program_input_delivery.py` and `test_noprose_fallback_evidence.py`.
 Original captures admit JSON arrays/objects of any size, or outputs at least 4 KiB, at most 1 MiB.
 Failed, explicitly partial, media and child-manifest sources are excluded;
 unknown upstream coverage remains unknown, without recovering missing bytes.

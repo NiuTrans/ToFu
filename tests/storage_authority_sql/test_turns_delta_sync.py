@@ -173,6 +173,27 @@ def test_python_projection_patch_applier_matches_the_wire_contract():
         })
 
 
+def test_turn_command_replay_rejects_missing_related_rows(session):
+    from lib.storage.errors import StorageError
+    from lib.storage_authority_sql.operations_pkg._turns import _turn_create_pair
+
+    class IncompleteReplaySession:
+        def lock_key(self, namespace, key):
+            return None
+
+        def fetch_one(self, sql, params=()):
+            if 'JOIN storage_conversation_turns' in sql:
+                return {'attempt_id': 'attempt-missing', 'turn_id': 'turn-missing'}
+            return None
+
+    with pytest.raises(StorageError) as caught:
+        _turn_create_pair(IncompleteReplaySession(), {
+            'conversation_id': 'conv-d', 'user_id': 1,
+            'command_id': 'incomplete-replay',
+        })
+    assert caught.value.code == 'database_integrity'
+
+
 def test_turn_event_record_applies_only_revision_checked_projection_patch(
         session):
     from lib.storage.errors import StorageError

@@ -1,4 +1,4 @@
-"""Coordinate an in-place server re-exec through the production lifespan.
+"""Own restart preparation, Supervisor handoff and in-place process replacement.
 
 Request threads may ask for a restart, but only ``server.py`` may replace the
 process image.  The serving loop first stops accepting connections and runs
@@ -11,10 +11,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import json
 import logging
 import os
 import sys
 import threading
+import time
+
+from lib.log import audit_log, get_logger
+from lib.runtime.runtime_paths import data_root
+
+logger = get_logger(__name__)
 
 
 ShutdownRequester = Callable[[str], None]
@@ -31,6 +38,143 @@ class _PendingServerReexec:
 _STATE_LOCK = threading.RLock()
 _shutdown_requester: ShutdownRequester | None = None
 _pending_request: _PendingServerReexec | None = None
+
+
+def prepare_server_reexec_frontend() -> str:
+    """Prepare current disk code in an isolated control interpreter."""
+    from serverctl_pkg.application_restart import run_application_restart_control
+
+    try:
+        run_application_restart_control(_restart_project(), stage='prepare')
+    except (OSError, RuntimeError) as exc:
+        logger.warning('[Update] application restart preparation failed: %s', exc)
+        return str(exc)
+    return ''
+
+
+def _restart_project() -> str:
+    return os.path.realpath(
+        os.environ.get('TOFU_PROJECT_PATH')
+        or os.path.join(os.path.dirname(__file__), '..', '..'))
+
+
+def perform_server_reexec(reason: str, *, frontend_prevalidated: bool = False,
+                           requested_at: float | None = None) -> bool:
+    """Request a graceful process replacement through its lifecycle owner.
+
+    The caller must have verified there is no in-flight work — see
+    update_restart's list_running_tasks guard and lib/auto_restart.py's
+    precondition bundle. The host-local Supervisor is offered the replacement
+    for EVERY launch mode (not only ``TOFU_MANAGED_BY=supervisor``): the
+    manager kills and respawns the worker from outside, so a restart never
+    depends on the sick process replacing its own image — the failure mode
+    behind the stuck-retry incident. A freshly reloaded manager also cannot
+    keep launch-time resource policy pinned in a stale parent or inherited
+    environment. Only when the manager cannot be reached or refuses does the
+    worker fall back to the bounded in-place ``execv`` path. Returns ``False``
+    only when every lifecycle bridge refuses the request.
+
+    ``frontend_prevalidated`` marks that the synchronous request path already
+    ran (and passed) the frontend artifact preflight this restart; re-running
+    it here would rebuild/validate the same artifact twice, adding several
+    seconds of dead time to every restart on a slow filesystem.
+    """
+    if frontend_prevalidated:
+        logger.info('[Update] Frontend preflight already passed in-request; '
+                    'skipping the duplicate build')
+    else:
+        preflight_error = prepare_server_reexec_frontend()
+        if preflight_error:
+            logger.error(
+                '[Update] Restart preflight refused before shutdown: %s',
+                preflight_error,
+            )
+            audit_log(
+                'self_update_restart_preflight_failed',
+                pid=os.getpid(),
+                reason=reason,
+                detail=preflight_error[:500],
+            )
+            return False
+
+    project = _restart_project()
+    try:
+        from serverctl_pkg.application_restart import run_application_restart_control
+        supervisor_started = time.monotonic()
+        restart_kwargs = {
+            'stage': 'delegate',
+            'reason': reason,
+        }
+        if requested_at is not None:
+            restart_kwargs['requested_at'] = requested_at
+        result = run_application_restart_control(project, **restart_kwargs)
+        logger.info(
+            '[Update] Supervisor accepted deferred worker restart in '
+            '%.1fs', time.monotonic() - supervisor_started)
+    except Exception as exc:
+        logger.warning(
+            '[Update] Manager delegation unavailable (%s); falling back to '
+            'in-place re-exec', exc)
+        audit_log(
+            'self_update_manager_delegation_unavailable',
+            pid=os.getpid(),
+            reason=reason,
+            detail=str(exc)[:500],
+        )
+    else:
+        audit_log(
+            'self_update_managed_restart_requested',
+            pid=os.getpid(),
+            reason=reason,
+            manager_pid=(result.get('supervisorRefresh') or {}).get(
+                'managerPid'),
+        )
+        logger.warning(
+            '[Update] Current Supervisor accepted a fresh worker generation '
+            '(%s)', reason)
+        return True
+
+    if not begin_server_reexec(reason):
+        # Every bridge refused BEFORE the shutdown point of no return, so this
+        # process is guaranteed to keep serving. Roll back the acceptance
+        # stamp consume_restart committed in-request: leaving it would make
+        # the next human-approved retry hit cooldown/restartPending against a
+        # process that will never replace itself (the stuck-retry incident).
+        try:
+            from lib.lifecycle_approval import rollback_restart_stamp
+            if rollback_restart_stamp(pid=os.getpid()):
+                logger.warning(
+                    '[Update] Restart refused by every bridge; acceptance '
+                    'stamp rolled back so a retry can proceed')
+        except Exception as rb_exc:
+            logger.warning('[Update] Restart stamp rollback failed: %s', rb_exc)
+        return False
+    logger.info(
+        '[Update] Graceful server re-exec requested (%s); draining lifecycle',
+        reason,
+    )
+    # The shutdown event and its hard deadline are armed above before these
+    # best-effort writes touch the data volume.  ``execv`` skips atexit, so the
+    # freshness snapshot still has to land before the main thread replaces the
+    # process image.
+    try:
+        from lib import write_freshness as _wf
+        _wf.save_snapshot()
+    except Exception as _wf_e:
+        logger.warning('[Update] write-freshness snapshot save failed: %s', _wf_e)
+    # tofu_guard must not relaunch into the drain / fresh-boot window.
+    # execv KEEPS the pid, so the guard's process-age check can never see a
+    # re-exec — this marker is the only truthful signal. The fresh image
+    # clears it at boot-ready (server.py); the guard ignores markers older
+    # than 300s. Best-effort: the live instance lock remains the second fence.
+    try:
+        with open(os.path.join(data_root(), '.reexec_in_progress'), 'w') as _fh:
+            json.dump({'pid': os.getpid(), 'ts': time.time()}, _fh)
+    except Exception as _mk_e:
+        logger.warning('[Update] re-exec marker write failed (guard may race): %s',
+                       _mk_e)
+    finish_server_reexec_preparation()
+    return True
 
 
 def install_server_reexec_shutdown_requester(
@@ -184,7 +328,11 @@ def execute_pending_server_reexec(
             '[Restart] Marked %d inherited descriptor(s) close-on-exec',
             changed,
         )
-    executable = sys.executable
+    # A local runtime replica may be stale after the restart's own package
+    # installs; the source interpreter is always current, and the next
+    # managed spawn re-selects a fresh replica.
+    from serverctl_pkg.runtime_replica import authoritative_interpreter
+    executable = authoritative_interpreter()
     arguments = [executable, *sys.argv]
     log.info(
         '[Restart] Production shutdown complete; re-execing (%s): %s %s',
@@ -220,6 +368,8 @@ def _reset_server_reexec_state_for_tests() -> None:
 
 
 __all__ = [
+    'perform_server_reexec',
+    'prepare_server_reexec_frontend',
     'begin_server_reexec',
     'confirm_server_reexec_storage_boundary_released',
     'execute_pending_server_reexec',

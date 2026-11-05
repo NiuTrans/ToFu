@@ -89,6 +89,15 @@ def _clear_keys():
         api_keys.revoke_key(row['id'], owner_user_id=OWNER_USER_ID)
 
 
+def _keystore_outage(*_args, **_kwargs):
+    from lib.storage import StorageError
+    raise StorageError('database_unavailable', 'keystore down', retryable=True)
+
+
+def _mint_bug(*_args, **_kwargs):
+    raise TypeError('unexpected keyword internal-detail')
+
+
 @pytest.fixture
 def fake_artifact(tmp_path, monkeypatch):
     """Point the route's store seam at a one-file fake exe; returns a
@@ -235,14 +244,26 @@ class TestAgentInstallerRoute:
         monkeypatch.setenv('_TOFU_RUNTIME_HOST', '127.0.0.1')
         import lib.api_keys as ak
         auth = _bearer()  # mint BEFORE the keystore goes down
-
-        def _boom(*a, **kw):
-            raise RuntimeError('keystore down')
-        monkeypatch.setattr(ak, 'create_key', _boom)
+        monkeypatch.setattr(ak, 'create_key', _keystore_outage)
         r = flask_client.get('/api/v4/desktop/agent-installer',
                              headers=auth)
         assert r.status_code == 503
         assert '.exe' not in r.headers.get('Content-Disposition', '')
+
+    def test_7h_mint_server_fault_is_a_redacted_500_not_a_retry_503(
+            self, flask_client, fake_artifact, monkeypatch):
+        """Only a transient keystore outage is 'retry shortly'; a
+        deterministic fault is a logged, redacted 500 that still ships
+        nothing."""
+        monkeypatch.setenv('_TOFU_RUNTIME_HOST', '127.0.0.1')
+        import lib.api_keys as ak
+        auth = _bearer()
+        monkeypatch.setattr(ak, 'create_key', _mint_bug)
+        r = flask_client.get('/api/v4/desktop/agent-installer',
+                             headers=auth)
+        assert r.status_code == 500
+        assert '.exe' not in r.headers.get('Content-Disposition', '')
+        assert 'internal-detail' not in r.get_data(as_text=True)
 
     def test_7c_legacy_bundle_url_also_returns_exe_not_zip(
             self, flask_client, fake_artifact):
@@ -313,14 +334,23 @@ class TestAgentAttachBundleRoute:
     def test_7g_mint_failure_is_a_503(self, flask_client, monkeypatch):
         import lib.api_keys as ak
         auth = _bearer()
-
-        def _boom(*a, **kw):
-            raise RuntimeError('keystore down')
-        monkeypatch.setattr(ak, 'create_key', _boom)
+        monkeypatch.setattr(ak, 'create_key', _keystore_outage)
         r = flask_client.post('/api/v4/desktop/agent-attach-bundle',
                               headers=auth)
         assert r.status_code == 503, (
             'a device package must never ship without a usable credential')
+
+    def test_7i_mint_server_fault_is_a_redacted_500(
+            self, flask_client, monkeypatch):
+        import lib.api_keys as ak
+        auth = _bearer()
+        monkeypatch.setattr(ak, 'create_key', _mint_bug)
+        r = flask_client.post('/api/v4/desktop/agent-attach-bundle',
+                              headers=auth)
+        raw = r.get_data(as_text=True)
+        assert r.status_code == 500
+        assert 'internal-detail' not in raw
+        assert 'tofu-agent-attach' not in raw
 
 
 # ── 8-13: agent-side import ───────────────────────────────────────────
@@ -590,6 +620,23 @@ class TestClientDiagInbox:
                              headers=_bearer())
         assert r.status_code == 200
         assert r.get_json()['entries'] == []
+
+    def test_16f_unreadable_inbox_is_an_error_not_an_empty_list(
+            self, flask_client, diag_log):
+        """Only an absent inbox is empty. A refused read (here the
+        O_NOFOLLOW guard on a symlinked inbox) must not read as 'nothing
+        was ever pasted'."""
+        if not getattr(os, 'O_NOFOLLOW', 0):
+            pytest.skip('platform has no O_NOFOLLOW')
+        target = diag_log.parent / 'elsewhere.log'
+        target.write_text(json.dumps({'owner_user_id': OWNER_USER_ID,
+                                      'text': 'redirected'}) + '\n',
+                          encoding='utf-8')
+        diag_log.symlink_to(target)
+        r = flask_client.get('/api/v4/desktop/client-diag',
+                             headers=_bearer())
+        assert r.status_code == 500
+        assert 'redirected' not in r.get_data(as_text=True)
 
 
 class TestProbeTransportAlignment:

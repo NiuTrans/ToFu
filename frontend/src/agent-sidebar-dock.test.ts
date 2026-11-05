@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { backgroundAgentContextHost, createAgentSidebarDock, type AgentDockItem } from './agent-sidebar-dock';
 import { createConversationSurface } from './conversation/ui/conversation-surface';
-const translate = (_: string, fallback: string, vars?: Record<string, string | number>) => fallback.replace('{count}', String(vars?.count ?? ''));
+const translate = (_: string, fallback: string, vars?: Record<string, string | number>) => fallback.replace(/\{(\w+)\}/g, (match, name) => String(vars?.[name] ?? match));
 const item = (key: string, status = 'running'): AgentDockItem => ({ key, name: `Agent ${key}`, status, revision: '1', render: vi.fn(async () => '<details data-rich-key="call-1"><summary>read_files</summary><pre>source</pre></details>') });
 const settle = async () => { await Promise.resolve(); await Promise.resolve(); };
 
@@ -23,7 +23,7 @@ describe('background agent dock', () => {
     const agent = { ...item('a'), agentId: 'worker', swarmRunId: 'run' };
     const { host, dock, row, open } = setup([agent, item('failed', 'failed')]);
     const receipt = { swarmRunId: 'run', agentId: 'worker', messageId: 'm', state: 'input_confirmed', content: 'Full message' };
-    const run = { swarm_id: 'run', messageReceiptsAvailable: true, messageReceipts: [receipt,
+    const run = { swarm_id: 'run', messageReceipts: [receipt,
       { ...receipt, agentId: 'other', messageId: 'other', content: 'Other task' }], messageParticipants: [{ id: 'worker', label: 'Worker' }] };
     dock.update('one', [agent, item('failed', 'failed')], [run]);
     const all = host.querySelector<HTMLDetailsElement>('.agent-dock-messages')!;
@@ -57,7 +57,8 @@ describe('background agent dock', () => {
     } });
     surface.render(vm('first'));
     const rail = backgroundAgentContextHost(container, 'one', 'human')!;
-    expect(rail.dataset.conversationPart).toBe('turn-context-rail');
+    expect(rail.dataset.conversationPart).toBe('turn-context-card');
+    expect((rail.parentElement as HTMLElement).dataset.conversationPart).toBe('turn-context-rail');
     const agent = item('a'); const dock = createAgentSidebarDock({host:rail,translate}); dock.update('one',[agent]);
     const row = rail.querySelector<HTMLDetailsElement>('.agent-dock-agent')!;
     row.open = true; row.dispatchEvent(new Event('toggle')); await settle();
@@ -74,6 +75,53 @@ describe('background agent dock', () => {
     dock.mount(rail); expect(rail.querySelector('.agent-dock-agent')).toBe(row);
     dock.dispose(); surface.dispose();
   });
+  it('hosts the section in the rail that covers a latest input persisted without context', () => {
+    const container = document.createElement('div'); document.body.append(container);
+    const turn = (turnId: string, ordinal: number, actor: 'human' | 'assistant', model = ''): any => ({
+      turnId, laneId: 'main', parentTurnId: null, ordinal, actor, role: actor === 'human' ? 'user' : 'assistant',
+      kind: actor === 'human' ? 'input' : 'reply', status: 'completed', attemptId: null, projectionRevision: 1,
+      subtreeRevisionKey: turnId, commandPending: null, finish: null, branches: [], actions: [], metadata: {}, source: {},
+      blocks: model ? [{ kind: 'context', blockId: `${turnId}-ctx`, identitySource: 'contract', source: { model }, value: { snapshot: { model } } }] : [],
+    });
+    const surface = createConversationSurface(container, { renderTurnContextRail(node, block) {
+      node.replaceChildren(); node.textContent = String(block?.value.snapshot.model || ''); node.hidden = !block;
+    } });
+    surface.render({ conversationId: 'one', conversationRevision: 1, transport: 'live', orphanLanes: [], queue: [],
+      mainLane: { laneId: 'main', parentTurnId: null, title: 'Conversation', kind: 'main', turns: [
+        turn('human', 1, 'human', 'opus'), turn('reply', 2, 'assistant'), turn('proactive', 3, 'human'), turn('proactive-reply', 4, 'assistant'),
+      ] } } as any);
+    const covering = backgroundAgentContextHost(container, 'one', 'human')!;
+    expect(covering.textContent).toBe('opus');
+    expect(backgroundAgentContextHost(container, 'one', 'proactive')).toBe(covering);
+    // Narrow pane: no rail track is granted, and a context-less input has no fold.
+    (covering.parentElement as HTMLElement).style.display = 'none';
+    expect(backgroundAgentContextHost(container, 'one', 'proactive')).toBeNull();
+    surface.dispose();
+  });
+  it('hosts the section in the latest round input rail, including autopilot and critic inputs', () => {
+    const container = document.createElement('div'); document.body.append(container);
+    const turn = (turnId: string, ordinal: number, actor: 'human' | 'assistant' | 'virtual_user' | 'critic', model = ''): any => ({
+      turnId, laneId: 'main', parentTurnId: null, ordinal, actor, role: actor === 'assistant' ? 'assistant' : 'user',
+      kind: actor === 'assistant' ? 'reply' : 'input', status: 'completed', attemptId: null, projectionRevision: 1,
+      subtreeRevisionKey: turnId, commandPending: null, finish: null, branches: [], actions: [], metadata: {}, source: {},
+      blocks: model ? [{ kind: 'context', blockId: `${turnId}-ctx`, identitySource: 'contract', source: { model }, value: { snapshot: { model } } }] : [],
+    });
+    const surface = createConversationSurface(container, { renderTurnContextRail(node, block) {
+      node.replaceChildren(); node.textContent = String(block?.value.snapshot.model || ''); node.hidden = !block;
+    } });
+    surface.render({ conversationId: 'one', conversationRevision: 1, transport: 'live', orphanLanes: [], queue: [],
+      mainLane: { laneId: 'main', parentTurnId: null, title: 'Conversation', kind: 'main', turns: [
+        turn('human', 1, 'human', 'opus'), turn('reply', 2, 'assistant'),
+        turn('autopilot', 3, 'virtual_user', 'autopilot-context'), turn('autopilot-reply', 4, 'assistant'),
+        turn('critic', 5, 'critic'), turn('critic-reply', 6, 'assistant'),
+      ] } } as any);
+    // A swarm/autopilot continuation opens the round being read; the human rail above it is history.
+    expect(backgroundAgentContextHost(container, 'one', 'autopilot')?.textContent).toBe('autopilot-context');
+    expect(backgroundAgentContextHost(container, 'one', 'critic')?.textContent).toBe('autopilot-context');
+    expect(backgroundAgentContextHost(container, 'one')?.textContent).toBe('autopilot-context');
+    expect(backgroundAgentContextHost(container, 'one', 'reply')).toBeNull();
+    surface.dispose();
+  });
   it('starts collapsed and renders execution only on explicit expansion', async () => {
     const agent = item('a'); const { host, open } = setup([agent]);
     expect(host.querySelector('.agent-dock')!.classList.contains('is-expanded')).toBe(false);
@@ -84,14 +132,75 @@ describe('background agent dock', () => {
     expect(host.querySelector('.agent-dock-avatar')).toBeNull();
   });
   it('keeps readable status and count without requesting execution details', () => {
-    const agent = { ...item('a'), statusLabel: 'Running · round 42' };
+    const agent = { ...item('a'), statusLabel: 'Waiting for capacity' };
     const { host, dock } = setup([agent, item('b', 'pending')]);
     expect(host.querySelector('.agent-dock-counts')!.textContent).toBe('1 running · 1 waiting');
-    expect(host.querySelector('.agent-dock-status')!.textContent).toBe('Running · round 42');
+    expect(host.querySelector('.agent-dock-status')!.textContent).toBe('Waiting for capacity');
     expect(agent.render).not.toHaveBeenCalled();
-    dock.update('two', [{ ...item('new'), statusLabel: 'Running · round 3' }]);
-    expect(host.textContent).not.toContain('round 42');
-    expect(host.textContent).toContain('round 3');
+    dock.update('two', [{ ...item('new'), statusLabel: 'Waiting for prerequisites' }]);
+    expect(host.textContent).not.toContain('capacity');
+    expect(host.textContent).toContain('prerequisites');
+  });
+  it('reads each row as what the agent does and its state, keeping the ID a quiet identifier', () => {
+    const described = { ...item('a'), objective: '  Review the dock contract\n\nFull instructions stay in the detail.', statusLabel: 'Working…' };
+    const { host, dock } = setup([described, item('b', 'failed')]);
+    const [row, failed] = host.querySelectorAll<HTMLDetailsElement>('.agent-dock-agent');
+    const part = (node: Element, name: string) => node.querySelector<HTMLElement>(`.agent-dock-${name}`)!;
+    expect(part(row, 'purpose').textContent).toBe('Review the dock contract');
+    expect(part(row, 'purpose').title).toBe('Review the dock contract');
+    expect(part(row, 'status').textContent).toBe('Working…');
+    expect(part(row, 'name').textContent).toBe('Agent a'); expect(part(row, 'name').hidden).toBe(false);
+    expect(row.querySelector('summary')!.getAttribute('aria-label')).toBe('Review the dock contract · Working… · Agent a');
+    expect(row.textContent).not.toContain('Full instructions');
+    expect(row.title).toBe('');
+    // Live and queued glyphs are drawn by style; outcomes use registry glyphs.
+    expect(row.dataset.tone).toBe('live'); expect(part(row, 'glyph').querySelector('svg')).toBeNull();
+    expect(failed.dataset.tone).toBe('error'); expect(part(failed, 'glyph').querySelector('svg')).not.toBeNull();
+    // Without a brief the name is the purpose line, never repeated beside the state.
+    expect(part(failed, 'purpose').textContent).toBe('Agent b'); expect(part(failed, 'name').hidden).toBe(true);
+    expect(failed.querySelector('summary')!.getAttribute('aria-label')).toBe('Agent b · failed');
+    dock.update('one', [{ ...described, status: 'pending', statusLabel: 'Waiting to start' }, { ...item('b', 'stalled'), objective: 'Profile storage' }]);
+    expect(host.querySelectorAll('.agent-dock-agent')[0]).toBe(row);
+    expect(row.dataset.tone).toBe('queued'); expect(part(row, 'status').textContent).toBe('Waiting to start');
+    expect(failed.dataset.tone).toBe('attention'); expect(part(failed, 'glyph').querySelector('svg')).not.toBeNull();
+    expect(part(failed, 'purpose').textContent).toBe('Profile storage'); expect(part(failed, 'name').hidden).toBe(false);
+  });
+  it('shows the round count on the collapsed row and patches it in place', () => {
+    const agent = { ...item('a'), objective: 'Review the dock contract', statusLabel: 'Working…', roundCount: 41 };
+    const { host, dock, row } = setup([agent, item('b', 'pending')]);
+    const rounds = row().querySelector<HTMLElement>('.agent-dock-rounds')!;
+    expect(rounds.textContent).toBe('41 rounds'); expect(rounds.hidden).toBe(false);
+    expect(row().querySelector('summary')!.getAttribute('aria-label')).toBe('Review the dock contract · Working… · 41 rounds · Agent a');
+    const queued = host.querySelectorAll<HTMLDetailsElement>('.agent-dock-agent')[1];
+    expect(queued.querySelector<HTMLElement>('.agent-dock-rounds')!.hidden).toBe(true);
+    expect(queued.querySelector('summary')!.getAttribute('aria-label')).toBe('Agent b · pending');
+    dock.update('one', [{ ...agent, roundCount: 1 }, item('b', 'pending')]);
+    expect(row().querySelector('.agent-dock-rounds')).toBe(rounds); expect(rounds.textContent).toBe('1 round');
+    dock.update('one', [{ ...agent, status: 'done', roundCount: 57 }]);
+    const history = host.querySelector<HTMLDetailsElement>('.agent-dock-history')!;
+    history.open = true; history.dispatchEvent(new Event('toggle'));
+    expect(history.querySelector('.agent-dock-rounds')!.textContent).toBe('57 rounds');
+    expect(agent.render).not.toHaveBeenCalled();
+  });
+  it('shows message folds, and a section of nothing but folds, only once messages exist', () => {
+    const host = document.createElement('main'); document.body.append(host);
+    const dock = createAgentSidebarDock({ host, translate });
+    const section = host.querySelector<HTMLElement>('.agent-dock')!;
+    const run = { swarm_id: 'run', messageReceipts: [] as any[], messageParticipants: [{ id: 'worker', label: 'Worker' }] };
+    dock.update('one', [], [run]);
+    expect(section.hidden).toBe(true);
+    const agent = { ...item('a'), agentId: 'worker', swarmRunId: 'run' };
+    dock.update('one', [agent], [run]);
+    const all = host.querySelector<HTMLDetailsElement>('.agent-dock-messages')!;
+    const own = host.querySelector<HTMLDetailsElement>('.agent-dock-agent-messages')!;
+    expect(section.hidden).toBe(false); expect(all.hidden).toBe(true); expect(own.hidden).toBe(true);
+    const other = { swarmRunId: 'run', agentId: 'other', messageId: 'm', state: 'submitted', content: 'Other task' };
+    dock.update('one', [agent], [{ ...run, messageReceipts: [other] }]);
+    expect(all.hidden).toBe(false); expect(own.hidden).toBe(true);
+    dock.update('one', [agent], [{ ...run, messageReceipts: [other, { ...other, agentId: 'worker', messageId: 'n', content: 'Own task' }] }]);
+    expect(own.hidden).toBe(false); expect(own.textContent).toContain('Own task'); expect(own.textContent).not.toContain('Other task');
+    dock.update('one', [], [{ ...run, messageReceipts: [other] }]);
+    expect(section.hidden).toBe(false); expect(all.hidden).toBe(false);
   });
   it('retains an open completed row until the reader closes it', async () => {
     const agent = item('a'); const { host, dock, row, open } = setup([agent]); await open();
@@ -306,5 +415,55 @@ describe('background agent dock', () => {
     rows[1].open = true; rows[1].dispatchEvent(new Event('toggle'));
     expect(second.render).not.toHaveBeenCalled(); resolve('<pre>first</pre>'); await settle();
     expect(second.render).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('background agent Stop', () => {
+  const actions = (row: HTMLElement) => Array.from(row.querySelectorAll<HTMLButtonElement>('.agent-dock-actions button'));
+
+  it('stops a running agent from its opened row and stays busy until the snapshot settles it', async () => {
+    let accept!: (accepted: boolean) => void;
+    const stop = vi.fn(() => new Promise<boolean>(resolve => { accept = resolve; }));
+    const agent = { ...item('a'), stop, openConversation: vi.fn() };
+    const { dock, row, open } = setup([agent]);
+    await open();
+    expect(actions(row()).map(button => button.textContent)).toEqual(['Open agent conversation', 'Stop agent']);
+    const button = actions(row())[1];
+    button.focus(); button.click(); button.click();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(button.disabled).toBe(true); expect(button.textContent).toBe('Stopping…');
+    expect(document.activeElement).toBe(row().querySelector('summary'));
+    accept(true); await settle();
+    dock.update('one', [{ ...agent }]);
+    expect(button.disabled).toBe(true); expect(actions(row())[1]).toBe(button);
+    dock.update('one', [{ ...item('a', 'cancelled'), openConversation: agent.openConversation }]);
+    expect(actions(row()).map(node => node.textContent)).toEqual(['Open agent conversation']);
+    expect(row().open).toBe(true);
+  });
+
+  it('re-arms Stop when nothing was stopped or the request failed, using the latest port', async () => {
+    const declined = vi.fn(async () => false);
+    const { dock, row, open } = setup([{ ...item('a'), stop: declined }]);
+    await open();
+    const [button] = actions(row());
+    button.click(); await settle();
+    expect(declined).toHaveBeenCalledTimes(1);
+    expect(button.disabled).toBe(false); expect(button.textContent).toBe('Stop agent');
+    const failing = vi.fn(async (): Promise<boolean> => { throw new Error('offline'); });
+    dock.update('one', [{ ...item('a'), stop: failing }]);
+    expect(actions(row())[0]).toBe(button);
+    button.click(); await settle();
+    expect(failing).toHaveBeenCalledTimes(1); expect(declined).toHaveBeenCalledTimes(1);
+    expect(button.disabled).toBe(false);
+  });
+
+  it('offers no Stop without a live port and drops the empty action bar', async () => {
+    const { dock, row, open } = setup([item('a')]);
+    await open();
+    expect(row().querySelector('.agent-dock-actions')).toBeNull();
+    dock.update('one', [{ ...item('a'), stop: vi.fn(async () => true) }]);
+    expect(actions(row())).toHaveLength(1);
+    dock.update('one', [item('a')]);
+    expect(row().querySelector('.agent-dock-actions')).toBeNull();
   });
 });

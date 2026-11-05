@@ -109,18 +109,28 @@ _MEASURE_JS = r"""
 def _rows(page, live_server):
     # Feature flags are module-owned after the ESM cutover. Exercise their
     # real boot authority instead of mutating the removed window snapshot.
+    intercepted = []
+
     def _force_debug_flags(route):
         response = route.fetch()
+        assert response.ok, 'the real config read must succeed before injecting flags'
         body = response.json()
-        body['feature_flags'] = {
+        payload = body.get('data', body)
+        payload['feature_flags'] = {
             'debug_mode': True, 'optimizer_enabled': True}
+        intercepted.append(route.request.url)
         route.fulfill(response=response, json=body)
 
-    page.route('**/api/v1/server-config**', _force_debug_flags)
-    page.reload(wait_until='domcontentloaded')
-    page.goto(live_server, wait_until='domcontentloaded')
-    page.wait_for_function('typeof renderToolRoundsHTML === "function"',
-                           timeout=30000)
+    page.route('**/api/v4/server-config**', _force_debug_flags)
+    with page.expect_response('**/api/v4/server-config**'):
+        page.reload(wait_until='domcontentloaded')
+    assert intercepted, 'the fixture must intercept the actual boot config read'
+    # The response arriving does not mean its async application has completed.
+    # Observe the renderer's public capability before taking geometry readings.
+    page.wait_for_function('''() => typeof renderToolRoundsHTML === 'function'
+      && renderToolRoundsHTML([{roundNum:1,llmRound:0,toolName:'run_command',
+        status:'done',toolContent:'ok',_taskId:'task-geom-1'}], false, null)
+        .includes('ri-tool-anchor')''', timeout=30000)
     n = page.evaluate(_SEED_JS)
     assert n >= 2, f'seed rendered {n} tool slots, expected >= 2'
     return page.evaluate(_MEASURE_JS)

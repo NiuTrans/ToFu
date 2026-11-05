@@ -18,22 +18,24 @@ served 1:1 by tofu-db's semantic executor.
 
 from __future__ import annotations
 
+import logging
 import random
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
-from lib.log import get_logger
-from lib.storage.commit_events import publish_committed_events
+from lib.log import get_logger, log_event, log_fields
+from lib.storage.commit_events import publish_committed_events, publish_committed_operation
+from lib.storage.deadline_policy import observe_storage_service
 from lib.storage.errors import StorageError
 from lib.storage.event_composition import EventBatchCompositionBudget, native_event_batch_composition_budget
 from lib.storage.frame_admission import (
     FrameByteAdmission,
     process_response_frame_admission,
 )
-from lib.storage.retry_log import retry_log_throttle
+from lib.storage.retry_log import RetryLogThrottle, retry_log_throttle
 from lib.storage.v2_semantics import application_notice, application_result, request_payload
 from lib.storage.protocol import validate_operation
 
@@ -50,12 +52,9 @@ from tofu_db.wire import (
 )
 
 
-# Transient classified failures that are safe to replay on a fresh connection.
-# Mirrors lib/storage/client.py: reads are replay-safe; a command stays
-# fail-fast unless the peer explicitly proved it was rejected before dispatch.
-# storage.v2 addition: the native engine emits database_busy only from
-# classified pre-mutation refusals (WAL-rotation backpressure, capacity
-# bounds), so a same command-id retry of a busy command cannot double-apply.
+# Native queries replay freely; commands preserve their receipt identity
+# across classified transient failures. Protocol/integrity failures and the
+# instance-bound checkpoint port never enter this ordinary semantic retry loop.
 # Busy is flow control, not failure: a busy command gets a deeper bounded
 # budget with exponential backoff inside the caller's deadline, while every
 # other command failure keeps the shallow fail-fast budget. Backoff starts
@@ -98,8 +97,20 @@ _COMMAND_MIN_RETRY_BUDGET_S = 45.0
 _V2_TO_STORAGE_CODE = {
     'authority_scope_mismatch': 'database_forbidden',
     'deadline_elapsed': 'database_timeout',
-    'database_resource_exhausted': 'database_unavailable',
 }
+
+
+def _resource_exhaustion_code(retryable: bool) -> str:
+    """Split the native resource-exhaustion wire code by its retry policy.
+
+    A retryable refusal is transient load shedding and keeps the historic
+    ``database_unavailable`` classification (back off and re-ask). A
+    non-retryable refusal is a deterministic per-request bound (contract
+    reason ``domain_resource_bound``): replaying the identical request
+    re-hits the bound, so it keeps its own non-transient code and callers
+    shrink the request instead.
+    """
+    return 'database_unavailable' if retryable else 'database_resource_exhausted'
 
 # Deterministic request-oversize rejections from tofu_db/wire.py, raised
 # BEFORE any byte is written to the socket (the per-operation payload bound
@@ -131,18 +142,38 @@ def _record_rpc(kind: str, operation: str, started_at: float,
         pass
 
 
-# Pool sizing: the daemon advertises `maximumConnections` in its readiness
-# resourceBudget (launch-probe derived: CPU × 16, bounded by memory headroom
-# and the wire-contract ceiling); the pool takes at most half — other client
-# processes (the supervisor's health probes, a second app role) must always
-# find a free connection. There is no client-side constant cap: the
-# machine-probed daemon budget is the only ceiling, per the scaling charter
-# (bounds prevent runaway growth, they never starve a capable machine).
-# Without a budget the lean-daemon profile is the safe fallback: four
-# connections. 2026-09-22: removed the hardcoded cap (8 → 16 → none) — on a
-# slow authority volume (FUSE block reads at ~7 ms) a 16-session pool
-# exhausted under one slow-scan burst, failing user-facing RPCs with
-# database_busy while the daemon still advertised free connections.
+# A successful call this slow is authority pressure that no retry or error
+# surfaced. Exact counts stay in tofu_storage_rpc_seconds; the WARNING adds
+# the caller identity, at most once per operation per throttle interval.
+SLOW_RPC_WARN_SECONDS = 2.0
+_slow_rpc_log_throttle = RetryLogThrottle()
+
+
+def _warn_slow_rpc(kind: str, operation: str, elapsed: float, attempts: int,
+                   command_id: str | None) -> None:
+    """Correlate one slow success via the ambient request/task log context."""
+    if elapsed < SLOW_RPC_WARN_SECONDS:
+        return
+    try:
+        if not _slow_rpc_log_throttle.allow(f'v2:slow:{kind}:{operation}'):
+            return
+        ambient = log_fields()
+        elapsed_ms = int(elapsed * 1000)
+        log_event(logger, logging.WARNING, 'storage_rpc_slow',
+                  'storage.v2 slow %s %s succeeded elapsedMs=%d attempts=%d '
+                  'task=%s conv=%s',
+                  kind, operation, elapsed_ms, attempts,
+                  ambient.get('task_id') or '-', ambient.get('conversation_id') or '-',
+                  kind=kind, operation=operation, elapsed_ms=elapsed_ms,
+                  attempts=attempts, command_id=command_id or '')
+    except Exception as error:
+        logger.debug('slow rpc warning dropped: %s', type(error).__name__)
+
+
+# Pool size controls only idle socket retention. Active callers always claim
+# a reusable session or create one immediately; launch observations never cap
+# request admission. An older daemon's positive maximumConnections field can
+# seed the idle hint, while an unlimited/absent declaration uses four.
 _POOL_SIZE_LEAN_FALLBACK = 4
 # Socket-level slack beyond the per-attempt wire deadline: the daemon answers
 # `deadline_elapsed` at the wire deadline, so the socket only needs to outlive
@@ -162,13 +193,12 @@ _SESSION_IDLE_CAP_S = 20.0
 class _ConnectionClosedError(StorageError):
     """``database_unavailable`` for a peer close at a frame boundary.
 
-    No response byte was emitted, so the replay-safety proof matches
-    ``deadline_elapsed``: a command that committed before its response was
-    lost left a durable (tenant, owner, command_id) receipt, and a
-    same-command-id replay returns the recorded outcome instead of
-    double-applying. Only this subclass unlocks command replay on
-    ``database_unavailable``; every other source stays fail-fast for
-    commands.
+    EOF does not prove whether the authority committed. A receipt-backed
+    native command that committed before its response was lost left a durable
+    (tenant, owner, command_id) receipt; replaying that same identity returns
+    the recorded outcome without applying it twice. A receipt-free command is
+    re-executed, so its operation must be idempotent under re-execution.
+    Other classified native availability failures share this replay rule.
     """
 
     __slots__ = ()
@@ -374,6 +404,7 @@ class StorageV2Client:
         self._tenant_id = tenant_id if tenant_id is None else int(tenant_id)
         self._timeout = max(0.05, float(timeout))
         self._read_attempts = max(1, int(read_attempts))
+        self._recovery_client: Callable[[float], StorageV2Client] | None = None
         self._readiness_lock = threading.Lock()
         self._readiness_budget: dict[str, Any] = {}
         self._event_composition_budget: EventBatchCompositionBudget | None = None
@@ -401,6 +432,14 @@ class StorageV2Client:
     def request_timeout_seconds(self) -> float:
         """Configured per-request I/O policy shared by native transport ports."""
         return self._timeout
+
+    def bind_runtime_recovery(self, resolve: Callable[[float], StorageV2Client]) -> None:
+        """Bind the selected runtime's ready generation before publication.
+
+        Only ordinary replay-safe calls use this port. Health supervision and
+        instance-bound checkpoint control always keep their original handle.
+        """
+        self._recovery_client = resolve
 
     @property
     def endpoint(self) -> tuple[str, int]:
@@ -431,9 +470,15 @@ class StorageV2Client:
         # single caller (the health lane) skip that step, so honor the
         # requested timeout up front. Callers that re-arm anyway get the
         # same value twice — a no-op.
-        set_timeout = getattr(session, 'set_timeout', None)
-        if set_timeout is not None:
-            set_timeout(timeout)
+        try:
+            set_timeout = getattr(session, 'set_timeout', None)
+            if set_timeout is not None:
+                set_timeout(timeout)
+        except BaseException:
+            # The pool has not received ownership yet, so its acquisition
+            # rollback cannot close this successfully negotiated socket.
+            _SessionPool._close_quietly(session)
+            raise
         return session
 
     def close(self) -> None:
@@ -526,7 +571,7 @@ class StorageV2Client:
         # hidden one-second deadline. Other failures keep their shallow cap.
         busy_attempts = max(_BUSY_COMMAND_ATTEMPTS,
             int(aggregate_budget / _BUSY_COMMAND_MAX_DELAY_S) + 16)
-        loop_attempts = busy_attempts if kind == 'command' else attempts
+        loop_attempts = busy_attempts if kind == 'command' or self._recovery_client else attempts
         stop_at = time.monotonic() + aggregate_budget
         # tofu-db rejects any state-mutating op that lacks a command_id
         # (mutates_state() == kind != Query), and maintenance-kind ops such as
@@ -536,6 +581,8 @@ class StorageV2Client:
         wire_command_id = None if kind == 'query' else command_id
         started_at = time.monotonic()
         last_error = None
+        active_client = self
+        recover = False
         for attempt in range(loop_attempts):
             remaining = stop_at - time.monotonic()
             if remaining <= 0 and last_error is not None:
@@ -544,16 +591,30 @@ class StorageV2Client:
             # Each replay gets a fresh execution window within the original
             # aggregate retry budget. Reusing the first wire deadline makes
             # every retry after a slow attempt arrive already expired.
-            attempt_timeout = min(timeout, max(0.001, stop_at - time.monotonic()))
-            deadline_unix_ms = int((time.time() + attempt_timeout) * 1000)
             try:
-                result = self._attempt(
+                if recover and self._recovery_client is not None:
+                    candidate = self._recovery_client(remaining)
+                    if (not isinstance(candidate, StorageV2Client)
+                            or (candidate._owner_id, candidate._tenant_id)
+                            != (self._owner_id, self._tenant_id)):
+                        raise StorageError('database_integrity',
+                            'Storage recovery changed the authenticated authority scope')
+                    active_client = candidate
+                remaining = stop_at - time.monotonic()
+                if remaining <= 0 and last_error is not None:
+                    raise last_error
+                attempt_timeout = min(timeout, max(0.001, remaining))
+                deadline_unix_ms = int((time.time() + attempt_timeout) * 1000)
+                result = active_client._attempt(
                     operation, payload,
                     timeout=attempt_timeout,
                     command_id=wire_command_id,
                     deadline_unix_ms=deadline_unix_ms,
                 )
                 _record_rpc(kind, operation, started_at, 'success')
+                elapsed = time.monotonic() - started_at
+                observe_storage_service(kind, operation, elapsed)
+                _warn_slow_rpc(kind, operation, elapsed, attempt + 1, wire_command_id)
                 return result
             except StorageError as exc:
                 last_error = exc
@@ -561,43 +622,35 @@ class StorageV2Client:
                 # that single wire flag also gates command replay, but both
                 # server variants are replay-safe here: admission rejects
                 # pre-dispatch, and an execution deadline aborts the
-                # transaction pre-commit — committed commands always leave a
-                # durable (tenant, owner, command_id) receipt, so a
-                # same-command-id replay returns the recorded outcome
-                # instead of double-applying (the classification
-                # lib/evolution/records.py already applies).
+                # transaction pre-commit (the classification
+                # lib/evolution/records.py already applies). Only a
+                # receipt-backed command that did commit replays its recorded
+                # outcome; a receipt-free one is re-executed, so its operation
+                # must be idempotent under re-execution.
                 timeout_transient = exc.code == 'database_timeout'
                 retry_classified = (
                     (exc.retryable or timeout_transient)
                     and exc.code in _RETRYABLE_CODES)
                 busy_command = kind == 'command' and exc.code == 'database_busy'
-                # A peer close at a frame boundary shares the
-                # deadline_elapsed replay proof above (no response byte was
-                # emitted; a committed command left a durable receipt), so a
-                # same-command-id replay returns the recorded outcome instead
-                # of double-applying. Only ``_ConnectionClosedError`` widens
-                # command replay this way; every other database_unavailable
-                # source stays fail-fast for commands.
+                # Frame-boundary EOF carries the same native receipt proof.
                 closed_transient = isinstance(exc, _ConnectionClosedError)
-                # A supervised-restart window (or any transport refusal
-                # before the first response byte) is replay-safe for
-                # commands by the same proof as ``_ConnectionClosedError``:
-                # no response byte means either the command never reached
-                # the authority, or it committed and left a durable
-                # (tenant, owner, command_id) receipt whose replay returns
-                # the recorded outcome instead of double-applying. Without
-                # this the ~10 s recycle 503'd every in-flight command
-                # within milliseconds (2026-09-24 desktop/token and
-                # task-row upsert outage) even though the caller's RPC
-                # deadline exceeded the restart window.
+                # Transport loss does not prove whether a command committed.
+                # Only replaying its unchanged receipt identity resolves that
+                # ambiguity; the runtime resolver changes transport, not the
+                # operation, identity or selected authority.
                 unavailable_transient = exc.code == 'database_unavailable'
+                recover = unavailable_transient
                 command_replay_safe = kind == 'command' and (
                     exc.request_not_dispatched or busy_command
                     or timeout_transient or closed_transient
                     or unavailable_transient)
                 replay_safe = read_replay_safe or command_replay_safe
-                attempt_cap = (
-                    busy_attempts if busy_command else attempts)
+                # A managed authority can replace both endpoint and secret.
+                # Its recovery wait consumes this same aggregate budget; a
+                # fast refusal must not exhaust three stale-endpoint attempts
+                # before supervision has a chance to publish the replacement.
+                managed_recovery = unavailable_transient and self._recovery_client is not None
+                attempt_cap = busy_attempts if busy_command or managed_recovery else attempts
                 exhausted = attempt + 1 >= attempt_cap
                 if not retry_classified or not replay_safe or exhausted:
                     _record_rpc(kind, operation, started_at, 'error')
@@ -696,12 +749,16 @@ class StorageV2Client:
             set_timeout = getattr(session, 'set_timeout', None)
             if set_timeout is not None:
                 set_timeout(remaining + _SOCKET_TIMEOUT_SLACK_S)
+            # Only a complete exchange proves alignment. Cancellation and
+            # unexpected callback errors can interrupt any send/read phase.
+            broken = True
             response = session.request(
                 operation,
                 body,
                 command_id=command_id,
                 deadline_unix_ms=deadline_unix_ms,
             )
+            broken = False
             if response.status != 0:
                 raise self._to_storage_error(response, operation)
             return response.json()
@@ -753,6 +810,7 @@ class StorageV2Client:
         except (ValueError, TypeError) as exc:
             if type(exc) is ValueError and any(
                     marker in str(exc) for marker in _REQUEST_OVERSIZE_MARKERS):
+                broken = False
                 # Raised before dispatch: no request byte reached the wire,
                 # so the pooled session is provably still aligned and must
                 # NOT be retired — sustained oversize rejections (an
@@ -783,8 +841,11 @@ class StorageV2Client:
     def _to_storage_error(exc: StorageV2Error | Any,
                           operation: str = '') -> StorageError:
         wire_code = getattr(exc, 'error_code', None) or getattr(exc, 'code', '') or ''
-        code = _V2_TO_STORAGE_CODE.get(wire_code, wire_code)
         retryable = bool(getattr(exc, 'retryable', False))
+        if wire_code == 'database_resource_exhausted':
+            code = _resource_exhaustion_code(retryable)
+        else:
+            code = _V2_TO_STORAGE_CODE.get(wire_code, wire_code)
         message = (
             getattr(exc, 'error_message', None)
             or getattr(exc, 'message', '')
@@ -836,7 +897,9 @@ class StorageV2Client:
             command_id=command_id,
         )
         if not isinstance(result, Mapping) or '_storageCommitContract' not in result:
-            return application_result(operation, result)
+            value = application_result(operation, result)
+            publish_committed_operation(operation)
+            return value
         if result.get('_storageCommitContract') != COMMITTED_EVENTS_CONTRACT:
             raise StorageError(
                 'database_protocol_error',
@@ -853,7 +916,9 @@ class StorageV2Client:
         publish_committed_events([
             application_notice(event, owner_id=self._owner_id) for event in events
         ])
-        return application_result(operation, result.get('value'))
+        value = application_result(operation, result.get('value'))
+        publish_committed_operation(operation)
+        return value
 
     def health(self, deadline: float | None = 2.0) -> Any:
         """Daemon-reported health, or a synthetic liveness probe on old builds.
@@ -941,6 +1006,10 @@ class StorageV2Client:
                 'storage.v2 health lane deadline elapsed', True, 25,
                 request_not_dispatched=True)
         try:
+            with self._pool._condition:
+                if self._pool._closed:
+                    raise StorageError('database_unavailable',
+                        'storage.v2 client is closed', request_not_dispatched=True)
             remaining = timeout - (time.monotonic() - started_at)
             if remaining <= 0:
                 raise StorageError('database_timeout',
@@ -962,12 +1031,14 @@ class StorageV2Client:
                     set_timeout(remaining)
                 body = request_payload(
                     operation, payload, owner_id=self._owner_id)
+                broken = True
                 response = session.request(
                     operation,
                     body,
                     command_id=None,
                     deadline_unix_ms=deadline_unix_ms,
                 )
+                broken = False
                 if response.status != 0:
                     raise self._to_storage_error(response, operation)
                 _record_rpc('health', operation, started_at, 'success')

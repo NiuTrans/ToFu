@@ -1,9 +1,9 @@
 # HOT_PATH
-"""Long-tool heartbeat + serial-dispatch config + pooled execution wrapper.
+"""Long-tool heartbeat + human-wait exemptions + pooled execution wrapper.
 
-Houses the ``_SERIAL_BLOCKING_TOOLS`` config table, the heartbeat ticker that
-keeps the SSE stream non-silent while a slow tool blocks, and the callable used
-by parallel tool workers.
+Houses the ``_SERIAL_BLOCKING_TOOLS`` human-wait table, the heartbeat ticker
+that keeps the SSE stream non-silent while a slow tool blocks, and the callable
+used by bounded tool workers.
 """
 
 from __future__ import annotations
@@ -32,14 +32,16 @@ def _execute_tool_one_in_pool(task, tc, fn_name, tc_id, fn_args, rn,
     cooperatively, and — ONLY when our own timer fired, never on an outer
     abort or the pool ceiling — the late result is replaced with the
     typed timeout result, retaining any captured classified failure and its
-    recovery instructions. The pool ceiling (``TOOL_PARALLEL_TIMEOUT``) remains
-    the outer bound for non-cooperative handlers; the ``_SERIAL_BLOCKING``
+    recovery instructions. The collector uses the larger of the ordinary pool
+    ceiling and this declaration for each occurrence, bounding non-cooperative
+    handlers without truncating a declared long wait; the ``_SERIAL_BLOCKING``
     human-wait exemptions never arm a declared timeout.
     """
     timeout_ms = None
     if not _is_exempt_wait(fn_name, fn_args or {}):
         from lib.tools.registry import declared_tool_timeout_ms
-        timeout_ms = declared_tool_timeout_ms(fn_name)
+        timeout_ms = declared_tool_timeout_ms(
+            fn_name, fn_args or {}, tool_schemas=all_tools)
     if timeout_ms is None:
         return _execute_tool_one(task, tc, fn_name, tc_id, fn_args, rn,
                                  round_entry, cfg, project_path,
@@ -90,9 +92,11 @@ def _execute_tool_one_in_pool(task, tc, fn_name, tc_id, fn_args, rn,
         task, fn_name, round_entry, content=result[1]), False
 
 
-# ── Serial-dispatch config for long-blocking tools ──────────────────────
-# These tools must run serially (outside the thread pool) because they block
-# for user input or extended periods, exceeding TOOL_PARALLEL_TIMEOUT.
+# ── Human-wait exemptions for long-blocking tools ────────────────────
+# These tools block for user input or extended periods, exceeding
+# TOOL_PARALLEL_TIMEOUT, so they get no pool ceiling and no declared timer.
+# The name predates concurrent dispatch: since owner decision 2026-10-28 they
+# start beside their siblings and never delay them.
 # Each entry: tool_name → {match: callable(fn_args) → bool, inject: dict of extra args}
 #
 # Owner decision (2026-07-25,  F4, option A): while a
@@ -123,10 +127,11 @@ _SERIAL_BLOCKING_TOOLS: dict[str, dict] = {
 def _is_exempt_wait(fn_name: str, fn_args: dict) -> bool:
     """True when (fn_name, fn_args) is a ratified human-wait exemption.
 
-    Delegates to the SAME table the serial dispatcher consults, so the
-    heartbeat's immunity set and the pipeline's serial set can never drift
-    (await_task is exempt only when action='wait'; a status/list call is an
-    ordinary tool and gets graded ticks like everything else).
+    Delegates to the SAME table the dispatcher's unbounded-call policy
+    consults, so the heartbeat's immunity set and the calls exempt from the
+    pool ceiling can never drift (await_task is exempt only when
+    action='wait'; a status/list call is an ordinary tool and gets graded
+    ticks like everything else).
     """
     cfg = _SERIAL_BLOCKING_TOOLS.get(fn_name)
     if not cfg:
@@ -212,7 +217,10 @@ def _start_tool_heartbeat(task: dict, parallel_items: list, tid: str):
 
     Returns ``(stop_event, thread)``. The caller MUST ``stop_event.set()`` in
     its ``finally`` so the ticker can't outlive the round. A fast tool finishes
-    before the first tick, so it never emits a heartbeat.
+    before the first tick, so it never emits a heartbeat. When the host
+    refuses the thread, ``thread`` is ``None`` and the round runs without
+    ticks: its tools run on the pool, so a missing keepalive must not fail
+    the turn.
     """
     stop = threading.Event()
     t0 = time.time()
@@ -226,5 +234,10 @@ def _start_tool_heartbeat(task: dict, parallel_items: list, tid: str):
                 logger.debug('[Task %s] tool heartbeat tick failed: %s', tid, e)
 
     thread = threading.Thread(target=_loop, name=f'tool-hb-{tid}', daemon=True)
-    thread.start()
+    try:
+        thread.start()
+    except RuntimeError as error:
+        logger.warning('[Task %s] tool heartbeat thread could not start (%s); '
+                       'running this round without keepalive ticks', tid, error)
+        return stop, None
     return stop, thread

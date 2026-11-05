@@ -1,4 +1,4 @@
-"""Bounded host-local bytecode cache for Python run-command workloads.
+"""Host-local bytecode cache for Python run-command workloads.
 
 Responsibility: accelerate repeated Python subprocesses whose workspace lives
 on a network/userspace filesystem by routing CPython's reconstructible ``.pyc``
@@ -8,8 +8,14 @@ environment overlay plus one exact sandbox bind path.
 
 Entry points: :func:`prepare_python_bytecode_cache` and
 :func:`release_python_bytecode_cache`.  Cache authority is explicit in the
-task owner, workspace, and interpreter fingerprints.  Cleanup is synchronous,
-bounded, symlink-safe, and best-effort because these bytes are disposable.
+task owner, workspace, and interpreter fingerprints.  Retention has no size
+quota and shares its primitives with the managed server cache
+(``serverctl_pkg.python_bytecode_cache``): namespaces in use are never
+removed; others go when unused for the TTL, when their workspace or
+interpreter was provably removed, or while the cache volume is below the
+shared free-space reserve; a detached sweep removes bytecode whose source
+directory was removed.  These bytes are disposable, so cleanup is
+best-effort and symlink-safe.
 """
 
 from __future__ import annotations
@@ -25,27 +31,19 @@ import shutil
 import stat
 import tempfile
 import threading
-import time
 
 from lib.log import get_logger
+from serverctl_pkg.python_bytecode_cache import (
+    RUN_NAMESPACE_NAME, reclaim_namespaces, record_namespace_identity,
+    request_bytecode_sweep, volume_has_room,
+)
 logger = get_logger(__name__)
 
-_MIB = 1024 * 1024
-_DEFAULT_MAX_BYTES = 64 * _MIB
-_HARD_MAX_BYTES = 256 * _MIB
-_DEFAULT_MAX_FILES = 100_000
-_HARD_MAX_FILES = 250_000
-_DEFAULT_MAX_NAMESPACES = 64
-_HARD_MAX_NAMESPACES = 128
-_DEFAULT_RESERVE_BYTES = 256 * _MIB
-_HARD_RESERVE_BYTES = 16 * 1024 * _MIB
 _DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
 _HARD_TTL_SECONDS = 30 * 24 * 60 * 60
-_MAX_ROOT_ENTRIES_SCANNED = 256
 _MAX_AUTO_OBSERVATIONS = 256
 _MAX_MOUNT_DECISIONS = 256
-_NAMESPACE_NAME_RE = re.compile(
-    r"^ns-[0-9a-f]{12}-[0-9a-f]{16}-[0-9a-f]{16}$")
+_NAMESPACE_NAME_RE = RUN_NAMESPACE_NAME
 _PYTHON_EXECUTABLE_RE = re.compile(
     r"^python(?:\d+(?:\.\d+)*)?(?:\.exe)?$", re.IGNORECASE)
 _OFF_VALUES = frozenset({"0", "false", "no", "off", "disabled"})
@@ -80,14 +78,10 @@ def _process_user_id() -> int:
 
 @dataclass(frozen=True, slots=True)
 class PythonBytecodeCachePolicy:
-    """Explicit limits for one process-wide reconstructible cache root."""
+    """Mode, location and inactivity TTL of one process-wide cache root."""
 
     mode: str = "auto"
     cache_root: str = ""
-    max_bytes: int = _DEFAULT_MAX_BYTES
-    max_files: int = _DEFAULT_MAX_FILES
-    max_namespaces: int = _DEFAULT_MAX_NAMESPACES
-    reserve_bytes: int = _DEFAULT_RESERVE_BYTES
     ttl_seconds: int = _DEFAULT_TTL_SECONDS
 
     @property
@@ -111,30 +105,6 @@ class PythonBytecodeCachePolicy:
         return cls(
             mode=mode,
             cache_root=os.path.abspath(configured_root or default_root),
-            max_bytes=_bounded_environment_mib(
-                "TOFU_RUN_PYTHON_CACHE_MAX_MIB",
-                _DEFAULT_MAX_BYTES,
-                minimum_mib=8,
-                maximum_bytes=_HARD_MAX_BYTES,
-            ),
-            max_files=_bounded_environment_integer(
-                "TOFU_RUN_PYTHON_CACHE_MAX_FILES",
-                _DEFAULT_MAX_FILES,
-                minimum=1_000,
-                maximum=_HARD_MAX_FILES,
-            ),
-            max_namespaces=_bounded_environment_integer(
-                "TOFU_RUN_PYTHON_CACHE_MAX_NAMESPACES",
-                _DEFAULT_MAX_NAMESPACES,
-                minimum=1,
-                maximum=_HARD_MAX_NAMESPACES,
-            ),
-            reserve_bytes=_bounded_environment_mib(
-                "TOFU_RUN_PYTHON_CACHE_RESERVE_MIB",
-                _DEFAULT_RESERVE_BYTES,
-                minimum_mib=0,
-                maximum_bytes=_HARD_RESERVE_BYTES,
-            ),
             ttl_seconds=_bounded_environment_integer(
                 "TOFU_RUN_PYTHON_CACHE_TTL_DAYS",
                 _DEFAULT_TTL_SECONDS // (24 * 60 * 60),
@@ -155,15 +125,6 @@ class PythonBytecodeCacheActivation:
     lock_fd: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _NamespaceUsage:
-    path: Path
-    last_used: float
-    total_bytes: int
-    file_count: int
-    scan_exhausted: bool
-
-
 def _bounded_environment_integer(
     name: str,
     default: int,
@@ -177,23 +138,6 @@ def _bounded_environment_integer(
     except (TypeError, ValueError, OverflowError):
         value = default
     return min(maximum, max(minimum, value))
-
-
-def _bounded_environment_mib(
-    name: str,
-    default_bytes: int,
-    *,
-    minimum_mib: int,
-    maximum_bytes: int,
-) -> int:
-    default_mib = max(minimum_mib, default_bytes // _MIB)
-    value_mib = _bounded_environment_integer(
-        name,
-        default_mib,
-        minimum=minimum_mib,
-        maximum=max(minimum_mib, maximum_bytes // _MIB),
-    )
-    return value_mib * _MIB
 
 
 def _has_shell_control_syntax(source: str) -> bool:
@@ -475,179 +419,14 @@ def _close_namespace_lock(descriptor: int | None) -> None:
         pass
 
 
-def _namespace_usage(
-    namespace: Path,
-    *,
-    remaining_files: int,
-    remaining_bytes: int,
-) -> _NamespaceUsage:
-    total_bytes = 0
-    file_count = 0
-    exhausted = False
-    marker = namespace / ".last-used"
-    try:
-        last_used = marker.stat().st_mtime
-    except OSError:
-        try:
-            last_used = namespace.stat().st_mtime
-        except OSError:
-            last_used = 0.0
-
-    for directory, directory_names, file_names in os.walk(
-        namespace, topdown=True, followlinks=False
-    ):
-        directory_path = Path(directory)
-        safe_directories: list[str] = []
-        for name in directory_names:
-            child = directory_path / name
-            try:
-                metadata = child.lstat()
-            except OSError:
-                continue
-            if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
-                safe_directories.append(name)
-            file_count += 1
-            total_bytes += max(0, metadata.st_size)
-            if file_count > remaining_files or total_bytes > remaining_bytes:
-                exhausted = True
-                safe_directories = []
-                break
-        directory_names[:] = safe_directories
-        if exhausted:
-            break
-        for name in file_names:
-            try:
-                metadata = (directory_path / name).lstat()
-            except OSError:
-                continue
-            file_count += 1
-            total_bytes += max(0, metadata.st_size)
-            if file_count > remaining_files or total_bytes > remaining_bytes:
-                exhausted = True
-                directory_names[:] = []
-                break
-        if exhausted:
-            break
-    return _NamespaceUsage(
-        path=namespace,
-        last_used=last_used,
-        total_bytes=total_bytes,
-        file_count=file_count,
-        scan_exhausted=exhausted,
-    )
-
-
-def _scan_namespaces(
-    root: Path,
-    policy: PythonBytecodeCachePolicy,
-) -> tuple[list[_NamespaceUsage], bool]:
-    records: list[_NamespaceUsage] = []
-    total_bytes = 0
-    total_files = 0
-    root_scan_exhausted = False
-    try:
-        iterator = os.scandir(root)
-    except OSError:
-        return records, True
-    with iterator:
-        for entry_index, entry in enumerate(iterator):
-            if entry_index >= _MAX_ROOT_ENTRIES_SCANNED:
-                root_scan_exhausted = True
-                break
-            if not _NAMESPACE_NAME_RE.fullmatch(entry.name):
-                continue
-            try:
-                if not entry.is_dir(follow_symlinks=False):
-                    continue
-            except OSError:
-                continue
-            record = _namespace_usage(
-                Path(entry.path),
-                remaining_files=max(0, policy.max_files - total_files),
-                remaining_bytes=max(0, policy.max_bytes - total_bytes),
-            )
-            records.append(record)
-            total_files += record.file_count
-            total_bytes += record.total_bytes
-    return records, root_scan_exhausted
-
-
-def _safe_remove_namespace(root: Path, namespace: Path) -> bool:
-    descriptor = None
-    try:
-        if namespace.parent != root or not _NAMESPACE_NAME_RE.fullmatch(namespace.name):
-            return False
-        metadata = namespace.lstat()
-        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-            return False
-        descriptor = _try_namespace_lock(namespace, exclusive=True)
-        if descriptor is None:
-            return False
-        shutil.rmtree(namespace)
-        return True
-    except OSError as exc:
-        logger.debug("[python-cache] namespace cleanup skipped: %s", exc)
-        return False
-    finally:
-        _close_namespace_lock(descriptor)
-
-
-def _prune_cache(
-    root: Path,
-    policy: PythonBytecodeCachePolicy,
-    *,
-    required_headroom: int = 0,
-    reserve_namespace_slot: bool = False,
-) -> bool:
-    """Prune inactive LRU namespaces and report whether another may start."""
-    records, root_scan_exhausted = _scan_namespaces(root, policy)
-    now = time.time()
-    active = set(_active_namespaces)
-    retained: list[_NamespaceUsage] = []
-    for record in records:
-        if (
-            str(record.path) not in active
-            and now - record.last_used > policy.ttl_seconds
-        ):
-            if _safe_remove_namespace(root, record.path):
-                continue
-        retained.append(record)
-
-    retained.sort(key=lambda record: record.last_used)
-    total_bytes = sum(record.total_bytes for record in retained)
-    total_files = sum(record.file_count for record in retained)
-    target_bytes = max(0, policy.max_bytes - required_headroom)
-    namespace_limit = max(
-        0,
-        policy.max_namespaces - (1 if reserve_namespace_slot else 0),
-    )
-    while retained and (
-        len(retained) > namespace_limit
-        or total_bytes > target_bytes
-        or total_files > policy.max_files
-        or any(record.scan_exhausted for record in retained)
-    ):
-        victim_index = next(
-            (index for index, record in enumerate(retained)
-             if str(record.path) not in active),
-            None,
-        )
-        if victim_index is None:
-            break
-        victim = retained.pop(victim_index)
-        if _safe_remove_namespace(root, victim.path):
-            total_bytes -= victim.total_bytes
-            total_files -= victim.file_count
-        else:
-            return False
-
-    return (
-        not root_scan_exhausted
-        and len(retained) <= namespace_limit
-        and total_bytes <= target_bytes
-        and total_files <= policy.max_files
-        and not any(record.scan_exhausted for record in retained)
-    )
+def _reclaim(root: Path, policy: PythonBytecodeCachePolicy,
+             keep: frozenset[str] = frozenset()) -> int:
+    """Remove namespaces nothing can use; never one active in this process."""
+    with _state_lock:
+        active = {Path(namespace).name for namespace in _active_namespaces}
+    return reclaim_namespaces(
+        root, pattern=_NAMESPACE_NAME_RE, ttl_seconds=policy.ttl_seconds,
+        keep=active | keep, has_space=lambda: volume_has_room(root))
 
 
 def prepare_python_bytecode_cache(
@@ -658,7 +437,7 @@ def prepare_python_bytecode_cache(
     *,
     policy: PythonBytecodeCachePolicy | None = None,
 ) -> PythonBytecodeCacheActivation | None:
-    """Opt one eligible subprocess into a bounded local ``.pyc`` namespace."""
+    """Opt one eligible subprocess into a host-local ``.pyc`` namespace."""
     resolved_policy = policy or PythonBytecodeCachePolicy.from_environment()
     if (
         not resolved_policy.enabled
@@ -721,16 +500,8 @@ def prepare_python_bytecode_cache(
     try:
         with _state_lock:
             _ensure_private_directory(cache_root)
-            available = shutil.disk_usage(cache_root).free
-            headroom = min(16 * _MIB, max(_MIB, resolved_policy.max_bytes // 4))
-            if available < resolved_policy.reserve_bytes + headroom:
-                return None
-            if not _prune_cache(
-                cache_root,
-                resolved_policy,
-                required_headroom=headroom,
-                reserve_namespace_slot=not namespace.exists(),
-            ):
+            _reclaim(cache_root, resolved_policy, frozenset({namespace_name}))
+            if not volume_has_room(cache_root):
                 return None
             _ensure_private_directory(namespace)
             namespace_lock_fd = _try_namespace_lock(
@@ -747,6 +518,7 @@ def prepare_python_bytecode_cache(
             )
             os.close(descriptor)
             os.utime(marker, None)
+            record_namespace_identity(namespace, (cwd, interpreter))
             namespace_text = str(namespace)
             _active_namespaces[namespace_text] = (
                 _active_namespaces.get(namespace_text, 0) + 1)
@@ -757,11 +529,10 @@ def prepare_python_bytecode_cache(
 
     environment["PYTHONPYCACHEPREFIX"] = str(prefix)
     logger.info(
-        "[python-cache] active owner=%s workspace=%s interpreter=%s cap=%dMiB",
+        "[python-cache] active owner=%s workspace=%s interpreter=%s",
         owner_user_id,
         _short_hash(os.path.realpath(cwd), 12),
         os.path.basename(interpreter),
-        resolved_policy.max_bytes // _MIB,
     )
     return PythonBytecodeCacheActivation(
         cache_root=str(cache_root),
@@ -779,7 +550,7 @@ def prepare_python_bytecode_cache(
 def release_python_bytecode_cache(
     activation: PythonBytecodeCacheActivation | None,
 ) -> None:
-    """Release one namespace and enforce byte/file/count/TTL limits."""
+    """Release one namespace, then reclaim what nothing can use."""
     if activation is None:
         return
     root = Path(activation.cache_root)
@@ -804,7 +575,9 @@ def release_python_bytecode_cache(
                 os.close(descriptor)
                 os.utime(marker, None)
                 _auto_observations.pop(str(namespace), None)
-            _prune_cache(root, activation.policy)
+            _reclaim(root, activation.policy)
+            if namespace.is_dir():
+                request_bytecode_sweep(root, namespace.name)
         except (OSError, ValueError) as exc:
             logger.debug("[python-cache] post-run cleanup skipped: %s", exc)
 

@@ -248,7 +248,8 @@ def test_budget_overrides_are_finite_and_clamped():
         'TOFU_PAPER_BUILD_CACHE_MAX_MIB': '999999',
         'TOFU_PAPER_BUILD_CACHE_RECORDS': '999999',
     })
-    assert budget == BuildBudget(4, 16, 2048 * 1024 * 1024, 128)
+    # The retired queue-capacity knob is ignored: no waiting quota exists.
+    assert budget == BuildBudget(4, 0, 2048 * 1024 * 1024, 128)
 
 
 def test_failed_build_under_pressure_preserves_last_good_and_single_slot_can_update(tmp_path):

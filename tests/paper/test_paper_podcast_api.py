@@ -167,7 +167,7 @@ def _wait_done(client, task_id, timeout=15.0):
 def test_worker_full_chain(podcast_env, phash):
     """Direct worker drive: events, DB row, atomic file, WAV master."""
     import lib.paper.podcast_engine.worker as PE
-    from lib.paper.podcast_runtime import _new_podcast_task
+    from tests.support.paper_podcast import new_podcast_task as _new_podcast_task
 
     _insert_report(phash)
     task = _new_podcast_task('podcast_test01', phash, 'short', 'zh', 'alloy', None, user_id=TEST_OWNER_USER_ID)
@@ -312,7 +312,7 @@ def test_worker_script_only_degrade(podcast_env, phash, monkeypatch):
     """No TTS slot configured → script_only row + honest reason (owner rule)."""
     import lib.paper.podcast_engine.worker as PE
     import lib.tts as T
-    from lib.paper.podcast_runtime import _new_podcast_task
+    from tests.support.paper_podcast import new_podcast_task as _new_podcast_task
 
     monkeypatch.setattr(T, 'tts_available', lambda **_kwargs: False)
     _insert_report(phash)
@@ -357,7 +357,7 @@ def test_script_only_task_requires_confirmed_persistence(
 ):
     import lib.paper.podcast_engine.worker as PE
     import lib.tts as T
-    from lib.paper.podcast_runtime import _new_podcast_task
+    from tests.support.paper_podcast import new_podcast_task as _new_podcast_task
 
     _insert_report(phash)
     monkeypatch.setattr(T, 'tts_available', lambda **_kwargs: False)
@@ -386,7 +386,7 @@ def test_worker_degrade_vs_error_contrast(podcast_env, phash, monkeypatch):
     script_only comes from the degrade branch, not from any TTS failure."""
     import lib.paper.podcast_engine.worker as PE
     import lib.tts as T
-    from lib.paper.podcast_runtime import _new_podcast_task
+    from tests.support.paper_podcast import new_podcast_task as _new_podcast_task
 
     monkeypatch.setattr(T, 'tts_available', lambda **_kwargs: True)  # gate says yes…
     monkeypatch.setattr(T, '_tts_slots', lambda: [])        # …but no slot
@@ -404,7 +404,7 @@ def test_worker_degrade_vs_error_contrast(podcast_env, phash, monkeypatch):
 
 def test_worker_abort(podcast_env, phash, monkeypatch):
     import lib.paper.podcast_engine.worker as PE
-    from lib.paper.podcast_runtime import _new_podcast_task
+    from tests.support.paper_podcast import new_podcast_task as _new_podcast_task
 
     _insert_report(phash)
     task = _new_podcast_task('podcast_test04', phash, 'short', 'zh', 'alloy', None, user_id=TEST_OWNER_USER_ID)
@@ -422,7 +422,7 @@ def test_worker_abort(podcast_env, phash, monkeypatch):
 def test_worker_source_gate(podcast_env, phash):
     """No report/translation/parsed text → error with report_required reason."""
     import lib.paper.podcast_engine.worker as PE
-    from lib.paper.podcast_runtime import _new_podcast_task
+    from tests.support.paper_podcast import new_podcast_task as _new_podcast_task
 
     task = _new_podcast_task('podcast_test05', phash, 'short', 'zh', 'alloy', None, user_id=TEST_OWNER_USER_ID)
     PE.run_podcast_task(task)
@@ -445,7 +445,7 @@ def test_start_gate_NEUTER(flask_client, podcast_env, phash, monkeypatch):
     """NEUTER: amputate has_report → the SAME no-report start proceeds —
     the gate is load-bearing, not incidental."""
     monkeypatch.setattr(
-        'routes.paper_pkg._podcast.has_report',
+        'lib.paper.podcast_engine.worker.has_report',
         lambda ph, *, user_id: user_id == TEST_OWNER_USER_ID)
     r = flask_client.post('/api/v4/paper/podcast/start',
                           json={'paper_hash': phash, 'mode': 'short', 'lang': 'zh'})
@@ -472,6 +472,31 @@ def test_start_poll_done_and_cache_hit(flask_client, podcast_env, phash):
     body2 = r2.get_json()
     assert body2.get('cached') is True and 'task_id' not in body2
     assert body2['audioUrl'] == final['audioUrl']
+
+
+@pytest.mark.parametrize('force', [False, True])
+def test_start_joins_live_podcast_before_cache_or_force(
+        flask_client, podcast_env, phash, monkeypatch, force):
+    """A repeat request joins the accepted task; force bypasses only cache."""
+    from lib.paper.podcast_runtime import _podcast_runtime
+
+    _insert_report(phash)
+    submitted = []
+    monkeypatch.setattr(_podcast_runtime, 'spawn',
+                        lambda task_id, *_args: submitted.append(task_id))
+    request = {'paper_hash': phash, 'mode': 'short', 'lang': 'zh'}
+    try:
+        first = flask_client.post(
+            '/api/v4/paper/podcast/start', json=request).get_json()
+        second = flask_client.post(
+            '/api/v4/paper/podcast/start',
+            json={**request, 'force': force}).get_json()
+        assert second['task_id'] == first['task_id']
+        assert second['reused'] is True
+        assert submitted == [first['task_id']]
+    finally:
+        for task_id in submitted:
+            _podcast_runtime.finish(task_id, error='test cleanup')
 
 
 def test_lookup(flask_client, podcast_env, phash):
@@ -593,20 +618,20 @@ def test_lookup_reattach_ignores_model_and_voice(flask_client, podcast_env,
 def test_dedup_index_separates_models():
     """A request for model B must never JOIN an in-flight task made with
     model A — the join would silently hand back A's audio."""
-    import uuid
     from lib.paper.podcast_runtime import (
-        _new_podcast_task,
-        _podcast_index_get,
-        _podcast_index_register,
+        _claim_podcast_task, _podcast_index_get, _podcast_runtime,
     )
-    tid = 'podcast_idx_' + uuid.uuid4().hex[:8]
-    task = _new_podcast_task(tid, 'ph_dedup', 'short', 'zh', 'alloy', 'm-alpha', user_id=TEST_OWNER_USER_ID)
-    _podcast_index_register('ph_dedup', 'short', 'zh', 'alloy', 'm-alpha',
-                            task['task_id'], user_id=TEST_OWNER_USER_ID)
-    assert _podcast_index_get('ph_dedup', 'short', 'zh', 'alloy',
-                              'm-alpha', user_id=TEST_OWNER_USER_ID) == task['task_id']
-    assert _podcast_index_get('ph_dedup', 'short', 'zh', 'alloy',
-                              'm-beta', user_id=TEST_OWNER_USER_ID) is None
+    paper_hash = uuid.uuid4().hex
+    task, existing = _claim_podcast_task(
+        paper_hash, 'short', 'zh', 'alloy', 'm-alpha', user_id=TEST_OWNER_USER_ID)
+    try:
+        assert existing is None
+        assert _podcast_index_get(paper_hash, 'short', 'zh', 'alloy',
+            'm-alpha', user_id=TEST_OWNER_USER_ID) == task['task_id']
+        assert _podcast_index_get(paper_hash, 'short', 'zh', 'alloy',
+            'm-beta', user_id=TEST_OWNER_USER_ID) is None
+    finally:
+        _podcast_runtime.finish(task['task_id'], error='test cleanup')
 
 
 def test_audio_range(flask_client, podcast_env, phash):

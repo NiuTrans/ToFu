@@ -7,6 +7,163 @@ optional, and deployment resources still belong to that caller. Provider
 documentation can inform local algorithms without making that provider a
 runtime dependency.
 
+## Pipeline elapsed-time authority
+
+Problem: wall-clock corrections could exhaust a search pipeline budget early
+or give later ranking more time than the original request allowed. Decision:
+pipeline phase durations and remaining budgets use `time.monotonic()` throughout;
+the existing configured deadlines and partial-evidence policy keep their owners.
+`tests/test_pipeline_clock.py` verifies forward/backward clock corrections and
+real elapsed exhaustion through the public search entry point. Alternatives:
+clamping negative durations hides the display symptom but leaves admission
+wrong; restarting each phase's timeout grants a second allowance. The separate
+HTTP `deadline_ts` boundary still accepts its documented epoch-based input.
+
+Problem: HTTP retry/socket phases already used a monotonic context, but body
+reads and the URL fallback chain compared independent epoch clocks. A wall-clock
+correction could skip useful fallbacks or admit work beyond the URL allowance.
+Decision: `fetch/request_budget.py` also owns the page scope. HTTP attempts take
+the earliest page, enclosing request and local request deadline. An external
+epoch `deadline_ts` is converted once at entry; internal page calls never round
+trip their allowance through wall time. Body reads use that same request clock.
+Scopes reset on success, failure and interruption. A nonpositive URL allowance
+disables its own cap and cannot extend an enclosing page's deadline. Page scopes
+alone do not change direct shared-session retry behavior.
+
+Fallback admission remains cooperative: an active host/browser provider keeps
+its own timeout and is not forcibly interrupted. Alternatives rejected:
+recomputing epoch deadlines between hops leaves a correction race; independent
+per-phase budgets restart the allowance; mutating shared sessions leaks one
+request's deadline into concurrent calls. `test_fetch_elapsed_budget.py` covers
+both clock directions, HTTP/body/decoder paths, fallback admission, independent
+concurrent pages, disabled caps and scope release after interruption.
+Admission checks also run between public readers, live-browser/cookie identity
+paths and anonymous HTTP. An exhausted hop cannot initiate another identity
+attempt, and a `deadline` diagnosis explains that stop. Existing browser-first
+and cookie-first order, received authentication-refusal evidence and successful
+late receipts remain intact; deadlines do not grant or broaden access authority.
+
+Problem: ordinary and decompression-recovery responses duplicated body handling.
+Malformed length headers or a control interruption could bypass closure, a
+failed close could replace the read failure, and the retry skipped declared-size
+validation. Decision: `fetch/http_response.py` owns admission, byte/time checks,
+buffer release and one close attempt for every received response. The HTTP owner
+keeps proxy selection, the single decoding retry and the public `HttpError`
+identity. Received HTTP refusal evidence keeps precedence over a body timeout.
+
+The consumer drops incomplete buffers before propagating errors or retrying,
+including when a diagnostic receipt retains the exception traceback. A close
+failure after a successful read still fails the request. An ordinary close error
+is logged without replacing the read failure; an interruption takes precedence
+over an ordinary failure, and the first control signal is preserved.
+Alternatives rejected: duplicating `finally` blocks leaves validation drift;
+catching only `Exception` misses interruption; retaining chunks in an extracted
+helper's traceback keeps failed transport data alive. The response-lifecycle
+suite verifies both ordinary and recovery paths, original error identity,
+response closure and payload release while error receipts remain live.
+In a controlled four-chunk failure (64 KiB each), retained consumer payload fell
+from 262,144 bytes to zero while both old/new error receipts remained live.
+Successful responses retained byte-for-byte output and one close attempt.
+This measures consumer-owned transport buffers, not process RSS or payloads
+that a separate transport implementation may retain in its own traceback.
+
+## Search phase ownership
+
+Problem: engine authority, optional scoring and result diagnostics were embedded
+in the worker orchestration loop. Decision: `search/engine_selection.py` builds
+an explicit plan from borrowed request-owned providers and engine functions;
+`ranking_phase.py` applies scoring without upgrading uncertain evidence;
+`diagnostics.py` projects the final received facts. The orchestrator retains
+phase order, worker lifetime and the public result class. Alternatives rejected:
+separate pipelines per engine duplicate retrieval/settlement, while a generic
+pipeline framework hides the existing early refusals and failure precedence.
+
+The same selection owner plans configured gateway sources and deferred free
+engine waves. Request configuration, gateway function and tag prefix are
+explicit inputs, preserving caller patches and avoiding an import cycle through
+the engine package. The orchestrator retains gateway fallback/parallel/off
+policy and provider-body Race-to-N behavior; diagnostics count engines actually
+started. The gateway policy and concurrent-import suites verify these seams.
+
+Candidate accumulation has one call-local canonical URL index in
+`search/candidates.py`. Problem: separate seen-URL and result maps could diverge
+when malformed source metadata failed validation; in-place duplicate merging
+could also expose half-accepted corroboration. Decision: publish a new URL only
+after its evidence fields validate, and merge duplicates into a temporary row
+before updating the original identity held by fetch receipts. Invalid source
+contributions remain visible as engine errors and do not poison independent
+evidence. Alternatives rejected: reserving a URL before validation loses later
+sources; replacing the published object disconnects in-flight fetch receipts;
+swallowing malformed fields silently invents source evidence. Provider-owned
+rows remain unchanged. The candidate accumulation and race suites verify these
+boundaries through the public search entry point.
+Provider-crawled bodies pass through the same candidate owner: snippets-only
+requests remove them, full requests clip them to the page allowance, and valid
+duplicates can enrich a representative without starting another fetch.
+
+## Waiting only for useful work
+
+Problem: an engine wave waited for its slowest engine. On a host whose only
+route out is an HTTP proxy, Marginalia's shared public API failed after its
+10 s request timeout (the direct fallback fails name resolution at once), Brave
+answered HTTP 429 and DDG-API HTTP 202, while Bing and DDG-HTML answered within
+1-2 s. Every wave waited 11-13 s. The breaker did not bound this in a
+long-running host: after its 120 s cooldown it reset to closed, so the next
+three searches each paid the full failure again. Over two days of production
+logs (66 searches) the median engine phase was 11.9 s, and only Bing and
+DDG-HTML ever returned rows.
+
+Decision: an engine whose most recent request failed runs as a probe. The wave
+calls it but stops waiting once the other engines have answered. This covers a
+cooled-down breaker, which is half-open (one failed probe re-opens it for
+another cooldown, any success closes it), and an engine that failed once before
+tripping, so after a restart only the first search pays for a dead engine. A
+probe that answers in time contributes normally; an abandoned probe is reported
+as `circuit_open` coverage and still settles its breaker in the background.
+When every engine in a wave is probing, the wave waits as before, so a fully
+recovering host still gets results. A healthy engine that fails once loses at
+most the late results of the next search.
+
+Race-to-N previously waited for twice the requested result count of any fetched
+page, adjusted by a pool-size heuristic. Fast off-topic pages could satisfy it
+while the relevant pages were still downloading, ending the search with nothing
+usable to deliver. It now waits for the requested number of pages that
+`quality.is_established_evidence` would deliver, the same predicate that later
+separates delivered results from uncertain candidates; the wave still ends at
+the search deadline when fewer exist.
+
+Alternatives rejected: a shorter engine timeout is a tuned value that also cuts
+off slow healthy engines; removing failing engines from the default set loses
+them when they recover or on hosts where they work; a fixed fraction of answered
+engines is another threshold. `tests/test_recovery_probe_wave.py`, the breaker
+cases in `tests/test_engines.py` and `tests/test_orchestrator_race.py` verify the
+probe, recovery and evidence-counting boundaries.
+
+## Query length admission
+
+Problem: a slide-research caller sent its whole 3,510-character brief as a
+query. As 15.9-16.4 KB request URLs it was refused by every engine:
+HTTP 414 from DDG-API, Brave, Marginalia and SearXNG, HTTP 400 from Bing and a
+DDG-HTML transport failure. Three refusals in a row opened each engine's circuit
+breaker for 120 s, so concurrent valid searches lost those engines as well.
+
+Decision: `perform_web_search` refuses a query longer than `MAX_QUERY_CHARS`
+(400 characters, surrounding whitespace excluded) before engine selection. The
+empty result carries `_search_diag.reason == 'query_too_long'` with a detail
+naming the length and the limit, and the formatter asks for keywords. No engine,
+provider or circuit-breaker state is touched. Brave documents `q` as 1-400
+characters in its web-search skill reference. Preparing every engine's request
+URL offline (the same parameters, `requests` encoding) gives at most 475 bytes
+for 400 ASCII characters, 3,680 for CJK and 4,875 for 4-byte characters, well
+below the 8 KB request-line defaults of nginx and Apache.
+
+Alternatives rejected: truncation silently changes what is searched; a
+per-engine byte budget still sends paragraph-sized queries to some engines and
+returns nothing actionable. Brave's further 50-word cap is not enforced: CJK
+text has no word delimiters, and the observed failure was length.
+`tests/test_query_length_admission.py` verifies refusal before any engine, an
+at-limit query reaching the engines, and the formatter's guidance.
+
 ## Admitting a free source
 
 **Problem:** a successful HTTP response can contain a structurally valid result
@@ -303,7 +460,8 @@ call and project only known reason categories and valid HTTP status tokens
 into the unavailable text reply. Keep raw exception details and response
 headers out of the model-facing message. Unknown categories retain a generic
 failure; successful extraction or browser recovery returns the original text.
-Tool discovery states the optional browser/PDF requirements and access limits.
+Tool discovery states the optional browser/enhanced PDF layout requirements,
+included local text-PDF capability and access limits.
 
 `fetch/diagnostics.py` owns this safe projection for all delivery adapters.
 The native agent diagnostic also sends it in `fetch_failure`, instead of

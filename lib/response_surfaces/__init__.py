@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 import hashlib
 import re
 
+from lib.error_envelope import BadRequest
+
 
 def resolve_scope(scope, *, user_id):
     from lib.identity import require_user_id
@@ -81,14 +83,14 @@ def available_providers(scope, *, user_id):
 
 def read_resources(scope, provider, *, user_id, tenant_id='', cancelled=lambda: False, connection=None, queue=None):
     if not isinstance(provider, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', provider):
-        raise ValueError('Invalid provider')
+        raise BadRequest('Invalid provider', field='provider')
     project = resolve_scope(scope, user_id=user_id)
     if connection is not None:
         from lib.response_surfaces.mcp import read_catalog as read_mcp
         catalog = read_mcp(connection, provider, user_id=user_id, cancelled=cancelled, queue=queue)
     else:
         if queue is not None:
-            raise ValueError('Queue resources require an explicit connection')
+            raise BadRequest('Queue resources require an explicit connection', field='connection')
         catalog = read_catalog(provider, user_id=user_id, tenant_id=tenant_id,
                                project_path=project, cancelled=cancelled)
     # Recheck access after the remote read; deletion/revocation cannot deliver

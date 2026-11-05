@@ -254,6 +254,21 @@ def evaluate_condition_predicate(task: dict[str, Any]):
                               log_id=task['id'][:8])
 
 
+def predicate_status(result) -> str:
+    """Status lines for one predicate evaluation: verdict, note, fenced output.
+
+    The poll LLM has no tools, so a hybrid verdict is only informed when the
+    snapshot carries the evidence the predicate decided on.
+    """
+    verdict = {True: 'matched', False: 'no match'}.get(result.matched, 'ambiguous')
+    lines = [f'\nCondition predicate: {verdict} (exit={result.exit_code})']
+    if result.error_note:
+        lines.append(f'Predicate note: {result.error_note}')
+    if result.output:
+        lines.append(fence_untrusted(result.output, 'PREDICATE OUTPUT'))
+    return '\n'.join(lines)
+
+
 def apply_reconcile_poll(task: dict[str, Any], predicate_result, llm_ready,
                          llm_available: bool):
     """Reconcile predicate vs LLM for a code/hybrid proactive task, persist the
@@ -438,5 +453,5 @@ def should_auto_disable(task: dict[str, Any]) -> bool:
 __all__ = [
     'gather_system_status', 'poll_decision', 'record_poll', 'get_poll_log',
     'execute_proactive_task', 'is_task_executing', 'should_auto_disable',
-    'evaluate_condition_predicate', 'apply_reconcile_poll',
+    'evaluate_condition_predicate', 'apply_reconcile_poll', 'predicate_status',
 ]

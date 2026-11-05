@@ -71,7 +71,7 @@ function _modelRoutingHasProviderBundle(bundle) {
   });
 }
 
-async function _stageModelRoutingProviderBundle(bundle, apiKey) {
+async function _stageModelRoutingProviderBundle(bundle, apiKey, listing) {
   if (!_stgModelRouting || !bundle || !bundle.provider) return false;
   if (_modelRoutingHasProviderBundle(bundle)) {
     showAlert('该服务商或接入点已经存在，请直接编辑现有接入配置。');
@@ -110,12 +110,19 @@ async function _stageModelRoutingProviderBundle(bundle, apiKey) {
       return row.kind === 'local_identity';
     });
   }
-  var created = await Api.modelRouting.createProvider(
-    draft, _stgModelRoutingRevision);
-  if (!created || !created.provider) throw new Error('服务商接入未能保存');
-  _stgModelRoutingRevision = Number(created.revision || _stgModelRoutingRevision);
-  await _loadModelRoutingAuthority();
-  _renderModelRoutingTabs();
+  /* Never assign the receipt revision to the draft: the commit's wake hint has
+   * usually started a live-sync read already, and that read would then refuse
+   * the committed document, leaving the new card unrendered. */
+  var result = await runModelRoutingMutation(async function(revision) {
+    var created = await Api.modelRouting.createProvider(draft, revision);
+    if (!created || !created.provider) throw new Error('服务商接入未能保存');
+    return {revision: created.revision};
+  });
+  // An oversized listing was imported in part; say how to load the rest.
+  _notifyProviderMutation(result, listing && listing.listed > listing.imported
+    ? t('settings.providerModelsRetained', { imported: listing.imported, listed: listing.listed })
+    : t(apiKey ? 'providerCatalog.addedWithKey' : 'providerCatalog.addedWithoutKey'),
+    _renderModelRoutingTabs);
   var card = Array.from(document.querySelectorAll('.stg-provider-card-v2')).find(function(candidate) {
     return candidate.dataset.providerId === String(bundle.provider.provider_id);
   });
@@ -123,7 +130,6 @@ async function _stageModelRoutingProviderBundle(bundle, apiKey) {
     card.open = true;
     card.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
-  showToast(t(apiKey ? 'providerCatalog.addedWithKey' : 'providerCatalog.addedWithoutKey'));
   return true;
 }
 
@@ -158,76 +164,19 @@ async function addProvider() {
     if (!result || !result.provider_bundle) {
       throw new Error(result && (result.error || result.message) || '接入点探测失败');
     }
-    await _stageModelRoutingProviderBundle(result.provider_bundle, String(apiKey).trim());
+    await _stageModelRoutingProviderBundle(result.provider_bundle, String(apiKey).trim(), {
+      listed: Number(result.listed_model_count) || 0,
+      imported: Number(result.model_count) || 0,
+    });
   } catch (error) {
     showAlert('添加自定义服务商失败：' + String(error && error.message || error));
   }
 }
 
+// Retained event handlers need a fresh view of the live draft after each edit.
+// Remove this bridge when those handlers move to the typed Settings owners.
 function _modelRoutingProviderContext(providerId) {
-  if (!_stgModelRouting) return null;
-  var documentValue = _stgModelRouting;
-  var provider = (documentValue.providers || []).find(function(row) {
-    return row.provider_id === providerId;
-  });
-  var accessIndex = (documentValue.provider_accesses || []).findIndex(function(row) {
-    return row.provider_id === providerId;
-  });
-  var access = (documentValue.provider_accesses || [])[accessIndex];
-  if (!provider || !access) return null;
-  var accessId = access.provider_access_id;
-  var connections = (documentValue.connections || []).map(function(row, index) {
-    return { row: row, index: index };
-  }).filter(function(item) { return item.row.provider_access_id === accessId; });
-  var credentials = (documentValue.credentials || []).map(function(row, index) {
-    return { row: row, index: index };
-  }).filter(function(item) { return item.row.provider_access_id === accessId; });
-  var offerings = (documentValue.offerings || []).map(function(row, index) {
-    return { row: row, index: index };
-  }).filter(function(item) { return item.row.provider_access_id === accessId; });
-  var offeringIds = new Set(offerings.map(function(item) { return item.row.offering_id; }));
-  var deployments = (documentValue.deployments || []).map(function(row, index) {
-    return { row: row, index: index };
-  }).filter(function(item) { return offeringIds.has(item.row.offering_id); });
-  var modelNames = {};
-  (documentValue.models || []).forEach(function(model) {
-    modelNames[(model.creator_id || '') + '::' + (model.model_id || '')] =
-      model.display_name || model.model_id;
-  });
-  var modelReleaseDates = {};
-  (documentValue.models || []).forEach(function(model) {
-    if (model.release_date) {
-      modelReleaseDates[(model.creator_id || '') + '::' + (model.model_id || '')] =
-        model.release_date;
-    }
-  });
-  var modelListPricing = {};
-  (documentValue.models || []).forEach(function(model) {
-    if (model.list_pricing) {
-      modelListPricing[(model.creator_id || '') + '::' + (model.model_id || '')] =
-        model.list_pricing;
-    }
-  });
-  var modelLifecycles = {};
-  (documentValue.models || []).forEach(function(model) {
-    if (model.lifecycle) {
-      modelLifecycles[(model.creator_id || '') + '::' + (model.model_id || '')] =
-        model.lifecycle;
-    }
-  });
-  return {
-    provider: provider,
-    access: access,
-    accessIndex: accessIndex,
-    connections: connections,
-    credentials: credentials,
-    offerings: offerings,
-    deployments: deployments,
-    modelReleaseDates: modelReleaseDates,
-    modelListPricing: modelListPricing,
-    modelLifecycles: modelLifecycles,
-    modelNames: modelNames,
-  };
+  return createProviderSettingsProjection(_stgModelRouting, providerId).context(providerId);
 }
 
 function _modelRoutingProviderBrand(context) {
@@ -245,6 +194,8 @@ function _modelRoutingProviderBrand(context) {
 }
 
 function _renderModelRoutingProvidersTab(list) {
+  if (_providerCredentialReveals) _providerCredentialReveals.dispose();
+  if (_providerKeyEditor) _providerKeyEditor.dispose();
   if (!_stgModelRouting) {
     list.innerHTML = '<p class="stg-empty">' + escapeHtml(
       _stgModelRoutingLoadError
@@ -266,9 +217,10 @@ function _renderModelRoutingProvidersTab(list) {
       expandedIds.add(String(card.getAttribute('data-provider-id') || ''));
     });
   }
+  var projection = createProviderSettingsProjection(document);
   var html = '';
   providers.forEach(function(provider) {
-    var context = _modelRoutingProviderContext(provider.provider_id);
+    var context = projection.context(provider.provider_id);
     if (!context) return;
     var access = context.access;
     var modelCount = new Set(context.offerings.filter(function(item) {
@@ -324,7 +276,7 @@ function _renderModelRoutingProvidersTab(list) {
           escapeHtml(provider.provider_id) + '" ' +
           'data-tofu-action="_deleteModelRoutingProvider(this.dataset.providerId)">删除服务商</button>' +
       '</div></div>' +
-      '<div class="stg-models-section">' + _renderAccessMatrix(provider.provider_id) + '</div>' +
+      '<div class="stg-models-section">' + _renderAccessMatrix(provider.provider_id, context) + '</div>' +
       '</div>' +
       '</details>';
   });
@@ -427,17 +379,6 @@ function _v2KeyCardPendingSecret(credentialId) {
   return String(_stgPendingCredentialSecrets[credentialId] || '');
 }
 
-/* Client mirror of the server hint contract (first4 + masks + last4), used
- * only for staged values that the server has not hashed yet. */
-function _v2MaskedSecret(value) {
-  var normalized = String(value || '').trim();
-  if (!normalized) return '';
-  if (normalized.length <= 8) return '****';
-  var hidden = Math.min(normalized.length - 8, 40);
-  return normalized.slice(0, 4) + new Array(hidden + 1).join('*') +
-    normalized.slice(-4);
-}
-
 function _renderV2KeyCard(provider, item, order) {
   var row = item.row;
   var keyHint = String(row.key_hint || '').replace(/^…+/, '');
@@ -447,7 +388,7 @@ function _renderV2KeyCard(provider, item, order) {
     ? (keyHint || '••••••••')
     : (row.kind === 'local_identity' ? '本地身份（无需密钥）' : '订阅授权（OAuth）');
   var staged = isApiKey ? _v2KeyCardPendingSecret(credentialId) : '';
-  var display = staged ? _v2MaskedSecret(staged) : storedDisplay;
+  var display = staged ? maskProviderCredentialSecret(staged) : storedDisplay;
   return '<div class="stg-key-card ' + _v2KeyCardStateClass(provider.provider_id, item) +
     (staged ? ' stg-key-card--staged' : '') +
     '" data-credential-index="' + item.index + '"' +
@@ -476,96 +417,53 @@ function _renderV2KeyCard(provider, item, order) {
   '</div>';
 }
 
-function _v2KeyDisplaySecret(secret) {
-  /* Credentials carrying encrypted extra_headers store a
-   * tofu.credential-secret/v1 envelope; the key card reveals only the
-   * usable key, never the envelope JSON chrome. */
-  try {
-    var decoded = JSON.parse(secret);
-    if (decoded && decoded.format === 'tofu.credential-secret/v1') {
-      var apiKey = String(decoded.api_key || '').trim();
-      if (apiKey) return apiKey;
-    }
-  } catch (error) { /* raw key secrets are not JSON */ }
-  return secret;
-}
+var _providerCredentialReveals = null;
 
-function _markV2KeyCardStaged(card, staged) {
-  if (!card || !card.classList) return;
-  if (staged) card.classList.add('stg-key-card--staged');
-  else card.classList.remove('stg-key-card--staged');
-}
-
-function _showV2KeyPlaintext(button, card, input, plaintext) {
-  input.value = plaintext;
-  // A property, not a data attribute: an attribute would serialize the
-  // secret into every DOM snapshot/diagnostic dump.
-  input.__revealedSecret = plaintext;
-  input.readOnly = false;
-  input.title = '可直接编辑；保存后替换该密钥';
-  button.setAttribute('aria-pressed', 'true');
-  button.innerHTML = _V2_KEY_EYE_OFF;
-  input.focus();
-  if (typeof input.select === 'function') input.select();
-}
-
-function _onV2KeySecretEdit(input) {
-  if (!input || typeof input.closest !== 'function' || input.readOnly) return;
-  if (typeof _stgPendingCredentialSecrets === 'undefined' ||
-      !_stgPendingCredentialSecrets) return;
-  var card = input.closest('.stg-key-card');
-  if (!card) return;
-  var credentialId = card.getAttribute('data-credential-id') || '';
-  if (!credentialId) return;
-  var value = String(input.value || '');
-  var revealed = input.__revealedSecret || '';
-  var storedMask = input.getAttribute('data-stored') || '';
-  if (value.trim() && value !== revealed) {
-    _stgPendingCredentialSecrets[credentialId] = value;
-    input.setAttribute('data-masked', _v2MaskedSecret(value));
-    _markV2KeyCardStaged(card, true);
-  } else {
-    delete _stgPendingCredentialSecrets[credentialId];
-    input.setAttribute('data-masked', storedMask || '••••••••');
-    _markV2KeyCardStaged(card, false);
+function _getProviderCredentialReveals() {
+  if (!_providerCredentialReveals) {
+    _providerCredentialReveals = createProviderKeyReveal({
+      document: function() { return _stgModelRouting; },
+      credential: function(providerId, credentialId) {
+        var context = _modelRoutingProviderContext(providerId);
+        var item = context && context.credentials.find(function(candidate) {
+          return String(candidate.row.credential_id || '') === credentialId;
+        });
+        return item ? item.row : null;
+      },
+      pendingSecret: _v2KeyCardPendingSecret,
+      stageSecret: function(credentialId, value) {
+        if (value === null) delete _stgPendingCredentialSecrets[credentialId];
+        else _stgPendingCredentialSecrets[credentialId] = value;
+      },
+      reveal: function(credentialId) { return Api.modelRouting.revealCredentialSecret(credentialId); },
+      paint: function(binding, revealed) {
+        binding.input.title = revealed ? '可直接编辑；保存后替换该密钥' : '密文保存在服务端，默认只显示首尾识别位';
+        binding.button.setAttribute('aria-pressed', revealed ? 'true' : 'false');
+        binding.button.innerHTML = revealed ? _V2_KEY_EYE_OFF : _V2_KEY_EYE_OPEN;
+      },
+      failed: function() { showToast(t('settings.keyRevealFailed')); },
+    });
   }
+  return _providerCredentialReveals;
 }
 
 function _toggleV2KeyReveal(button) {
-  if (!button || typeof button.closest !== 'function') return;
-  var card = button.closest('.stg-key-card');
-  var input = card ? card.querySelector('.stg-keys-input') : null;
-  if (!input) return;
-  if (button.getAttribute('aria-pressed') === 'true') {
-    input.value = input.getAttribute('data-masked') || '';
-    input.readOnly = true;
-    delete input.__revealedSecret;
-    input.title = '密文保存在服务端，默认只显示首尾识别位';
-    button.setAttribute('aria-pressed', 'false');
-    button.innerHTML = _V2_KEY_EYE_OPEN;
-    return;
-  }
-  var credentialId = card.getAttribute('data-credential-id') || '';
-  if (!credentialId) return;
-  // A staged replacement is already in memory; show it without a round trip.
-  var staged = _v2KeyCardPendingSecret(credentialId);
-  if (staged) {
-    _showV2KeyPlaintext(button, card, input, staged);
-    return;
-  }
-  if (typeof Api === 'undefined' || !Api.modelRouting ||
-      !Api.modelRouting.revealCredentialSecret) return;
-  button.disabled = true;
-  Api.modelRouting.revealCredentialSecret(credentialId).then(function(data) {
-    button.disabled = false;
-    if (!data || typeof data.secret !== 'string' || !data.secret) {
-      showToast(t('settings.keyRevealFailed'));
-      return;
-    }
-    // The user may have typed while the request was in flight; never clobber it.
-    if (input.readOnly === false && input.value.trim()) return;
-    _showV2KeyPlaintext(button, card, input, _v2KeyDisplaySecret(data.secret));
-  });
+  return _getProviderCredentialReveals().toggle(button);
+}
+
+function _onV2KeySecretEdit(input) {
+  if (_providerCredentialReveals) _providerCredentialReveals.edit(input);
+}
+
+// Removed with this retained adapter when Provider cards become native modules.
+function _adoptProviderCredentialDraft(previous) {
+  if (_providerCredentialReveals) _providerCredentialReveals.adoptDocument(previous);
+}
+
+function _destroyProviderCredentialViews() {
+  if (_providerCredentialReveals) _providerCredentialReveals.dispose();
+  if (_providerKeyEditor) _providerKeyEditor.dispose();
+  if (_providerKeyStats) _providerKeyStats.dispose();
 }
 
 /* ── Per-key runtime stats (today) — classic two-row key card ──
@@ -577,70 +475,28 @@ function _toggleV2KeyReveal(button) {
  * document field, because the dispatcher never mints a slot for it.
  */
 
-var _v2KeyStatsCache = null;
-var _v2KeyStatsLoading = false;
+var _providerKeyStats = null;
 
-function _loadV2KeyStats() {
-  if (_v2KeyStatsLoading || _v2KeyStatsCache) return;
-  if (typeof Api === 'undefined' || !Api.dispatch || !Api.dispatch.keyStats) return;
-  _v2KeyStatsLoading = true;
-  Api.dispatch.keyStats()
-    .then(function(data) {
-      _v2KeyStatsCache = (data && typeof data === 'object') ? data : { providers: {} };
-    })
-    .catch(function() {
-      _v2KeyStatsCache = { providers: {} };
-    })
-    .finally(function() {
-      _v2KeyStatsLoading = false;
-      _refreshV2KeyStatsDom();
+function _getProviderKeyStats() {
+  if (!_providerKeyStats) {
+    _providerKeyStats = createProviderKeyStats({
+      document: function() { return _stgModelRouting; },
+      read: function() { return Api.dispatch.keyStats(); },
+      write: function(body) { return Api.dispatch.keyOverride(body); },
+      refresh: _refreshV2KeyStatsDom,
+      failed: function() { showToast('密钥切换失败，请稍后重试。'); },
     });
+  }
+  return _providerKeyStats;
 }
 
-function _v2KeyStatsBucket(providerId, credentialId) {
-  var providers = (_v2KeyStatsCache && _v2KeyStatsCache.providers) || {};
-  var candidates = [];
-  if (providers[providerId]) candidates.push(providerId);
-  var suffix = ':' + providerId;
-  var names = Object.keys(providers);
-  for (var i = 0; i < names.length; i++) {
-    if (names[i] !== providerId && names[i].slice(-suffix.length) === suffix) {
-      candidates.push(names[i]);
-    }
-  }
-  /* A stale legacy bucket (e.g. persistent overrides recorded pre-v2 under
-   * the bare provider id) must not shadow the owner-scoped bucket that
-   * actually holds this credential's rows: resolve by content first. */
-  if (credentialId) {
-    for (var j = 0; j < candidates.length; j++) {
-      if (providers[candidates[j]][credentialId]) {
-        return { id: candidates[j], keys: providers[candidates[j]] };
-      }
-    }
-  }
-  return candidates.length
-    ? { id: candidates[0], keys: providers[candidates[0]] }
-    : null;
+function _loadV2KeyStats() {
+  if (typeof Api === 'undefined' || !Api.dispatch || !Api.dispatch.keyStats) return;
+  return _getProviderKeyStats().load();
 }
 
 function _v2KeyStatRow(providerId, credentialId) {
-  var bucket = _v2KeyStatsBucket(providerId, credentialId);
-  return bucket ? (bucket.keys[credentialId] || null) : null;
-}
-
-/* Namespace for override writes: the bucket already holding this
- * credential's rows always wins (it is the exact id the dispatcher
- * recorded under); otherwise compose from the server-reported
- * key_namespace (owner-scoped since routing v2). A legacy bucket with no
- * rows for the credential must never capture the write — the dispatcher
- * would never read an override recorded under it. */
-function _v2KeyNamespace(providerId, credentialId) {
-  var bucket = _v2KeyStatsBucket(providerId, credentialId);
-  if (bucket && credentialId && bucket.keys[credentialId]) return bucket.id;
-  var prefix = (_v2KeyStatsCache && _v2KeyStatsCache.key_namespace) || '';
-  if (prefix) return prefix + providerId;
-  if (bucket) return bucket.id;
-  return providerId;
+  return _getProviderKeyStats().row(providerId, credentialId);
 }
 
 function _v2KeyCardStateClass(providerId, item) {
@@ -651,7 +507,8 @@ function _v2KeyCardStateClass(providerId, item) {
   if (!row.enabled) return 'stg-keystat-disabled';
   if (row.auto_disabled) return 'stg-keystat-warn';
   if (row.success_rate == null) return 'stg-keystat-idle';
-  var minRate = (_v2KeyStatsCache && _v2KeyStatsCache.min_success_rate) || 0.5;
+  var snapshot = _getProviderKeyStats().snapshot;
+  var minRate = (snapshot && snapshot.min_success_rate) || 0.5;
   if (row.success_rate >= 0.9) return 'stg-keystat-good';
   if (row.success_rate >= minRate) return 'stg-keystat-ok';
   return 'stg-keystat-warn';
@@ -660,7 +517,8 @@ function _v2KeyCardStateClass(providerId, item) {
 function _renderV2KeyCardStats(providerId, item) {
   var credentialId = String(item.row.credential_id || '');
   var row = _v2KeyStatRow(providerId, credentialId);
-  var effectiveEnabled = !!item.row.enabled && (row ? !!row.enabled : true);
+  var pending = _getProviderKeyStats().pending(providerId, credentialId);
+  var effectiveEnabled = !!item.row.enabled && (typeof pending === 'boolean' ? pending : row ? !!row.enabled : true);
 
   var total = row ? (row.total || 0) : 0;
   var succ = row ? (row.success || 0) : 0;
@@ -668,7 +526,8 @@ function _renderV2KeyCardStats(providerId, item) {
   var rl429 = row ? (row.rate_limited || 0) : 0;
   var gw = row ? (row.gateway_errors || 0) : 0;
   var cons429 = row ? (row.consecutive_429 || 0) : 0;
-  var max429 = (_v2KeyStatsCache && _v2KeyStatsCache.max_consecutive_429) || 100;
+  var snapshot = _getProviderKeyStats().snapshot;
+  var max429 = (snapshot && snapshot.max_consecutive_429) || 100;
   var modelStops = row ? Object.keys(row.exhausted_models || {}) : [];
   var srTxt = row && row.success_rate != null
     ? Math.round(row.success_rate * 100) + '%' : '—';
@@ -705,6 +564,9 @@ function _renderV2KeyCardStats(providerId, item) {
       escapeHtml(t('settings.keyStatLastError')) + '</span>';
   }
 
+  var status = _getProviderKeyStats().status;
+  var emptyMessage = !row && status === 'loading' ? t('common.loading')
+    : !row && status === 'failed' ? t('settings.keyStatLoadFailed') : t('settings.keyStatNoCallsTip');
   var metrics = total > 0
     ? '<span class="stg-keystat-metrics">' +
       '<span class="stg-keystat-rate" title="' +
@@ -719,11 +581,11 @@ function _renderV2KeyCardStats(providerId, item) {
       (gw > 0 ? '<span class="stg-keystat-gateway" title="' + escapeHtml(t('settings.keyStatGatewayTip')) + '">' +
         escapeHtml(t('settings.keyStatGateway', { n: gw })) + '</span>' : '') +
       '</span>'
-    : '<span class="stg-keystat-none">' + escapeHtml(t('settings.keyStatNoCallsTip')) + '</span>';
+    : '<span class="stg-keystat-none">' + escapeHtml(emptyMessage) + '</span>';
 
   return metrics +
     badges +
-    '<span class="stg-keystat-actions">' +
+    '<span class="stg-keystat-actions" aria-busy="' + (pending !== undefined ? 'true' : 'false') + '">' +
       '<label class="stg-toggle stg-key-toggle" title="' + escapeHtml(t('settings.keyStatToggleTip')) + '">' +
         '<input type="checkbox"' + (effectiveEnabled ? ' checked' : '') +
           ' data-provider-id="' + escapeHtml(providerId) + '"' +
@@ -754,44 +616,37 @@ function _onV2KeyToggle(providerId, credentialId, enabled) {
     showToast('已重新启用 — 保存后生效。');
     return;
   }
-  _v2KeyOverride(providerId, credentialId, !!enabled);
+  return _v2KeyOverride(providerId, credentialId, !!enabled);
 }
 
 function _onV2KeyClearOverride(providerId, credentialId) {
-  _v2KeyOverride(providerId, credentialId, null);
+  return _v2KeyOverride(providerId, credentialId, null);
 }
 
 function _v2KeyOverride(providerId, credentialId, enabled) {
   if (typeof Api === 'undefined' || !Api.dispatch || !Api.dispatch.keyOverride) return;
-  var namespaced = _v2KeyNamespace(providerId, credentialId);
-  Api.dispatch.keyOverride({
-    provider_id: namespaced,
-    key_name: credentialId,
-    enabled: enabled,
-  }).then(function(data) {
-    if (data && data.row) {
-      if (!_v2KeyStatsCache) _v2KeyStatsCache = { providers: {} };
-      if (!_v2KeyStatsCache.providers) _v2KeyStatsCache.providers = {};
-      if (!_v2KeyStatsCache.providers[namespaced]) _v2KeyStatsCache.providers[namespaced] = {};
-      _v2KeyStatsCache.providers[namespaced][credentialId] = data.row;
-    } else {
-      showToast('密钥切换失败，请稍后重试。');
-    }
-    _refreshV2KeyStatsDom();
-  });
+  return _getProviderKeyStats().override(providerId, credentialId, enabled);
 }
 
 function _refreshV2KeyStatsDom() {
   if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
   var cards = document.querySelectorAll('.stg-key-card[data-credential-id]');
+  var projection = createProviderSettingsProjection(_stgModelRouting);
+  var credentialsByProvider = new Map();
   for (var i = 0; i < cards.length; i++) {
     var card = cards[i];
     var providerId = card.getAttribute('data-provider-id') || '';
     var credentialId = card.getAttribute('data-credential-id') || '';
-    var context = _modelRoutingProviderContext(providerId);
-    var item = context ? context.credentials.find(function(candidate) {
-      return String(candidate.row.credential_id || '') === credentialId;
-    }) : null;
+    if (!credentialsByProvider.has(providerId)) {
+      var context = projection.context(providerId);
+      var credentials = new Map();
+      (context ? context.credentials : []).forEach(function(candidate) {
+        var id = String(candidate.row.credential_id || '');
+        if (!credentials.has(id)) credentials.set(id, candidate);
+      });
+      credentialsByProvider.set(providerId, credentials);
+    }
+    var item = credentialsByProvider.get(providerId).get(credentialId);
     if (!item) continue;
     var classes = (card.className || '').split(/\s+/).filter(function(name) {
       return name && name.indexOf('stg-keystat-') !== 0;
@@ -799,8 +654,34 @@ function _refreshV2KeyStatsDom() {
     classes.push(_v2KeyCardStateClass(providerId, item));
     card.className = classes.join(' ');
     var statsEl = card.querySelector('.stg-key-card-stats');
-    if (statsEl) statsEl.innerHTML = _renderV2KeyCardStats(providerId, item);
+    if (statsEl) {
+      var active = document.activeElement;
+      var focused = statsEl.contains(active) ? active.getAttribute('data-tofu-action-change') || active.getAttribute('data-tofu-action') : null;
+      statsEl.innerHTML = _renderV2KeyCardStats(providerId, item);
+      if (focused) {
+        var control = Array.from(statsEl.querySelectorAll('[data-tofu-action-change], [data-tofu-action]')).find(function(node) {
+          return node.getAttribute('data-tofu-action-change') === focused || node.getAttribute('data-tofu-action') === focused;
+        });
+        if (control) control.focus();
+      }
+    }
   }
+}
+
+var _providerKeyEditor = null;
+
+function _getProviderKeyEditor() {
+  if (!_providerKeyEditor) {
+    _providerKeyEditor = createProviderKeyEditor({
+      document: function() { return _stgModelRouting; },
+      save: function(providerId, secret) {
+        var context = _modelRoutingProviderContext(providerId);
+        return _saveNewProviderCredential(context, secret, false).then(function(result) { return result.refreshed; });
+      },
+      refresh: function() { _notifyProviderMutation({refreshed: true}, '', _renderProvidersTab); },
+    });
+  }
+  return _providerKeyEditor;
 }
 
 function _startNewV2ApiKey(providerId) {
@@ -827,61 +708,33 @@ function _startNewV2ApiKey(providerId) {
       '</div>' +
     '</div>');
   var card = list.lastElementChild;
-  var input = card.querySelector('input');
-  card.querySelector('.stg-keys-btn').onclick = function() { card.remove(); };
-  input.addEventListener('keydown', function(event) {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      void _commitNewV2ApiKey(providerId, card, input);
-    }
-  });
-  input.addEventListener('blur', function() {
-    if (input.value.trim()) void _commitNewV2ApiKey(providerId, card, input);
-  });
-  input.focus();
-}
-
-async function _commitNewV2ApiKey(providerId, card, input) {
-  var apiKey = input.value.trim();
-  if (!apiKey) { input.focus(); return; }
-  var context = _modelRoutingProviderContext(providerId);
-  if (!context) { card.remove(); return; }
-  input.disabled = true;
-  try {
-    await _saveNewProviderCredential(context, apiKey);
-  } catch (error) {
-    input.disabled = false;
-    input.focus();
-  }
+  _getProviderKeyEditor().mount(providerId, card);
 }
 
 async function _deleteV2Credential(providerId, credentialIndex) {
+  var document = _stgModelRouting;
   var context = _modelRoutingProviderContext(providerId);
   if (!context) return;
   var index = Number(credentialIndex);
   var row = Number.isInteger(index) ? (_stgModelRouting.credentials || [])[index] : null;
   if (!row || row.provider_access_id !== context.access.provider_access_id) return;
+  var credentialId = row.credential_id;
+  var accessId = context.access.provider_access_id;
   var order = context.credentials.findIndex(function(item) {
     return item.row.credential_id === row.credential_id;
   });
   if (!await showConfirm(
     '删除密钥 #' + (order + 1) + '？删除立即生效，使用该密钥的轮转会自动跳过它。',
     { danger: true })) return;
-  var bundle = _providerBundleForSave(context);
-  bundle.credentials = bundle.credentials.filter(function(candidate) {
-    return candidate.credential_id !== row.credential_id;
-  });
   try {
-    var saved = await Api.modelRouting.saveProvider(
-      context.provider.provider_id, bundle, _stgModelRoutingRevision);
-    if (!saved || !saved.provider) throw new Error('密钥未能删除');
-    if (typeof _stgPendingCredentialSecrets !== 'undefined' && _stgPendingCredentialSecrets) {
-      delete _stgPendingCredentialSecrets[row.credential_id];
+    if (_stgModelRouting !== document || _stgModelRouting.credentials[index] !== row ||
+        row.credential_id !== credentialId || row.provider_access_id !== accessId ||
+        context.access.provider_access_id !== accessId) {
+      throw new Error(t('settings.providerSelectionChanged'));
     }
-    _stgModelRoutingRevision = Number(saved.revision || _stgModelRoutingRevision);
-    await _loadModelRoutingAuthority();
-    _renderProvidersTab();
-    showToast('已删除密钥。');
+    var result = await _getProviderMutations().removeCredential(
+      providerId, accessId, credentialId);
+    _notifyProviderMutation(result, '已删除密钥。', _renderProvidersTab);
   } catch (error) {
     showAlert('删除密钥失败：' + String(error && error.message || error));
   }
@@ -1014,63 +867,26 @@ function _removeV2Alias(deploymentIndex) {
  * enabled Connection" produced a row that could never answer — the reported
  * "added it several times, still fails". The face is a Connection property,
  * so every request name pointing at it shares one. */
-function _ensureV2FaceConnection(context, plan) {
-  if (!plan || !plan.base_url) return null;
-  var accessId = context.access.provider_access_id;
-  var url = String(plan.base_url).replace(/\/$/, '');
-  var existing = (_stgModelRouting.connections || []).find(function(row) {
-    if (row.provider_access_id !== accessId) return false;
-    if (String(row.base_url || '').replace(/\/$/, '') !== url) return false;
-    if (!plan.face) return true;
-    return !row.gateway_namespace || row.gateway_namespace === plan.face;
-  });
-  var connectionId;
-  if (existing) {
-    connectionId = existing.connection_id;
+function _providerDisabledConnectionError(row) {
+  return new Error(t('settings.requestNameConnectionDisabled', {
+    name: row.display_name || row.connection_id,
+  }));
+}
 
-    if (existing.enabled === false) throw new Error(t('settings.requestNameConnectionDisabled', { name: existing.display_name || existing.connection_id }));
-    // Fill only what the face declares and the row lacks: an owner-edited
-    // protocol/profile is a deliberate override, not a gap.
-    if (!existing.protocol && plan.protocol) existing.protocol = plan.protocol;
-    if (plan.face && !existing.gateway_namespace) existing.gateway_namespace = plan.face;
-    if (plan.responses_profile && !existing.responses_profile) {
-      existing.responses_profile = plan.responses_profile;
-    }
-    if (plan.inference_profile && !existing.inference_profile) {
-      existing.inference_profile = plan.inference_profile;
-    }
-    var headers = existing.extra_headers || {};
-    Object.keys(plan.extra_headers || {}).forEach(function(key) {
-      if (!(key in headers)) headers[key] = plan.extra_headers[key];
+function _ensureV2FaceConnection(context, plan) {
+  var result = resolveProviderFaceConnection(_stgModelRouting.connections || [],
+    context.access.provider_access_id, plan, {
+      newId: _newV2StagedId,
+      disabledConnection: _providerDisabledConnectionError,
     });
-    existing.extra_headers = headers;
-  } else {
-    connectionId = _newV2StagedId('conn');
-    var row = {
-      connection_id: connectionId,
-      provider_access_id: accessId,
-      base_url: url,
-      protocol: plan.protocol || 'openai',
-      enabled: true,
-      priority: 100,
-      extra_headers: Object.assign({}, plan.extra_headers || {}),
-    };
-    if (plan.face) row.gateway_namespace = plan.face;
-    if (plan.responses_profile) row.responses_profile = plan.responses_profile;
-    if (plan.inference_profile) row.inference_profile = plan.inference_profile;
-    _stgModelRouting.connections.push(row);
-  }
-  // Dispatch refuses a wire whose credential cannot use its Connection.
-  (context.credentials || []).forEach(function(item) {
-    var credential = item.row;
-    if (!credential.authorization) {
-      credential.authorization = { connection_ids: [], models: [] };
-    }
-    var ids = credential.authorization.connection_ids ||
-      (credential.authorization.connection_ids = []);
-    if (ids.indexOf(connectionId) < 0) ids.push(connectionId);
+  if (!result) return null;
+  if (result.previous) Object.assign(result.previous, result.connection);
+  else _stgModelRouting.connections.push(result.connection);
+  context.credentials.forEach(function(item) {
+    item.row.authorization = authorizeProviderConnection(
+      item.row.authorization, result.connection.connection_id);
   });
-  return connectionId;
+  return result.connection.connection_id;
 }
 
 async function _planV2RequestNameFaces(names, context) {
@@ -1186,169 +1002,35 @@ async function _removeV2Offering(providerId, offeringId) {
  * ungranted refs), appended here deduped; revoke in the matrix.
  */
 
-var _stgModelPickerProviderId = '';
-var _stgModelPickerQuery = '';
-var _stgModelPickerChecked = new Set();
+var _providerModelPicker = null;
 
 function _newV2StagedId(prefix) {
   return prefix + '-' + String(Date.now()).toString(36) + '-' +
     Math.random().toString(36).slice(2, 8);
 }
 
-function _providerWireModelIds(context) {
-  var ids = new Set();
-  (context.deployments || []).forEach(function(item) {
-    ids.add(String(item.row.wire_model_id || ''));
-  });
-  return ids;
-}
-
-function _providerAddableCatalogModels(context) {
-  var offered = new Set();
-  context.offerings.forEach(function(item) {
-    var row = item.row;
-    if (row.identity_state === 'confirmed' && row.model) {
-      offered.add((row.model.creator_id || '') + '::' + (row.model.model_id || ''));
-    }
-  });
-  return (_stgModelRouting.models || []).filter(function(model) {
-    if (model.lifecycle === 'retired') return false;
-    return !offered.has((model.creator_id || '') + '::' + (model.model_id || ''));
-  });
-}
-
 async function _stageV2AddModels(providerId, catalogModels, customWireIds) {
-  // A new browser bundle can be served before the backend restarts. Do not
-  // send optional fields until the current server advertises their contract.
-  var authorityCapabilities = await Api.modelRouting.get();
-  var supportsInheritance = authorityCapabilities.metadata_inheritance_supported === true;
-  var context = _modelRoutingProviderContext(providerId);
-  if (!context) return 0;
-  var connection = context.connections.find(function(item) {
-    return item.row.enabled !== false;
-  }) || context.connections[0];
-  if (!connection) {
-    showAlert('请先为该服务商配置 API 地址，再添加模型。');
-    return 0;
-  }
-  var stagedDocument = _stgModelRouting;
-  var requestNames = runtimeScope.planProviderRequestNames
-    ? await runtimeScope.planProviderRequestNames(catalogModels || [], context.connections.map(item => item.row.base_url)) : {};
-  if (_stgModelRouting !== stagedDocument) return 0;
-  context = _modelRoutingProviderContext(providerId);
-  if (!context) return 0;
-  connection = context.connections.find(item => item.row.connection_id === connection.row.connection_id);
-  if (!connection) return 0;
-  var wireIds = _providerWireModelIds(context);
-  var granted = new Set();
-  var added = 0;
-  // Every request name the picker is about to add, so one template lookup
-  // resolves the face each one must travel over.
-  var pendingWireIds = [];
-  (catalogModels || []).forEach(function(model) {
-    (requestNames[model.model_id] || [String(model.model_id || '')])
-      .forEach(function(id) { if (id && !wireIds.has(id)) pendingWireIds.push(id); });
+  return addProviderModels(providerId, catalogModels || [], customWireIds || [], {
+    document: function() { return _stgModelRouting; },
+    readCapabilities: function() { return Api.modelRouting.get(); },
+    planRequestNames: function(models, urls) {
+      return runtimeScope.planProviderRequestNames
+        ? runtimeScope.planProviderRequestNames(models, urls) : Promise.resolve({});
+    },
+    planFaces: function(names, urls) {
+      return typeof runtimeScope.planProviderRequestNameFaces === 'function'
+        ? runtimeScope.planProviderRequestNameFaces(names, urls) : Promise.resolve({});
+    },
+    newId: _newV2StagedId,
+    disabledConnection: _providerDisabledConnectionError,
+    missingConnection: function() { showAlert('请先为该服务商配置 API 地址，再添加模型。'); },
+    selectionChanged: function() { return new Error(t('settings.modelAddSelectionChanged')); },
+    render: function() { _renderProvidersTab(); },
+    persist: function() { return _persistModelRoutingNow(); },
   });
-  (customWireIds || []).forEach(function(rawId) {
-    var wireId = String(rawId || '').trim();
-    if (wireId && !wireIds.has(wireId)) pendingWireIds.push(wireId);
-  });
-  var facePlans = await _planV2RequestNameFaces(pendingWireIds, context);
-  if (_stgModelRouting !== stagedDocument) return 0;
-  // A face-pinned request name (aigc kunlun) must not inherit the card's
-  // default Connection: that endpoint rejects the id outright.
-  var connectionForWire = function(wireId) {
-    return _ensureV2FaceConnection(context, facePlans[wireId])
-      || connection.row.connection_id;
-  };
-  var pushDeployment = function(offeringId, wireId, confidence) {
-    _stgModelRouting.deployments.push({
-      deployment_id: _newV2StagedId('deployment'),
-      offering_id: offeringId,
-      connection_id: connectionForWire(wireId),
-      wire_model_id: wireId,
-      identity_confidence: confidence,
-      probe_status: 'unprobed',
-      priority: 100,
-    });
-    wireIds.add(wireId);
-  };
-  var grantModel = function(ref) {
-    var grantKey = ref.creator_id + '::' + ref.model_id;
-    if (granted.has(grantKey)) return;
-    granted.add(grantKey);
-    context.credentials.forEach(function(item) {
-      var credential = item.row;
-      if (!credential.authorization) {
-        credential.authorization = { connection_ids: [], models: [] };
-      }
-      var grants = credential.authorization.models || [];
-      var exists = grants.some(function(candidate) {
-        return String(candidate.creator_id || '') === String(ref.creator_id) &&
-          String(candidate.model_id || '') === String(ref.model_id);
-      });
-      if (!exists) grants.push({ creator_id: ref.creator_id, model_id: ref.model_id });
-      credential.authorization.models = grants;
-    });
-  };
-  (catalogModels || []).forEach(function(model) {
-    var names = (requestNames[model.model_id] || [String(model.model_id || '')]).filter(id => id && !wireIds.has(id));
-    if (!names.length) return;
-    var offeringId = _newV2StagedId('offering');
-    _stgModelRouting.offerings.push({
-      offering_id: offeringId,
-      provider_access_id: context.access.provider_access_id,
-      identity_state: 'confirmed',
-      model: { creator_id: model.creator_id, model_id: model.model_id },
-      enabled: true,
-      stale: false,
-      capabilities: (model.capabilities && model.capabilities.length
-        ? model.capabilities : ['text']).slice(),
-      context_window: model.context_window || 128000,
-      ...(supportsInheritance ? { inherited_model_fields: ['capabilities', 'context_window'] } : {}),
-      priority: 100,
-    });
-    names.forEach(wireId => pushDeployment(offeringId, wireId, 'high'));
-    grantModel({ creator_id: model.creator_id, model_id: model.model_id });
-    added++;
-  });
-  (customWireIds || []).forEach(function(rawId) {
-    var wireId = String(rawId || '').trim();
-    if (!wireId || wireId.length > 256 || /[\u0000-\u001f]/.test(wireId)) return;
-    if (wireIds.has(wireId)) return;
-    var offeringId = _newV2StagedId('offering');
-    _stgModelRouting.offerings.push({
-      offering_id: offeringId,
-      provider_access_id: context.access.provider_access_id,
-      identity_state: 'pending_identity',
-      pending_model_id: wireId,
-      enabled: true,
-      stale: false,
-      capabilities: ['text'],
-      context_window: 128000,
-      ...(supportsInheritance ? { inherited_model_fields: ['capabilities', 'context_window'] } : {}),
-      priority: 100,
-    });
-    pushDeployment(offeringId, wireId, 'pending');
-    added++;
-  });
-  if (added) {
-    _renderProvidersTab();
-    // Model adds commit immediately (like key/provider edits): the access
-    // matrix probes the SERVER document, so a staged-but-unsaved row would
-    // 400 with "no cells match the requested scope".
-    await _persistModelRoutingNow();
-  }
-  return added;
 }
 
-function _openProviderModelPicker(providerId) {
-  var context = _modelRoutingProviderContext(providerId);
-  if (!context) return;
-  _closeProviderModelPicker();
-  _stgModelPickerProviderId = String(providerId);
-  _stgModelPickerQuery = '';
-  _stgModelPickerChecked = new Set();
+function _createProviderModelPickerView(context) {
   var overlay = document.createElement('div');
   overlay.id = 'stgProviderModelPickerOverlay';
   overlay.className = 'stg-v2-manager-overlay stg-v2-picker-overlay';
@@ -1371,6 +1053,12 @@ function _openProviderModelPicker(providerId) {
           '<button type="button" class="stg-btn-add" data-tofu-action="_stageV2CustomModelFromPicker()">添加</button>' +
         '</div>' +
         '<p class="stg-v2-picker-hint">' + escapeHtml(t('settings.requestNamePendingIdentity')) + '</p></div>' +
+      '<div class="stg-v2-picker-custom"><label>' + escapeHtml(t('settings.listedModelsSection')) + '</label>' +
+        '<div class="stg-v2-picker-foot"><p class="stg-v2-picker-hint">' +
+          escapeHtml(t('settings.listedModelsHint')) + '</p>' +
+          '<button type="button" id="stgProviderListedImport" class="stg-btn-add" ' +
+            'data-tofu-action="_importListedProviderModels()">' +
+            escapeHtml(t('settings.listedModelsImport')) + '</button></div></div>' +
       '<div class="stg-v2-picker-catalog"><label>从模型目录选择</label>' +
         '<input class="stg-v2-picker-search" type="search" placeholder="搜索模型名称或 ID" ' +
           'data-tofu-action-input="_filterProviderModelPicker(this.value)">' +
@@ -1380,67 +1068,29 @@ function _openProviderModelPicker(providerId) {
       '</div>' +
     '</div>';
   overlay.appendChild(panel);
-  document.body.appendChild(overlay);
-  overlay.onclick = function(event) { if (event.target === overlay) _closeProviderModelPicker(); };
-  var customInput = panel.querySelector('#stgProviderModelCustomId');
-  if (customInput) {
-    customInput.addEventListener('keydown', function(event) {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        _stageV2CustomModelFromPicker();
-      }
-    });
-  }
-  _renderProviderModelPickerList();
+  return {
+    root: overlay,
+    customInput: panel.querySelector('#stgProviderModelCustomId'),
+    customSubmit: panel.querySelector('.stg-v2-picker-custom-row button'),
+    listedImport: panel.querySelector('#stgProviderListedImport'),
+    list: panel.querySelector('#stgProviderModelPickerList'),
+    count: panel.querySelector('#stgProviderModelPickerCount'),
+  };
 }
 
-function _closeProviderModelPicker() {
-  _stgModelPickerProviderId = '';
-  var overlay = document.getElementById('stgProviderModelPickerOverlay');
-  if (overlay) overlay.remove();
+function _renderProviderModelPickerCount(view, count) {
+  view.count.textContent = count ? '已选择 ' + count + ' 个模型' : '未选择模型';
 }
 
-function _filterProviderModelPicker(value) {
-  _stgModelPickerQuery = String(value || '');
-  _renderProviderModelPickerList();
-}
-
-function _toggleProviderModelPick(key, checked) {
-  key = String(key || '');
-  if (!key) return;
-  if (checked) _stgModelPickerChecked.add(key);
-  else _stgModelPickerChecked.delete(key);
-  _renderProviderModelPickerCount();
-}
-
-function _renderProviderModelPickerCount() {
-  var count = document.getElementById('stgProviderModelPickerCount');
-  if (count) {
-    count.textContent = _stgModelPickerChecked.size
-      ? '已选择 ' + _stgModelPickerChecked.size + ' 个模型'
-      : '未选择模型';
-  }
-}
-
-function _renderProviderModelPickerList() {
-  var list = document.getElementById('stgProviderModelPickerList');
-  var context = _modelRoutingProviderContext(_stgModelPickerProviderId);
-  if (!list || !context) return;
-  var query = _stgModelPickerQuery.trim().toLowerCase();
-  var rows = _providerAddableCatalogModels(context).filter(function(model) {
-    var haystack = [model.display_name, model.model_id, model.creator_id].join(' ').toLowerCase();
-    return !query || haystack.includes(query);
-  }).sort(function(left, right) {
-    return String(left.display_name || left.model_id).localeCompare(
-      String(right.display_name || right.model_id), undefined,
-      { numeric: true, sensitivity: 'base' });
-  });
-  var visible = rows.slice(0, 120);
-  list.innerHTML = visible.map(function(model) {
+function _renderProviderModelPickerRows(view, rows, checked, emptyReason) {
+  var list = view.list;
+  var active = list.ownerDocument.activeElement;
+  var focusedKey = active && list.contains(active) ? active.getAttribute('data-model-key') : null;
+  list.innerHTML = rows.map(function(model) {
     var key = (model.creator_id || '') + '::' + (model.model_id || '');
     return '<label class="stg-v2-picker-row">' +
       '<input type="checkbox" data-model-key="' + escapeHtml(key) + '"' +
-        (_stgModelPickerChecked.has(key) ? ' checked' : '') +
+        (checked.has(key) ? ' checked' : '') +
         ' data-tofu-action-change="_toggleProviderModelPick(this.dataset.modelKey,this.checked)">' +
       '<span class="stg-v2-picker-row-icon">' +
         _brandSvg(typeof _modelBrand === 'function'
@@ -1453,135 +1103,139 @@ function _renderProviderModelPickerList() {
         escapeHtml(model.list_pricing ? _modelRoutingPriceLabel(model.list_pricing) : '目录未挂牌') +
       '</span></label>';
   }).join('');
-  if (!visible.length) {
+  if (!rows.length) {
     list.innerHTML = '<p class="stg-v2-picker-empty">' +
-      (rows.length ? '没有匹配的模型。' : '目录中的模型都已添加。') + '</p>';
+      (emptyReason === 'filtered' ? '没有匹配的模型。' : '目录中的模型都已添加。') + '</p>';
   }
-  _renderProviderModelPickerCount();
+  if (focusedKey) {
+    var focused = Array.from(list.querySelectorAll('[data-model-key]')).find(function(node) {
+      return node.getAttribute('data-model-key') === focusedKey;
+    });
+    if (focused) focused.focus();
+  }
+}
+
+function _notifyProviderModelPicker(notice) {
+  switch (notice.kind) {
+    case 'empty-selection': showToast('请先勾选要添加的模型。'); break;
+    case 'invalid-wire': showAlert('模型 ID 无效。'); break;
+    case 'duplicate-wire': showAlert('该模型 ID 已存在于本服务商。'); break;
+    case 'save-error': showAlert('模型保存失败：' + String(notice.error && notice.error.message || notice.error)); break;
+    case 'custom-added': showToast('已添加自定义模型。'); break;
+    case 'catalog-added': showToast('已添加 ' + notice.count + ' 个模型。'); break;
+    case 'listed-imported':
+      _notifyProviderMutation(notice, notice.added
+        ? t('settings.listedModelsAdded', { added: notice.added, listed: notice.listed })
+        : t('settings.listedModelsUpToDate', { listed: notice.listed }), _renderModelRoutingTabs);
+      break;
+    case 'listed-error':
+      showAlert(t('settings.listedModelsFailed', {
+        error: String(notice.error && notice.error.message || notice.error) }));
+      break;
+  }
+}
+
+function _getProviderModelPicker() {
+  if (!_providerModelPicker) {
+    _providerModelPicker = createProviderModelPicker({
+      document: function() { return _stgModelRouting; },
+      addModels: function(providerId, models, wireIds) { return _stageV2AddModels(providerId, models, wireIds); },
+      importListed: function(providerId) {
+        var context = _modelRoutingProviderContext(providerId);
+        if (!context) return Promise.reject(new Error(t('settings.providerSelectionChanged')));
+        return _getProviderMutations().importListedModels(
+          providerId, context.access.provider_access_id);
+      },
+      createView: _createProviderModelPickerView,
+      renderRows: _renderProviderModelPickerRows,
+      renderCount: _renderProviderModelPickerCount,
+      notify: _notifyProviderModelPicker,
+    });
+  }
+  return _providerModelPicker;
+}
+
+function _openProviderModelPicker(providerId) {
+  _getProviderModelPicker().open(String(providerId));
+}
+
+function _closeProviderModelPicker() {
+  if (_providerModelPicker) _providerModelPicker.close();
+}
+
+function _filterProviderModelPicker(value) {
+  _getProviderModelPicker().filter(String(value || ''));
+}
+
+function _toggleProviderModelPick(key, checked) {
+  _getProviderModelPicker().toggle(String(key || ''), !!checked);
 }
 
 async function _stageV2CustomModelFromPicker() {
-  var input = document.getElementById('stgProviderModelCustomId');
-  var wireId = input ? input.value.trim() : '';
-  if (!wireId) { if (input) input.focus(); return; }
-  var context = _modelRoutingProviderContext(_stgModelPickerProviderId);
-  if (!context) return;
-  if (wireId.length > 256 || /[\u0000-\u001f]/.test(wireId)) {
-    showAlert('模型 ID 无效。');
-    return;
-  }
-  if (_providerWireModelIds(context).has(wireId)) {
-    showAlert('该模型 ID 已存在于本服务商。');
-    return;
-  }
-  try {
-    if (!await _stageV2AddModels(_stgModelPickerProviderId, [], [wireId])) return;
-  } catch (error) {
-    showAlert('模型保存失败：' + String(error && error.message || error));
-    return;
-  }
-  input.value = '';
-  input.focus();
-  _renderProviderModelPickerList();
-  showToast('已添加自定义模型。');
+  await _getProviderModelPicker().submitCustom();
 }
 
 async function _stageV2CheckedCatalogModels() {
-  if (!_stgModelPickerChecked.size) {
-    showToast('请先勾选要添加的模型。');
-    return;
-  }
-  var context = _modelRoutingProviderContext(_stgModelPickerProviderId);
-  if (!context) return;
-  var byKey = {};
-  _providerAddableCatalogModels(context).forEach(function(model) {
-    byKey[(model.creator_id || '') + '::' + (model.model_id || '')] = model;
-  });
-  var models = Array.from(_stgModelPickerChecked).map(function(key) {
-    return byKey[key];
-  }).filter(Boolean);
-  var added = 0;
-  try {
-    added = await _stageV2AddModels(_stgModelPickerProviderId, models, []);
-  } catch (error) {
-    showAlert('模型保存失败：' + String(error && error.message || error));
-  }
-  _stgModelPickerChecked = new Set();
-  _renderProviderModelPickerList();
-  if (added) showToast('已添加 ' + added + ' 个模型。');
+  await _getProviderModelPicker().submitCatalog();
 }
 
-function _providerBundleForSave(context) {
-  return {
-    provider: JSON.parse(JSON.stringify(context.provider)),
-    provider_access: JSON.parse(JSON.stringify(context.access)),
-    connections: context.connections.map(function(item) { return JSON.parse(JSON.stringify(item.row)); }),
-    credentials: context.credentials.map(function(item) { return JSON.parse(JSON.stringify(item.row)); }),
-    offerings: context.offerings.map(function(item) { return JSON.parse(JSON.stringify(item.row)); }),
-    deployments: context.deployments.map(function(item) { return JSON.parse(JSON.stringify(item.row)); }),
-    creators: [],
-    models: [],
-  };
+async function _importListedProviderModels() {
+  await _getProviderModelPicker().importListed();
+}
+
+var _providerMutations = null;
+
+function _getProviderMutations() {
+  if (!_providerMutations) {
+    _providerMutations = createProviderMutations({
+      document: function() { return _stgModelRouting; },
+      mutate: runModelRoutingMutation,
+      save: function(providerId, bundle, revision) { return Api.modelRouting.saveProvider(providerId, bundle, revision); },
+      remove: function(providerId, revision) { return Api.modelRouting.deleteProvider(providerId, revision); },
+      importListed: function(providerId) { return Api.modelRouting.importListedModels(providerId); },
+      newId: function() { return _newV2StagedId('credential'); },
+      selectionChanged: function() { return new Error(t('settings.providerSelectionChanged')); },
+    });
+  }
+  return _providerMutations;
+}
+
+function _notifyProviderMutation(result, message, render) {
+  if (message) showToast(message);
+  var pending = !result.refreshed;
+  if (!pending && render) {
+    try { render(); }
+    catch (error) { pending = true; console.warn('[Settings] Provider view refresh failed', error); }
+  }
+  if (pending) showAlert(t('settings.providerSavedDraftKept'));
 }
 
 async function _deleteModelRoutingProvider(providerId) {
   var context = _modelRoutingProviderContext(providerId);
   if (!context) return;
+  var remove = _getProviderMutations().prepareRemoval(providerId);
   var name = context.access.display_name || context.provider.name || providerId;
   if (!await showConfirm('删除服务商「' + name + '」？其凭证、接入点与模型供给会一并移除。',
     { danger: true })) return;
   try {
-    var result = await Api.modelRouting.deleteProvider(providerId, _stgModelRoutingRevision);
-    if (result && result.revision != null) _stgModelRoutingRevision = Number(result.revision);
-    await _loadModelRoutingAuthority();
-    _renderModelRoutingTabs();
-    showToast('已删除服务商。');
+    var result = context.provider.brand === 'catpaw'
+      ? await catpawSettings.providerRemoval(remove) : await remove();
+    _notifyProviderMutation(result, '已删除服务商。', _renderModelRoutingTabs);
   } catch (error) {
     showAlert('删除服务商失败：' + String(error && error.message || error));
   }
 }
 
-async function _saveNewProviderCredential(context, apiKey) {
-  var credentialId = 'credential-' + String(Date.now()).toString(36) + '-' +
-    Math.random().toString(36).slice(2, 8);
-  var modelRefs = [];
-  var seen = new Set();
-  context.offerings.forEach(function(item) {
-    var row = item.row;
-    if (row.identity_state !== 'confirmed' || !row.model) return;
-    var key = row.model.creator_id + '::' + row.model.model_id;
-    if (seen.has(key)) return;
-    seen.add(key);
-    modelRefs.push(JSON.parse(JSON.stringify(row.model)));
-  });
-  var bundle = _providerBundleForSave(context);
-  bundle.credentials.push({
-    credential_id: credentialId,
-    provider_access_id: context.access.provider_access_id,
-    kind: 'api_key',
-    secret_reference: '',
-    key_hint: '',
-    enabled: true,
-    authorization: {
-      connection_ids: context.connections.map(function(item) { return item.row.connection_id; }),
-      models: modelRefs,
-    },
-    quota_policy: {},
-  });
-  bundle.credential_secrets = {};
-  bundle.credential_secrets[credentialId] = JSON.stringify({
-    format: 'tofu.credential-secret/v1', api_key: String(apiKey).trim(), oauth: '', extra_headers: {},
-  });
+async function _saveNewProviderCredential(context, apiKey, render) {
   try {
-    var saved = await Api.modelRouting.saveProvider(
-      context.provider.provider_id, bundle, _stgModelRoutingRevision);
-    if (!saved || !saved.provider) throw new Error('凭证未能保存');
-    _stgModelRoutingRevision = Number(saved.revision || _stgModelRoutingRevision);
-    await _loadModelRoutingAuthority();
-    _renderProvidersTab();
-    showToast('已添加凭证。');
+    if (!context) throw new Error(t('settings.providerSelectionChanged'));
+    var result = await _getProviderMutations().addCredential(
+      context.provider.provider_id, context.access.provider_access_id, apiKey);
+    _notifyProviderMutation(result, '已添加凭证。', render === false ? null : _renderProvidersTab);
+    return result;
   } catch (error) {
     showAlert('添加凭证失败：' + String(error && error.message || error));
+    throw error;
   }
 }
 

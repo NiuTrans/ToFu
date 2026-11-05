@@ -3,11 +3,13 @@ from pathlib import Path
 import subprocess
 import os
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 
 
 def test_complete_source_change_list_in_real_browser(page, tmp_path):
+    require_node_modules('vite')
     root = Path(__file__).resolve().parents[2]
     for entry, global_name in [
         ('frontend/src/features/paper/preview-changes.ts', 'PaperChanges'),

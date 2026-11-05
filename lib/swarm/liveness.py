@@ -1,4 +1,4 @@
-"""lib/swarm/liveness.py — the ONE liveness judgement for the whole swarm.
+"""lib/swarm/liveness.py — the swarm's view of the ONE agent liveness judgement.
 
 Before this module, three independent clocks decided when to stop a swarm, and
 none of them looked at whether work was actually being produced:
@@ -30,6 +30,17 @@ Progress is anything that proves forward motion:
   round start · token/thinking delta · tool dispatched · tool returned ·
   tool subprocess output · agent settled.
 
+An agent running an invocation is BOUND to its task and judged by
+``lib.tasks_pkg.liveness`` — the dual clocks, explained waits (storage, writer
+admission, a stale filesystem mount), silence origin, per-command interrupt
+ladder and threshold that judge a root conversation turn. A sub-agent is an
+ordinary agent beside its parent: the driver, the TTL sweep and the stuck-task
+reaper therefore cannot disagree about it, and tool-heartbeat self-ticks prove
+nothing here either. Touches remain the record for agents not yet bound
+(launch and admission) and the "quiet for" presentation. The window defaults
+to the shared threshold (``stall_threshold_seconds``); the beacon never stops an
+agent itself — the reaper, or the master's backstop, delivers the verdict.
+
 Monotonic by construction (``time.monotonic``): this drives control-flow
 decisions and must not be perturbed by a wall-clock step. Wall-clock instants
 for the UI stay in ``scheduler._started_at``.
@@ -37,6 +48,7 @@ for the UI stay in ``scheduler._started_at``.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 
@@ -44,23 +56,7 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['ProgressBeacon', 'DEFAULT_STALL_TIMEOUT_SEC',
-           'thread_progress_sink', 'notify_tool_progress']
-
-
-#: Seconds of COMPLETE SILENCE from an agent before it is considered stalled.
-#:
-#: This is NOT a budget for how long work may take — a job that keeps emitting
-#: tokens, tool calls or subprocess output runs indefinitely. It bounds only the
-#: gap BETWEEN two signs of life, so the number is chosen against the slowest
-#: legitimate gap we can measure rather than against total runtime.
-#:
-#: The widest real gap observed in this deployment is a rate-limited dispatch
-#: cycling on cooldown, which still fires ``on_retry`` well inside a minute; a
-#: long ``run_command`` heartbeats on subprocess output. 15 minutes of nothing
-#: at all is therefore several orders above the worst honest case, while still
-#: reaping a genuinely wedged agent in bounded time.
-DEFAULT_STALL_TIMEOUT_SEC = 900.0
+__all__ = ['ProgressBeacon', 'thread_progress_sink', 'notify_tool_progress']
 
 
 class ProgressBeacon:
@@ -76,9 +72,16 @@ class ProgressBeacon:
     killing real work is far more expensive than reaping a wedged agent late.
     """
 
-    __slots__ = ('_lock', '_last', '_notes', '_stall_timeout', '_created', '_persistence_waits')
+    __slots__ = ('_lock', '_last', '_notes', '_stall_timeout', '_created',
+                 '_persistence_waits', '_tasks')
 
-    def __init__(self, stall_timeout: float = DEFAULT_STALL_TIMEOUT_SEC):
+    def __init__(self, stall_timeout: float | None = None):
+        if stall_timeout is None:
+            # Silence bound, not a runtime budget: one threshold for every
+            # agent, and a disabled judge never stalls one.
+            from lib.tasks_pkg.liveness import stall_threshold_seconds
+            threshold = stall_threshold_seconds()
+            stall_timeout = threshold if threshold > 0 else math.inf
         self._lock = threading.Lock()
         self._last: dict[str, float] = {}
         self._notes: dict[str, str] = {}
@@ -86,6 +89,7 @@ class ProgressBeacon:
         self._created = time.monotonic()
 
         self._persistence_waits: dict[str, set[object]] = {}
+        self._tasks: dict[str, dict] = {}
 
     # ── Recording ────────────────────────────────────
 
@@ -122,6 +126,26 @@ class ProgressBeacon:
                 self._last[agent_id] = time.monotonic()
                 self._notes[agent_id] = 'storage_ack'
 
+    def bind(self, agent_id: str, task: dict) -> None:
+        """Judge *agent_id* by its running invocation *task* (the shared rule)."""
+        if not agent_id:
+            return
+        with self._lock:
+            self._last.setdefault(agent_id, time.monotonic())
+            self._tasks[agent_id] = task
+
+    def unbind(self, agent_id: str, task: dict) -> None:
+        """Return to touch judgement once *task* (and only that task) has ended."""
+        with self._lock:
+            if self._tasks.get(agent_id) is not task:
+                return
+            del self._tasks[agent_id]
+            if agent_id in self._last:
+                # Settlement is progress: the agent's remaining bookkeeping
+                # must not inherit the invocation's (possibly explained) silence.
+                self._last[agent_id] = time.monotonic()
+                self._notes[agent_id] = 'invocation_settled'
+
     def forget(self, agent_id: str) -> None:
         """Drop *agent_id* once it has settled, so it can't hold a swarm open."""
         if not agent_id:
@@ -129,6 +153,7 @@ class ProgressBeacon:
         with self._lock:
             self._last.pop(agent_id, None)
             self._notes.pop(agent_id, None)
+            self._tasks.pop(agent_id, None)
 
             self._persistence_waits.pop(agent_id, None)
 
@@ -139,8 +164,51 @@ class ProgressBeacon:
 
     # ── Reading ──────────────────────────────────────
 
+    def _judgements(self, agent_id: str | None = None) -> list[tuple[str, bool, float, str]]:
+        """``(agent_id, stalled, silent_seconds, note)`` per tracked agent.
+
+        Snapshot under the lock, judge outside it: the shared judge reads task
+        state and other owners' locks, never this beacon's. A bound agent whose
+        task is running gets the shared verdict (the reaper's exact domain);
+        any other agent its touch silence, which also never counts before the
+        last host filesystem recovery. Nothing is stalled while the filesystem
+        is unresponsive or the agent's write is pending.
+        """
+        from lib.fs_keepalive import filesystem_resumed_at, filesystem_unresponsive
+        from lib.tasks_pkg.liveness import judge
+        with self._lock:
+            ids = list(self._last) if agent_id is None else [agent_id]
+            rows = [(aid, self._last[aid], self._notes.get(aid, ''),
+                     bool(self._persistence_waits.get(aid)), self._tasks.get(aid))
+                    for aid in ids if aid in self._last]
+        if not rows:
+            return []
+        frozen = filesystem_unresponsive()
+        floor = filesystem_resumed_at()[0]
+        now, wall = time.monotonic(), time.time()
+        judged = []
+        for aid, last, note, waiting, task in rows:
+            if task is None or task.get('status') != 'running' or task.get('aborted'):
+                silent = max(0.0, now - max(last, floor))
+                stalled = silent >= self._stall_timeout
+            else:
+                try:
+                    verdict = judge(task, wall, self._stall_timeout)
+                except Exception as error:
+                    # Fail OPEN, loudly: while the judge is broken this agent
+                    # can never be judged stalled, so the driver, the TTL sweep
+                    # and the reaper lose their stopping condition for it.
+                    logger.error('[Beacon] LIVENESS PROBE BROKEN for %s (%s) — assuming '
+                                 'alive; while this persists it cannot be judged stalled',
+                                 aid, error, exc_info=True)
+                    verdict = None
+                silent = 0.0 if verdict is None else verdict.silent_seconds
+                stalled = verdict is not None and verdict.state == 'wedged'
+            judged.append((aid, stalled and not waiting and not frozen, silent, note))
+        return judged
+
     def seconds_since_activity(self, agent_id: str | None = None) -> float:
-        """Seconds since the last progress event.
+        """Seconds of silence (unexplained silence for a bound agent).
 
         With *agent_id*: that agent alone. Without: the MOST RECENT activity
         across all tracked agents — the whole-swarm judgement, so one busy
@@ -151,29 +219,20 @@ class ProgressBeacon:
         — "no evidence of silence", never "silent forever". The default must
         fail toward keeping work alive.
         """
-        now = time.monotonic()
-        with self._lock:
-            if agent_id is not None:
-                ts = self._last.get(agent_id)
-                return 0.0 if ts is None else max(0.0, now - ts)
-            if not self._last:
-                return 0.0
-            return max(0.0, now - max(self._last.values()))
+        return min((silent for _aid, _stalled, silent, _note in self._judgements(agent_id)),
+                   default=0.0)
 
     def is_making_progress(self, agent_id: str | None = None) -> bool:
-        """True while activity is fresher than the stall timeout.
+        """True unless every tracked agent asked about is stalled.
 
-        THE predicate. The driver loop, the per-agent guard and the session TTL
-        sweep all route through this one call, so "still working" has exactly
-        one definition in the swarm subsystem and the three can no longer
-        disagree about the same running agent.
+        THE predicate. The driver loop, the master's backstop and the session
+        TTL sweep all route through this one call, so "still working" has one
+        definition in the swarm subsystem — and, for bound agents, the same one
+        the stuck-task reaper applies to every root and child task.
         """
         try:
-            with self._lock:
-                if (self._persistence_waits if agent_id is None else
-                        self._persistence_waits.get(agent_id)):
-                    return True
-            return self.seconds_since_activity(agent_id) < self._stall_timeout
+            judged = self._judgements(agent_id)
+            return not judged or not all(stalled for _aid, stalled, _silent, _note in judged)
         except Exception as e:
             # Fail OPEN: a broken beacon must not become a new way to kill a
             # healthy swarm — the exact failure mode this module replaces.
@@ -196,17 +255,12 @@ class ProgressBeacon:
     def stalled_agents(self) -> list[tuple[str, float, str]]:
         """``(agent_id, silent_seconds, last_note)`` for every stalled agent.
 
-        Used for the operator-facing report: a stall must name WHO went quiet
-        and what it was last doing, otherwise the only symptom is a swarm that
-        ends early for no stated reason.
+        Used for the operator-facing report and the master's stall delivery: a
+        stall must name WHO went quiet and what it was last doing, otherwise the
+        only symptom is a swarm that ends early for no stated reason.
         """
-        now = time.monotonic()
-        out: list[tuple[str, float, str]] = []
-        with self._lock:
-            for aid, ts in self._last.items():
-                silent = max(0.0, now - ts)
-                if silent >= self._stall_timeout and not self._persistence_waits.get(aid):
-                    out.append((aid, silent, self._notes.get(aid, '')))
+        out = [(aid, silent, note) for aid, stalled, silent, note in self._judgements()
+               if stalled]
         out.sort(key=lambda x: -x[1])
         return out
 

@@ -297,8 +297,14 @@ class ExecutionSession:
         outcome: ExecutionPhase,
         *,
         cause: str = "",
+        on_completed: Callable[[], None] | None = None,
     ) -> ExecutionTerminalReceipt:
-        """Release every resource once and freeze a terminal invariant receipt."""
+        """Release resources, run an eligible completion, then freeze the receipt.
+
+        ``on_completed`` runs once only for a clean requested success. Its
+        failure freezes FAILED before the original exception propagates; a
+        sealed session never repeats the callback on settlement retries.
+        """
         if outcome not in TERMINAL_EXECUTION_PHASES:
             raise ValueError("execution outcome must be terminal")
         with self._lock:
@@ -378,6 +384,21 @@ class ExecutionSession:
             if not invariants_satisfied:
                 final_outcome = ExecutionPhase.FAILED
                 final_cause = final_cause or "terminal_resource_invariant_failed"
+            completion_error = None
+            try:
+                if final_outcome is ExecutionPhase.COMPLETED and on_completed is not None:
+                    on_completed()
+            except BaseException as exc:
+                # Deferred: the FAILED receipt freezes before this re-raises.
+                logger.debug(
+                    "[ExecutionSession] completion failed execution=%s kind=%s type=%s",
+                    self.execution_id[:20], self.kind, type(exc).__name__,
+                )
+                completion_error = exc
+                final_outcome = ExecutionPhase.FAILED
+                final_cause = final_cause or "completion_failed"
+            finally:
+                on_completed = None
             now = time.monotonic()
             self._phase = final_outcome
             self._phase_changed_monotonic = now
@@ -408,6 +429,8 @@ class ExecutionSession:
         )
         if interruption is not None:
             raise interruption
+        if completion_error is not None:
+            raise completion_error
         return self._terminal_receipt
 
     def snapshot(self) -> dict[str, Any]:
@@ -577,11 +600,11 @@ def _bind_acquired_resource(
 def acquire_and_bind_admission(
     session: ExecutionSession,
     controller: Any,
-) -> str | None:
-    """Acquire one exact lease or settle every earlier preflight resource.
+) -> str:
+    """Acquire one exact ownership lease or settle every earlier resource.
 
-    Capacity refusal returns ``None`` after cleanup. Store/controller failures
-    also settle earlier resources, then propagate for the HTTP error boundary.
+    Execution ownership never refuses accepted work. Store/controller failures
+    settle earlier resources, then propagate for the HTTP error boundary.
     """
     try:
         lease_id = controller.acquire()
@@ -589,10 +612,6 @@ def acquire_and_bind_admission(
         session.settle(
             ExecutionPhase.FAILED, cause="admission_acquire_failed")
         raise
-    if lease_id is None:
-        session.settle(
-            ExecutionPhase.FAILED, cause="task_admission_refused")
-        return None
     bind_admission_lease(
         session,
         lambda: controller.release(lease_id),

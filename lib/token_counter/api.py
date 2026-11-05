@@ -23,12 +23,20 @@ from .config import API_THRESHOLD, MODE
 from .heuristic import cheap_estimate, cheap_estimate_text
 from .resolver import force_backend, resolve
 from .tiktoken_counter import (
+    RequestTextCounts,
+    RequestTextCountView,
     cached_cheap_estimate_text,
     count_text as _tiktoken_count_text,
+    request_text_count_view,
 )
 from .usage_cache import invalidate, record_usage
 
 logger = get_logger(__name__)
+
+
+def _reusable_request_text_estimate(text: str) -> int:
+    """Request history is reusable across rounds, as for the exact counter."""
+    return cached_cheap_estimate_text(text, reusable=True)
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -44,7 +52,9 @@ def count_tokens(messages: list, *,
                  mode: str = 'auto',
                  api_base_url: Optional[str] = None,
                  api_key: Optional[str] = None,
-                 measurement_out: Optional[dict[str, Any]] = None) -> dict:
+                 measurement_out: Optional[dict[str, Any]] = None,
+                 text_count_memo: RequestTextCounts | RequestTextCountView | None = None,
+                 ) -> dict:
     """Count tokens for a full request. **The public entry point.**
 
     Args:
@@ -66,6 +76,12 @@ def count_tokens(messages: list, *,
                   (Anthropic / Gemini). Ignored by local backends.
         measurement_out: Optional call-local, content-free counter evidence.
                   Callers must never persist identity-keyed reuse hints.
+        text_count_memo: Optional owner-held :class:`RequestTextCounts`
+                  (its default view) or one :class:`RequestTextCountView`
+                  for a repeatedly counted, append-mostly request. Local
+                  tokenizers and the entropy prefilter then process only
+                  texts no view of that owner has counted; the result is
+                  unchanged.
 
     Returns:
         ``{'tokens': int, 'method': str, 'elapsed_ms': int,
@@ -75,6 +91,7 @@ def count_tokens(messages: list, *,
     heuristic count.
     """
     t0 = time.time()
+    text_count_view = request_text_count_view(text_count_memo)
     effective_mode = (mode or 'auto').lower()
     if effective_mode == 'auto':
         effective_mode = MODE
@@ -94,6 +111,7 @@ def count_tokens(messages: list, *,
         'api_key': api_key,
         'context_limit': context_limit,
         'measurement_out': measurement_out,
+        'text_count_memo': text_count_view,
     }
     # Most calls finish in the usage cache or a local tokenizer.  The cheap
     # estimate cannot affect either successful result, so do not scan a long
@@ -106,8 +124,11 @@ def count_tokens(messages: list, *,
     def _get_cheap_pre() -> int:
         nonlocal cheap_pre
         if cheap_pre is None:
-            cheap_pre = cheap_estimate(
-                messages, system=system, tools=tools)
+            cheap_pre = (
+                text_count_view.cheap_estimate(messages, system, tools)
+                if text_count_view is not None else cheap_estimate(
+                    messages, system=system, tools=tools,
+                    estimate_text=_reusable_request_text_estimate))
         return cheap_pre
 
     for counter in candidates:
@@ -176,5 +197,6 @@ def count_text(text: str, *, model: str = '', reusable: bool = False) -> int:
 
 __all__ = [
     'count_tokens', 'count_text', 'cached_cheap_estimate_text',
-    'record_usage', 'invalidate',
+    'record_usage', 'invalidate', 'RequestTextCounts',
+    'RequestTextCountView', 'request_text_count_view',
 ]

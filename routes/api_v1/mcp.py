@@ -502,7 +502,11 @@ def get_catalog_v1():
         'Body: ``{id, env?: {KEY: value, ...}}``. User-supplied env values '
         'take precedence over any previously-stored values (e.g. from a '
         'soft uninstall). Required env vars from the catalog ``env_specs`` '
-        'are validated against the merged set.'
+        'are validated against the merged set. When the entry declares a '
+        '``companion_skill``, its workflow guide is installed into the '
+        'owner\'s skills and ``companion_skill: {id, action}`` reports '
+        '``installed|updated|unchanged|kept|failed`` (``kept``: a different '
+        'same-id skill wins); a guide failure never fails the install.'
     ),
     tags=['mcp'],
 )
@@ -539,6 +543,8 @@ def install_from_catalog_v1():
 
     cfg_upsert(server_id, server_cfg, user_id=request_user_id())
     logger.info('[MCP.v1] catalog install: %s', server_id)
+    companion = _install_companion_skill(entry)
+    extra = {'companion_skill': companion} if companion else {}
 
     # For a vendored internal launcher that isn't on PATH yet, the first
     # install does a cold `pip install` that can take MINUTES. We do NOT block
@@ -559,6 +565,7 @@ def install_from_catalog_v1():
                     'status': 'installing',
                     'id': server_id,
                     'message': f'{entry["name"]} 正在安装依赖…',
+                    **extra,
                 }, 202)
             if job.get('state') == 'error':
                 from lib.mcp.client import _launcher_install_hint
@@ -567,21 +574,35 @@ def install_from_catalog_v1():
                 return api_error(
                     _launcher_install_hint(command), status=500,
                     config_saved=True,
-                    stderr_tail=job.get('detail') or '')
+                    stderr_tail=job.get('detail') or '', **extra)
             # state == 'ready' → fall through to the fast connect below.
 
-    return _connect_after_install(server_id, server_cfg, entry['name'])
+    return _connect_after_install(server_id, server_cfg, entry['name'],
+                                  extra=extra)
 
 
-def _connect_after_install(server_id, server_cfg, display_name):
+def _install_companion_skill(entry):
+    """Install the entry's in-tree workflow skill for the requesting owner."""
+    from lib.mcp.registry import companion_skill_dir
+    source = companion_skill_dir(entry)
+    if source is None:
+        return None
+    from lib.skills.companion import ensure_companion_skill
+    return ensure_companion_skill(source, owner_user_id=request_user_id())
+
+
+def _connect_after_install(server_id, server_cfg, display_name, *, extra=None):
     """Do the (fast) MCP handshake for an installed server + surface errors.
 
     Shared by the synchronous install path (launcher already on PATH) and the
-    async status poll (launcher just finished pip-installing).
+    async status poll (launcher just finished pip-installing). ``extra``
+    carries install-time facts (the companion skill outcome) into either
+    response.
     """
     from lib.mcp import get_bridge
     from lib.mcp.client import MCPConnectError
 
+    extra = dict(extra or {})
     bridge = get_bridge(request_user_id())
     try:
         tools = bridge.connect_server(server_id, server_cfg)
@@ -590,19 +611,26 @@ def _connect_after_install(server_id, server_cfg, display_name):
             'message': f'{display_name} installed and connected',
             'tools_count': len(tools),
             'tool_names': [t.name for t in tools],
+            **extra,
         })
     except MCPConnectError as e:
         logger.error('[MCP.v1] catalog install connect %s failed: %s',
                      server_id, e)
+        # The SDK reports an HTTP 401 as a generic JSON-RPC error, so a
+        # rejected token cannot be told apart here; name the token page.
+        from lib.mcp.registry import get_catalog_entry, obtain_credential_spec
+        spec = obtain_credential_spec(get_catalog_entry(server_id))
+        hint = (f'\n\n若 Token 无效或已过期，请到 {spec["obtain_url"]} 重新获取后再安装。'
+                if spec else '')
         return api_error(
-            f'Config saved but connection failed.\n\n{e}', status=500,
-            config_saved=True, stderr_tail=e.stderr_tail or '')
+            f'Config saved but connection failed.\n\n{e}{hint}', status=500,
+            config_saved=True, stderr_tail=e.stderr_tail or '', **extra)
     except Exception as e:
         logger.error('[MCP.v1] catalog install crashed for %s: %s',
                      server_id, e, exc_info=True)
         return api_error(
             f'Config saved but connection failed: {e}', status=500,
-            config_saved=True)
+            config_saved=True, **extra)
 
 
 @api_v1_mcp_bp.route('/api/v1/mcp/catalog/install/status', methods=['GET'])
@@ -760,8 +788,9 @@ async def check_updates_v1():
     tags=['mcp'],
 )
 async def apply_update_v1():
+    from lib.error_envelope import BadRequest
     from lib.mcp.client import MCPConnectError
-    from lib.mcp.updates import apply_update
+    from lib.mcp.updates import MCPServerNotFound, apply_update
     from lib.request_parser import async_parse_body
 
     data = await async_parse_body(exact=('id',))
@@ -771,9 +800,9 @@ async def apply_update_v1():
 
     try:
         result = await apply_update(server_id, user_id=request_user_id())
-    except KeyError:
+    except MCPServerNotFound:
         return api_not_found(f'Server "{server_id}" not in config')
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(
             f'Server "{server_id}" is not updatable ({e})')
     except MCPConnectError as e:

@@ -6,6 +6,8 @@ policy. This module creates no task, worker, storage record or replay authority.
 """
 from copy import deepcopy
 from functools import lru_cache
+
+from lib.error_envelope import BadRequest
 import json
 from pathlib import Path
 
@@ -21,11 +23,16 @@ def action_logical_budget_schema():
 
 
 def normalize_action_logical_budget(value=None):
-    from .action_observations import _validate
+    import jsonschema
+    from .action_observations import _validator
     if value is not None and not isinstance(value, dict):
-        raise ValueError('logical_budget must be an object')
+        raise BadRequest('logical_budget must be an object', field='logical_budget')
     budget = {'token_budget': 0, 'dispatch_budget': 0} | (value or {})
-    _validate(budget, 'actionLogicalBudget')
+    try:
+        _validator('actionLogicalBudget').validate(budget)
+    except jsonschema.ValidationError as exc:
+        raise BadRequest(f'logical_budget: {exc.message[:200]}',
+                         field='logical_budget') from exc
     if any(type(budget[key]) is not int for key in ('token_budget', 'dispatch_budget')):
-        raise ValueError('logical_budget values must be integers')
+        raise BadRequest('logical_budget values must be integers', field='logical_budget')
     return budget

@@ -81,7 +81,8 @@ def test_unchanged_legacy_model_does_not_block_repairs_but_edit_requires_complet
     assert draft['models'][0]['registration_state'] == 'pending_metadata'
 
 
-@pytest.mark.parametrize('model_id', ['deepseek-v4.1-flash', 'deepseek-v4-1-flash', 'deepseek-flash'])
+@pytest.mark.parametrize('model_id', ['deepseek-v4.1-flash', 'deepseek-v4-1-flash', 'deepseek-flash',
+                                     'deepseek-v4.1-flash-1017'])
 @pytest.mark.parametrize('effort,expected', [('low', 'low'), ('high', 'high'), ('max', 'max'), ('xhigh', 'high')])
 def test_deepseek_registration_to_wire_without_network(model_id, effort, expected):
     doc = document(model_id, 'deepseek')
@@ -89,12 +90,25 @@ def test_deepseek_registration_to_wire_without_network(model_id, effort, expecte
         doc['models'][0].pop(field)
     registered = prepare_registration_document(doc, previous=empty_document())
     model = public_projection(registered)['models'][0]
-    assert model['release_date'] == '2026-09-10'
+    expected_date = '2026-10-17' if model_id.endswith('-1017') else '2026-09-10'
+    assert model['release_date'] == expected_date
     assert model['official_pricing']['input'] == .15
     body = {'_reasoning_intent': {'version': 1, 'mode': 'preset', 'value': effort, 'strict': True}}
     compile_reasoning(body, model_id, inference_profile=model['inference_profile'])
     assert body['thinking'] == {'type': 'enabled'}
     assert body['reasoning_effort'] == expected
+
+
+def test_flash_1017_snapshot_has_its_own_release_date_and_reasoning_contract():
+    doc = document('deepseek-v4.1-flash-1017', 'deepseek')
+    for field in ('registration_metadata', 'list_pricing', 'inference_profile'):
+        doc['models'][0].pop(field)
+    registered = prepare_registration_document(doc, previous=empty_document())
+    model = public_projection(registered)['models'][0]
+    assert model['registration_state'] == 'ready'
+    assert model['release_date'] == '2026-10-17'
+    assert model['official_pricing']['input'] == .15
+    assert model['inference_profile']['reasoning']['wire_format'] == 'thinking_type'
 
 
 def test_exact_defaults_preserve_explicit_owner_and_provider_disablement():

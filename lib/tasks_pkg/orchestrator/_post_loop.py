@@ -8,8 +8,10 @@ Two functions consolidated here, both extracted from the tail of
   1. :func:`finalize_after_loop` — the SUCCESS-PATH post-loop tail:
      - Append the final assistant reply to messages when it wasn't
        already appended (prose-only round path, no tool_calls).
-     - Emit RENDER_CONTRACT terminal ROUND_END + incremental translate
-       submission + final MESSAGES_SNAPSHOT event.
+     - Emit RENDER_CONTRACT terminal ROUND_END + final MESSAGES_SNAPSHOT
+       event. The final reply is not submitted for incremental
+       translation: the durable whole-turn job translates it once after
+       settlement (``lib.translate.terminal``).
      - Write updated messages back to ``task['messages']`` so Flow callers
        see the complete conversation.
      - Dispatch to ``_finalize_and_emit_done`` (which emits the DONE
@@ -56,6 +58,22 @@ from lib.tasks_pkg.orchestrator._finalize import (
 from lib.tasks_pkg.invocation import is_child_invocation
 
 logger = get_logger(__name__)
+
+# Rendered verbatim: the envelope's ``permission`` kind would otherwise blame
+# a provider credential, while this refusal happens before any provider call.
+_MODEL_ADMISSION_TITLE = ('⚠️ 模型请求在发送前被授权检查拒绝，任务未完成\n'
+                          'Model request was refused by an authority check before it was sent')
+_MODEL_ADMISSION_HINT = (
+    '解决办法 / How to fix:\n'
+    '• 这不是 Key / 配额 / 模型问题：请求没有发往任何服务商，因此不会换 Key 或回退到其他模型。'
+    '展开下方详情可查看拒绝原因。\n'
+    '• 该请求所依赖的授权已变化（例如授权它的消息被编辑、请求被停止或项目绑定变更）；'
+    '重新发送或重新生成即可在当前授权下开始新请求。\n\n'
+    '• This is NOT a key / quota / model problem: no provider was contacted, so no other '
+    'key or model was tried. Expand the detail for the reason.\n'
+    '• An authority this request depends on changed (for example the message that '
+    'authorized it was edited, the request was stopped, or the project binding changed); '
+    'send or regenerate to start a new request under the current authority.')
 
 
 def finalize_after_loop(
@@ -117,13 +135,6 @@ def finalize_after_loop(
             logger.debug('[%s] Appended final assistant reply to messages '
                          '(%d content chars, %d reasoning chars)',
                          tid, len(_final_content), len(_final_reasoning))
-            # Incremental auto-translate: the closing prose segment
-            #   (the model's final answer after the last tool round, or
-            #   the whole reply when no tools were called). round_num
-            #   here is the final round index — unique vs the in-loop
-            #   submissions.
-            from lib.tasks_pkg.orchestrator._completion_translation import submit_final_translation
-            submit_final_translation(task,round_num,_final_content)
             from lib.tasks_pkg.orchestrator._completion_projection import publish_final_messages_snapshot
             publish_final_messages_snapshot(task, messages, model=model, tid=tid,
                 tools=tool_list, publish=append_event)
@@ -204,10 +215,19 @@ def handle_task_fatal(task: dict[str, Any], e: Exception, *, allow_retry: bool =
     :func:`handle_task_base_exception` below (slice 34).
     """
     _tid8 = (task.get('id', '?') or '?')[:8]
-    from lib.llm.llm_errors import AbortedError
+    from lib.llm.llm_errors import (
+        AbortedError, AdmissionRefused, ModelAdmissionRefused,
+    )
     from lib.tasks_pkg.event_delivery import EventDeliveryCancelled
-    from lib.turn_verdict import TurnStatus, derive_task_verdict
-    _cancelled_delivery = isinstance(e, (AbortedError, EventDeliveryCancelled))
+    from lib.turn_verdict import (
+        DISPATCH_AUTHORITY_ABORT_REASONS, TurnStatus, derive_task_verdict,
+        dispatch_authority_stop_detail,
+    )
+    # An admission refusal halts work through the abort lane, but the turn
+    # failed for a stated reason; it must not settle as a silent user Stop.
+    _admission_refused = isinstance(e, AdmissionRefused)
+    _cancelled_delivery = (isinstance(e, (AbortedError, EventDeliveryCancelled))
+                           and not _admission_refused)
 
     if _cancelled_delivery and task.get('_chat_terminal_stamped'):
         # Late cancelled observers cannot replace an acknowledged candidate;
@@ -235,6 +255,36 @@ def handle_task_fatal(task: dict[str, Any], e: Exception, *, allow_retry: bool =
         from lib.error_envelope import from_exception
         _user_err = from_exception(
             e, context='task-fatal', source='task-event-delivery')
+    # A dispatch authority stop is stamped where the authority failed; it
+    # names the turn's cause whichever exception carried the halt here.
+    _authority_stop = str(task.get('_abort_reason') or '')
+    if _authority_stop not in DISPATCH_AUTHORITY_ABORT_REASONS:
+        _authority_stop = ''
+    if not _user_err and not _authority_stop and isinstance(e, ModelAdmissionRefused):
+        from lib.error_envelope import make_envelope as _make_env
+        _user_err = _make_env(
+            'permission', message=_MODEL_ADMISSION_TITLE, hint=_MODEL_ADMISSION_HINT,
+            detail=f'Refused before any provider was contacted: {e}',
+            model=task.get('config', {}).get('model', ''),
+            context='model-admission', source='orchestrator', raw=str(e),
+            retryable=False)
+    if not _user_err and (_admission_refused or _authority_stop):
+        from lib.error_envelope import make_envelope as _make_env
+        if _admission_refused:
+            _refused_tool = f'`{e.tool_name}`' if e.tool_name else 'A tool call'
+            _detail = f'{_refused_tool} was refused before execution: {e}'
+        else:
+            _provenance = str(task.get('_abortReasonDetail') or '')
+            _detail = dispatch_authority_stop_detail(_authority_stop, _provenance)
+            if str(e) not in _provenance:
+                _detail = f'{_detail} Refusal: {e}'
+        _user_err = _make_env(
+            _authority_stop or 'tool_call_rejected',
+            detail=_detail,
+            model=task.get('config', {}).get('model', ''),
+            context='tool-admission' if _admission_refused else 'dispatch-authority',
+            source='orchestrator', raw=str(e),
+            retryable=False)
     if not _user_err and isinstance(e, ImportError):
         from lib.error_envelope import make_envelope as _make_env
         _user_err = _make_env(

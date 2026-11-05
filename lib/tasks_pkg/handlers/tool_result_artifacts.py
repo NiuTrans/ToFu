@@ -11,11 +11,15 @@ from __future__ import annotations
 import json
 
 from lib.log import get_logger
-from lib.agent_core.storage_errors import StorageError
+from lib.llm.llm_errors import AbortedError
+from lib.agent_core.storage_errors import StorageError, TRANSIENT_STORAGE_CODES
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
 from lib.tasks_pkg.executor import tool_registry
 from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
+from lib.tasks_pkg.handlers._artifact_page_budget import plan_source_limit
 from lib.tasks_pkg.manager import task_user_id
+from lib.tasks_pkg.tool_runtime import active_context_for_call
+from lib.project_mod.tool_admission import Cancellation
 from lib.tool_results.tool_result_artifacts import (
     ToolResultArtifactRepository, resolve_artifact_ref)
 from lib.tools.contracts import ToolContractError
@@ -105,9 +109,10 @@ def _metadata_refusal(result=None):
             'retryable': False, 'nextAction': 'Use fewer references or a narrower source query.'}}
 
 
-def _fit_read_result(result, model, token_budget):
+def _fit_read_result(result, model, token_budget, *, measured_tokens=None):
     # Opaque cursors cannot be reconstructed after trimming text locally.
-    if _model_tokens('read_tool_artifact', result, model) <= token_budget:
+    if (measured_tokens if measured_tokens is not None else
+            _model_tokens('read_tool_artifact', result, model)) <= token_budget:
         return result
     if result.get('resumeCursor') or str(result.get('nextCursor', '')).startswith(SIGNED_CURSOR_PREFIXES):
         return _metadata_refusal(result)
@@ -124,8 +129,9 @@ def _fit_read_result(result, model, token_budget):
     return best if best is not None else _metadata_refusal(result)
 
 
-def _fit_search_result(result, model, token_budget):
-    if _model_tokens('search_tool_artifact', result, model) <= token_budget:
+def _fit_search_result(result, model, token_budget, *, measured_tokens=None):
+    if (measured_tokens if measured_tokens is not None else
+            _model_tokens('search_tool_artifact', result, model)) <= token_budget:
         return result
     # The cursor has consumed every match in this page. Shortening a quotation
     # (or dropping a match) would strand evidence behind that cursor, including
@@ -133,13 +139,19 @@ def _fit_search_result(result, model, token_budget):
     return _metadata_refusal(result)
 
 
-def _fit_one_result(fn_name, result, model, token_budget):
+def _fit_one_result(fn_name, result, model, token_budget, *, measured_tokens=None):
     if fn_name == 'read_tool_artifact':
-        return _fit_read_result(result, model, token_budget)
-    return _fit_search_result(result, model, token_budget)
+        return _fit_read_result(result, model, token_budget, measured_tokens=measured_tokens)
+    return _fit_search_result(result, model, token_budget, measured_tokens=measured_tokens)
 
 
-def _fit_batch_to_budget(fn_name, results, model, *, refit=None):
+def _check_cancellation(abort):
+    if abort is not None and abort():
+        raise AbortedError('Artifact query cancelled by its owner')
+
+
+def _fit_batch_to_budget(fn_name, results, model, *, refit=None, abort=None):
+    _check_cancellation(abort)
     wrapper = {'status': 'ok' if all(x.get('status') == 'ok' for x in results) else 'partial_failure', 'items': results}
     total = _model_tokens(fn_name, wrapper, model)
     if total > _RESPONSE_TOKEN_BUDGET:
@@ -164,7 +176,8 @@ def _fit_batch_to_budget(fn_name, results, model, *, refit=None):
         else:
             replacements = run_batch_concurrent(
                 requests, lambda request: refit(*request),
-                max_workers=_MAX_BATCH_WORKERS, tag='ToolArtifactFit')
+                max_workers=_MAX_BATCH_WORKERS, tag='ToolArtifactFit', abort=abort)
+        _check_cancellation(abort)
         fitted = list(results)
         for (index, _, item), replacement in zip(requests, replacements):
             fitted[index] = replacement if replacement is not None else {
@@ -178,11 +191,17 @@ def _fit_batch_to_budget(fn_name, results, model, *, refit=None):
 
 
 def _fit_source_result(fn_name, arguments, result, *, user_id, repository,
-                       model, token_budget, task):
+                       model, token_budget, task, abort=None):
     """Refit only through the original source cursor, using observed demand."""
     identity = {'index': result['index']} if 'index' in result else {}
+    # One proposal plus one correction for changed cursor/metadata size;
+    # remaining retries use the existing strictly halving source limit.
+    planning_attempts = 2
     while result.get('status') == 'ok':
-        fitted = _fit_one_result(fn_name, result, model, token_budget)
+        _check_cancellation(abort)
+        source_tokens = _model_tokens(fn_name, result, model)
+        fitted = _fit_one_result(fn_name, result, model, token_budget,
+                                 measured_tokens=source_tokens)
         if fitted.get('status') == 'ok':
             return fitted
         is_read = fn_name == 'read_tool_artifact'
@@ -195,12 +214,18 @@ def _fit_source_result(fn_name, arguments, result, *, user_id, repository,
         smaller_limit = min(source_limit // 2, extent // 2)
         if smaller_limit < 1:
             return fitted
+        if planning_attempts:
+            planning_attempts -= 1
+            planned = plan_source_limit(fn_name, result, token_budget, source_tokens,
+                lambda page: _model_tokens(fn_name, page, model))
+            if planned is not None:
+                smaller_limit = min(source_limit - 1, planned)
         arguments = {**arguments, 'limit': smaller_limit}
         # A short EOF page must not be fetched unchanged at several limits.
         # Keep whole matches/codepoints and let storage sign the new cursor.
         result = {**_execute_one(
             fn_name, arguments, user_id=user_id, repository=repository,
-            model=model, token_budget=None, task=task), **identity}
+            model=model, token_budget=None, task=task, abort=abort), **identity}
     return result
 
 
@@ -233,14 +258,16 @@ def _error_result(exc: Exception) -> dict:
                     'code': code, 'retryable': failure['retryable'],
                     'nextAction': failure['nextAction']}}
     logger.warning('[ToolArtifact] owner-scoped read failed: %s', exc, exc_info=True)
-    retryable = isinstance(exc, StorageError) and exc.retryable
+    retryable = isinstance(exc, StorageError) and exc.code in TRANSIENT_STORAGE_CODES
+    retry_delay = (f'Wait at least {exc.retry_after_ms} milliseconds before retrying. '
+                   if retryable and exc.retry_after_ms is not None else '')
     return {
         "status": "error",
         "error": {
             "code": "artifact_store_unavailable",
             "retryable": retryable,
             "nextAction": (
-                "Retry this read once; do not re-execute the source tool to recover historical evidence."
+                retry_delay + "Retry this read once; do not re-execute the source tool to recover historical evidence."
                 if retryable else
                 "The artifact store could not complete this read. Continue independent work and report the storage failure; do not repeat the source tool to recover historical evidence."),
         },
@@ -250,7 +277,7 @@ def _error_result(exc: Exception) -> dict:
 def _execute_one(fn_name: str, arguments: dict, *, user_id: int,
                  repository: ToolResultArtifactRepository, model: str = '',
                  token_budget: int | None = _RESPONSE_TOKEN_BUDGET,
-                 task=None) -> dict:
+                 task=None, abort=None) -> dict:
     try:
         cursor = _parse_cursor(arguments)
         # The model quotes the semantic alias from its envelope projection;
@@ -270,6 +297,7 @@ def _execute_one(fn_name: str, arguments: dict, *, user_id: int,
                         "Unknown or expired artifact reference. Quote the artifactRef exactly as returned; historical evidence is not recovered by repeating the source tool."),
                 },
             }
+        _check_cancellation(abort)
         if fn_name == 'read_tool_artifact':
             result = repository.read_range(
                 user_id=user_id,
@@ -309,8 +337,10 @@ def _execute_one(fn_name: str, arguments: dict, *, user_id: int,
             return result
         return _fit_source_result(
             fn_name, arguments, result, user_id=user_id, repository=repository,
-            model=model, token_budget=token_budget, task=task)
+            model=model, token_budget=token_budget, task=task, abort=abort)
     except Exception as exc:
+        if isinstance(exc, AbortedError) and abort is not None and abort():
+            raise
         failed = _error_result(exc)
         failed['artifactRef'] = arguments.get('artifact_ref')
         if fn_name == 'search_tool_artifact':
@@ -344,7 +374,11 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
     contract = _CONTRACTS[fn_name]
     raw_arguments = fn_args if isinstance(fn_args, dict) else {}
     model = task.get('model', '') if isinstance(task, dict) else ''
+    context = active_context_for_call(task, round_num=rn, tool_call_id=tc_id,
+                                      round_entry=round_entry)
+    abort = Cancellation(task, context).is_set
     try:
+        _check_cancellation(abort)
         arguments = contract.validate_arguments(fn_args)
         calls, is_batch = _normalize_calls(fn_name, arguments)
         owner = task_user_id(task)
@@ -355,10 +389,12 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
                 lambda item: _execute_one(
                     fn_name, item, user_id=owner, repository=repository, model=model,
                     token_budget=_RESPONSE_TOKEN_BUDGET,
-                    task=task),
+                    task=task, abort=abort),
                 max_workers=_MAX_BATCH_WORKERS,
                 tag='ToolArtifact',
+                abort=abort,
             )
+            _check_cancellation(abort)
             indexed = [{"index": index, **(result or {
                 "status": "error",
                 "error": {"code": "artifact_store_unavailable",
@@ -368,17 +404,20 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
                 fn_name, indexed, model,
                 refit=lambda index, budget, page: _fit_source_result(
                     fn_name, calls[index], page, user_id=owner,
-                    repository=repository, model=model, token_budget=budget, task=task))
+                    repository=repository, model=model, token_budget=budget,
+                    task=task, abort=abort), abort=abort)
             batch_result = json.loads(content)
             succeeded = batch_result['status'] == 'ok'
         else:
             result = _execute_one(
                 fn_name, calls[0], user_id=owner, repository=repository,
-                model=model, task=task)
+                model=model, task=task, abort=abort)
             content = _serialize(_fit_one_result(
                 fn_name, result, model, _RESPONSE_TOKEN_BUDGET))
             succeeded = result.get('status') == 'ok'
     except Exception as exc:
+        if isinstance(exc, AbortedError) and abort():
+            raise
         logger.debug('tool result artifact execution failed: %s', exc)
         result = _error_result(exc)
         content = _serialize(result)

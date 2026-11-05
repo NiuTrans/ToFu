@@ -99,15 +99,17 @@ def test_malformed_supplied_budget_is_rejected(limits):
 
 
 def test_child_monitor_observes_inherited_deadline_and_progress():
-    from lib.tasks_pkg.invocation import invocation_abort_requested
-    from lib.swarm.liveness import ProgressBeacon
+    from lib.tasks_pkg.invocation import invocation_abort_requested, stop_stalled_invocation
     task = root()
     task['config']['executionLimits']['deadline'] = 1
     assert invocation_abort_requested(task)
     assert task['_invocationStopReason'] == 'deadline'
+    # The shared liveness judge's verdict arrives through the same port; an
+    # inherited deadline observed first keeps its own cause.
+    assert not stop_stalled_invocation(task, silent_seconds=2000, stall_timeout=1800)
+    assert task['_invocationStopReason'] == 'deadline'
     task = root()
-    task['_invocationProgressBeacon'] = ProgressBeacon(stall_timeout=0)
-    task['_invocationProgressBeacon'].touch(task['id'])
+    assert stop_stalled_invocation(task, silent_seconds=2000, stall_timeout=1800)
     assert invocation_abort_requested(task)
     assert task['_invocationStopReason'] == 'stalled'
 

@@ -5,11 +5,10 @@
   "description": "Public signal-driven Project Brain projections and executable Charter records.",
   "$defs": {
     "recoveryCursor": {
-      "description": "Opaque storage-issued continuation for a bounded startup recovery page.",
+      "description": "Opaque storage-issued continuation after the last scanned project, in the authority's stable project-identity order: settling or updating a project never moves it across the cursor, and a complete walk visits each project once.",
       "type": "object",
-      "required": ["updatedAt", "ownerUserId", "projectKey"],
+      "required": ["ownerUserId", "projectKey"],
       "properties": {
-        "updatedAt": {"type": "integer", "minimum": 0},
         "ownerUserId": {"type": "integer", "minimum": 1},
         "projectKey": {"type": "string", "minLength": 1, "maxLength": 4096}
       },

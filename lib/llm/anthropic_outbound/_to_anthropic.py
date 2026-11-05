@@ -2,12 +2,9 @@
 """Outbound direction: OpenAI Chat Completions body → Anthropic Messages body.
 
 Contains the block/tool/message converters and the top-level
-``openai_body_to_anthropic`` entry point. Depends only on stdlib + the
-``lib.llm.body`` image sniffer; no dependency on the inbound module.
+``openai_body_to_anthropic`` entry point. Uses shared conversion validation,
+model replay requirements and image sniffing; no dependency on the inbound module.
 """
-
-import copy
-
 
 from lib.llm.conversion import (
     checked_conversion, conversion_report, object_arguments, stop_sequences, validate_request,
@@ -15,6 +12,7 @@ from lib.llm.conversion import (
 from lib.llm.conversion import ProtocolConversionError
 from lib.llm_sanitize.text_blocks import normalize_text_blocks
 from lib.log import get_logger
+from lib.model_info import model_requires_reasoning_content_replay
 
 logger = get_logger(__name__)
 
@@ -176,15 +174,31 @@ def _convert_tools(tools) -> list:
     return out
 
 
-def _assistant_blocks(msg: dict) -> list:
+def _key_sorted_copy(value):
+    """Deep-copy JSON data with every object's keys in sorted order.
+
+    Live opaque blocks keep the stream's key order, but blocks reloaded from
+    TofuDB (serde_json without ``preserve_order``) come back key-sorted. One
+    order keeps a replayed turn byte-identical across the turn boundary, so
+    the cached prefix survives; Anthropic ignores JSON key order.
+    """
+    if isinstance(value, dict):
+        return {key: _key_sorted_copy(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_key_sorted_copy(item) for item in value]
+    return value
+
+
+def _assistant_blocks(msg: dict, *, replay_unsigned_reasoning=False) -> list:
     """Assistant message → Anthropic content blocks (thinking + text + tool_use).
 
     When the message carries both ``reasoning_content`` and its opaque
     ``thinking_signature`` (captured from the stream and round-tripped on
     Continue), the thinking block is re-emitted FIRST so the Messages API
-    can verify tool-use continuity. A ``reasoning_content`` without a
-    signature is dropped: sending a thinking block without its signature
-    returns HTTP 400, so a lossy "fresh reasoning" continuation is better.
+    can verify tool-use continuity. Claude requires that signature, while
+    DeepSeek's Messages dialect requires the unsigned reasoning text itself.
+    The caller selects that replay policy from the logical model, independently
+    of the wire protocol or deployment alias. Never fabricate a signature.
     """
     _opaque = msg.get('_anthropic_content_blocks')
     if isinstance(_opaque, list) and _opaque:
@@ -192,8 +206,28 @@ def _assistant_blocks(msg: dict) -> list:
         # server-tool blocks, redacted thinking, or a compaction summary).
         # Replaying a regenerated text/tool_use projection is insufficient;
         # the complete original content array and its order are protocol state.
-        blocks = [copy.deepcopy(block) for block in _opaque
+        blocks = [_key_sorted_copy(block) for block in _opaque
                   if isinstance(block, dict)]
+        # The sidecar records only what the PROVIDER returned. Local tool
+        # expansion (the execute_tools gateway) appends sibling calls to the
+        # canonical tool_calls that were never in that array, so replaying it
+        # alone would orphan their tool_result messages and a strict
+        # Anthropic-shape provider would reject the whole request
+        # ("tool_call_id  is not found"). Restore exactly those local calls,
+        # in canonical order, after the provider's own blocks.
+        replayed_call_ids = {
+            block.get('id') for block in blocks
+            if block.get('type') in ('tool_use', 'server_tool_use')}
+        for tc in msg.get('tool_calls') or []:
+            if not isinstance(tc, dict) or tc.get('id') in replayed_call_ids:
+                continue
+            fn = tc.get('function') or {}
+            blocks.append({
+                'type': 'tool_use',
+                'id': tc.get('id') or '',
+                'name': fn.get('name', ''),
+                'input': object_arguments(fn.get('arguments', '{}')),
+            })
         _cc = _block_cache_control(msg.get('content'))
         if _cc and blocks:
             blocks = _strip_cc(blocks)
@@ -201,10 +235,18 @@ def _assistant_blocks(msg: dict) -> list:
         return blocks
 
     blocks = []
+    if (replay_unsigned_reasoning and msg.get('reasoning_content') is not None
+            and not isinstance(msg['reasoning_content'], str)):
+        raise ProtocolConversionError('native_content_invalid')
     th_text = msg.get('reasoning_content') or ''
     th_sig = msg.get('thinking_signature') or ''
-    if th_text and th_sig:
-        blocks.append({'type': 'thinking', 'thinking': th_text, 'signature': th_sig})
+    if th_text and (th_sig or replay_unsigned_reasoning):
+        if not isinstance(th_text, str):
+            raise ProtocolConversionError('native_content_invalid')
+        thinking = {'type': 'thinking', 'thinking': th_text}
+        if th_sig:
+            thinking['signature'] = th_sig
+        blocks.append(thinking)
     blocks.extend(_convert_content_blocks(msg.get('content') or ''))
     for tc in msg.get('tool_calls') or []:
         fn = tc.get('function', {})
@@ -247,6 +289,8 @@ def _convert_body_to_anthropic(body: dict) -> dict:
     tool-result messages into a single Anthropic user turn.
     """
     validate_request(body, 'anthropic')
+    replay_unsigned_reasoning = model_requires_reasoning_content_replay(
+        body.get('_admission_logical_model') or body.get('model') or '')
 
     stops = stop_sequences(body)
     out = {
@@ -401,7 +445,8 @@ def _convert_body_to_anthropic(body: dict) -> dict:
             else:
                 messages.append({'role': 'user', 'content': [block]})
         elif role == 'assistant':
-            blocks = _assistant_blocks(msg)
+            blocks = _assistant_blocks(
+                msg, replay_unsigned_reasoning=replay_unsigned_reasoning)
             if not blocks:
                 # Ghost assistant (no signed thinking, no content, no
                 # tool_calls) — a caller bypassed build_body's
@@ -432,7 +477,8 @@ def _convert_body_to_anthropic(body: dict) -> dict:
             out['system'] = system_blocks[0].get('text', '')
         else:
             out['system'] = system_blocks
-    report = conversion_report(body, 'anthropic')
+    report = conversion_report(
+        body, 'anthropic', replay_unsigned_reasoning=replay_unsigned_reasoning)
     if report:
         out['_conversion_report'] = report
     out['messages'] = messages

@@ -188,3 +188,52 @@ def test_batch_replay_and_dependency_pins_survive_selected_reads(owned):
     result['projectionRevision'] = 6
     with pytest.raises(ProjectDispatchError, match='not ready'):
         c.repo.validate(c.repo.admission(child['id']))
+
+
+def _recipient(c, name):
+    c.repo.conversations.rows[name] = {'user_id': c.repo.owner, 'settings': {'projectPath': '/project'}}
+    return {**c.request, 'recipientId': name}
+
+
+def test_catalog_origins_read_each_admission_once_without_a_snapshot_fence(owned):
+    from lib.project_dispatch.history import RecipientOrigins
+    c = owned
+    c.repo.authorize(c.request, c.principal, 'first')
+    writer = ProjectDispatchRepository(c.repo.owner, '/project', client=c.factory, conversations=c.repo.conversations,
+        turn_get=c.repo.turn_get, binding_repository=c.repo.binding_repository, clock=c.repo.clock)
+    queries, during = [], []
+    class Counted:
+        def query(self, operation, payload, **kw):
+            queries.append(payload.get('collection') or operation)
+            if during and payload.get('collection') == 'assignments':
+                during.pop()()
+            return c.factory().query(operation, payload, **kw)
+    counted = Counted()
+    c.repo.client = lambda **kw: counted
+    memo = RecipientOrigins()
+    assert memo.read(c.repo) == {'recipient': 'coordinator'}
+    assert queries.count('assignments') == 1
+    queries.clear()
+    assert memo.read(c.repo) == {'recipient': 'coordinator'}
+    assert queries == ['head']
+    writer.authorize(_recipient(c, 'second'), c.principal, 'second')
+    # Another admission commits after this read listed its page.
+    during.append(lambda: writer.authorize(_recipient(c, 'third'), c.principal, 'third'))
+    queries.clear()
+    assert memo.read(c.repo) == {'recipient': 'coordinator', 'second': 'coordinator'}
+    assert queries == ['head', 'indexes', 'assignments']
+    queries.clear()
+    assert memo.read(c.repo) == {'recipient': 'coordinator', 'second': 'coordinator', 'third': 'coordinator'}
+    assert queries == ['head', 'indexes', 'assignments']
+
+
+def test_catalog_origins_read_the_legacy_record_until_its_cutover(owned):
+    from lib.project_dispatch.history import RecipientOrigins
+    c = owned; c.repo.storage_version = 1
+    c.repo.authorize(c.request, c.principal, 'legacy')
+    c.repo.storage_version = 2
+    memo = RecipientOrigins()
+    assert memo.read(c.repo) == {'recipient': 'coordinator'} and c.store.head() is None
+    c.repo.authorize(_recipient(c, 'second'), c.principal, 'cutover')
+    assert c.store.head()['value']['state']['phase'] == 'ready'
+    assert memo.read(c.repo) == {'recipient': 'coordinator', 'second': 'coordinator'}

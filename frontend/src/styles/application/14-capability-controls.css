@@ -1,0 +1,6 @@
+/* Shared capability toggle state and modal-link geometry remain available at startup. */
+/* Capability toggles are independent, so several rows are often on at once.
+   Flush rows fused their highlights into one slab; one spacing step keeps each
+   row its own shape. Rows share the theme's on-state: no per-capability hue. */
+#submenuExtras .submenu-item+.submenu-item{margin-top:var(--space-1)}
+.modal a.btn{display:inline-flex;align-items:center;justify-content:center}

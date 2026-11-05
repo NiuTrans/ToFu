@@ -228,7 +228,7 @@ fn restore_session(
     let count_key = session_count_key(tx)?;
     let count = read_count(database, tx, &count_key)?;
     if count >= MAX_SWARM_SESSIONS_PER_OWNER as u64 {
-        return Err(exhausted("swarm session capacity reached"));
+        return Err(crate::resource_exhaustion::capacity_quota("swarm session capacity reached"));
     }
     // The session is restored before its agents; resumable_agents starts at
     // the count of already-restored resumable agents for this session.
@@ -353,6 +353,7 @@ fn restore_agent(
         objective: request.objective.clone(),
         messages: request.messages.clone(),
         result: request.result.clone(),
+        checkpoint_id: String::new(),
     };
     if let (Some(existing_core), Some(existing_state)) = (&old_core, &old_state) {
         let matches = existing_core.swarm_key == core.swarm_key
@@ -373,7 +374,7 @@ fn restore_agent(
     let count_key = agent_count_key(tx, &request.swarm_key)?;
     let count = read_count(database, tx, &count_key)?;
     if count >= MAX_SWARM_AGENTS_PER_SESSION as u64 {
-        return Err(exhausted("swarm agent capacity reached"));
+        return Err(crate::resource_exhaustion::capacity_quota("swarm agent capacity reached"));
     }
     write_count(database, tx, count_key, count + 1)?;
     let state = AgentState {
@@ -381,6 +382,7 @@ fn restore_agent(
         rounds_used: request.rounds_used,
         delivered: request.delivered,
         updated_at: request.updated_at,
+        checkpoint: None,
     };
     put_document(
         database,

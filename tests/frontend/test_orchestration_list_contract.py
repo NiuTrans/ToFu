@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
@@ -13,7 +12,6 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node unavailable')
 def test_list_admission_preserves_transport_failure_and_domain_facades():
     client = native_module_path(
         '.native/orchestration-list-client.js',

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 from concurrent.futures import Future
 from types import SimpleNamespace
 
@@ -46,7 +47,9 @@ def corpus(kind):
 @pytest.mark.parametrize('kind', ['pages', 'snippets', 'uncertain'])
 def test_serial_streaming_cache_and_settled_round_retain_full_evidence(monkeypatch, batch, kind):
     import lib.tasks_pkg.tool_dispatch._pipeline as pipeline
-    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import (
+        ToolResultArtifactRepository, resolve_artifact_ref,
+    )
 
     results = corpus(kind)
     vertical = {'domain': 'academic', 'sources': [], 'items': [],
@@ -107,7 +110,9 @@ def test_serial_streaming_cache_and_settled_round_retain_full_evidence(monkeypat
         evidence = settled_row['toolResultEvidence']
         assert evidence['retentionCoverage'] == 'complete'
         assert evidence['viewCoverage'] == 'partial'
-        assert evidence['artifactRef'] in str(model)
+        # The model may see the short tr:<slug>:<prefix> alias of the canonical digest.
+        model_ref = re.search(r'"artifactRef":"([^"]+)"', str(model)).group(1)
+        assert resolve_artifact_ref(task, model_ref, user_id=17) == evidence['artifactRef']
         repository = ToolResultArtifactRepository()
         recovered = repository.read_range(user_id=17, artifact_ref=evidence['artifactRef'], limit=8192)
         assert 'https://uncertain.org/39' in capture_result(content).text()

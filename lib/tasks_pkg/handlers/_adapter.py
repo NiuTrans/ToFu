@@ -244,7 +244,11 @@ def run_batch_concurrent(
             try:
                 ordered[idx], _ok = fut.result()
             except Exception as e:
-                logger.error('[%s] batch worker failed at idx=%d: %s', tag, idx, e, exc_info=True)
+                from lib.tasks_pkg.executor._effects import is_tool_cancellation
+                if is_tool_cancellation(e):
+                    logger.info('[%s] batch worker cancelled at idx=%d', tag, idx)
+                else:
+                    logger.error('[%s] batch worker failed at idx=%d: %s', tag, idx, e, exc_info=True)
                 ordered[idx] = None
                 _ok = False
             if on_item is not None:

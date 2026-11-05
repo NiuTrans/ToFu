@@ -166,3 +166,126 @@ def test_linked_rework_requires_current_review_and_fresh_human_grant(context):
     assert c.repo.authorize(second, c.principal, 'second') == born
     second['reworkOf']['resultRevision'] = 6
     with pytest.raises(ValueError): c.repo.authorize(second, c.principal, 'invalid')
+
+
+@pytest.mark.parametrize('spelling', ['canonical', 'symlink', 'ancestor'])
+def test_file_worker_in_plain_folder_runs_isolated_and_publishes_back(context, repo, monkeypatch, spelling):
+    """The RSI Exam shape: nobody ran Git, the folder holds notes and bulky data."""
+    import os
+    from lib.project_mod import delivery
+    from lib.project_mod.managed_repository import LARGE_FILE_BYTES
+    from lib.tasks_pkg.workspace_delivery import bind_worker_workspace
+    from lib.tasks_pkg.executor._execute import _execute_tool_one
+    from lib.agent_core.execution_budget import model_budget_admission
+    root, _, owner = repo
+    plain = (root.parent / 'plain-project').resolve()
+    (plain / 'allowed').mkdir(parents=True)
+    (plain / 'allowed' / 'notes.md').write_text('person notes\n')
+    panel = plain / 'allowed' / 'panel.parquet'
+    with open(panel, 'wb') as stream:
+        stream.truncate(LARGE_FILE_BYTES)
+    project = plain
+    if spelling != 'canonical':
+        alias = root.parent / 'project-alias'
+        alias.symlink_to(plain if spelling == 'symlink' else plain.parent, target_is_directory=True)
+        project = alias if spelling == 'symlink' else alias / plain.name
+    f = file_context(context, (project, None, owner), monkeypatch)
+    row = f.repository.authorize(f.request, f.principal, 'plain-command')
+    f.repository.bind_execution(row['id'], 'worker-turn', 'worker-attempt')
+    trusted = admission.TrustedDispatch(f.repository.admission(row['id']))
+    cfg = trusted.capture({}, f.owner, trusted.principal, 'recipient')
+    cfg.update(_turnOwnerUserId=f.owner, _turnId='worker-turn', _attemptId='worker-attempt')
+    task = {'id': 'automatic', 'convId': 'recipient', 'config': cfg, 'status': 'running',
+        'messages': [], 'usage': {}, 'toolRounds': [], 'events': [], '_userId': f.owner,
+        '_principalContext': trusted.principal.to_payload(), '_attended': False,
+        '_turnId': 'worker-turn', '_attemptId': 'worker-attempt', 'abort_event': threading.Event()}
+    admission.bind_account(task)
+    bind_worker_workspace(task)
+
+    work = Path(task['config']['projectPath'])
+    assert work != plain and admission.owned_workspace(task)['task_id'] == 'automatic'
+    assert task['convId'] == 'recipient'
+    assert task['config']['canonicalProjectPath'] == str(project)
+    assert task['config'][admission.KEY]['projectPath'] == str(project)
+    assert f.c.conversations.rows['recipient']['settings']['projectPath'] == str(project)
+    assert state.get_workspace(str(plain), 'automatic', user_id=owner)['origin'][admission.KEY]['projectPath'] == str(project)
+    assert (plain / '.git').is_dir() and git(plain, 'status', '--porcelain') == ''
+    assert (work / 'AGENTS.md').read_text() == (plain / 'AGENTS.md').read_text()
+    assert (work / 'allowed' / 'notes.md').read_text() == 'person notes\n'
+    assert os.readlink(work / 'allowed' / 'panel.parquet') == str(panel)
+    monkeypatch.setattr('lib.tasks_pkg.manager.append_event', lambda _task, event: True)
+    lease = model_budget_admission(task)(input_tokens=4, max_output_tokens=6)
+    lease.mark_dispatched(); lease.settle({'prompt_tokens': 4, 'completion_tokens': 6})
+    round_entry = {'name': 'write_file', 'query': 'Write the result',
+                   'arguments': {'path': 'allowed/result.txt', 'content': 'worker bytes\n'}}
+    result = _execute_tool_one(task, {}, 'write_file', 'tool-1', round_entry['arguments'], 0,
+        round_entry, task['config'], str(work), True)
+    assert 'Error:' not in str(result[1]), result
+    assert not (plain / 'allowed' / 'result.txt').exists()
+
+    f.attempt['status'] = 'completed'
+    f.output.update(projectionRevision=2, projection={'content': 'Files ready for review'})
+    held = automatic_settle((plain, None, owner))
+    assert held['state'] == 'blocked'
+    if spelling != 'canonical':
+        from lib.llm.llm_errors import ToolAdmissionRefused
+        from lib.project_dispatch.publication import delivery_view, publication_reason
+        registered = state.get_workspace(str(plain), 'automatic', user_id=owner)
+        assigned = f.repository.read(row['id'])
+        assert delivery_view(assigned, f.attempt, state.find_workspace)['checkpointSha'] == held['checkpointSha']
+        target = alias.readlink()
+        alias.unlink()
+        alias.symlink_to(root, target_is_directory=True)
+        try:
+            with pytest.raises(ToolAdmissionRefused, match='registered owned isolated worktree'):
+                admission.owned_workspace(task)
+            assert publication_reason(registered, held) == 'project_publication_identity_changed'
+            assert delivery_view(assigned, f.attempt, state.find_workspace) is None
+            assert not (root / 'allowed' / 'result.txt').exists()
+        finally:
+            alias.unlink()
+            alias.symlink_to(target, target_is_directory=True)
+    service = ProjectDispatchService(f.repository, commands=SimpleNamespace(), turn_get=f.turns,
+        attempt_get=lambda *a, **kw: deepcopy(f.attempt), workspace_get=state.find_workspace,
+        publication_lock=lambda root: nullcontext(), publication_wake=lambda: None)
+    service.review(row['id'], principal=f.principal, decision='accept', note='Checked bytes',
+                   result_revision=2, expected_revision=1)
+    service.publish(row['id'], principal=f.principal, expected_revision=1,
+                    result_revision=2, expected_checkpoint_sha=held['checkpointSha'])
+    delivery.resume_pending_workspace_deliveries()
+    settled = state.get_workspace(str(plain), 'automatic', user_id=owner)['origin']['delivery']
+    assert settled['state'] == 'delivered', settled.get('reason')
+    assert (plain / 'allowed' / 'result.txt').read_text() == 'worker bytes\n'
+    assert service.view(row['id'], principal=f.principal)['canonicalDelivery'] is True
+    assert (project / 'allowed' / 'result.txt').read_text() == 'worker bytes\n'
+    if spelling != 'canonical':
+        assert alias.is_symlink()
+    assert panel.stat().st_size == LARGE_FILE_BYTES and not panel.is_symlink()
+    assert 'allowed/panel.parquet' not in git(plain, 'ls-tree', '-r', '--name-only', held['checkpointSha'])
+
+
+def test_file_worker_in_a_repository_subdirectory_fails_binding_before_any_model_request(
+        context, repo, monkeypatch):
+    from lib.tasks_pkg.workspace_delivery import WorkspaceBindingError, bind_worker_workspace
+    root, _, owner = repo
+    plain = root / 'nested-project'
+    plain.mkdir()
+    f = file_context(context, (plain, None, owner), monkeypatch)
+    row = f.repository.authorize(f.request, f.principal, 'plain-command')
+    f.repository.bind_execution(row['id'], 'worker-turn', 'worker-attempt')
+    trusted = admission.TrustedDispatch(f.repository.admission(row['id']))
+    cfg = trusted.capture({}, f.owner, trusted.principal, 'recipient')
+    cfg.update(_turnOwnerUserId=f.owner, _turnId='worker-turn', _attemptId='worker-attempt')
+    task = {'id': 'automatic', 'convId': 'recipient', 'config': cfg, 'status': 'running',
+        'messages': [], 'usage': {}, 'toolRounds': [], 'events': [], '_userId': f.owner,
+        '_principalContext': trusted.principal.to_payload(), '_attended': False,
+        '_turnId': 'worker-turn', '_attemptId': 'worker-attempt', 'abort_event': threading.Event()}
+    admission.bind_account(task)
+    with pytest.raises(WorkspaceBindingError, match='subdirectory of the Git repository') as refused:
+        bind_worker_workspace(task)
+    assert refused.value.user_hint.startswith('解决办法 / How to fix:')
+    assert f'Open {root}' in refused.value.user_hint and 'git ' not in refused.value.user_hint
+    assert task['config']['projectPath'] == str(plain) and '_workspaceDelivery' not in task
+    assert state.find_workspace(str(plain), 'automatic', user_id=owner) is None
+    assert f.repository.read(row['id'])['modelAttempts'] == []
+    assert not (plain / '.git').exists() and not (plain / 'AGENTS.md').exists()

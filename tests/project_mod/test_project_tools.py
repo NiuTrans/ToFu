@@ -454,6 +454,34 @@ class TestExtractWriteTargets:
     def test_awk_pipeline_readonly(self):
         assert _extract_write_targets("ps aux | awk '{print $2}'") == set()
 
+    # sd rewrites its FILES operands in place; FIND/REPLACE are program text.
+    def test_sd_files_are_exact_targets(self):
+        assert _extract_write_targets("sd 'old' 'new' a.py b.py") == {'a.py', 'b.py'}
+
+    def test_sd_options_anywhere_and_values_skipped(self):
+        t = _extract_write_targets("sd -F -n 3 --flags=i foo bar src/x.py -f w")
+        assert t == {'src/x.py'}
+
+    def test_sd_bundled_short_options(self):
+        assert _extract_write_targets("sd -Fn2 a b c.txt") == {'c.txt'}
+
+    def test_sd_double_dash_ends_options(self):
+        assert _extract_write_targets("sd -- -x y f.txt") == {'f.txt'}
+
+    def test_sd_stdin_filter_is_read_only(self):
+        assert _extract_write_targets("rg -l foo | sd foo bar") == set()
+        assert _extract_write_targets("cat a.txt | sd -F x y") == set()
+
+    def test_sd_preview_is_read_only(self):
+        assert _extract_write_targets("sd -p foo bar a.py") == set()
+        assert _extract_write_targets("sd foo bar a.py --preview") == set()
+
+    def test_sd_unknown_option_is_opaque(self):
+        assert _extract_write_targets("sd --frobnicate foo bar a.py") is None
+
+    def test_sd_glob_is_opaque(self):
+        assert _extract_write_targets("sd foo bar src/*.py") is None
+
     # Opaque commands → None
     def test_python_opaque(self):
         assert _extract_write_targets('python3 script.py') is None
@@ -486,6 +514,15 @@ class TestIsDestructiveCommand:
 
     def test_ls_not_destructive(self):
         assert not _is_destructive_command('ls -la')
+
+    def test_sd_filter_and_preview_not_destructive(self):
+        assert not _is_destructive_command('rg -l foo | sd foo bar')
+        assert not _is_destructive_command('sd -p foo bar a.py')
+
+    def test_sd_file_edit_destructive(self):
+        assert _is_destructive_command('sd foo bar a.py')
+        assert _is_destructive_command('sd --frobnicate foo bar')
+        assert _is_destructive_command('sd foo bar *.py')
 
     def test_rm_rf_destructive(self):
         assert _is_destructive_command('rm -rf /tmp/foo')

@@ -104,7 +104,9 @@ WRITE_COMMANDS = {'desktop_write_file', 'desktop_move_file',
                   'project_edit_file'}
 EXEC_COMMANDS = {'desktop_run_command', 'desktop_open_file', 'desktop_open_app',
                  'project_run_command'}
-GUI_COMMANDS = {'desktop_gui_action', 'desktop_screenshot'}
+# The clipboard holds arbitrary user data outside the shared folders, so both
+# reading and writing it belong to the GUI tier, like reading the screen.
+GUI_COMMANDS = {'desktop_gui_action', 'desktop_screenshot', 'desktop_clipboard'}
 EGRESS_COMMANDS = {'egress_http', 'adapter_ensure', 'adapter_status',
                   'adapter_stop'}
 

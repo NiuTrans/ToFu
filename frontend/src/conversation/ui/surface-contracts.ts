@@ -102,6 +102,8 @@ export interface ScrollAnchorPort<Snapshot = unknown> {
   capture(root: HTMLElement): Snapshot;
   restore(root: HTMLElement, snapshot: Snapshot): void;
   followLatest?(root: HTMLElement, options?: { force?: boolean }): void;
+  /** Exact navigation shares follow/layout cancellation and scoped geometry. */
+  scrollToTurn?(root: HTMLElement, turnId: string, onScroll?: () => void): boolean;
   isNearBottom?(threshold?: number): boolean;
 
   suspendFollow?(): void;
@@ -167,16 +169,27 @@ export interface ConversationSurfaceOptions extends ConversationSurfaceRenderers
   transportNoticeLabel?(
     state: 'recovering' | 'degraded' | 'offline',
   ): string;
+  /** Main-lane tail range residency retired on this conversation's previous
+   * mount; the first render reuses it while the same Turn is still newest. */
+  retainedTail?: ConversationRetainedTail;
+}
+
+export interface ConversationRetainedTail {
+  firstTurnId: string;
+  lastTurnId: string;
 }
 
 export interface ConversationSurface {
   readonly root: HTMLElement;
   readonly windowState: ConversationWindowState;
   readonly mountedTurnIds: ReadonlyArray<string>;
+  /** The main-lane tail range while residency has retired Turns above it. */
+  readonly retainedTail: ConversationRetainedTail | null;
   render(viewModel: ConversationViewModel): void;
   showEarlier(): boolean;
   showLater(): boolean;
 
+  /** Mount the bounded target window and align its Turn in the owned viewport. */
   revealTurn(turnId: string): boolean;
   isNearLatest(threshold?: number): boolean;
   followLatest(options?: { force?: boolean }): void;

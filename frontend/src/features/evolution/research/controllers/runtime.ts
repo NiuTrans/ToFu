@@ -20,6 +20,7 @@ type ResearchWindow = Window & {
   Api?: { tasks?: TaskApi; research?: ResearchApi };
   _evolutionRunsApi?: EvolutionRunsPort;
   debugLog?: (message: string, level?: string) => void;
+  t?: (key: string) => string;
   _researchStream?: ResearchStream | null;
   _researchPollTimer?: number | null;
   _paintResearch?: () => void;
@@ -519,7 +520,10 @@ export async function openResearchRecord(taskId: string): Promise<boolean> {
     mergeLiterature(stream, record);
     stream.recordSaved = true;
     if (record.result && typeof record.result === 'object') researchApplyArtifacts(stream, record.result as JsonObject);
-    if (stream.status === 'interrupted') stream.commandError = _i18nLang === 'zh' ? '执行已中断，论文和已完成阶段已保存。' : 'Execution interrupted. Papers and completed stages are saved.';
+    if (stream.status === 'interrupted') {
+      stream.commandError = state.t?.('evolution.research.interruptedDetail')
+        || 'Execution interrupted. Papers and completed stages are saved.';
+    }
     state._researchStream = stream;
     repaintResearchSurface();
     if (researchIsRunning(stream)) { attachStreamPush(stream); scheduleResearchPoll(stream); }

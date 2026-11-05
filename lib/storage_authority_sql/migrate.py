@@ -8,6 +8,8 @@ the advisory lock serializes concurrent Job retries.
 
 from __future__ import annotations
 
+# pyright: strict
+
 import json
 import logging
 from typing import Any, cast

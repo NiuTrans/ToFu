@@ -30,8 +30,8 @@ logger = get_logger(__name__)
 
 
 _READ_ONLY_TOOL_NAMES = frozenset({
-    'list_dir', 'read_files', 'grep_search', 'find_files',
-    'web_search', 'fetch_url', 'inspect_image',
+    'list_dir', 'read_files', 'search_files', 'grep_search', 'find_files',
+    'web_search', 'fetch_url', 'inspect_image', 'inspect_video',
 })
 _TRACKED_EDIT_TOOL_NAMES = frozenset({
     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
@@ -173,8 +173,9 @@ def _run_commit_round_async(task: dict, project_path: str,
                 len(linear_checkpoint.get('repositories') or []),
             )
     except Exception as error:
-        # Checkpointing is a best-effort post-task observer. It must never
-        # rewrite the already-settled task result or block later project tools.
+        # Checkpointing never rewrites the settled task result, but its error
+        # receipt must survive independently of the terminal Turn projection.
+        linear_checkpoint = {'status': 'error', 'detail': str(error)[:3000]}
         logger.warning('[Task:%s] linear Git checkpoint settlement failed: %s',
                        tid, error, exc_info=True)
 

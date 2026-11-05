@@ -26,7 +26,7 @@ from tofu_search.search.authority import (
 
 logger = get_logger(__name__)
 
-__all__ = ['rerank_by_bm25']
+__all__ = ['rerank_by_bm25', 'rerank_by_scores', 'build_scoring_texts']
 
 # ═══════════════════════════════════════════════════════
 #  BM25 constants (same as lib/memory/relevance.py)
@@ -181,6 +181,28 @@ def _diversify_by_domain(
 
 
 def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
+    """Rank with the default lexical policy and its evidence-gated priors."""
+    return _rank_candidates(query, results, top_k)
+
+
+def build_scoring_texts(query: str, results: list[dict]) -> list[str]:
+    """Keep source text literal; use the evaluated metadata representation."""
+    return [_build_doc_text(row, query) if row.get('full_content') else
+            (row.get('title') or '').strip() + '\n' + (row.get('snippet') or '').strip()
+            for row in results]
+
+
+def rerank_by_scores(query: str, results: list[dict], top_k: int,
+                     scores: list[float]) -> list[dict]:
+    """Apply optional relevance scores through the same prior/diversity owner."""
+    if (len(scores) != len(results)
+            or any(type(value) not in (int, float) or not math.isfinite(value) for value in scores)):
+        raise ValueError('Expected one finite relevance score per candidate')
+    return _rank_candidates(query, results, top_k, semantic_scores=scores)
+
+
+def _rank_candidates(query: str, results: list[dict], top_k: int, *,
+                     semantic_scores: list[float] | None = None) -> list[dict]:
     """Rank body evidence with BM25; fuse native and local snippet ranks.
 
     Uses the ``full_content`` field when available, falling back to
@@ -229,6 +251,7 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
 
     # Score each result with BM25
     scored = []
+    native_eligible = set()
     for i, (result, doc, dl) in enumerate(zip(results, docs, doc_lens, strict=True)):
         score = 0.0
         # Build term frequency map for query terms only
@@ -250,6 +273,10 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
             score += idf * numerator / denominator
 
         if score > 0:
+            native_eligible.add(i)
+        if semantic_scores is not None:
+            score = semantic_scores[i]
+        elif score > 0:
             # Retain useful prior ceilings, but a URL cannot contribute more
             # than the lexical evidence itself or erase all matching evidence.
             tier = classify_authority(result.get('url') or '', subject)
@@ -271,14 +298,19 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
     # Sort by score descending, break ties by original position
     scored.sort(key=lambda x: (-x[0], x[1]))
 
+    if semantic_scores is not None:
+        fuse_snippet_ranks = fuse_snippet_ranks and any(
+            index in native_eligible and row.get('rrf_score')
+            for index, row in enumerate(results))
     if fuse_snippet_ranks:
         # One local vote uses the same units as the upstream rank sum. Native
         # order and local evidence can cancel, so tied fusion scores keep the
         # stronger lexical result first, including small candidate pools.
         lexical_positions = {index: rank for rank, (_, index, _) in enumerate(scored, 1)}
         scored = [
-            (float(result.get('rrf_score') or 0.0) + 1.0 / (RRF_RANK_OFFSET + rank)
-             if score > 0 else 0.0, index, result)
+            ((float(result.get('rrf_score') or 0.0) if index in native_eligible else 0.0)
+             + 1.0 / (RRF_RANK_OFFSET + rank)
+             if semantic_scores is not None or score > 0 else 0.0, index, result)
             for rank, (score, index, result) in enumerate(scored, 1)
         ]
         scored.sort(key=lambda x: (-x[0], lexical_positions[x[1]], x[1]))
@@ -292,7 +324,8 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
     elapsed = time.time() - t0
     scores_str = ', '.join(f'#{item[1]}:{item[0]:.3f}' for item in scored[:top_k])
     logger.info('[Rerank] %s %d->%d results in %.1fms. div=%s Top-%d (idx:score): %s  query=%r',
-                'BM25+RRF' if fuse_snippet_ranks else 'BM25',
+                ('local-model' if semantic_scores is not None else 'BM25')
+                + ('+RRF' if fuse_snippet_ranks else ''),
                 len(results), top_k, elapsed * 1000, diversified is not None,
                 top_k, scores_str, query[:60])
 

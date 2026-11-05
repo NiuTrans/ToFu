@@ -1,4 +1,5 @@
 """Project messages carry context, not human authority or automatic execution."""
+from copy import deepcopy
 from types import SimpleNamespace
 import pytest
 from tests.swarm.test_retained_agents import RecordClient
@@ -28,17 +29,20 @@ def send(setup, **kw):
 
 def test_submit_replay_and_lost_response(setup, monkeypatch):
     original = setup.client.command
-    attempts = []
-    def lost(*a):
-        value = original(*a); attempts.append(1)
-        if len(attempts) == 1:
-            raise StorageError('database_timeout', 'ACK lost', retryable=True)
+    head = pm.ProjectMailbox(1, '/project', 'recipient').key
+    commits = []
+    def lost(operation, payload, command_id):
+        value = original(operation, payload, command_id)
+        if payload['key'] == head:
+            commits.append(1)
+            if len(commits) == 1:
+                raise StorageError('database_timeout', 'ACK lost', retryable=True)
         return value
     monkeypatch.setattr(setup.client, 'command', lost)
     first = send(setup)
     assert first['execution_started'] is False and first['wake'] == 'next_authorized_turn'
     assert send(setup)['message'] == first['message']
-    assert len(attempts) == 1
+    assert len(commits) == 1
     with pytest.raises(pm.ProjectMessageError, match='changed'):
         send(setup, content='different')
 
@@ -114,14 +118,18 @@ def test_failed_acquisition_or_ack_does_not_fabricate_receipt(setup, monkeypatch
     assert pm.execute('get_project_messages', {}, setup.recipient)['messages'][0]['state'] == 'submitted'
 
 
-def test_mailbox_capacity_never_evicts_durable_evidence(setup, monkeypatch):
-    monkeypatch.setitem(pm.LIMITS, 'messagesPerMailbox', 2)
-    send(setup)
-    send(setup, idempotency_key='two')
-    with pytest.raises(pm.ProjectMessageError, match='capacity'):
-        send(setup, idempotency_key='three')
-    assert len(pm.execute('get_project_messages', {}, setup.recipient)['messages']) == 2
 
+def test_history_outlives_the_old_lifetime_count_and_pages_back_completely(setup):
+    sent = [send(setup, idempotency_key=str(index), content=f'History {index}')['message']['id']
+            for index in range(129)]
+    seen, cursor = [], None
+    while True:
+        page = pm.execute('get_project_messages', {'before_id': cursor} if cursor else {}, setup.recipient)
+        seen[:0] = [row['id'] for row in page['messages']]
+        cursor = page['next_before_id']
+        if cursor is None:
+            break
+    assert seen == sent
 
 def test_message_contracts_have_one_owner_and_children_cannot_discover_them():
     from lib.tools.registry import all_specs
@@ -161,14 +169,14 @@ def test_later_small_originals_progress_past_full_unfit_prefix(setup, monkeypatc
     mailbox = pm.ProjectMailbox(1, '/project', 'recipient')
     batch_size = pm.LIMITS['batchSize']
     small_count = 2 * batch_size + 1
-    prefix_count = pm.LIMITS['messagesPerMailbox'] - small_count
-    for index in range(pm.LIMITS['messagesPerMailbox']):
+    prefix_count = pm.LIMITS['messagesPerSegment'] - small_count
+    for index in range(pm.LIMITS['messagesPerSegment']):
         if index < prefix_count:
             content = ('x' if bound == 'tokens' else '"') * pm.LIMITS['messageChars']
         else:
             content = f'  small {index}\n\t<&雪🙂>  '
         mailbox.submit('sender', {'content': content, 'idempotency_key': str(index)}, 'task-s')
-    originals = deepcopy(mailbox.load()[0]['messages'])
+    originals = deepcopy(mailbox.read())
     pending = originals[prefix_count:]
     messages = [{'role': 'user', 'content': 'Objective'}]
     for round_num in range(3):
@@ -180,12 +188,12 @@ def test_later_small_originals_progress_past_full_unfit_prefix(setup, monkeypatc
         for row in pending[round_num * batch_size:(round_num + 1) * batch_size]:
             assert escape(row['content']) in carrier['content']
         pm.confirm(setup.recipient, round_num)
-        assert all(row['state'] == 'submitted' for row in mailbox.load()[0]['messages'][prefix_count + round_num * batch_size:])
+        assert all(row['state'] == 'submitted' for row in mailbox.read()[prefix_count + round_num * batch_size:])
         receipts.stream_with_receipts(
             lambda *a, **kw: ProviderStreamResult.from_legacy({'role': 'assistant', 'content': 'Read'}, 'stop', {}),
             setup.recipient, {'messages': messages})
         pm.confirm(setup.recipient, round_num)
-        saved = mailbox.load()[0]['messages']
+        saved = mailbox.read()
         assert saved[:prefix_count] == originals[:prefix_count]
         assert all(row['state'] == 'input_confirmed' for row in saved[prefix_count:prefix_count + (round_num + 1) * batch_size])
         assert [row['content'] for row in saved] == [row['content'] for row in originals]
@@ -216,12 +224,12 @@ def test_present_original_still_acknowledges_when_fresh_input_is_refused(setup, 
         lambda *a, **kw: ProviderStreamResult.from_legacy({'role': 'assistant', 'content': 'Read'}, 'stop', {}),
         setup.recipient, {'messages': messages[:1]})
     pm.confirm(setup.recipient, 1)
-    assert all(row['state'] == 'submitted' for row in pm.ProjectMailbox(1, '/project', 'recipient').load()[0]['messages'])
+    assert all(row['state'] == 'submitted' for row in pm.ProjectMailbox(1, '/project', 'recipient').read())
     receipts.stream_with_receipts(
         lambda *a, **kw: ProviderStreamResult.from_legacy({'role': 'assistant', 'content': 'Read'}, 'stop', {}),
         setup.recipient, {'messages': messages})
     pm.confirm(setup.recipient, 1)
-    saved = pm.ProjectMailbox(1, '/project', 'recipient').load()[0]['messages']
+    saved = pm.ProjectMailbox(1, '/project', 'recipient').read()
     assert [(row['id'], row['state']) for row in saved] == [
         (first['id'], 'input_confirmed'), (second['id'], 'submitted')]
 
@@ -260,7 +268,7 @@ def test_present_batch_does_not_spend_fresh_count_and_only_physical_carrier_acks
 
     receipts.stream_with_receipts(stream, setup.recipient, {'messages': messages})
     pm.confirm(setup.recipient, 1)
-    rows = pm.ProjectMailbox(1, '/project', 'recipient').load()[0]['messages']
+    rows = pm.ProjectMailbox(1, '/project', 'recipient').read()
     assert [row['id'] for row in rows if row['state'] == 'input_confirmed'] == expected[batch_size:2 * batch_size]
     pm.inject(setup.recipient, messages, 2)
     assert messages[-1]['_projectMessageIds'] == expected[-1:]
@@ -278,12 +286,12 @@ def test_full_scan_keeps_state_decision_and_sender_scope_filters(setup):
     mailbox.consider({'message_id': decided['id'], 'decision': 'deferred', 'note': 'Wait', 'expected_revision': 1}, 'task-r')
     fresh = mailbox.submit('sender', {'content': 'Current original', 'idempotency_key': 'fresh'}, 'task-s')
     setup.conversations[(1, 'rebound')] = '/other'
-    before = mailbox.load()
+    before = deepcopy(setup.client.rows)
     messages = [{'role': 'user', 'content': 'Objective'}]
     pm.inject(setup.recipient, messages, 1)
     assert messages[-1]['_projectMessageIds'] == [fresh['id']]
     assert setup.recipient['_projectMessageAttempt']['ids'] == [fresh['id']]
-    assert mailbox.load() == before  # Optional acquisition creates no receipt or execution.
+    assert setup.client.rows == before  # Optional acquisition creates no receipt or execution.
 
 
 def test_sender_validity_cache_is_per_injection_and_includes_invalid_senders(setup, monkeypatch):
@@ -292,7 +300,7 @@ def test_sender_validity_cache_is_per_injection_and_includes_invalid_senders(set
     mailbox = pm.ProjectMailbox(1, '/project', 'recipient')
     setup.conversations.update({(1, 'invalid'): '/other', (1, 'second'): '/project'})
     senders = ('sender', 'invalid', 'second')
-    for index in range(pm.LIMITS['messagesPerMailbox']):
+    for index in range(pm.LIMITS['messagesPerSegment']):
         sender = senders[index % len(senders)]
         mailbox.submit(sender, {'content': sender, 'idempotency_key': str(index)}, 'task-s')
     scope_calls = []
@@ -304,7 +312,7 @@ def test_sender_validity_cache_is_per_injection_and_includes_invalid_senders(set
     messages = [{'role': 'user', 'content': 'Objective'}]
     pm.inject(setup.recipient, messages, 0)
     assert Counter(scope_calls) == {'recipient': 1, 'sender': 1, 'invalid': 1, 'second': 1}
-    rows = {row['id']: row for row in mailbox.load()[0]['messages']}
+    rows = {row['id']: row for row in mailbox.read()}
     assert {rows[item]['sender'] for item in messages[-1]['_projectMessageIds']} == {'sender', 'second'}
     # Cache entries, including negative results, cannot survive another inject.
     setup.conversations.update({(1, 'sender'): '/other', (1, 'invalid'): '/project'})
@@ -313,3 +321,26 @@ def test_sender_validity_cache_is_per_injection_and_includes_invalid_senders(set
     assert len(messages) == 3
     assert {rows[item]['sender'] for item in messages[-1]['_projectMessageIds']} == {'invalid', 'second'}
     assert all(rows[item]['sender'] != 'sender' for item in setup.recipient['_projectMessageAttempt']['ids'])
+def test_project_message_is_visible_in_first_live_turn_projection_without_checkpoint(setup):
+    from lib.turn_lifecycle import capture_task_projection_source, _task_projection
+
+    message = send(setup, content='Fresh project evidence')['message']
+    messages = [{'role': 'user', 'content': 'Objective'}]
+    pm.inject(setup.recipient, messages, 0)
+    carrier = messages[-1]
+    event = {'type': 'llm_round_start', 'round': 1}
+    source = capture_task_projection_source(setup.recipient, event)
+    projection = _task_projection(source, {}, event)
+    note, = [segment for segment in projection['segments'] if segment['type'] == 'system_note']
+    assert note['text'] == carrier['content']
+    assert note['reason'] == 'inbox_delivery' and note['noteKind'] == 'context-injection'
+    assert note['blockId'] == setup.recipient['_contextManifest'][-1]['blockId']
+    assert not projection.get('toolRounds') and not setup.recipient.get('segments')
+    assert not setup.recipient.get('_inboxInjects')
+    assert carrier['_containsHumanSteer'] is False
+    saved, = pm.execute('get_project_messages', {}, setup.recipient)['messages']
+    assert saved['id'] == message['id'] and saved['state'] == 'submitted'
+    assert saved['decision'] is None
+    pm.inject(setup.recipient, messages, 1)
+    projected_again = _task_projection(capture_task_projection_source(setup.recipient, event), projection, event)
+    assert [s for s in projected_again['segments'] if s['type'] == 'system_note'] == [note]

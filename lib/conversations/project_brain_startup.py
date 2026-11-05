@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 from lib.log import get_logger
 from lib.storage import get_storage_client
@@ -56,10 +57,17 @@ def recover_active_work_items() -> int:
     client = get_storage_client(write=True)
     recovered = 0
     cursor = None
+    page_number = 0
     while True:
+        page_number += 1
+        started = time.monotonic()
         snapshot = client.maintenance(
             'project_brain.recovery.snapshot',
             {'cursor': cursor} if cursor is not None else {}, deadline=30.0)
+        logger.info(
+            '[ProjectBrain] recovery snapshot page=%d elapsed=%.3fs projects=%d more=%s',
+            page_number, time.monotonic() - started,
+            len(snapshot.get('projects') or ()), bool(snapshot.get('capped')))
         next_cursor = snapshot.get('nextCursor')
         if snapshot.get('capped') and (
                 not isinstance(next_cursor, dict) or not next_cursor

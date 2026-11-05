@@ -35,7 +35,19 @@ Row shapes
     Span: ``{spanId, parent, depth, kind, name, tStart, tEnd, status,
        attrs, budgetMs?, overBudget?, truncated?}``
     Summary: ``{totalMs, llmMs, toolMs, waitMs, compactionMs,
-       approvalWaitMs, unattributedMs, ttftMs, overBudget}``
+       approvalWaitMs, flowStepMs, orchestrationMs, unattributedMs, ttftMs,
+       overBudget, admissionWaitMs, retryWaitMs, spawnWaitMs, startupMs,
+       roundPrepMs, roundSettleMs, finalizeMs}`` — the wait and orchestration
+       splits come from the same disjoint fold (never extra buckets).
+
+Terminal settlement (``finalize_trace_projection``) also logs ONE
+``[TurnTraceSummary]`` line per task from that same fold, including the
+per-kind split of ``waitMs`` (admission / retry / spawn waits).
+
+A failed event read is never an empty log: the reader raises
+``TurnTraceEventReadError``; settlement then freezes an explicit
+``coverage:partial`` / ``coverageReason:event-read-failed`` document without a
+fabricated summary, spans or gaps.
 """
 
 from __future__ import annotations
@@ -44,8 +56,16 @@ from collections.abc import Mapping
 import time
 
 from lib.agent_core.events import Phase
+from lib.conversation_sync.settled_rows import settle
 from lib.log import get_logger
 from lib.orchestration.message_compat import is_flow_event_type
+from lib.tasks_pkg.turn_trace_spans import (
+    TraceSpanFold,
+    _span as _span,
+    _close as _close,
+    _safe_nonnegative_int as _safe_nonnegative_int,
+    _safe_seconds_to_ms as _safe_seconds_to_ms,
+)
 
 logger = get_logger(__name__)
 
@@ -90,15 +110,19 @@ _STATUS_CLEAR_TYPES = frozenset({'delta', *_TRACE_TERMINAL_TYPES})
 #                  (llm_thinking ⊂ llm span; tool_exec ⊂ the tool spans)
 #   'ignore'     — momentary notice, not a duration; any time it actually
 #                  covers surfaces honestly as a gap (unattributed)
+#   'startup'    — before the first execution boundary it opens the named
+#                  startup stage (_STARTUP_STAGE_BY_DETAIL_KEY); afterwards
+#                  it is a momentary notice like 'ignore'
 _PHASE_TRACE_RULE: dict[str, str] = {
     Phase.WAITING_MODEL: 'ttft',
     Phase.RETRYING: 'retry_wait',
-    Phase.EXECUTOR_QUEUED: 'retry_wait',
+    # The AI-task queue precedes worker entry: a startup stage, not a retry.
+    Phase.EXECUTOR_QUEUED: 'startup',
     Phase.COMPACTING: 'compaction',
     Phase.LLM_THINKING: 'covered',
     Phase.STREAM_STALLED: 'covered',
     Phase.TOOL_EXEC: 'covered',
-    Phase.WORKING: 'ignore',
+    Phase.WORKING: 'startup',
     Phase.TODO_CONTINUATION: 'ignore',
     Phase.INTENT_STALL_NUDGE: 'ignore',
     Phase.TOOL_HISTORY_RESTORED: 'ignore',
@@ -122,9 +146,34 @@ _KIND_BUDGETS_MS: dict[str, int | None] = {
     'approval_wait': None,
     'compaction': 120_000,
     'spawn_wait': 10_000,
+    # Admission waits last as long as another holder's workload (often an
+    # unbounded run_command) — declared unbounded like that workload itself.
+    'admission_wait': None,
     # A flow step wraps whatever its dispatched child agents do — declared
     # unbounded, same owner ruling as llm/run_command workloads.
     'flow_step': None,
+    # Orchestration windows scale with workspace, memory and storage latency;
+    # no expectation is declared yet.
+    'startup': None,
+    'round_prep': None,
+    'round_settle': None,
+    'finalize': None,
+}
+
+# The WORKING startup prompts (detailKey) that open a named startup stage.
+# ``executor_queued`` opens ``executor_queue``; the time before the first event
+# is ``dispatch``; memory_prefetch events split ``context`` into
+# ``memory_load`` / ``memory_select`` / ``context``. An unlisted key keeps the
+# current stage.
+_STARTUP_STAGE_BY_DETAIL_KEY: dict[str, str] = {
+    'stream.phase.workerStarting': 'worker_start',
+    'stream.phase.workspacePreparing': 'workspace',
+    'translationWait.turn': 'translation',
+    'stream.phase.startupConfig': 'config',
+    'stream.phase.startupTools': 'tools',
+    'stream.phase.startupContext': 'context',
+    'stream.phase.vuInjectContext': 'context',
+    'stream.phase.vuContextReady': 'handoff',
 }
 
 # Payload-bearing event types the fold reads. ``delta`` is deliberately NOT
@@ -133,11 +182,13 @@ _KIND_BUDGETS_MS: dict[str, int | None] = {
 _TRACE_PAYLOAD_TYPES: frozenset[str] = frozenset({
     'round_start', 'round_end', 'phase',
     'tool_start', 'tool_progress', 'tool_result', 'tool_complete',
+    'workspace_admission_wait',
     'compaction', 'compaction_done',
     'write_approval_request',
     'round_usage', 'retry_reset', 'model_fallback',
     'model_request_start', 'model_request_complete',
     'step_start', 'step_complete',
+    'memory_prefetch',
     'done', 'error', 'aborted', 'interrupted',
 })
 
@@ -146,11 +197,21 @@ _TRACE_PAYLOAD_TYPES: frozenset[str] = frozenset({
 # inside a tool span is approval time, not tool time; a 429 retry inside
 # the LLM window is wait time, not model time).
 _BUCKET_PRIORITY: tuple[tuple[str, str], ...] = (
+    # Measured at the lease owner with exact start/end, so it outranks every
+    # span that merely encloses it: the announce->spawn spawn_wait, an approval
+    # span whose end is only bounded by the later spawn/tool-end event (approval
+    # precedes admission for the same call), and the tool span itself.
+    ('admission_wait', 'waitMs'),
     ('approval_wait', 'approvalWaitMs'),
     ('compaction', 'compactionMs'),
     ('retry_wait', 'waitMs'),
     ('spawn_wait', 'waitMs'),
     ('tool', 'toolMs'),
+    # A round's own window minus its logical model requests: preparation
+    # before the first request and settlement after the last one. They outrank
+    # the round-level llm span that encloses the whole round.
+    ('round_prep', 'orchestrationMs'),
+    ('round_settle', 'orchestrationMs'),
     ('llm', 'llmMs'),
     ('llm_ttft', 'llmMs'),
     # A flow step WRAPS the child-agent work dispatched inside it: llm/tool
@@ -158,6 +219,26 @@ _BUCKET_PRIORITY: tuple[tuple[str, str], ...] = (
     # dispatch, evidence delivery and coordination overhead that previously
     # hid inside a never-closing llm window or the gaps.
     ('flow_step', 'flowStepMs'),
+    # Derived windows claim only the remainder: before the first execution
+    # boundary (named startup stages) and after the last model round.
+    ('startup', 'orchestrationMs'),
+    ('finalize', 'orchestrationMs'),
+)
+# Every kind allocated to ``waitMs`` above, and the summary field carrying its
+# share. Persisted with the buckets: the bounded spans list drops evidence on
+# long tasks, so the split cannot be recomputed from the stored document.
+_WAIT_SPLIT_FIELDS: tuple[tuple[str, str], ...] = (
+    ('admission_wait', 'admissionWaitMs'),
+    ('retry_wait', 'retryWaitMs'),
+    ('spawn_wait', 'spawnWaitMs'),
+)
+# The same split for ``orchestrationMs``: agent-loop work outside model
+# requests, tools and waits.
+_ORCHESTRATION_SPLIT_FIELDS: tuple[tuple[str, str], ...] = (
+    ('startup', 'startupMs'),
+    ('round_prep', 'roundPrepMs'),
+    ('round_settle', 'roundSettleMs'),
+    ('finalize', 'finalizeMs'),
 )
 
 _SPAN_OVERLAP_CLOSE_TYPES = frozenset({
@@ -178,13 +259,22 @@ def invalidate_trace_cache(task_id: str) -> None:
     if task_id:
         _TRACE_CACHE.pop(task_id, None)
 
+class TurnTraceEventReadError(RuntimeError):
+    """The event authority failed; absence of trace events was not established."""
+
+
+TRACE_COVERAGE_EVENT_READ_FAILED = 'event-read-failed'
+_READ_FAILURE_DETAIL_MAX_CHARS = 400
+
+
 def _read_trace_rows(task_id: str) -> list:
     """Return [{event_id, type, payload, ts_ms}] ordered by event_id.
 
     Payload rows for the structural slice + ts-only spine rows for
     ``delta`` (the TTFT boundary; parsing 50k per-token payloads would be
     pure waste). CACHED with the same short-TTL + write-invalidation
-    discipline as the Request Inspector read. Read-only; never throws.
+    discipline as the Request Inspector read. Read-only; a failed read raises
+    ``TurnTraceEventReadError`` and is never cached as an empty log.
     """
     if not task_id:
         return []
@@ -212,16 +302,26 @@ def _read_trace_rows_uncached(task_id: str) -> list:
     """Read the bounded trace projection from the Sidecar authority."""
     try:
         from lib.storage import get_storage_client
+        from lib.tasks_pkg.request_inspector_history import is_event_page_size_error
 
         out = _TraceRows()
         after = -1
         scanned = 0
+        page_limit = 1000
         client = get_storage_client()
         while True:
-            rows = client.query(
-                'event.list', {'task_id': task_id,
-                               'after_sequence': after, 'limit': 1000,
-                               'payload_types': sorted(_TRACE_PAYLOAD_TYPES)}) or []
+            try:
+                rows = client.query(
+                    'event.list', {'task_id': task_id,
+                                   'after_sequence': after, 'limit': page_limit,
+                                   'payload_types': sorted(_TRACE_PAYLOAD_TYPES)}) or []
+            except Exception as exc:
+                # A deterministic page-size bound: a smaller page at the SAME
+                # cursor reads the same rows; a one-row refusal stays a failure.
+                if is_event_page_size_error(exc) and page_limit > 1:
+                    page_limit = max(1, page_limit // 2)
+                    continue
+                raise
             if not rows:
                 break
             scanned += len(rows)
@@ -239,7 +339,7 @@ def _read_trace_rows_uncached(task_id: str) -> list:
                         'ts_ms': int(row.get('created_at_ms') or 0),
                     })
             after = int(rows[-1].get('sequence', after))
-            if len(rows) < 1000:
+            if len(rows) < page_limit:
                 break
             if scanned >= TRACE_MAX_EVENT_ROWS:
                 latest = client.query('event.latest', {'task_id': task_id, 'metadata_only': True})
@@ -267,42 +367,28 @@ def _read_trace_rows_uncached(task_id: str) -> list:
         out.sort(key=lambda row: row['event_id'])
         return out
     except Exception as e:
-        logger.warning('[TurnTrace] Sidecar event read failed task=%s: %s',
-                       task_id[:8], e)
-        return []
+        from lib.agent_core.storage_errors import describe_storage_failure
+
+        # A bare ``str(StorageError)`` is often just its code; render the
+        # classification and message, bounded.
+        detail = describe_storage_failure(e)
+        if len(detail) > _READ_FAILURE_DETAIL_MAX_CHARS:
+            detail = detail[:_READ_FAILURE_DETAIL_MAX_CHARS] + '...'
+        logger.warning('[TurnTrace] Sidecar event read failed task=%s %s',
+                       task_id, detail)
+        raise TurnTraceEventReadError(
+            f'Turn Trace event read failed: {detail}') from e
 
 # ── Span helpers ──
 
-def _span(span_id, parent, depth, kind, name, t_start, status='running',
-          attrs=None):
-    return {
-        'spanId': span_id, 'parent': parent, 'depth': depth, 'kind': kind,
-        'name': name, 'tStart': int(t_start) if t_start is not None else None,
-        'tEnd': None, 'status': status, 'attrs': attrs or {},
-    }
 
-def _close(span, t_end, status=None):
-    if span.get('tEnd') is None:
-        span['tEnd'] = int(t_end) if t_end is not None else None
-    if status:
-        span['status'] = status
 
 def _elapsed(span):
     if span.get('tStart') is None or span.get('tEnd') is None:
         return None
     return max(0, span['tEnd'] - span['tStart'])
 
-def _safe_nonnegative_int(value, default=0):
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError, OverflowError):
-        return max(0, int(default or 0))
 
-def _safe_seconds_to_ms(value, default=0.0):
-    try:
-        return max(0, round(float(value or 0) * 1000))
-    except (TypeError, ValueError, OverflowError):
-        return max(0, round(float(default or 0) * 1000))
 
 def _bounded_status_args(value):
     """Keep only the small primitive interpolation evidence the user saw."""
@@ -353,6 +439,8 @@ def _close_status_history(history, observed_at_ms, *, terminal=False):
     current.setdefault('lastObservedAt', current['tStart'])
     if terminal:
         current['terminalBoundary'] = True
+    # A closed interval never changes again; projection capture shares it.
+    history[-1] = settle(current)
 
 def observe_task_trace_event(task, event, *, observed_at_ms=None):
     """Fold one canonical task event into a bounded user-visible phase ledger.
@@ -500,17 +588,68 @@ def _union_length(intervals):
         total += cur_b - cur_a
     return total
 
-def _disjoint_summary(spans, t0, t1):
-    """Priority-allocate every ms of [t0, t1] to exactly ONE bucket.
+# The same priority order, one ledger entry per span kind; summary buckets are
+# groupings of these entries (llm + llm_ttft -> llmMs, three waits -> waitMs).
+_KIND_PRIORITY: tuple[tuple[str, str], ...] = tuple(
+    (kind, kind) for kind, _ in _BUCKET_PRIORITY)
+
+
+def _disjoint_attribution(spans, t0, t1):
+    """Priority-allocate every ms of [t0, t1] to exactly ONE span kind.
 
     Elementary-segment sweep over span boundaries: each segment picks the
-    highest-priority span kind covering it (``_BUCKET_PRIORITY``). The
-    buckets therefore sum EXACTLY to totalMs — strict accounting, no
+    highest-priority span kind covering it (``_BUCKET_PRIORITY`` order), so the
+    per-kind totals plus ``unattributedMs`` sum EXACTLY to the interval — no
     double-count when spans nest (approval ⊂ tool, retry ⊂ llm window).
     """
     from .turn_trace_ledger import disjoint_summary
 
-    return disjoint_summary(spans, t0, t1, _BUCKET_PRIORITY)
+    return disjoint_summary(spans, t0, t1, _KIND_PRIORITY)
+
+
+def trace_kind_attribution(trace):
+    """Per-kind disjoint attribution of an already folded trace document.
+
+    Same ledger and priority order as the document's ``summary``, so the
+    kinds group exactly into its buckets — unless the bounded document dropped
+    spans (``droppedSpans``), which only the original fold can account for.
+    """
+    t0, total = trace.get('tStart'), trace.get('totalMs')
+    if type(t0) is not int or type(total) is not int:
+        return {}
+    return _disjoint_attribution(trace.get('spans') or [], t0, t0 + total)
+
+
+def _disjoint_summary(spans, t0, t1, attribution=None):
+    """Group the per-kind attribution into the contract's summary buckets."""
+    if attribution is None:
+        attribution = _disjoint_attribution(spans, t0, t1)
+    summary = {bucket: 0 for _, bucket in _BUCKET_PRIORITY}
+    for kind, bucket in _BUCKET_PRIORITY:
+        summary[bucket] += attribution[kind]
+    summary['unattributedMs'] = attribution['unattributedMs']
+    for kind, field in _WAIT_SPLIT_FIELDS + _ORCHESTRATION_SPLIT_FIELDS:
+        summary[field] = attribution[kind]
+    return summary
+
+def _terminal_trace_status(event_type, payload):
+    if event_type == 'error' or payload.get('error'):
+        return 'error'
+    finish_reason = payload.get('finishReason') or ''
+    if event_type in {'aborted', 'interrupted'} \
+            or finish_reason in {'aborted', 'interrupted'}:
+        return 'aborted'
+    return 'done'
+
+def _settled_status_history(status_history, status_dropped_count, *,
+                            settle_ts, running):
+    """Bound the in-memory prompt ledger; a settled run closes its last prompt."""
+    history, newly_dropped = _bounded_trace_rows(
+        status_history, TRACE_MAX_STATUS_ENTRIES, keep_recent=True)
+    if history and not running and history[-1].get('tEnd') is None:
+        history[-1]['tEnd'] = settle_ts
+        history[-1]['terminalBoundary'] = True
+    return history, max(0, int(status_dropped_count or 0)) + newly_dropped
 
 def _fold_status_history(rows, *, settle_ts, running):
     projected_task = {}
@@ -562,16 +701,26 @@ def finalize_trace_projection(
     """Fold and freeze the terminal trace while preserving client evidence."""
     task_id = str(task.get('id') or task.get('taskId') or '')
     history, dropped = task_status_history(task)
-    document = fold_task_trace(
-        task_id,
-        now_ms=now_ms,
-        pending_event=raw_event,
-        pending_sequence=pending_sequence,
-        status_history=history or None,
-        status_dropped_count=dropped,
-    )
+    ledger = {}
+    read_failed = False
+    try:
+        document = fold_task_trace(
+            task_id,
+            now_ms=now_ms,
+            pending_event=raw_event,
+            pending_sequence=pending_sequence,
+            status_history=history or None,
+            status_dropped_count=dropped,
+            ledger_out=ledger,
+        )
+    except TurnTraceEventReadError:
+        read_failed = True
+        document = _event_read_failed_trace(
+            task_id, raw_event, now_ms=now_ms,
+            status_history=history, status_dropped_count=dropped)
     if not document.get('eventsAvailable'):
         return dict(projection or {})
+    _log_trace_summary(task, task_id, document, ledger)
     previous_trace = (
         projection.get('timingTrace')
         if isinstance(projection, Mapping) else None
@@ -588,11 +737,51 @@ def finalize_trace_projection(
                 0, int(observation_dropped))
     document['running'] = False
     document['source'] = 'turn-snapshot'
-    document['eventLogAvailable'] = True
+    document['eventLogAvailable'] = not read_failed
     next_projection = dict(projection or {})
     next_projection['timingTrace'] = compact_trace_document(
         document, source='turn-snapshot')
     return next_projection
+
+def _event_read_failed_trace(task_id, pending_event, *, now_ms,
+                             status_history, status_dropped_count):
+    """Terminal document for a settlement whose event read failed.
+
+    Keeps only evidence that never depended on the failed read: the terminal
+    event's status and execution clock, and the in-memory prompt ledger.
+    Rounds, spans, gaps and the bucket partition are unknown, so none is
+    fabricated. Without a ``summary`` the trace endpoint does not treat this
+    marker as the permanent authority and re-folds the retained event log.
+    """
+    event = pending_event if isinstance(pending_event, Mapping) else {}
+    t_end = event.get('executionAtMs')
+    if type(t_end) is not int or t_end <= 0:
+        t_end = int(now_ms)
+    history, dropped = _settled_status_history(
+        status_history, status_dropped_count, settle_ts=t_end, running=False)
+    document = {
+        'version': TRACE_CONTRACT_VERSION,
+        'taskId': task_id,
+        'eventsAvailable': True,
+        'eventLogAvailable': False,
+        'source': 'turn-snapshot',
+        'status': _terminal_trace_status(str(event.get('type') or ''), event),
+        'running': False,
+        'coverage': 'partial',
+        'coverageReason': TRACE_COVERAGE_EVENT_READ_FAILED,
+        'clockSource': 'legacy-wall',
+        'tEnd': t_end,
+        'statusHistory': history,
+    }
+    clock_id = event.get('executionClockId')
+    origin = event.get('executionOriginAtMs')
+    if isinstance(clock_id, str) and clock_id and type(origin) is int \
+            and 0 < origin <= t_end:
+        document.update(clockSource='server-monotonic', tStart=origin,
+                        totalMs=t_end - origin)
+    if dropped:
+        document['statusDroppedCount'] = dropped
+    return document
 
 def read_persisted_task_trace(task_id, *, user_id):
     """Read one permanent owner-scoped attempt trace by executor task id."""
@@ -631,6 +820,69 @@ def read_persisted_task_trace(task_id, *, user_id):
         source = 'attempt-receipts'
     return compact_trace_document(document, source=source)
 
+# Terminal projection can be rebuilt for the same task (CAS rebase, retained
+# terminal receipt retry); the per-task summary line is emitted only once.
+# The value is True once a real fold was logged, or the read-failure marker.
+_TRACE_SUMMARY_LOGGED_KEY = '_turnTraceSummaryLogged'
+
+
+def _log_trace_summary(task, task_id, document, ledger):
+    """One authoritative INFO line per task, from the fold being frozen.
+
+    Every number comes from that fold's persisted summary (including its
+    per-kind ``waitMs`` split); only ``rounds`` comes from the ledger.
+    INFO stays below the WARNING+ duplicate coalescer, and the full task id
+    keeps distinct tasks' lines distinct.
+
+    A settlement whose event read failed has no fold: its line carries the
+    coverage marker and no number a log aggregator could sum. A rebuild of
+    the same terminal projection whose read then succeeds still logs its fold.
+    """
+    read_failed = (
+        document.get('coverageReason') == TRACE_COVERAGE_EVENT_READ_FAILED)
+    logged = task.get(_TRACE_SUMMARY_LOGGED_KEY)
+    if logged is True or (read_failed and logged):
+        return
+    task[_TRACE_SUMMARY_LOGGED_KEY] = (
+        TRACE_COVERAGE_EVENT_READ_FAILED if read_failed else True)
+    try:
+        if read_failed:
+            logger.info(
+                '[TurnTraceSummary] task=%s conv=%s status=%s coverage=%s '
+                'coverageReason=%s',
+                task_id or '-', task.get('convId') or '-',
+                document.get('status') or '-', document.get('coverage') or '-',
+                TRACE_COVERAGE_EVENT_READ_FAILED)
+            return
+        summary = document.get('summary') or {}
+
+        def ms(value):
+            return int(value or 0)
+
+        logger.info(
+            '[TurnTraceSummary] task=%s conv=%s status=%s totalMs=%d llmMs=%d '
+            'toolMs=%d waitMs=%d admissionWaitMs=%d retryWaitMs=%d '
+            'compactionMs=%d approvalWaitMs=%d unattributedMs=%d ttftMs=%d '
+            'rounds=%d spawnWaitMs=%d flowStepMs=%d orchestrationMs=%d '
+            'startupMs=%d roundPrepMs=%d roundSettleMs=%d finalizeMs=%d '
+            'coverage=%s',
+            task_id or '-', task.get('convId') or '-',
+            document.get('status') or '-', ms(summary.get('totalMs')),
+            ms(summary.get('llmMs')), ms(summary.get('toolMs')),
+            ms(summary.get('waitMs')), ms(summary.get('admissionWaitMs')),
+            ms(summary.get('retryWaitMs')), ms(summary.get('compactionMs')),
+            ms(summary.get('approvalWaitMs')), ms(summary.get('unattributedMs')),
+            ms(summary.get('ttftMs')), ms(ledger.get('rounds')),
+            ms(summary.get('spawnWaitMs')), ms(summary.get('flowStepMs')),
+            ms(summary.get('orchestrationMs')), ms(summary.get('startupMs')),
+            ms(summary.get('roundPrepMs')), ms(summary.get('roundSettleMs')),
+            ms(summary.get('finalizeMs')),
+            document.get('coverage') or '-')
+    except Exception as e:
+        # Diagnostic sinks cannot alter fold/settlement outcomes.
+        logger.debug('[TurnTraceSummary] emit dropped: %s', e)
+
+
 def fold_task_trace(
     task_id: str,
     now_ms: int | None = None,
@@ -639,15 +891,20 @@ def fold_task_trace(
     pending_sequence: int | None = None,
     status_history: list | None = None,
     status_dropped_count: int = 0,
+    ledger_out: dict | None = None,
 ) -> dict:
-    """Measure read + fold + bounded projection, not the task's execution time."""
+    """Measure read + fold + bounded projection, not the task's execution time.
+
+    ``ledger_out`` (optional) receives this fold's per-kind disjoint attribution
+    (``kindMs``) and round count, which the bounded document does not carry.
+    """
     started = time.monotonic()
     outcome = 'error'
     try:
         result = _fold_task_trace(
             task_id, now_ms, pending_event=pending_event,
             pending_sequence=pending_sequence, status_history=status_history,
-            status_dropped_count=status_dropped_count,
+            status_dropped_count=status_dropped_count, ledger_out=ledger_out,
         )
         outcome = 'done'
         return result
@@ -661,6 +918,62 @@ def fold_task_trace(
             # Diagnostic sinks cannot alter fold/settlement outcomes.
             logger.debug('[TurnTraceTiming] emit dropped: %s', e)
 
+
+def _trace_gaps(spans, t0, t1):
+    """The complement that makes accounting strict: [t0, t1] minus every span
+    except the enclosing turn/round frames."""
+    covered = []
+    for span in spans:
+        if span['kind'] in ('turn', 'round'):
+            continue
+        a, b = span.get('tStart'), span.get('tEnd')
+        if a is not None and b is not None and b > a:
+            a, b = max(a, t0), min(b, t1)
+            if b > a:
+                covered.append((a, b))
+    gaps = []
+    cursor = t0
+    for a, b in sorted(covered):
+        if a > cursor:
+            gaps.append({'tStart': cursor, 'tEnd': a})
+        cursor = max(cursor, b)
+    if t1 > cursor:
+        gaps.append({'tStart': cursor, 'tEnd': t1})
+    return [gap for gap in gaps if gap['tEnd'] - gap['tStart'] >= 1]
+
+
+def fold_exported_events(task_id: str, events, *, now_ms: int | None = None) -> dict:
+    """Replay: fold exported task events (``seq`` + payload) offline.
+
+    Rows are projected as ``_read_trace_rows`` serves them; the producer's
+    ``executionAtMs`` stands in for the stored row time, so events without a
+    server execution clock cannot be placed and are skipped. ``now_ms``
+    defaults to the terminal (else the last) event.
+    """
+    from lib.event_envelope import EventFormatError, execution_event_time_ms
+
+    rows = []
+    for event in events or ():
+        if not isinstance(event, Mapping) or type(event.get('seq')) is not int:
+            continue
+        event_type = str(event.get('type') or '')
+        if not (event_type == 'delta' or event_type in _TRACE_PAYLOAD_TYPES
+                or is_flow_event_type(event_type)):
+            continue
+        try:
+            timestamp = execution_event_time_ms(event, 0)
+        except EventFormatError:
+            continue
+        if timestamp > 0:
+            rows.append({'event_id': event['seq'], 'type': event_type,
+                         'payload': {} if event_type == 'delta' else dict(event),
+                         'ts_ms': timestamp})
+    rows.sort(key=lambda row: row['event_id'])
+    if now_ms is None:
+        ends = [row['ts_ms'] for row in rows if row['type'] in _TRACE_TERMINAL_TYPES]
+        now_ms = ends[-1] if ends else (rows[-1]['ts_ms'] if rows else 0)
+    return _fold_task_trace(task_id, now_ms, exported_rows=rows)
+
 # ── The fold ──
 
 def _fold_task_trace(
@@ -671,15 +984,19 @@ def _fold_task_trace(
     pending_sequence: int | None = None,
     status_history: list | None = None,
     status_dropped_count: int = 0,
+    ledger_out: dict | None = None,
+    exported_rows: list | None = None,
 ) -> dict:
     """Fold a task's persisted event log into the timing span tree.
 
     Never throws on shape: unknown/expired tasks return
-    ``eventsAvailable:false`` (the Request Inspector honesty precedent).
+    ``eventsAvailable:false`` (the Request Inspector honesty precedent). A
+    failed event read raises ``TurnTraceEventReadError`` instead.
     ``now_ms`` is the server clock used to bound still-running spans;
-    injectable for tests.
+    injectable for tests. ``exported_rows`` replaces the authority read for
+    an offline replay (``fold_exported_events``).
     """
-    read_rows = _read_trace_rows(task_id)
+    read_rows = _read_trace_rows(task_id) if exported_rows is None else exported_rows
     event_limit = bool(getattr(read_rows, 'truncated', False))
     rows = list(read_rows)
     missing_live_clock = False
@@ -785,645 +1102,23 @@ def _fold_task_trace(
     if eff_end < t0:
         eff_end = t0
 
-    status = 'running'
-    if terminal is not None:
-        if terminal['type'] == 'error' or terminal['payload'].get('error'):
-            status = 'error'
-        else:
-            fr = (terminal['payload'].get('finishReason') or '')
-            status = ('aborted' if terminal['type'] in {'aborted', 'interrupted'}
-                      or fr in {'aborted', 'interrupted'} else 'done')
+    status = ('running' if terminal is None
+              else _terminal_trace_status(terminal['type'], terminal['payload']))
 
-    used_span_ids: set[str] = set()
-    span_id_suffixes: dict[str, int] = {}
-
-    def make_span(span_id, *args, **kwargs):
-        # Correlation tokens are not public occurrence identities. Allocate for
-        # every kind so request tokens cannot collide with structural spans.
-        candidate = span_id
-        suffix = span_id_suffixes.get(span_id, 1)
-        while candidate in used_span_ids:
-            suffix += 1
-            candidate = f'{span_id}.occ{suffix}'
-        span_id_suffixes[span_id] = suffix
-        used_span_ids.add(candidate)
-        return _span(candidate, *args, **kwargs)
-
-    def close_tool(span, ts, status, *, truncated=False,
-                   approval_status=None, approval_truncated=None):
-        _close(span, ts, status)
-        if truncated:
-            span['truncated'] = True
-        approval = span['attrs'].get('_approval')
-        if approval is not None and approval.get('tEnd') is None:
-            _close(approval, span['tEnd'], approval_status or status)
-            if (truncated if approval_truncated is None else approval_truncated):
-                approval['truncated'] = True
-            _apply_budget(approval)
-        _apply_budget(span)
-
-    spans: list[dict] = []
-    turn_span = make_span('turn', None, 0, 'turn', 'turn', t0,
-                      status=('running' if running else status))
-    if not running:
-        _close(turn_span, t_end_turn, status)
-    spans.append(turn_span)
-
-    rounds: dict[str, dict] = {}       # roundNum(str) -> round span
-    round_order: list[str] = []
-    cur_round_key: str | None = None
-    # Call ids are provider correlation tokens, not task-global identities.
-    # Keep occurrence-ordered spans so positional ``call_0`` reuse and even a
-    # malformed duplicate inside one round cannot overwrite an older span.
-    open_tools: list[dict] = []
-    tool_span_occurrences: dict[tuple[str, str], int] = {}
-    open_model_requests: dict[str, dict] = {}  # raw correlation id -> active occurrence
-    pending_approval: dict[tuple[str, str], list[float]] = {}
-    open_phase_span: dict | None = None  # retry_wait / compaction span
-    ttft_open: dict | None = None      # {'round': key, 'tStart': ts}
-    usage_by_round: dict[str, list] = {}
-    usage_orphans: list[dict] = []
-    saw_round_markers = False
-    # Flow node executions (Planner/Critic/Executor …) fold as their own
-    # span kind instead of only flagging the task partial. The engine walk
-    # is sequential, so at most one step is open; pairing stays keyed by
-    # node id so a lost completion closes honestly as truncated.
-    open_steps: dict[str, dict] = {}
-    saw_step_markers = False
-    counters = {'wait': 0, 'compact': 0, 'flat_tool': 0, 'step': 0}
-
-    def _tool_event_round_key(payload: dict) -> str:
-        return str(payload.get('roundNum', '')) or (cur_round_key or '')
-
-    def _find_open_tool(round_key: str, call_id: str, *,
-                        require_unapproved: bool = False,
-                        require_unmarked: bool = False) -> dict | None:
-        candidates = [
-            span for span in open_tools
-            if (not round_key or span['attrs'].get('roundKey') == round_key)
-            and (not call_id or span['attrs'].get('toolCallId') == call_id)
-            and (not require_unapproved
-                 or '_approval' not in span['attrs'])
-            and (not require_unmarked
-                 or not span['attrs'].get('_execMarked'))
-        ]
-        # A legacy event without either selector is safe only when exactly one
-        # tool is open. Never guess between several concurrent occurrences.
-        if not round_key and not call_id and len(candidates) != 1:
-            return None
-        return candidates[0] if candidates else None
-
-    def _take_open_tool(round_key: str, call_id: str) -> dict | None:
-        target = _find_open_tool(round_key, call_id)
-        if target is not None:
-            open_tools.remove(target)
-        return target
-
-    def _close_phase_span(ts, status='done'):
-        nonlocal open_phase_span
-        if open_phase_span is not None:
-            _close(open_phase_span, ts, status)
-            _apply_budget(open_phase_span)
-            open_phase_span = None
-
-    def _close_ttft(ts):
-        nonlocal ttft_open
-        if ttft_open is not None:
-            sp = ttft_open['span']
-            _close(sp, ts, 'done')
-            _apply_budget(sp)
-            ttft_open = None
-
-    def _close_llm(round_key, ts, status_):
-        rk = str(round_key)
-        rnd = rounds.get(rk)
-        if rnd is None:
-            return
-        llm = rnd['attrs'].get('_llm')
-        if llm is not None and llm.get('tEnd') is None:
-            _close(llm, ts, status_)
-            _apply_budget(llm)
-
-    def _close_round(round_key, ts, status_):
-        nonlocal cur_round_key
-        rk = str(round_key)
-        rnd = rounds.get(rk)
-        if rnd is None or rnd.get('tEnd') is not None:
-            return
-        if ttft_open is not None and ttft_open.get('round') == rk:
-            _close_ttft(ts)
-        _close_llm(rk, ts, status_)
-        for tsp in list(open_tools):
-            if tsp['attrs'].get('roundKey') == rk:
-                close_tool(tsp, ts, 'unknown', truncated=True)
-                open_tools.remove(tsp)
-        for request_id, request_span in list(open_model_requests.items()):
-            if request_span['attrs'].get('roundKey') == rk:
-                _close(request_span, ts, 'unknown')
-                request_span['truncated'] = True
-                open_model_requests.pop(request_id, None)
-        _close(rnd, ts, status_)
-        if cur_round_key == rk:
-            cur_round_key = None
-
+    span_fold = TraceSpanFold(
+        t0=t0, running=running, status=status, t_end_turn=t_end_turn,
+        flow_seen=flow_seen, phase_rules=_PHASE_TRACE_RULE,
+        phase_close_types=_SPAN_OVERLAP_CLOSE_TYPES, apply_budget=_apply_budget,
+        startup_stages=_STARTUP_STAGE_BY_DETAIL_KEY,
+    )
     for row in rows:
-        et = row['type']
-        p = row['payload']
-        ts = row['ts_ms']
-
-        # A phase span closes when the next meaningful row arrives (it is a
-        # "what is happening NOW" marker; the NEXT thing ends it). Phase
-        # rows close/coalesce inside the phase branch itself; tool_progress
-        # / round_usage rows don't close it (heartbeats ride along).
-        if open_phase_span is not None and et in _SPAN_OVERLAP_CLOSE_TYPES \
-                and et != 'phase':
-            _close_phase_span(ts)
-
-        if et == 'round_start':
-            saw_round_markers = True
-            rn = p.get('roundNum')
-            key = str(rn)
-            # The next model round proves all tools authored by prior rounds
-            # have stopped blocking the loop. If their terminal event was
-            # lost, close those diagnostic spans honestly instead of allowing
-            # a recycled call id to overwrite them later.
-            for tsp in list(open_tools):
-                if tsp['attrs'].get('roundKey') != key:
-                    close_tool(tsp, ts, 'unknown', truncated=True)
-                    open_tools.remove(tsp)
-            if cur_round_key is not None and cur_round_key != key:
-                # A new round implicitly closes the previous one; a missing
-                # round_end (crash window) shows as truncated, never a
-                # silent overlap.
-                prev = rounds.get(cur_round_key)
-                if prev is not None and prev.get('tEnd') is None:
-                    prev['truncated'] = True
-                _close_round(cur_round_key, ts, 'unknown')
-            rnd = make_span(f'r{key}', 'turn', 1, 'round', f'round {key}', ts)
-            rnd['attrs']['roundKey'] = key
-            llm = make_span(f'r{key}.llm', rnd['spanId'], 2, 'llm',
-                        'llm', ts)
-            rnd['attrs']['_llm'] = llm
-            spans.append(rnd)
-            spans.append(llm)
-            rounds[key] = rnd
-            round_order.append(key)
-            cur_round_key = key
-            continue
-
-        if et == 'round_end':
-            saw_round_markers = True
-            key = str(p.get('roundNum'))
-            reason = p.get('reason') or ''
-            st = 'done'
-            if reason == 'aborted':
-                st = 'aborted'
-            elif reason == 'error':
-                st = 'error'
-            _close_round(key, ts, st)
-            continue
-
-        if et == 'model_request_start':
-            request_id = str(p.get('spanId') or '')[:160]
-            if not request_id:
-                request_id = f'model.request.{len(spans)}'
-            rk = _tool_event_round_key(p)
-            if rk in rounds:
-                parent = rounds[rk]['attrs']['_llm']['spanId']
-                depth = 3
-            else:
-                parent = 'turn'
-                depth = 1
-            supplied_parent = str(p.get('parentSpanId') or '')[:160]
-            if p.get('requestLevel') == 'provider_attempt' and supplied_parent:
-                parent = supplied_parent
-                parent_span = open_model_requests.get(parent)
-                if parent_span is not None:
-                    parent = parent_span['spanId']
-                depth = parent_span['depth'] + 1 if parent_span else depth + 1
-            prior = open_model_requests.pop(request_id, None)
-            if prior is not None:
-                _close(prior, ts, 'unknown')
-                prior['truncated'] = True
-            request_span = make_span(
-                request_id, parent, depth, 'llm',
-                p.get('requestTag') or p.get('model') or 'model request', ts,
-                attrs={
-                    'model': p.get('model') or '',
-                    'providerId': p.get('providerId') or '',
-                    'requestTag': p.get('requestTag') or '',
-                    'roundKey': rk,
-                    'requestLevel': p.get('requestLevel') or 'logical',
-                    **({'attemptLevel': True, 'attempt': p.get('attempt'),
-                        'attemptScope': str(p.get('attemptScope') or '')[:80]}
-                       if p.get('requestLevel') == 'provider_attempt' else {}),
-                })
-            spans.append(request_span)
-            open_model_requests[request_id] = request_span
-            continue
-
-        if et == 'model_request_complete':
-            request_id = str(p.get('spanId') or '')[:160]
-            request_span = open_model_requests.pop(request_id, None)
-            rk = str(p.get('roundNum', '')) or (cur_round_key or '')
-            if request_span is None:
-                duration_ms = _safe_nonnegative_int(p.get('durationMs'))
-                parent = rounds[rk]['attrs']['_llm']['spanId'] if rk in rounds else 'turn'
-                depth = 3 if parent != 'turn' else 1
-                supplied_parent = str(p.get('parentSpanId') or '')[:160]
-                if p.get('requestLevel') == 'provider_attempt' and supplied_parent:
-                    parent = supplied_parent
-                    parent_span = open_model_requests.get(parent)
-                    if parent_span is not None:
-                        parent = parent_span['spanId']
-                    depth = parent_span['depth'] + 1 if parent_span else depth + 1
-                request_span = make_span(
-                    request_id or f'model.request.{len(spans)}',
-                    parent, depth, 'llm',
-                    p.get('requestTag') or p.get('model') or 'model request',
-                    max(t0, ts - duration_ms),
-                    attrs={'roundKey': rk,
-                           'requestLevel': p.get('requestLevel') or 'logical',
-                           **({'attemptLevel': True, 'attempt': p.get('attempt'),
-                               'attemptScope': str(p.get('attemptScope') or '')[:80]}
-                              if p.get('requestLevel') == 'provider_attempt' else {})})
-                spans.append(request_span)
-            raw_status = str(p.get('status') or '').lower()
-            request_status = (
-                'done' if raw_status == 'succeeded'
-                else 'aborted' if raw_status == 'aborted'
-                else 'error' if raw_status == 'failed'
-                else 'unknown')
-            request_span['attrs'].update({
-                'model': p.get('model') or '',
-                'providerId': p.get('providerId') or '',
-                'requestTag': p.get('requestTag') or '',
-                'finishReason': p.get('finishReason') or '',
-                'errorKind': p.get('errorKind') or '',
-                'statusCode': p.get('statusCode'),
-                'routeId': p.get('routeId') or '',
-                'routeMode': p.get('routeMode') or '',
-                'routeDecision': p.get('routeDecision') or '',
-                'failureStage': p.get('failureStage') or '',
-                'durationMs': _safe_nonnegative_int(p.get('durationMs')),
-            })
-            _close(request_span, ts, request_status)
-
-            isolation = p.get('observerIsolation')
-            if isinstance(isolation, Mapping):
-                request_span['attrs']['observerIsolation'] = {
-                    key: bool(isolation.get(key)) if key == 'flushIncomplete'
-                    else _safe_nonnegative_int(isolation.get(key))
-                    for key in ('providerDispatches', 'deferredEvents',
-                                'deferredCheckpoints', 'droppedEvents',
-                                'deliveryFailures', 'flushIncomplete',
-                                'diagnosticFailures') if key in isolation
-                }
-            continue
-
-        if et == 'phase':
-            ph = p.get('phase') or ''
-            rule = _PHASE_TRACE_RULE.get(ph)
-            # Observational beats cannot end a real backoff or restart TTFT.
-            if ph in (Phase.WAITING_MODEL, Phase.STREAM_STALLED):
-                if open_phase_span is not None and open_phase_span['kind'] == 'retry_wait':
-                    continue
-                if ph == Phase.WAITING_MODEL and ttft_open is not None:
-                    continue
-            coalesce = (open_phase_span is not None
-                        and open_phase_span['name'] == ph
-                        and rule in ('retry_wait', 'compaction'))
-            if open_phase_span is not None and not coalesce:
-                _close_phase_span(ts)
-            if rule == 'ttft':
-                # TTFT candidate: round's llm span is open; first delta (or
-                # tool_start / round close) settles it.
-                if ttft_open is not None:
-                    _close_ttft(ts)
-                parent = cur_round_key
-                span_id = (f'r{parent}.ttft.{len(spans)}' if parent is not None
-                           else f'ttft.{len(spans)}')
-                sp = make_span(span_id,
-                           rounds[parent]['attrs']['_llm']['spanId'] if parent is not None else 'turn',
-                           3 if parent is not None else 1,
-                           'llm_ttft', 'ttft', ts,
-                           attrs={'model': p.get('model') or ''})
-                spans.append(sp)
-                ttft_open = {'span': sp, 'round': parent}
-            elif rule in ('retry_wait', 'compaction'):
-                if coalesce:
-                    # Same-phase beat (429 heartbeat ×N): extend, keep the
-                    # latest attempt/detail — ONE span per continuous wait.
-                    if p.get('attempt') is not None:
-                        open_phase_span['attrs']['attempt'] = p['attempt']
-                    if p.get('detail'):
-                        open_phase_span['attrs']['detail'] = p['detail']
-                else:
-                    kind = 'retry_wait' if rule == 'retry_wait' else 'compaction'
-                    ckey = 'wait' if kind == 'retry_wait' else 'compact'
-                    counters[ckey] += 1
-                    sp = make_span(f'{ckey}.{counters[ckey]}',
-                               'turn', 1, kind, ph, ts,
-                               attrs={
-                                   'detail': p.get('detail') or '',
-                                   'detailKey': p.get('detailKey') or '',
-                                   'attempt': p.get('attempt'),
-                                   'bucket': p.get('bucket') or '',
-                                   'statusCode': p.get('statusCode'),
-                                   'model': p.get('model') or '',
-                               })
-                    spans.append(sp)
-                    open_phase_span = sp
-            # 'covered' / 'ignore' / unknown: no span (unknown phases are
-            # forward-compatible wire; their time lands in gaps honestly).
-            continue
-
-        if et == 'delta':
-            if ttft_open is not None and ts >= ttft_open['span']['tStart']:
-                _close_ttft(ts)
-            continue
-
-        if et == 'tool_start':
-            if ttft_open is not None:
-                _close_ttft(ts)
-            call_id = p.get('toolCallId') or ''
-            t_start = p.get('tStart') or ts
-            # Tools execute BETWEEN rounds (the authoring round's round_end
-            # already fired), so the payload's roundNum — not the open round
-            # — is the parent. A tool child EXTENDS its (closed) round's
-            # footprint: round N's true cost includes the tools it authored.
-            rk = str(p.get('roundNum', '')) or (cur_round_key or '')
-            parent = rounds[rk]['spanId'] if rk in rounds else 'turn'
-            depth = 2 if parent != 'turn' else 1
-            if parent == 'turn':
-                counters['flat_tool'] += 1
-            rnd = rounds.get(rk)
-            if rnd is not None and rnd.get('tEnd') is not None \
-                    and t_start > rnd['tEnd']:
-                rnd['tEnd'] = int(t_start)  # extended again at tool close
-            occurrence_key = (rk, str(call_id or '__anonymous__'))
-            occurrence = tool_span_occurrences.get(occurrence_key, 0) + 1
-            tool_span_occurrences[occurrence_key] = occurrence
-            tool_span_token = call_id or f'anonymous-{occurrence}'
-            occurrence_suffix = '' if occurrence == 1 else f'.occ{occurrence}'
-            sp = make_span(f'{parent}.tool.{tool_span_token}{occurrence_suffix}',
-                       parent, depth, 'tool',
-                       p.get('toolName') or 'tool', t_start,
-                       attrs={'toolName': p.get('toolName') or '',
-                              'query': (p.get('query') or '')[:200],
-                              'roundKey': rk,
-                              'toolCallId': call_id})
-            spans.append(sp)
-            open_tools.append(sp)
-            approval_key = (rk, str(call_id))
-            pending = pending_approval.get(approval_key) if call_id else None
-            if pending:
-                ap = make_span(f'{sp["spanId"]}.appr', sp['spanId'], depth + 1,
-                           'approval_wait', 'approval',
-                           pending.pop(0),
-                           attrs={'toolName': sp['attrs']['toolName']})
-                if not pending:
-                    pending_approval.pop(approval_key, None)
-                spans.append(ap)
-                sp['attrs']['_approval'] = ap
-            continue
-
-        if et == 'write_approval_request':
-            cid = str(p.get('toolCallId') or '')
-            if cid:
-                rk = _tool_event_round_key(p)
-                tgt = _find_open_tool(
-                    rk, cid, require_unapproved=True)
-                if tgt is not None and '_approval' not in tgt['attrs']:
-                    ap = make_span(f'{tgt["spanId"]}.appr', tgt['spanId'],
-                               tgt['depth'] + 1, 'approval_wait', 'approval',
-                               ts, attrs={'toolName': tgt['attrs']['toolName']})
-                    spans.append(ap)
-                    tgt['attrs']['_approval'] = ap
-                else:
-                    pending_approval.setdefault((rk, cid), []).append(ts)
-            continue
-
-        if et == 'tool_progress':
-            cid = str(p.get('toolCallId') or '')
-            rk = _tool_event_round_key(p)
-            exec_start = p.get('execStartTs')
-            tgt = _find_open_tool(
-                rk, cid, require_unmarked=True) if cid else None
-            if tgt is None and cid:
-                tgt = _find_open_tool(rk, cid)
-            if tgt is not None and exec_start:
-                # The REAL spawn moment: anything between the tool_start
-                # announce and this is queue/approval wait, not execution.
-                if not tgt['attrs'].get('_execMarked'):
-                    tgt['attrs']['_execMarked'] = True
-                    ap = tgt['attrs'].get('_approval')
-                    if ap is not None:
-                        _close(ap, int(exec_start), 'done')
-                        _apply_budget(ap)
-                    elif int(exec_start) - int(tgt['tStart'] or ts) > 500:
-                        sw = make_span(f'{tgt["spanId"]}.spawn', tgt['spanId'],
-                                   tgt['depth'] + 1, 'spawn_wait', 'dispatch',
-                                   tgt['tStart'] or ts)
-                        _close(sw, int(exec_start), 'done')
-                        _apply_budget(sw)
-                        spans.append(sw)
-            continue
-
-        if et in ('tool_result', 'tool_complete'):
-            cid = str(p.get('toolCallId') or '')
-            rk = _tool_event_round_key(p)
-            tgt = _take_open_tool(rk, cid) if cid else None
-            if tgt is None and not cid:
-                # Fallback: oldest open tool in the current round (legacy
-                # rows without call ids) — else drop (orphan result).
-                tgt = _take_open_tool(rk, '')
-            if tgt is not None:
-                verdict = p.get('status') or ''
-                if not verdict and et == 'tool_complete':
-                    verdict = 'error' if p.get('isError') else ''
-                st = ('done' if verdict in ('', 'done')
-                      else 'error' if verdict == 'error' else verdict)
-                close_tool(
-                    tgt, p.get('tEnd') or ts,
-                    st if st in ('done', 'error', 'aborted') else 'error',
-                    approval_status='unknown', approval_truncated=True)
-                if st not in ('done',):
-                    tgt['attrs']['verdict'] = st
-                _apply_budget(tgt)
-                rnd = rounds.get(tgt['attrs'].get('roundKey'))
-                if rnd is not None and rnd.get('tEnd') is not None \
-                        and tgt['tEnd'] > rnd['tEnd']:
-                    rnd['tEnd'] = tgt['tEnd']
-            continue
-
-        if et == 'compaction':
-            # The event pair without a phase (some paths emit only events):
-            # open the span here; the phase-driven path coalesces by name.
-            if open_phase_span is None or open_phase_span['name'] != Phase.COMPACTING:
-                _close_phase_span(ts)
-                counters['compact'] += 1
-                sp = make_span(f'compact.{counters["compact"]}', 'turn', 1,
-                           'compaction', Phase.COMPACTING, ts,
-                           attrs={'detail': p.get('detail') or ''})
-                spans.append(sp)
-                open_phase_span = sp
-            continue
-
-        if et == 'compaction_done':
-            if (open_phase_span is not None
-                    and open_phase_span['kind'] == 'compaction'):
-                _close_phase_span(ts)
-            continue
-
-        if et == 'round_usage':
-            u = p.get('usage') or {}
-            rec = {
-                'tag': p.get('tag') or '',
-                'model': p.get('model') or '',
-                'tokensIn': int(p.get('tokensIn') or 0),
-                'tokensOut': int(p.get('tokensOut') or 0),
-                'traceId': u.get('trace_id') or '',
-                'streamElapsedMs': int(u.get('stream_elapsed_ms') or 0),
-                'routeId': ((u.get('_network_route') or {}).get('routeId')
-                            if isinstance(u.get('_network_route'), dict) else ''),
-                'routeMode': ((u.get('_network_route') or {}).get('routeMode')
-                              if isinstance(u.get('_network_route'), dict) else ''),
-                'failureStage': u.get('_failure_stage') or '',
-                'streamState': u.get('_stream_state') or '',
-                'semanticProgressTimeout': bool(
-                    u.get('_semantic_progress_timeout')
-                    or u.get('_stream_state') ==
-                    'semantic_progress_timeout'),
-                # Historical projection retained for old trace readers.
-                'noActionableTimeout': bool(
-                    u.get('_no_actionable_timeout')),
-            }
-            if (rec['semanticProgressTimeout']
-                    or rec['noActionableTimeout']):
-                rec.update({
-                    'semanticStallWindowMs': _safe_seconds_to_ms(
-                        u.get('_no_actionable_timeout_s'))
-                    if u.get('_semantic_idle_timeout_ms') is None else
-                    _safe_nonnegative_int(u.get('_semantic_idle_timeout_ms')),
-                    'lastSemanticProgressAgeMs': _safe_seconds_to_ms(
-                        u.get('_no_actionable_stall_elapsed_s'))
-                    if u.get('_semantic_progress_idle_ms') is None else
-                    _safe_nonnegative_int(u.get('_semantic_progress_idle_ms')),
-                    'requestElapsedMs': _safe_seconds_to_ms(
-                        u.get('_no_actionable_request_elapsed_s'),
-                        rec['streamElapsedMs'] / 1000),
-                    'reasoningChars': _safe_nonnegative_int(
-                        u.get('_no_actionable_reasoning_chars')),
-                    'reasoningChunks': _safe_nonnegative_int(
-                        u.get('_no_actionable_reasoning_chunks')),
-                    'sseChunks': _safe_nonnegative_int(
-                        u.get('_chunks_received')),
-                })
-            key = str(p.get('roundNum'))
-            if key in rounds:
-                usage_by_round.setdefault(key, []).append(rec)
-            else:
-                usage_orphans.append((key, rec))
-            continue
-
-        if et == 'step_start':
-            flow_seen = True
-            saw_step_markers = True
-            node_id = str(p.get('node_id') or '')[:120]
-            # Sequential walk: a new step proves the previous one's
-            # completion event was lost if it is still open — close it
-            # honestly instead of letting spans overlap.
-            for open_node, open_step in list(open_steps.items()):
-                _close(open_step, ts, 'unknown')
-                open_step['truncated'] = True
-                _apply_budget(open_step)
-                open_steps.pop(open_node, None)
-            counters['step'] += 1
-            step_span = make_span(
-                f'flowstep.{counters["step"]}', 'turn', 1, 'flow_step',
-                str(p.get('name') or p.get('role') or 'flow step')[:160], ts,
-                attrs={'nodeId': node_id, 'role': str(p.get('role') or '')[:80]})
-            spans.append(step_span)
-            if node_id:
-                open_steps[node_id] = step_span
-            continue
-
-        if et == 'step_complete':
-            flow_seen = True
-            saw_step_markers = True
-            node_id = str(p.get('node_id') or '')[:120]
-            step_span = open_steps.pop(node_id, None)
-            if step_span is not None:
-                raw = str(p.get('status') or '')
-                step_status = (
-                    'done' if raw in {'completed', 'done', 'ok', 'success'}
-                    else 'error' if raw in {'failed', 'error'}
-                    else 'aborted' if raw == 'aborted' else 'unknown')
-                _close(step_span, ts, step_status)
-                _apply_budget(step_span)
-            # A completion without its start proves nothing about duration;
-            # the missing window stays honestly unattributed.
-            continue
-
-        if is_flow_event_type(et):
-            flow_seen = True
-            continue
-        # done/error/retry_reset/model_fallback/ping/…: no span work.
-
-    # ── Settle everything still open (running task or a crashed log) ──
-    settle_ts = eff_end
-    _close_ttft(settle_ts)
-    if open_phase_span is not None:
-        _close_phase_span(settle_ts, 'running' if running else 'unknown')
-    for tsp in list(open_tools):
-        close_tool(tsp, settle_ts, 'running' if running else 'unknown',
-                   truncated=not running)
-    open_tools.clear()
-    for request_id, request_span in list(open_model_requests.items()):
-        _close(request_span, settle_ts, 'running' if running else 'unknown')
-        if not running:
-            request_span['truncated'] = True
-        open_model_requests.pop(request_id, None)
-    for rk in round_order:
-        rnd = rounds[rk]
-        llm = rnd['attrs'].get('_llm')
-        if llm is not None:
-            if llm.get('tEnd') is None:
-                _close(llm, rnd.get('tEnd') or settle_ts,
-                       'running' if running else 'unknown')
-            _apply_budget(llm)
-        if rnd.get('tEnd') is None:
-            _close(rnd, settle_ts, 'running' if running else 'unknown')
-            if not running:
-                rnd['truncated'] = True
-    for open_node, open_step in list(open_steps.items()):
-        _close(open_step, settle_ts, 'running' if running else 'unknown')
-        if not running:
-            open_step['truncated'] = True
-        _apply_budget(open_step)
-        open_steps.pop(open_node, None)
-
-    # Usage join (llm span attrs — model + authoritative attempt elapsed).
-    for key, rec in usage_orphans:
-        usage_by_round.setdefault(key, []).append(rec)
-    for key, attempts in usage_by_round.items():
-        rnd = rounds.get(key)
-        if rnd is None:
-            continue
-        llm_span = rnd['attrs'].get('_llm')
-        if llm_span is not None:
-            llm_span['attrs']['attempts'] = attempts
-            if attempts and attempts[0].get('model'):
-                llm_span['attrs']['model'] = attempts[0]['model']
-
-    # Drop the internal llm handles from round attrs (wire cleanliness).
-    for rk in round_order:
-        rounds[rk]['attrs'].pop('_llm', None)
-        rounds[rk]['attrs'].pop('_llm_closed', None)
-    for s in spans:
-        s['attrs'].pop('_approval', None)
-        s['attrs'].pop('_execMarked', None)
+        span_fold.consume(row)
+    span_fold.finish(eff_end)
+    spans = span_fold.spans
+    round_order = span_fold.round_order
+    saw_round_markers = span_fold.saw_round_markers
+    saw_step_markers = span_fold.saw_step_markers
+    flow_seen = span_fold.flow_seen
 
     for span in spans:
         a, b = span.get('tStart'), span.get('tEnd')
@@ -1431,30 +1126,14 @@ def _fold_task_trace(
             clock_regressed = True
             span['tEnd'] = a
 
-    # ── Gaps: the complement that makes accounting strict ──
-    covered_ivs = []
-    for s in spans:
-        if s['kind'] in ('turn', 'round'):
-            continue
-        a, b = s.get('tStart'), s.get('tEnd')
-        if a is not None and b is not None and b > a:
-            a, b = max(a, t0), min(b, eff_end)
-            if b > a:
-                covered_ivs.append((a, b))
-    gaps = []
-    iv = sorted(covered_ivs)
-    cursor = t0
-    for a, b in iv:
-        if a > cursor:
-            gaps.append({'tStart': cursor, 'tEnd': a})
-        cursor = max(cursor, b)
-    if eff_end > cursor:
-        gaps.append({'tStart': cursor, 'tEnd': eff_end})
-    gaps = [g for g in gaps if g['tEnd'] - g['tStart'] >= 1]
+    gaps = _trace_gaps(spans, t0, eff_end)
 
     # ── Summary (disjoint priority allocation) ──
-    summary = _disjoint_summary(spans, t0, eff_end)
+    attribution = _disjoint_attribution(spans, t0, eff_end)
+    summary = _disjoint_summary(spans, t0, eff_end, attribution)
     summary['totalMs'] = eff_end - t0
+    if ledger_out is not None:
+        ledger_out.update(kindMs=dict(attribution), rounds=len(round_order))
     ttft_ivs = [(s['tStart'], s['tEnd']) for s in spans
                 if s['kind'] == 'llm_ttft']
     summary['ttftMs'] = _union_length(ttft_ivs)  # informational ⊂ llmMs
@@ -1494,14 +1173,9 @@ def _fold_task_trace(
         folded_status_history, folded_status_dropped = _fold_status_history(
             rows, settle_ts=eff_end, running=running)
     else:
-        folded_status_history, newly_dropped = _bounded_trace_rows(
-            status_history, TRACE_MAX_STATUS_ENTRIES, keep_recent=True)
-        folded_status_dropped = max(0, int(status_dropped_count or 0)) \
-            + newly_dropped
-        if folded_status_history and not running \
-                and folded_status_history[-1].get('tEnd') is None:
-            folded_status_history[-1]['tEnd'] = eff_end
-            folded_status_history[-1]['terminalBoundary'] = True
+        folded_status_history, folded_status_dropped = _settled_status_history(
+            status_history, status_dropped_count,
+            settle_ts=eff_end, running=running)
 
     # Stable wire order: depth-first by (tStart, spanId insertion).
     order = {id(s): i for i, s in enumerate(spans)}
@@ -1529,14 +1203,17 @@ def _fold_task_trace(
 __all__ = [
     'CLIENT_OBSERVATION_KINDS',
     'TRACE_CONTRACT_VERSION',
+    'TRACE_COVERAGE_EVENT_READ_FAILED',
     'TRACE_MAX_CLIENT_OBSERVATIONS',
     'TRACE_MAX_COUNTER',
     'TRACE_MAX_GAPS',
     'TRACE_MAX_PERSISTED_BYTES',
     'TRACE_MAX_SPANS',
+    'TurnTraceEventReadError',
     'append_client_trace_observation',
     'compact_trace_document',
     'finalize_trace_projection',
+    'fold_exported_events',
     'fold_task_trace',
     'invalidate_trace_cache',
     'merge_client_trace_evidence',
@@ -1544,4 +1221,5 @@ __all__ = [
     'project_running_trace_status',
     'read_persisted_task_trace',
     'task_status_history',
+    'trace_kind_attribution',
 ]

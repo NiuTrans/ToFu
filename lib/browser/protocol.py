@@ -26,12 +26,14 @@ class BrowserCapability(str, Enum):
     WAIT = 'wait'
     EXECUTE = 'execute'
     IFRAMES = 'iframes'
+    FRAME_AUTHORITY = 'frame_authority'
     NETWORK_CAPTURE = 'network_capture'
     NETWORK_BODY = 'network_body'
     DEEP_COLLECT = 'deep_collect'
     # Optional, passive-only response-retention bias for generic research.
     # It never permits endpoint replay or bypasses per-response policy.
     RESEARCH_HINTS = 'research_hints'
+    RESEARCH_ORIGIN_GUARD = 'research_origin_guard'
     DEVTOOLS_CONSOLE = 'devtools_console'
     JS_DEBUGGER = 'js_debugger'
     UPLOAD = 'upload'
@@ -44,6 +46,10 @@ class BrowserCapability(str, Enum):
 
 
 ALL_CAPABILITIES = frozenset(item.value for item in BrowserCapability)
+RESEARCH_CAPABILITIES = (
+    BrowserCapability.DEEP_COLLECT, BrowserCapability.NETWORK_BODY,
+    BrowserCapability.RESEARCH_ORIGIN_GUARD,
+)
 
 
 class BrowserProtocolRejected(ValueError):
@@ -135,7 +141,7 @@ def require_capabilities(client_id: str, required) -> dict:
 
 __all__ = [
     'PROTOCOL_VERSION', 'BrowserCapability', 'BrowserProtocolRejected',
-    'BrowserUpgradeRequired', 'ALL_CAPABILITIES',
+    'BrowserUpgradeRequired', 'ALL_CAPABILITIES', 'RESEARCH_CAPABILITIES',
     'normalize_protocol_version', 'normalize_capabilities', 'client_protocol',
     'require_capabilities',
 ]

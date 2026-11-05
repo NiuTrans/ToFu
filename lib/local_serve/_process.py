@@ -38,6 +38,8 @@ import subprocess
 import time
 import urllib.request
 
+from runtime_guards import pid_is_alive
+
 from lib.log import get_logger
 from lib.proxy import register_no_proxy_url
 
@@ -111,13 +113,9 @@ def _http_get(url: str, timeout: float = 2.0) -> tuple[int, str]:
 
 
 def _pid_alive(pid: int | None) -> bool:
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
+    # The engine is this process's child and its Popen is dropped once ready,
+    # so an exited engine stays a zombie until some later Popen reaps it.
+    return bool(pid) and pid_is_alive(pid)
 
 
 def allocate_port(*, ledger_rows=None, bind_test=True) -> int | None:

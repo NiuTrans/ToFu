@@ -113,7 +113,10 @@ function hasFailedResult(value: unknown): boolean {
   return results.some((value) => {
     const result = record(value);
     const exit = result.exitCode;
-    return result.isError === true || Boolean(result.error)
+    const edits = Array.isArray(result.editSummaries) ? result.editSummaries : [];
+    return result.isError === true || Boolean(result.error) || result.writeOk === false
+      || result.partial === true || result.partialSuccess === true
+      || edits.some(edit => record(edit).status !== 'ok')
       || result.timedOut === true || result.interrupted === true || result.notRun === true
       || (typeof exit === 'number' && exit !== 0)
       || (typeof exit === 'string' && /^(?:-?\d+|not-run|interrupted|timeout)$/.test(exit)

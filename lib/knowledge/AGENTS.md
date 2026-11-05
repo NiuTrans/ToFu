@@ -37,6 +37,14 @@ propagates spool I/O failure, and every store path closes the owned sequence.
 Nested extraction transfers evidence into its parent's spool and closes its
 child; metadata edits retain immutable raw offsets.
 
+`ocr.py` runs every OCR job in its own owned child from the pinned
+`_ocr_worker.py`, a standalone kernel (standard library plus PyMuPDF; never
+import `lib` there). Callers keep their best-effort policy; the child takes no
+MuPDF lock. Verify `test_knowledge_ocr_process.py`. `image_ocr_jobs.py` owns
+deferred OCR for tool-result images committed with `defer_image_ocr`: one
+carrier per job, coalesced per owner/asset, cancelled and joined by `stop`.
+Verify `test_knowledge_attachment_ocr.py`.
+
 Verify `tests/knowledge/test_asset_spool_demand.py`, PDF resource/vision cases,
 and knowledge data-layer/repository tests. Visual traversal uses actual document length; pipeline OCR has no local page
 quota. Explicit OCR ranges, text/model budgets, permissions and paid enrichment

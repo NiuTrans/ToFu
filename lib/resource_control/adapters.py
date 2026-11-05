@@ -44,7 +44,7 @@ def bind_root(controller, runtime, admission) -> None:
 
     controller.bind('execution.root', ResourcePort(
         read, resize, 1, max(initial, policy['root_maximum']),
-        automatic=False, growth_cost_bytes=0), identity=runtime)
+        automatic=False), identity=runtime)
 
 
 def bind_swarm(gate) -> None:
@@ -70,7 +70,7 @@ def bind_swarm(gate) -> None:
 
         return ResourcePort(
             read, gate.resize, 1, max(initial, policy['child_maximum']), acquire=acquire,
-            automatic=False, growth_cost_bytes=0)
+            automatic=False)
     controller.bind_lazy('execution.child', gate, make_port)
 
 
@@ -106,8 +106,7 @@ def bind_storage(client) -> None:
         controller.bind('storage.rpc', ResourcePort(
             lambda: _sample(client.resource_snapshot()), client.resize_resource_capacity,
             1, max(sample.capacity, sample.ceiling or sample.capacity),
-            automatic=controller.launch_policy['automatic'],
-            growth_cost_bytes=64 * 1024), identity=client)
+            automatic=controller.launch_policy['automatic']), identity=client)
     if hasattr(client, 'resource_frame_admission') and not controller.is_bound('storage.frames', client):
         frames = client.resource_frame_admission()
 
@@ -121,4 +120,4 @@ def bind_storage(client) -> None:
         capacity = read().capacity
         controller.bind('storage.frames', ResourcePort(
             read, frames.resize, capacity, max(capacity, controller.launch_policy['frame_maximum']),
-            growth_cost_bytes=1, automatic=controller.launch_policy['automatic']), identity=client)
+            automatic=controller.launch_policy['automatic']), identity=client)

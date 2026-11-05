@@ -190,15 +190,15 @@ def test_revocation_after_intent_ack_is_fenced_before_apply(repo, authority, mon
 
 
 @pytest.mark.parametrize('accepted', [False, True])
-def test_no_change_does_not_bypass_explicit_publication(repo, authority, accepted):
+def test_no_change_settles_without_explicit_publication(repo, authority, accepted):
+    # An empty delta publishes nothing: once the checkpoint is proven equal to
+    # its baseline, terminal bookkeeping needs no grant (docs/CONTINUOUS_DELIVERY.md).
+    # A changed checkpoint keeps its fence; see the held-accepted-held test above.
     root, _, _ = repo
-    work = workspace(repo, authority)
+    workspace(repo, authority)
     if accepted:
         authority.accept()
-    assert automatic_settle(repo)['state'] == 'blocked'
-    assert work.exists()  # No premature no-change source cleanup.
-    authority.publish()
-    delivery.resume_pending_workspace_deliveries()
+    assert automatic_settle(repo)['state'] == 'delivered'
     assert receipt(root)['state'] == 'delivered'
     assert receipt(root)['phase'] == 'no_changes'
 

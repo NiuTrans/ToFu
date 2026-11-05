@@ -2,10 +2,10 @@
   "format": "tofu.storage-operation-catalog.v1",
   "generatedBy": "scripts/gen_storage_operation_catalog.py",
   "sourceProtocol": "storage.v1",
-  "sourceSchemaVersion": 68,
-  "sourceRegistryVersion": 50,
-  "operationCount": 374,
-  "operationsSha256": "1717e967996953a99fcfe637ccfaf98be88d88086bd4c7a62404f29b39e80c6d",
+  "sourceSchemaVersion": 70,
+  "sourceRegistryVersion": 54,
+  "operationCount": 383,
+  "operationsSha256": "71f3e31e0da562dc21f16ddc1fd307eb9829d7e2bae4f596db39a33bb5b15293",
   "operations": [
     {
       "name": "artifact.create",
@@ -156,6 +156,14 @@
       "domain": "billing",
       "kind": "query",
       "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.payment.bind",
+      "domain": "billing",
+      "kind": "command",
+      "receiptRequired": true,
       "transactionTimeoutSeconds": null,
       "ownerScope": "handler-enforced"
     },
@@ -684,6 +692,14 @@
       "domain": "integration",
       "kind": "command",
       "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.delivery_action_page",
+      "domain": "integration",
+      "kind": "query",
+      "receiptRequired": false,
       "transactionTimeoutSeconds": null,
       "ownerScope": "handler-enforced"
     },
@@ -2280,7 +2296,39 @@
       "ownerScope": "handler-enforced"
     },
     {
+      "name": "swarm.agent.append",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "swarm.agent.checkpoint.mark",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
       "name": "swarm.agent.save",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "swarm.agent.state.get",
+      "domain": "workflows",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "swarm.agents.acknowledge_results",
       "domain": "workflows",
       "kind": "command",
       "receiptRequired": true,
@@ -2292,6 +2340,14 @@
       "domain": "workflows",
       "kind": "command",
       "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "swarm.agents.page",
+      "domain": "workflows",
+      "kind": "query",
+      "receiptRequired": false,
       "transactionTimeoutSeconds": null,
       "ownerScope": "handler-enforced"
     },
@@ -2691,7 +2747,7 @@
       "name": "turn.branch.delete",
       "domain": "turns",
       "kind": "command",
-      "receiptRequired": false,
+      "receiptRequired": true,
       "transactionTimeoutSeconds": null,
       "ownerScope": "handler-enforced"
     },
@@ -2731,12 +2787,20 @@
       "name": "turn.delete",
       "domain": "turns",
       "kind": "command",
-      "receiptRequired": false,
+      "receiptRequired": true,
       "transactionTimeoutSeconds": null,
       "ownerScope": "handler-enforced"
     },
     {
       "name": "turn.event.record",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.event.record_batch",
       "domain": "turns",
       "kind": "command",
       "receiptRequired": false,
@@ -2931,6 +2995,14 @@
       "name": "turn.visible.sync",
       "domain": "turns",
       "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "worker_job.claim_horizon",
+      "domain": "worker_jobs",
+      "kind": "query",
       "receiptRequired": false,
       "transactionTimeoutSeconds": null,
       "ownerScope": "handler-enforced"

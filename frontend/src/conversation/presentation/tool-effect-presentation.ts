@@ -6,6 +6,15 @@ import type { ToolExecutionEffect, TurnStatus } from '../../api/conversation-syn
 
 export type ToolEffectNotice = 'reconcile' | 'idempotent' | null;
 
+/** Summary chrome follows host evidence, never diagnostic text or tool names. */
+export function toolEffectOutcome(value: unknown, roundStatus?: string): 'not_started' | 'unknown' | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const effect = value as ToolExecutionEffect;
+  if (effect.state === 'not_started'
+      && ['error', 'failed', 'rejected', 'aborted'].includes(roundStatus ?? '')) return 'not_started';
+  return toolEffectNotice(effect, 'running', roundStatus) ? 'unknown' : null;
+}
+
 export function toolEffectNotice(effect: ToolExecutionEffect | undefined, turnStatus: TurnStatus, roundStatus?: string):
   ToolEffectNotice {
   if (!effect || effect.recovery === 'read_only') return null;

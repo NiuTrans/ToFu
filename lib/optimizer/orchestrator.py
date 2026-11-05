@@ -112,6 +112,8 @@ def run_once(*, principal: PrincipalContext, dry_run: bool = False,
             'audit_event_counts': evidence.audit_event_counts,
             'prior_actions_count': len(evidence.prior_actions),
             'daily_report_snippets': len(evidence.daily_report_snippets),
+            'cache_read_share_divergence': (
+                evidence.cache_read_share_divergence),
         },
         'prior_actions': evidence.prior_actions,
         'proposals': proposals,

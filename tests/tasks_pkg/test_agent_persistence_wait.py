@@ -91,6 +91,44 @@ def test_permanent_and_wrapped_transient_failures_have_distinct_verdicts():
     assert len(attempts) == 2
 
 
+def test_only_producer_rebased_projection_conflicts_are_retryable():
+    from lib.storage.errors import ProjectionRebaseRequired, is_transient_storage_error
+    original = StorageError('turn_projection_stale', 'stale editor patch', True)
+    assert not is_transient_storage_error(original)
+    assert not is_transient_storage_error(StorageError.from_payload(original.to_payload()))
+    carrier = task()
+    calls = []
+
+    def rebased_write():
+        calls.append(1)
+        if len(calls) <= 25:
+            raise ProjectionRebaseRequired('turn_projection_stale', 'baseline invalidated', True)
+        return 'committed'
+
+    assert wait_for_persistence(carrier, rebased_write, label='rebased event') == 'committed'
+    assert len(calls) == 26
+    assert not carrier['_storageWaits']
+
+
+def test_shutdown_returns_rebase_debt_to_its_original_owner():
+    from lib.storage.errors import ProjectionRebaseRequired
+    carrier = task()
+    stopping = Event()
+    failure = ProjectionRebaseRequired('turn_projection_stale', 'baseline invalidated', True)
+    calls = []
+
+    def write():
+        calls.append(1)
+        stopping.set()
+        raise failure
+
+    with pytest.raises(ProjectionRebaseRequired) as caught:
+        wait_for_persistence(carrier, write, label='rebased event',
+                             cancellable=False, stopping=stopping.is_set)
+    assert caught.value is failure and calls == [1]
+    assert not carrier['_storageWaits']
+
+
 def test_wait_does_not_mask_deadline_but_is_not_a_liveness_stall():
     from lib.tasks_pkg.invocation import invocation_abort_requested
     from lib.llm.llm_errors import AbortedError
@@ -123,6 +161,51 @@ def test_shutdown_retains_original_error_and_never_authorizes_effect():
     assert raised.value is failure and len(attempts) == 1
 
 
+def test_caller_classified_local_deadline_is_waited_out_and_logged(caplog):
+    class StillInFlight(TimeoutError):
+        pass
+    carrier = task()
+    attempts = []
+    def read():
+        attempts.append(1)
+        if len(attempts) < 3:
+            if len(attempts) > 1:
+                assert carrier['phase']['storageOperation'] == 'owner read'
+            raise StillInFlight('read still running after its patience window')
+        return 'fresh'
+    with caplog.at_level('INFO', logger=owner.__name__):
+        assert wait_for_persistence(carrier, read, label='owner read',
+            transient=lambda error: isinstance(error, StillInFlight)) == 'fresh'
+    assert len(attempts) == 3 and not carrier['_storageWaits']
+    assert not carrier.get('aborted') and carrier.get('phase') is None
+    logged = '\n'.join(record.getMessage() for record in caplog.records)
+    assert 'operation=owner read waiting attempt=1' in logged and 'StillInFlight' in logged
+    assert 'operation=owner read succeeded after 2 transient failures' in logged
+    # The default classifier still refuses the unclassified local timeout at once.
+    refused = []
+    def unclassified():
+        refused.append(1)
+        raise StillInFlight('not storage pressure')
+    with pytest.raises(StillInFlight):
+        wait_for_persistence(task(), unclassified, label='write')
+    assert refused == [1]
+
+
+def test_shutdown_cancels_an_effect_free_read_instead_of_returning_its_failure():
+    from lib.llm.llm_errors import AbortedError
+    carrier = task()
+    attempts = []
+    def read():
+        attempts.append(1)
+        # The fields quiesce_running_tasks publishes for every running task.
+        carrier.update(aborted=True, _abort_reason='server_shutdown')
+        carrier['abort_event'].set()
+        raise StorageError('database_unavailable', 'authority restarting')
+    with pytest.raises(AbortedError):
+        wait_for_persistence(carrier, read, label='owner read', effect_free=True)
+    assert attempts == [1] and not carrier['_storageWaits']
+
+
 def test_swarm_command_reuses_frozen_receipt_after_lost_ack(monkeypatch):
     from lib.swarm import persistence
     attempts, committed = [], {}
@@ -137,6 +220,28 @@ def test_swarm_command_reuses_frozen_receipt_after_lost_ack(monkeypatch):
         messages=[{'role': 'user', 'content': 'retained input'}], required=True, task=task())
     assert len(attempts) == 2 and attempts[0] == attempts[1]
     assert len(committed) == 1
+
+
+def test_swarm_command_replays_the_bytes_encoded_once_for_its_receipt(monkeypatch):
+    from lib.storage.v2_semantics import request_payload
+    from lib.swarm import persistence
+    from tofu_db.wire import _payload_bytes
+    transcript = [{'role': 'user', 'content': 'retained input'}]
+    sent, frozen = [], []
+    def command(operation, payload, command_id):
+        frozen.append(payload)
+        sent.append((command_id, _payload_bytes(request_payload(operation, payload, owner_id=7))))
+        if len(sent) == 1:
+            # A transcript change after the first attempt is not part of this receipt.
+            transcript.append({'role': 'assistant', 'content': 'later round'})
+            raise StorageError('database_unavailable', 'lost acknowledgement')
+        return {'saved': True}
+    monkeypatch.setattr(persistence, '_storage', lambda **kw: SimpleNamespace(command=command))
+    persistence.save_agent('wave', 'agent', role='coder', objective='verify', status='running',
+        messages=transcript, required=True, task=task())
+    assert len(sent) == 2 and sent[0] == sent[1]
+    assert frozen[0] is frozen[1] and frozen[0].encoded['messages'] == (
+        b'[{"role":"user","content":"retained input"}]')
 
 
 def test_registration_wait_keeps_child_identity_and_no_execution(monkeypatch):

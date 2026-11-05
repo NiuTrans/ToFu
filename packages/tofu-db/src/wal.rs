@@ -1,4 +1,4 @@
-//! Bounded active commit log with length twins, CRC32C, and BLAKE3 chaining.
+//! Append-only commit log with bounded frames, CRC32C, and BLAKE3 chaining.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,10 @@ use std::time::Duration;
 use crate::vfs::{
     sync_all_barrier, sync_data_barrier, sync_directory_barrier, OpenRequest, RealVfs, Vfs, VfsFile,
 };
-use crate::{ACTIVE_LOG_MAX_BYTES, FORMAT_VERSION};
+use crate::FORMAT_VERSION;
+
+#[path = "wal_reader.rs"]
+mod reader;
 
 /// Durability barrier policy for the active log.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -716,9 +719,6 @@ impl ActiveLog {
             },
         )?;
         let len = file.len()?;
-        if len > ACTIVE_LOG_MAX_BYTES {
-            return Err(invalid_data("active WAL exceeds the 64 MiB recovery bound"));
-        }
         Ok(Self {
             path,
             file,
@@ -800,6 +800,7 @@ impl ActiveLog {
             return Ok(0);
         }
         if let Some(barrier) = &self.barrier {
+            let _wait = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_WAL_BARRIER_WAIT);
             barrier.wait_synced(self.len, std::time::Instant::now() + MAX_BARRIER_WAIT)?;
             return Ok(pending);
         }
@@ -820,12 +821,6 @@ impl ActiveLog {
         let next_len = current_len
             .checked_add(record_len as u64)
             .ok_or_else(|| invalid_data("active WAL length overflow"))?;
-        if next_len > ACTIVE_LOG_MAX_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                "active WAL rotation required",
-            ));
-        }
         if self.durability == WalDurability::Strict {
             if let Some(barrier) = &self.barrier {
                 if barrier.queue_write(&self.path, current_len, next_len, &[&leading, payload, &trailing])? {
@@ -912,12 +907,6 @@ impl ActiveLog {
         let next_len = current_len
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| invalid_data("active WAL length overflow"))?;
-        if next_len > ACTIVE_LOG_MAX_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                "active WAL rotation required",
-            ));
-        }
         self.file.write_all_at(current_len, &bytes)?;
         self.note_appended(next_len - current_len, next_len)?;
         self.len = next_len;
@@ -967,22 +956,21 @@ impl ActiveLog {
         }
         if self.buffered_writes_enabled() { self.sync_pending()?; }
         let file_len = self.file.len()?;
-        if file_len > ACTIVE_LOG_MAX_BYTES {
-            return Err(invalid_data("active WAL exceeds the 64 MiB recovery bound"));
-        }
-        let bytes = self.file.read_all(ACTIVE_LOG_MAX_BYTES as usize)?;
-        let mut offset = 0_usize;
+        let mut reader = reader::buffered_reader(self.file.as_mut(), file_len);
+        let mut frame = Vec::new();
+        let mut offset = 0_u64;
         let mut previous_sequence = checkpoint_sequence;
         let mut parent = checkpoint_hash;
         let mut records = Vec::new();
         let mut invalid_tail = false;
-        while offset < bytes.len() {
-            if bytes.len() - offset < 4 {
+        while offset < file_len {
+            if file_len - offset < 4 {
                 invalid_tail = true;
                 break;
             }
-            let body_len =
-                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            let mut prefix = [0_u8; 4];
+            std::io::Read::read_exact(&mut reader, &mut prefix)?;
+            let body_len = u32::from_le_bytes(prefix) as usize;
             let total_len = match body_len.checked_add(8) {
                 Some(length) => length,
                 None => {
@@ -991,16 +979,18 @@ impl ActiveLog {
                 }
             };
             if body_len < FIXED_BODY_BYTES
-                || total_len > ACTIVE_LOG_MAX_BYTES as usize
-                || bytes.len() - offset < total_len
+                || body_len > FIXED_BODY_BYTES + MAX_TRANSACTION_BYTES
+                || file_len - offset < total_len as u64
             {
                 invalid_tail = true;
                 break;
             }
-            let suffix_offset = offset + 4 + body_len;
-            let suffix =
-                u32::from_le_bytes(bytes[suffix_offset..suffix_offset + 4].try_into().unwrap())
-                    as usize;
+            // Allocate only after the existing per-record framing bound has
+            // passed. Read-ahead and this scratch frame are independent of
+            // the accumulated durable backlog's length.
+            frame.resize(body_len + 4, 0);
+            std::io::Read::read_exact(&mut reader, &mut frame)?;
+            let suffix = u32::from_le_bytes(frame[body_len..].try_into().unwrap()) as usize;
             if suffix != body_len {
                 invalid_tail = true;
                 break;
@@ -1010,16 +1000,16 @@ impl ActiveLog {
                 break;
             };
             match decode_body(
-                &bytes[offset + 4..suffix_offset],
+                &frame[..body_len],
                 expected_sequence,
                 parent,
-                (offset + total_len) as u64,
+                offset + total_len as u64,
             ) {
                 Ok(record) => {
                     parent = record.record_hash;
                     previous_sequence = record.sequence;
                     records.push(record);
-                    offset += total_len;
+                    offset += total_len as u64;
                 }
                 Err(_) => {
                     invalid_tail = true;
@@ -1027,6 +1017,7 @@ impl ActiveLog {
                 }
             }
         }
+        drop(reader);
         let recovered_sequence = records
             .last()
             .map_or(checkpoint_sequence, |record| record.sequence);
@@ -1038,11 +1029,11 @@ impl ActiveLog {
                 "CONTROL points beyond active WAL: checkpoint={checkpoint_sequence}, durable={durable_sequence}, recovered={recovered_sequence}, valid_bytes={offset}, invalid_tail={invalid_tail}"
             )));
         }
-        let truncated_bytes = (bytes.len() - offset) as u64;
+        let truncated_bytes = file_len - offset;
         if truncate && truncated_bytes > 0 {
-            self.file.set_len(offset as u64)?;
+            self.file.set_len(offset)?;
             sync_all_barrier(self.file.as_mut())?;
-            self.len = offset as u64;
+            self.len = offset;
         }
         Ok(Recovery {
             records,
@@ -1059,10 +1050,10 @@ impl ActiveLog {
     }
 
     pub fn would_exceed(&self, payload: &[u8], limit: u64) -> io::Result<bool> {
-        if limit == 0 || limit > ACTIVE_LOG_MAX_BYTES {
+        if limit == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "active WAL admission limit is invalid",
+                "active WAL rotation threshold must be positive",
             ));
         }
         // The record length is fully determined by the payload length
@@ -1084,10 +1075,10 @@ impl ActiveLog {
     }
 
     pub fn batch_would_exceed(&self, payloads: &[&[u8]], limit: u64) -> io::Result<bool> {
-        if limit == 0 || limit > ACTIVE_LOG_MAX_BYTES {
+        if limit == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "active WAL admission limit is invalid",
+                "active WAL rotation threshold must be positive",
             ));
         }
         if payloads.is_empty() || payloads.len() > MAX_GROUP_TRANSACTIONS {
@@ -1161,6 +1152,56 @@ mod tests {
         let log = ActiveLog::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
         vfs.arm_fault(None).unwrap();
         (vfs, log)
+    }
+
+    #[test]
+    fn recovery_bounds_reads_before_rejecting_an_oversized_frame_in_a_large_sparse_tail() {
+        struct ReadProbe {
+            file: Box<dyn VfsFile>,
+            lengths: Arc<Mutex<Vec<usize>>>,
+        }
+        impl VfsFile for ReadProbe {
+            fn len(&self) -> io::Result<u64> { self.file.len() }
+            fn read_all(&mut self, _: usize) -> io::Result<Vec<u8>> {
+                panic!("recovery must not allocate the entire durable backlog")
+            }
+            fn read_exact_at(&mut self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+                self.lengths.lock().unwrap().push(bytes.len());
+                self.file.read_exact_at(offset, bytes)
+            }
+            fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+                self.file.write_all_at(offset, bytes)
+            }
+            fn set_len(&mut self, length: u64) -> io::Result<()> { self.file.set_len(length) }
+            fn sync_data(&mut self) -> io::Result<()> { self.file.sync_data() }
+            fn sync_all(&mut self) -> io::Result<()> { self.file.sync_all() }
+            fn try_lock_exclusive(&mut self) -> io::Result<()> { self.file.try_lock_exclusive() }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut log = ActiveLog::initialize(directory.path()).unwrap();
+        log.append(1, [0; 32], b"acknowledged prefix").unwrap();
+        let valid_bytes = log.len();
+        log.file.write_all_at(valid_bytes, &u32::MAX.to_le_bytes()).unwrap();
+        let sparse_length = 8 * 1024 * 1024 * 1024_u64;
+        log.file.set_len(sparse_length).unwrap();
+        log.file.sync_all().unwrap();
+        drop(log);
+        let mut log = ActiveLog::open(directory.path()).unwrap();
+        let lengths = Arc::new(Mutex::new(Vec::new()));
+        log.file = Box::new(ReadProbe { file: log.file, lengths: Arc::clone(&lengths) });
+        // A durable witness beyond the valid prefix must preserve evidence.
+        assert_eq!(log.recover(2).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(log.file.len().unwrap(), sparse_length);
+        let scanned = log.scan(0, [0; 32], 1).unwrap();
+        assert_eq!(scanned.records.len(), 1);
+        assert_eq!(log.file.len().unwrap(), sparse_length);
+        let recovered = log.recover(1).unwrap();
+        assert_eq!(recovered.records[0].payload, b"acknowledged prefix");
+        assert_eq!(recovered.truncated_bytes, sparse_length - valid_bytes);
+        assert_eq!(log.file.len().unwrap(), valid_bytes);
+        let lengths = lengths.lock().unwrap();
+        assert_eq!(lengths.len(), 3);
+        assert!(lengths.iter().all(|length| *length <= crate::generated_tofudb_ir::WAL_RECOVERY_READ_BUFFER_BYTES));
     }
 
     #[test]

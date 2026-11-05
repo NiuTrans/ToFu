@@ -3,19 +3,71 @@
 This service creates no worker/scheduler. Stable command identity delegates birth,
 idle/human-lane priority, cancellation and replay to conversation_sync. Result and
 review are distinct; acceptance never claims file publication/canonical delivery.
+HistoryPreviews keeps one owner/project's previous history-page result previews,
+reused only while the Turn's projection revision and public status are unchanged.
+A history page lists historyRow projections; exact command/assignment lookups
+return complete views. A page build whose requester is gone stops before its next
+row with HistoryBuildCancelled.
 """
 from __future__ import annotations
+from collections.abc import Mapping
+import threading
 import time
 from copy import deepcopy
 
 from lib.identity import PrincipalContext
 from lib.turn_initiation import INITIATOR_BRAIN, stamp_initiator
 from .admission import TrustedDispatch
+from .repository import CONTRACT
+
+# The list projection of a request: exact lookups keep every request field.
+HISTORY_REQUEST_FIELDS = tuple(CONTRACT['$defs']['historyRequest']['properties'])
+
+
+class HistoryBuildCancelled(RuntimeError):
+    """The page's requester is gone; the build stopped before reading another row."""
+
+
+class HistoryPreviews:
+    """Result previews of the previous history page, one page per owner/project.
+
+    A Turn's public projection is fenced by its projectionRevision; the public
+    status selects live or settled read normalization of that stored revision.
+    A page reuses a preview only for that exact Turn, revision and status, after
+    a live metadata read. Attempt, association, grant, tenant and delivery
+    evidence are still read on every build. Each build replaces its slot with
+    the previews it displayed, so retention is one contract page per
+    owner/project rather than a tuned size or age.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._pages = {}
+
+    def previous(self, owner, project):
+        with self._lock:
+            return self._pages.get((owner, project), {})
+
+    def replace(self, owner, project, previews):
+        with self._lock:
+            if previews:
+                self._pages[(owner, project)] = previews
+            else:
+                self._pages.pop((owner, project), None)
+
+
+# Shared across requests only where a composition root passes it explicitly.
+PROCESS_HISTORY_PREVIEWS = HistoryPreviews()
+
+
+def _preview_version(turn):
+    return turn.get('projectionRevision'), turn.get('status')
 
 
 class ProjectDispatchService:
     def __init__(self, repository, *, commands=None, turn_get=None, attempt_get=None,
-                 workspace_get=None, publication_lock=None, publication_wake=None):
+                 workspace_get=None, publication_lock=None, publication_wake=None,
+                 history_previews=None):
         self.repository = repository
         if commands is None:
             from lib.conversation_sync.runtime import conversation_turn_commands
@@ -32,6 +84,7 @@ class ProjectDispatchService:
             self.repository.workspace_get = workspace_get
         self.publication_lock = publication_lock
         self.publication_wake = publication_wake
+        self.history_previews = HistoryPreviews() if history_previews is None else history_previews
 
     def _publication_lock(self):
         if self.publication_lock is not None:
@@ -44,6 +97,22 @@ class ProjectDispatchService:
                 or principal.tenant_id != assignment['grant']['tenant']):
             raise PermissionError('Project assignment requires its authorized human owner and tenant')
         principal.require_scope('chat')
+
+    def _continuation(self, assignment):
+        trusted = TrustedDispatch(self.repository.admission(assignment['id']))
+        execution = assignment['execution']
+        outcome = self.commands.resume_turn(
+            assignment['request']['recipientId'], execution['turnId'], assignment['grant']['owner'], {
+                'commandId': 'project-dispatch-resume:' + assignment['id'] + ':' + execution['attemptId'],
+                'operation': 'continue',
+                'expectedProjectionRevision': self.turn_get(
+                    assignment['request']['recipientId'], execution['turnId'],
+                    user_id=assignment['grant']['owner'])['projectionRevision'],
+                'config': {},
+            }, request_started_at=time.time(), principal=trusted.principal,
+            trusted_dispatch=trusted)
+        return {**self._view(self.repository.read(assignment['id'])),
+                'dispatch': 'aborted' if outcome.value.get('aborted') else 'accepted'}
 
     def _check_rework(self, request, principal):
         if request.get('reworkOf') is not None:
@@ -130,7 +199,15 @@ class ProjectDispatchService:
         return self._dispatch(assignment)
 
     def dispatch_authorized(self, binding):
-        return self._dispatch(self.repository.validate_own(binding))
+        assignment = self.repository.validate_own(binding)
+        if assignment['execution'] is None:
+            return self._dispatch(assignment)
+        execution = assignment['execution']
+        attempt = self.repository.get_attempt(execution['attemptId'])
+        if (not isinstance(attempt, Mapping) or attempt.get('status') in ('pending', 'running')
+                or not self.repository.restart_paused(assignment)):
+            return self._dispatch(assignment)
+        return self._continuation(assignment)
 
     def view_authorized(self, binding):
         """Passive evidence for an exact existing grant; never creates authority."""
@@ -177,15 +254,20 @@ class ProjectDispatchService:
 
         return self._view(assignment)
 
-    def view_for_coordinator(self, assignment_id, *, scope):
-        """Passive evidence, including expired/stopped work, for the live role."""
+    def view_for_coordinator(self, assignment_id, *, scope, settlement_only=False):
+        """Passive evidence, including expired/stopped work, for the live role.
+
+        settlement_only keeps every authority check but reads Turn metadata
+        instead of the projection and skips dependency evidence: execution
+        status and the delivery receipt for waits, never a presentable result.
+        """
         assignment = self.repository.read(assignment_id)
         if (scope['user_id'] != self.repository.owner or scope['project_path'] != self.repository.project
                 or assignment['request']['coordinatorId'] != scope['conversation_id']):
             raise PermissionError('Assignment belongs to another Coordinator')
         self.repository.validate_binding(scope['conversation_id'], scope['binding_revision'])
         self.repository.validate_grant_binding(assignment)
-        return self._view(assignment)
+        return self._view(assignment, settlement_only=settlement_only)
 
     def review_for_coordinator(self, task, scope, arguments):
         """Coordinator judgment is distinct from human review and actual delivery."""
@@ -203,15 +285,39 @@ class ProjectDispatchService:
                 wake()
         return self.view_for_coordinator(assignment['id'], scope=scope)
 
-    def _view(self, assignment):
+    def _bound_turn(self, identity, owner, *, settlement_only, previews):
+        """Return the bound Turn plus the exact remembered preview it still has.
+
+        A Worker projection grows with every round (MBs); metadata carries the
+        identity and revision that settlement and a remembered preview need.
+        """
+        conversation_id, turn_id = identity
+        if settlement_only:
+            return self.turn_get(conversation_id, turn_id, user_id=owner, include_projection=False), None
+        if previews is not None and identity in previews[0]:
+            turn = self.turn_get(conversation_id, turn_id, user_id=owner, include_projection=False)
+            remembered = previews[0][identity]
+            if isinstance(turn, Mapping) and _preview_version(turn) == remembered[0]:
+                return turn, remembered
+        return self.turn_get(conversation_id, turn_id, user_id=owner), None
+
+    def _view(self, assignment, *, settlement_only=False, previews=None, snapshot=None):
+        """previews: a history page's (previous, current) maps of exact previews.
+
+        Only a history row passes them; that row also carries the contract's
+        historyRequest projection of the request instead of the complete one.
+        snapshot: the page's loaded dispatch value; dependency states read the
+        row's prerequisites from it instead of reloading them.
+        """
+        request = assignment['request']
         association = assignment['execution']
         execution = None
 
         attempt = None
         if association is not None:
-            request = assignment['request']
-            turn = self.turn_get(request['recipientId'], association['turnId'],
-                                 user_id=assignment['grant']['owner'])
+            identity = (request['recipientId'], association['turnId'])
+            turn, remembered = self._bound_turn(identity, assignment['grant']['owner'],
+                                                settlement_only=settlement_only, previews=previews)
             attempt = self.attempt_get(association['attemptId'], user_id=assignment['grant']['owner'])
             if turn is not None and attempt is not None:
 
@@ -222,18 +328,31 @@ class ProjectDispatchService:
                         or attempt.get('turnId') != association['turnId']
                         or attempt.get('conversationId') != request['recipientId']):
                     raise ValueError('Bound project execution association changed')
+                result = {}
+                if previews is not None:
+                    if remembered is None:
+                        content = (turn.get('projection') or {}).get('content')
+                        remembered = (_preview_version(turn),
+                                      content[:2000] if isinstance(content, str) else None)
+                    if type(remembered[0][0]) is int:
+                        previews[1][identity] = remembered
+                    result = {} if remembered[1] is None else {'content': remembered[1]}
+                elif not settlement_only:
+                    result = deepcopy(turn.get('projection') or {})
                 execution = {'turnId': association['turnId'], 'attemptId': association['attemptId'],
                     'taskId': attempt.get('taskId') or '', 'status': attempt.get('status') or 'unknown',
                     'resultRevision': turn.get('projectionRevision'),
-                    'result': deepcopy(turn.get('projection') or {})}
+                    'result': result}
         delivery = None
         if assignment['request'].get('profile', {}).get('mode') in ('files', 'project'):
             from .publication import delivery_view
             delivery = delivery_view(assignment, attempt,
                                      self.workspace_get or self.repository.get_workspace)
-        dependency_view = ({'dependencyStates': self.repository.dependency_states(assignment)}
-                           if 'dependencies' in assignment['request'] else {})
-        return {**dependency_view, 'assignmentId': assignment['id'], 'request': deepcopy(assignment['request']),
+        dependency_view = ({'dependencyStates': self.repository.dependency_states(assignment, value=snapshot)}
+                           if 'dependencies' in assignment['request'] and not settlement_only else {})
+        if previews is not None:
+            request = {name: request[name] for name in HISTORY_REQUEST_FIELDS if name in request}
+        return {**dependency_view, 'assignmentId': assignment['id'], 'request': deepcopy(request),
             'grantRevision': assignment['grant']['revision'], 'revoked': assignment['grant']['revoked'],
             'execution': execution, 'review': deepcopy(assignment['review']),
             'publication': deepcopy(assignment.get('publication')), 'delivery': delivery,
@@ -252,8 +371,15 @@ class ProjectDispatchService:
         return [self.view(row['id'], principal=principal) for row in self.repository.list()
                 if row['grant']['tenant'] == principal.tenant_id]
 
-    def history_page(self, *, principal, command_id=None, assignment_id=None, cursor=None):
-        """One bounded owned page; exact command/assignment lookup stays passive."""
+    def history_page(self, *, principal, command_id=None, assignment_id=None, cursor=None,
+                     cancelled=lambda: False):
+        """One bounded owned page of historyRow projections.
+
+        Exact command/assignment lookups stay passive and return complete views.
+        ``cancelled`` reports that the requester is gone; it is checked before the
+        page load and between rows, and a cancelled build keeps the previous
+        previews slot.
+        """
         if (not isinstance(principal, PrincipalContext) or principal.kind != 'user'
                 or principal.require_owner() != self.repository.owner):
             raise PermissionError('Assignment evidence requires its owning human principal')
@@ -264,16 +390,19 @@ class ProjectDispatchService:
         if assignment_id is not None:
             return {'assignments': [self.view(assignment_id, principal=principal)],
                     'olderCursor': None, 'newerCursor': None}
+        if cancelled():
+            raise HistoryBuildCancelled('Assignment history requester disconnected before the page load')
         page = self.repository.history_page(cursor)
+        owner, project = self.repository.owner, self.repository.project
+        previews = (self.history_previews.previous(owner, project), {})
         views = []
         for row in page['rows']:
+            if cancelled():
+                raise HistoryBuildCancelled('Assignment history requester disconnected during the build')
             if row['grant']['tenant'] != principal.tenant_id:
                 continue
-            view = self._view(row)
-            if view['execution'] is not None:
-                content = view['execution']['result'].get('content')
-                view['execution']['result'] = {'content': content[:2000]} if isinstance(content, str) else {}
-            views.append(view)
+            views.append(self._view(row, previews=previews, snapshot=page['snapshot']))
+        self.history_previews.replace(owner, project, previews[1])
         return {'assignments': views, 'olderCursor': page['olderCursor'], 'newerCursor': page['newerCursor']}
 
     def cancel_for_coordinator(self, task, scope, arguments):
@@ -287,9 +416,17 @@ class ProjectDispatchService:
             revision = assignment['grant']['revision'] - int(assignment['grant']['revoked'])
             execution = self.repository.revoke(assignment['id'], expected_revision=revision)
             if execution is not None:
-                cancel = getattr(self.commands, 'abort_project_attempt', None) or self.commands.abort_attempt
-                cancel(execution['attemptId'], assignment['grant']['owner'])
+                provenance = (f"Revoked by Coordinator conversation {task.get('convId') or '?'} "
+                              f"(task {task.get('id') or '?'}) calling cancel_project_work "
+                              f"on assignment {assignment['id']}.")
+                self._cancel_execution(execution['attemptId'], assignment['grant']['owner'], provenance)
         return self.view_for_coordinator(assignment['id'], scope=scope)
+
+    def _cancel_execution(self, attempt_id, owner, provenance):
+        cancel = getattr(self.commands, 'abort_project_attempt', None)
+        if cancel is None:
+            return self.commands.abort_attempt(attempt_id, owner)
+        return cancel(attempt_id, owner, provenance=provenance)
 
     def revoke(self, assignment_id, *, principal, expected_revision):
         assignment = self.repository.read(assignment_id)
@@ -301,8 +438,10 @@ class ProjectDispatchService:
             if execution is not None:
                 # Grant revocation and prepublication guards linearize under the
                 # same existing lock; ACK loss only retries this bound cancel.
-                cancel = getattr(self.commands, 'abort_project_attempt', self.commands.abort_attempt)
-                cancel(execution['attemptId'], assignment['grant']['owner'])
+                self._cancel_execution(
+                    execution['attemptId'], assignment['grant']['owner'],
+                    f"Revoked through the project assignment revoke API by "
+                    f"{getattr(principal, 'subject_id', None) or '?'} on assignment {assignment_id}.")
         return self.view(assignment_id, principal=principal)
 
     def publish(self, assignment_id, *, principal, expected_revision, result_revision, expected_checkpoint_sha):

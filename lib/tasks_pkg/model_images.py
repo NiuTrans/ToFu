@@ -22,7 +22,9 @@ def pin_model_images(messages, *, model, user_id):
                    if isinstance(block, dict) and block.get('type') == 'image_url']
         if not sources:
             continue
-        _validate_image_blocks([message], user_id=user_id)
+        # The task owns ``message``; the validated blocks are fresh copies.
+        message['content'] = _validate_image_blocks(
+            [message], user_id=user_id)[0]['content']
         # Model-specific resizing stays in the fresh wire body. Retaining the
         # original bytes lets a different fallback model choose its own cap.
         message['_modelImageSources'] = list(dict.fromkeys(

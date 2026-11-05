@@ -160,6 +160,7 @@ function check(name, cond, extra) {
 
 (async function () {
   window.eval(stateSrc);
+window.TradingApp.bindHost({ version: 1, api: { trading: { ...window.Api.trading, raw: () => Promise.reject(new Error("unused raw request")) } }, markdown: { parse: text => text, sanitize: html => html } });
   window.eval(ovSrc);
   await window.TradingApp.loadOverview();
   // let the three independent async loaders settle

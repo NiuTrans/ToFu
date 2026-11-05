@@ -17,6 +17,7 @@ import uuid
 from collections import deque
 
 from lib.project_mod import undo_filesystem
+from lib.project_mod.modifications import FileHistoryFault
 from lib.log import get_logger
 from lib.error_envelope import from_exception
 
@@ -28,6 +29,7 @@ from lib.file_history.store import (
     find_latest_snapshot_id_by_metadata,
     find_snapshot_with_previous,
     get_snapshot_file_maps,
+    highest_version,
     iter_snapshots,
     latest_snapshot_id,
     load_tracked,
@@ -172,6 +174,10 @@ def make_snapshot(base_path: str, *,
     to record.
     """
     if not is_enabled():
+        return None
+    if not os.path.isdir(base_path):
+        # A deferred round commit can follow source-clone reclamation; the
+        # retired root has nothing left to version and must stay retired.
         return None
     try:
         ensure_store(base_path)
@@ -349,19 +355,20 @@ def rewind_to(base_path: str, snapshot_id: str) -> dict:
     it).  Then we copy the backup blob (or delete the file) to restore
     the pre-round state.
 
-    Returns ``{ok, snapshotId, files: [paths], failed: [{path, reason}]}``.
+    Returns ``{ok, snapshotId, files: [paths], failed: [{path, reason,
+    refused}]}``; see :func:`_restore_one` for refused versus fault rows.
     """
     result: dict = {'ok': False, 'snapshotId': snapshot_id,
                     'files': [], 'failed': []}
     if not is_enabled() or not snapshot_id:
-        result['error'] = 'disabled or empty snapshot_id'
+        result.update(error='disabled or empty snapshot_id', refused=True)
         return result
     try:
         target, prior_snapshot = find_snapshot_with_previous(
             base_path, snapshot_id,
         )
         if not target:
-            result['error'] = 'snapshot not found'
+            result.update(error='snapshot not found', refused=True)
             return result
         # Pre-state = the most recent snapshot strictly before this one.
         prior_files: dict[str, int] = (
@@ -380,10 +387,10 @@ def rewind_to(base_path: str, snapshot_id: str) -> dict:
                 if ok:
                     applied.append({'path': rel, 'action': action})
                 else:
-                    failed.append({'path': rel, 'reason': action})
+                    failed.append({'path': rel, 'reason': action, 'refused': True})
             except Exception as e:
-                failed.append({'path': rel, 'reason': str(e)})
-                logger.warning('[FileHistory] rewind %s failed: %s', rel, e)
+                failed.append(_fault_row(rel, e))
+                logger.warning('[FileHistory] rewind %s failed: %s', rel, e, exc_info=True)
         result['ok'] = not failed
         result['files'] = applied
         result['failed'] = failed
@@ -405,34 +412,46 @@ def rewind_to(base_path: str, snapshot_id: str) -> dict:
 def restore_from(base_path: str, snapshot_id: str) -> dict:
     """Re-apply ``snapshot_id`` (REDO an earlier round).
 
-    For each path in the snapshot's file map, copies the corresponding
-    backup blob (or deletes the file if version 0).  After restore, a
-    new ``redoOf`` snapshot is appended to the log so the timeline
-    stays linear.
+    A snapshot pins every tracked file, so only the paths whose version
+    differs from the preceding snapshot belong to the round; each of those
+    gets its backup blob copied back (or is deleted if version 0).  Files the
+    round did not change keep their current bytes, including later rounds'
+    and the user's edits.  After restore, a new ``redoOf`` snapshot is
+    appended to the log so the timeline stays linear.
     """
     result: dict = {'ok': False, 'snapshotId': snapshot_id,
                     'files': [], 'failed': []}
     if not is_enabled() or not snapshot_id:
-        result['error'] = 'disabled or empty snapshot_id'
+        result.update(error='disabled or empty snapshot_id', refused=True)
         return result
     try:
-        target = find_snapshot(base_path, snapshot_id)
+        target, prior_snapshot = find_snapshot_with_previous(
+            base_path, snapshot_id,
+        )
         if not target:
-            result['error'] = 'snapshot not found'
+            result.update(error='snapshot not found', refused=True)
             return result
         target_files = target.get('files') or {}
+        round_files = target_files
+        if prior_snapshot is not None:
+            prior_files = prior_snapshot.get('files') or {}
+            round_files = {
+                rel: v for rel, v in target_files.items()
+                if rel not in prior_files or prior_files[rel] != v
+            }
         applied: list[dict] = []
         failed: list[dict] = []
-        for rel, v in target_files.items():
+        for rel, v in round_files.items():
             try:
                 ok, action = _restore_one(base_path, rel, int(v or 0))
                 if ok:
                     applied.append({'path': rel, 'action': action})
                 else:
-                    failed.append({'path': rel, 'reason': action})
+                    failed.append({'path': rel, 'reason': action, 'refused': True})
             except Exception as e:
-                failed.append({'path': rel, 'reason': str(e)})
-                logger.warning('[FileHistory] restore_from %s failed: %s', rel, e)
+                failed.append(_fault_row(rel, e))
+                logger.warning('[FileHistory] restore_from %s failed: %s', rel, e,
+                               exc_info=True)
 
         # Only successful mutations can advance tracked state. Metadata is
         # anchored too: a substituted parent must not become restore evidence.
@@ -443,6 +462,7 @@ def restore_from(base_path: str, snapshot_id: str) -> dict:
             v = target_files[rel]
             v_int = int(v or 0)
             entry = tracked.get(rel) or {}
+            entry = {**entry, 'highest_version': highest_version(entry)}
             if v_int == 0:
                 tracked[rel] = {**entry, 'latest_version': v_int,
                                 'deleted': True, 'mtime': 0, 'size': 0}
@@ -454,8 +474,13 @@ def restore_from(base_path: str, snapshot_id: str) -> dict:
                     tracked[rel] = {**entry, 'latest_version': v_int,
                                     'deleted': False,
                                     'mtime': st.st_mtime, 'size': st.st_size}
-                except (OSError, ValueError, NotImplementedError) as error:
-                    failed.append({'path': rel, 'reason': str(error)})
+                except ValueError as error:
+                    failed.append({'path': rel, 'reason': str(error), 'refused': True})
+                    continue
+                except (OSError, NotImplementedError) as error:
+                    failed.append(_fault_row(rel, error))
+                    logger.warning('[FileHistory] restored %s cannot be confirmed: %s',
+                                   rel, error, exc_info=True)
                     continue
             confirmed.append(item)
         applied = confirmed
@@ -494,7 +519,10 @@ def restore_from(base_path: str, snapshot_id: str) -> dict:
 def _restore_one(base_path: str, rel: str, version: int) -> tuple[bool, str]:
     """Restore ``rel`` to ``version``'s contents (or delete if v=0).
 
-    Returns (ok, action_label_or_reason).
+    Returns ``(True, action)``, or ``(False, reason)`` for a refusal: no
+    backup, or a target that the key validator or the anchored undo
+    filesystem refuses with ``ValueError``. Any other failure raises for the
+    caller to record as a fault row.
     """
     try:
         target = _restore_target(base_path, rel)
@@ -509,9 +537,14 @@ def _restore_one(base_path: str, rel: str, version: int) -> tuple[bool, str]:
         undo_filesystem.write_file(base_path, target, blob)
         undo_filesystem.touch_file(base_path, target)
         return True, 'restored'
-    except (OSError, ValueError, NotImplementedError) as error:
+    except ValueError as error:
         logger.debug('[FileHistory] unsafe restore refused for %s: %s', rel, error)
         return False, f'restore refused: {error}'
+
+
+def _fault_row(rel: str, error: BaseException) -> dict:
+    """A file whose restore failed for a server reason; its detail stays logged."""
+    return {'path': rel, 'reason': FileHistoryFault.reason(error), 'refused': False}
 
 
 def _restore_target(base_path: str, rel: str) -> str:

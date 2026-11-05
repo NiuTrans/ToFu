@@ -38,8 +38,8 @@ def request_write_approval(
         owner_user_id=owner_user_id,
     )
     if entry is None:
-        logger.error('[Approval] duplicate or capacity-exhausted request '
-                     'approval_id=%s; refusing registration', approval_id)
+        logger.error('[Approval] duplicate request approval_id=%s; '
+                     'refusing registration', approval_id)
         return False
 
     # Keep cross-replica resolution and cancellation bounded by the same

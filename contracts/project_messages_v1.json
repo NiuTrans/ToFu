@@ -1,7 +1,12 @@
 {
   "version": 1,
   "namespace": "project.conversation_messages.v1",
-  "limits": {"messageChars":4096,"messageBytes":16384,"messagesPerMailbox":128,"batchSize":8,"casAttempts":4},
+  "limits": {"messageChars":4096,"messageBytes":16384,"messagesPerSegment":128,"batchSize":8,"casAttempts":4},
+  "history": {
+    "keys": {"head":"{mailbox}","segment":"{mailbox}:segment:{segment}","message":"{mailbox}:message:{message}","sender":"{mailbox}:sender:{sender}","pending":"{mailbox}:pending"},
+    "identity": "mailbox = sha256 hex of the sorted-key JSON binding {owner, project, recipient}; sender = sha256 hex of the sender conversation ID; message = the deterministic message UUID; segment is a decimal integer from 0.",
+    "lifecycle": "Append-only history without a lifetime count. The head holds the open segment (at most messagesPerSegment originals), the sealed-segment count and 'unlocated' (leading originals without a locator, only from a legacy head); a head without 'sealed' is legacy open segment 0. Every append first claims its message locator {segment} with an expected-version write, which is also the history-wide idempotency check; a locator is replaced only when proven dangling, so a committed original's locator names its segment. An append to a full open segment first seals it: the segment copy with per-sender links {count, cumulative, previous}, each sender's newest-segment pointer and the pending index are written before the head CAS that advances it. Position = segment * messagesPerSegment + slot never changes and orders paging. Sealed originals stay immutable; their receipts CAS the segment record. The pending index is a reconstructible superset of sealed submitted, unconsidered originals. Only point reads and expected-version writes; no listing, deletion, archive or eviction."
+  },
   "$defs": {
     "inputState": {"type":"string","enum":["submitted","input_confirmed"]},
     "messageView": {"type":"object","additionalProperties":false,"required":["id","sender","kind","state","decision","revision","content"],"properties":{

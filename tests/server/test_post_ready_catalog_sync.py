@@ -8,6 +8,8 @@ embedders and test harnesses that have none.
 
 from __future__ import annotations
 
+import lib.server.server_background_services as background_services
+
 import asyncio
 from types import SimpleNamespace
 
@@ -36,14 +38,14 @@ def sync_calls(monkeypatch):
 
 def test_runs_inline_without_a_serving_gate(sync_calls):
     app = SimpleNamespace(extensions={})
-    scheduled = routes.start_post_ready_catalog_sync(app, process_role='all')
+    scheduled = background_services.start_post_ready_catalog_sync(app, process_role='all')
     assert scheduled is False
     assert sync_calls == ['oauth-reconcile', 'world-catalog']
 
 
 def test_role_without_request_services_does_nothing(sync_calls):
     app = SimpleNamespace(extensions={})
-    assert routes.start_post_ready_catalog_sync(
+    assert background_services.start_post_ready_catalog_sync(
         app, process_role='worker') is False
     assert sync_calls == []
 
@@ -63,7 +65,7 @@ def test_defers_until_the_gate_opens(sync_calls):
     })
 
     async def exercise():
-        scheduled = routes.start_post_ready_catalog_sync(
+        scheduled = background_services.start_post_ready_catalog_sync(
             app, process_role='all')
         assert scheduled is True
         assert sync_calls == []

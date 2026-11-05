@@ -74,10 +74,12 @@ _PARAM_ALIASES: dict[str, dict[str, str]] = {
                  'dir_path': 'path'},
     # Kimi CLI *Grep* uses ``glob`` for the file filter (≈ our ``include``)
     # and ``head_limit`` for the result cap; its ``ignore_case`` knob has no
-    # counterpart (grep_search is case-insensitive by default) and passes
-    # through inert.
-    'grep_search': {'regex': 'pattern', 'query': 'pattern', 'search': 'pattern',
-                    'glob': 'include', 'head_limit': 'max_results'},
+    # counterpart (search_files is case-insensitive by default) and passes
+    # through inert. Cline/Roo ``search_files`` sends ``regex`` and
+    # ``file_pattern``.
+    'search_files': {'regex': 'pattern', 'query': 'pattern', 'search': 'pattern',
+                     'glob': 'include', 'file_pattern': 'include',
+                     'head_limit': 'max_results'},
     # Kimi CLI *Glob* names its root directory ``directory``.
     'find_files': {'glob': 'pattern', 'name': 'pattern', 'file_path': 'path',
                    'directory': 'path'},
@@ -94,6 +96,8 @@ _PARAM_ALIASES: dict[str, dict[str, str]] = {
     # carries {skill, args?} — ``args`` stays inert.
     'load_skill': {'name': 'skill_id', 'skill': 'skill_id'},
 }
+# Frozen catalogs may still dispatch the retired name directly.
+_PARAM_ALIASES['grep_search'] = _PARAM_ALIASES['search_files']
 
 
 # Same alias problem one level DEEPER: the top-level keys are right, but each
@@ -371,10 +375,9 @@ def _transform_legacy_edit_to_edit_file(
         return args, False
 
     normalized = []
-    changed = not (
-        isinstance(source_edits, list)
-        and all(isinstance(e, dict) and e.get('operation') for e in source_edits)
-    )
+    # An ``edits`` batch changes only when an item is reshaped; the other
+    # envelopes are always rebuilt into one.
+    changed = not (isinstance(source_edits, list) and source_edits)
     for edit in candidates:
         if not isinstance(edit, dict):
             normalized.append(edit)
@@ -396,11 +399,13 @@ def _transform_legacy_edit_to_edit_file(
                 'path': path, 'operation': 'replace',
                 'anchor': search, 'content': replacement if replacement is not None else '',
             }
-        elif 'anchor' in edit:
-            position = edit.get('position', 'after')
+        elif 'anchor' in edit and 'position' in edit:
+            # Only the retired insert shape carries ``position``. Without it
+            # an anchored item is ambiguous (a replace removes the anchor, an
+            # insertion keeps it), so it stays for the contract to reject.
             unified = {
                 'path': path,
-                'operation': ('insert_before' if position == 'before'
+                'operation': ('insert_before' if edit['position'] == 'before'
                               else 'insert_after'),
                 'anchor': edit.get('anchor'),
                 'content': edit.get('content', edit.get('text', '')),
@@ -414,6 +419,7 @@ def _transform_legacy_edit_to_edit_file(
         if 'replaceAll' in edit and 'replace_all' not in unified:
             unified['replace_all'] = edit['replaceAll']
         normalized.append(unified)
+        changed = True
 
     # The envelope's shared path is not a declared top-level key, so it is
     # dropped from ``out`` below; every edit that still lacks a path inherits
@@ -781,10 +787,9 @@ def _edit_payload_is_foreign(args: dict[str, Any]) -> bool:
 # presentational UI caption, not execution semantics, so for payloads that
 # evidently came from a foreign schema (where the key does not exist) it is
 # derived from the target path instead of hard-failing the most common foreign
-# tool calls. A NATIVE-schema call missing description still fails closed
-# naming the key it was told about: the backfill never fires without a foreign
-# key spelling, keeping the pipeline's "native payloads untouched" invariant
-# even for broken native calls. An existing description is never clobbered.
+# tool calls. Native spellings never receive caption backfill: write_file keeps
+# its required caption while edit_file permits omission with a path-label
+# fallback. An existing description is never clobbered.
 def _backfill_caption(
     args: dict[str, Any], verb: str, foreign: bool, paths: list[str],
 ) -> tuple[dict[str, Any], bool]:
@@ -890,7 +895,7 @@ def _transform_run_command(
 _GREP_COUNT_OUTPUT_MODES = frozenset({'count', 'count_matches'})
 
 
-def _transform_grep_search(
+def _transform_search_files(
     args: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
     if args.get('count_only') is True:
@@ -938,7 +943,8 @@ _STRUCTURAL_TRANSFORMS: dict[str, Any] = {
     'apply_diffs': _transform_apply_diffs,
     'write_file': _transform_write_file,
     'run_command': _transform_run_command,
-    'grep_search': _transform_grep_search,
+    'search_files': _transform_search_files,
+    'grep_search': _transform_search_files,  # retired name, latched schemas
     'spawn_agents': _transform_spawn_agents,
     'read_files': _transform_foreign_read_range,
     'ask_human': _transform_askuserquestion_to_ask_human,

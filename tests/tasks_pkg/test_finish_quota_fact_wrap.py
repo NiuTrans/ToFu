@@ -26,7 +26,6 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
 def test_quota_facts_render_as_individual_wrappable_items(tmp_path):
     finish_owner = runtime_section('ui/finish_info.js')
     fn_start = finish_owner.index('function _quotaPct(value) {')

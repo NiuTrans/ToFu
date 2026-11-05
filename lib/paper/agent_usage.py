@@ -162,7 +162,8 @@ class PaperAgentUsageMeter:
             self.total_tokens += int(total_input or 0) + int(normal['output'] or 0)
 
             dispatch = usage.get('_dispatch') or {}
-            model = dispatch.get('model') or usage.get('model') or self.fallback_model
+            model = (dispatch.get('logical_model') or dispatch.get('model')
+                     or usage.get('model') or self.fallback_model)
             provider = dispatch.get('provider_id') or usage.get('provider_id')
             if model:
                 self.models.add(str(model))

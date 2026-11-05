@@ -21,14 +21,17 @@
     {
       "path": "01-shell-navigation.css"
     },
+    { "path": "01-message-surfaces.css", "responsibility": "Avatar letter gradients, reading measure, message media, live translation and search result cards" },
     { "path": "01-conversation-review.css", "responsibility": "Completed replies awaiting review in the conversation sidebar" },
 
     {
       "path": "31-folder-settings.css",
-      "responsibility": "Accessible sidebar folder settings, default roots and read-only directory picker"
+      "responsibility": "Sidebar folder settings workbench: default roots rail and searchable recents"
     },
 
     { "path": "32-agent-sidebar-dock.css", "responsibility": "Keyed background-agent dock and responsive right-hand rail" },
+    { "path": "35-global-router.css", "responsibility": "Main coordinator (Global Router) card slot, its compact conversation header and the compact Router disclosures it hosts: Worker model, standing instructions and health checks" },
+    { "path": "35-router-watchdog.css", "responsibility": "Health checks (Router Watchdog) settings body with the periodic review controls, and the Watchdog conversation header" },
     { "path": "02-inspector-tool-anchors.css", "responsibility": "inspector tool anchors" },
     {
       "path": "02-composer-geometry.css",
@@ -112,8 +115,7 @@
     },
     {
       "path": "02-message-navigation.css",
-      "responsibility": "message navigation",
-      "legacyTokenSha256": "d2581686fd2830a8c01045fff0ca3c99288cbe85f2356d25ca5ccc676bc822eb"
+      "responsibility": "message navigation"
     },
     {
       "path": "03-paper-reader.css",
@@ -149,8 +151,7 @@
     },
     {
       "path": "08-swarm-shell.css",
-      "responsibility": "Swarm summary, status and progress",
-      "legacyTokenSha256": "4f1b170a580ce45bdf49c998dd89c9fff87dc658c7a35e36ae9ea15d6cfa92f0"
+      "responsibility": "Parallel-execution card shell, header, verdict, completion bar and usage"
     },
     {
       "path": "08-swarm-messages.css",
@@ -158,18 +159,15 @@
     },
     {
       "path": "08-swarm-agent-cards.css",
-      "responsibility": "Agent card states, header and disclosure",
-      "legacyTokenSha256": "8f479503a793f6886742f524b21c450113203e096bee01fd0dc6e05b9b5ddd6a"
+      "responsibility": "Agent rows, states, body spine and disclosures"
     },
     {
       "path": "08-swarm-agent-activity.css",
-      "responsibility": "Agent execution timeline and outputs",
-      "legacyTokenSha256": "12f6e847d7de0a1960ab241ea83e1d28954a5382a9cf07edd85abc04978d5715"
+      "responsibility": "Agent execution timeline, results and failures"
     },
     {
       "path": "08-swarm-background-status.css",
-      "responsibility": "Background, stale and inbox summary states",
-      "legacyTokenSha256": "c279c8e04ef171c712d647d13f82de3220ae7cec4985b3e2a1488b70b699344b"
+      "responsibility": "Live verdict glyphs: spinner and background dot"
     },
     {
       "path": "08-injection-receipts.css",
@@ -178,8 +176,7 @@
     },
     {
       "path": "08-agent-rounds.css",
-      "responsibility": "Await/result rounds, live previews and dependencies",
-      "legacyTokenSha256": "c48c73333b71ba03d3884cfcfdfead4e6b371ac7e4383ac3b17d3853ae03ece5"
+      "responsibility": "Live result preview, prerequisites and shared keyframes"
     },
     {
       "path": "08-preview-modal.css",
@@ -205,6 +202,10 @@
       "path": "08-timer-panels.css",
       "responsibility": "Timer toolbar and poll-log panel",
       "legacyTokenSha256": "51ff096d9662048ab81ff2bc0d839ca3f3be5cea5a36e51b8c6a9856266951d2"
+    },
+    {
+      "path": "08-timer-panel-actions.css",
+      "responsibility": "Timer panel check-now action"
     },
     {
       "path": "08-program-execution.css",
@@ -257,8 +258,7 @@
     },
     {
       "path": "08-tool-row-compaction.css",
-      "responsibility": "Compaction layer and reduction evidence",
-      "legacyTokenSha256": "4db1e9126b0aeb23256d7106b2cd36afe0e639354c83624cc0bef4d9e761b23b"
+      "responsibility": "Compaction layer and reduction evidence"
     },
     {
       "path": "08-tool-search-diagnostics.css",
@@ -357,6 +357,10 @@
       "legacyTokenSha256": "119710f316f309a2401a16022c42e462b3e8c73f868a161e2d08e026a3517e92"
     },
     {
+      "path": "09-guidance-chat-reply.css",
+      "responsibility": "Non-blocking chat-reply question card, hint and replied/superseded rows"
+    },
+    {
       "path": "09-tool-failures.css",
       "responsibility": "Interrupted, failed and rejected tool receipts"
     },
@@ -399,18 +403,15 @@
     },
     {
       "path": "10-project-workspace.css",
-      "responsibility": "Docked browser and add-path controls",
-      "legacyTokenSha256": "c04d12982a74f1a79a677735166044cd83055835bc3449c476644b255781efc6"
+      "responsibility": "Co-Pilot browser pane, pinned actions and add-path controls"
     },
     {
       "path": "10-project-browser.css",
-      "responsibility": "Folder browser, breadcrumbs and row actions",
-      "legacyTokenSha256": "81b7b7b7d2364d6b82753410f32b77ca53bfafadb79842155fbf4da9a9d73639"
+      "responsibility": "Shared server-folder browser: breadcrumbs, filter and path jump, rows, create/delete"
     },
     {
       "path": "10-project-recent.css",
-      "responsibility": "Recent paths, filters and narrow-screen layouts",
-      "legacyTokenSha256": "27bdcc6e140b6acfd6cd02c7a4fad5ba4b0422870852ef0528b5950d280130b4"
+      "responsibility": "Recent paths, filters and narrow-screen layouts"
     },
     {
       "path": "10-file-change-modal.css",
@@ -424,8 +425,7 @@
     },
     {
       "path": "10-theme-pickers.css",
-      "responsibility": "Theme/language picker controls",
-      "legacyTokenSha256": "b5302e2c8cdae89aac3aee08f8d8fbffdf2e89f3a7b3ee336156466a443d7736"
+      "responsibility": "Theme picker controls"
     },
     {
       "path": "10-light-foundation.css",
@@ -463,7 +463,43 @@
     },
     { "path": "14-selection-popup.css", "responsibility": "Selection actions and composer quote previews" },
     {
-      "path": "14-bridges-memory-branches.css"
+      "path": "14-browser-setup.css",
+      "responsibility": "Browser setup instructions and desktop capability state",
+      "legacyTokenSha256": "dfe74e86c477321a6d2ac6c658e8c7111dccbd1305598c484dc913c9d5e7c2cf"
+    },
+    {
+      "path": "14-capability-controls.css",
+      "responsibility": "Shared capability toggle state and modal-link geometry"
+    },
+    {
+      "path": "14-memory-shell.css",
+      "responsibility": "Memory frame and palette under the shared viewport policy",
+      "legacyTokenSha256": "b9deddedc5faabf4de3d9cbb417cad8baffd5860aabcf1a94493504c470acff6"
+    },
+    {
+      "path": "14-conversation-branches.css",
+      "responsibility": "Conversation branch lanes and composer branch state",
+      "legacyTokenSha256": "4f4ffd1290880494f7b906dba2652285802741c3e82989447f031cab4fb87dc8"
+    },
+    {
+      "path": "14-conversation-context.css",
+      "responsibility": "Reply quotes, conversation references and dispatch provenance",
+      "legacyTokenSha256": "4d0baaae82c0862a8fd4a2a511fdb73093f043ac9c69d6bed005ef924ac4bc7d"
+    },
+    {
+      "path": "14-agent-role-evidence.css",
+      "responsibility": "Planner, critic and autopilot evidence in shared conversation turns",
+      "legacyTokenSha256": "8274997f69970653cdc712bc56ca2bbc79b4efd1f665fa51e3de76b4511bbf10"
+    },
+    {
+      "path": "14-toasts.css",
+      "responsibility": "Application notification geometry and interaction",
+      "legacyTokenSha256": "05d4c9e547ac3fd5c594b87a7ab750849e81eba772be833bd1044bb0f0512553"
+    },
+    {
+      "path": "14-thinking-controls.css",
+      "responsibility": "Reasoning effort controls and dropdown footer",
+      "legacyTokenSha256": "fb01038811c8d263410fb048bc3732072417f638a9bd7cfdb7b170d759df8b28"
     },
     {
       "path": "15-queue-mobile-my-day.css"
@@ -472,7 +508,7 @@
       "path": "16-my-day-context-indicators.css"
     },
     {
-      "path": "17-compaction-context-rail.css"
+      "path": "17-compaction-background-activity.css"
     },
     {
       "path": "18-artifacts-knowledge-library.css"
@@ -488,6 +524,10 @@
     },
     {
       "path": "23-turn-reading-system.css"
+    },
+    {
+      "path": "23-reading-context-rail.css",
+      "responsibility": "Per-turn context rail: track reservation, rail box, content and fold"
     },
     {
       "path": "23-reading-prose.css"
@@ -517,6 +557,15 @@
       "path": "23-reading-execution.css"
     },
     {
+      "path": "23-reading-tool-summary.css"
+    },
+    {
+      "path": "23-reading-tool-panel.css"
+    },
+    {
+      "path": "23-reading-context.css"
+    },
+    {
       "path": "25-conversation-bar.css"
     },
     {
@@ -528,16 +577,12 @@
   ],
   "deferredSections": [
     {
-      "path": "26-studio-workbench.css",
-      "featureEntry": "frontend/src/features/evolution/ui-components.ts"
+      "path": "26-studio-game.css",
+      "featureEntry": "frontend/src/features/evolution/studio-entry.ts"
     },
     {
       "path": "26-evolution-observations.css",
       "featureEntry": "frontend/src/features/evolution/programs/page.ts"
-    },
-    {
-      "path": "26-studio-command-center.css",
-      "featureEntry": "frontend/src/features/evolution/studio-entry.ts"
     },
     {
       "path": "26-evolution.css",
@@ -646,9 +691,26 @@
       "featureEntry": "frontend/src/features/diagnostics-presenters.ts"
     },
     {
+      "path": "02-inspector-trace.css",
+      "responsibility": "Server trace rows, evidence notices and semantic colors",
+      "featureEntry": "frontend/src/features/diagnostics-presenters.ts"
+    },
+    {
       "path": "02-inspector-responsive.css",
       "responsibility": "inspector responsive",
       "featureEntry": "frontend/src/features/diagnostics-presenters.ts"
+    },
+    {
+      "path": "14-local-control.css",
+      "responsibility": "Local Control dialog capability cards and connection evidence",
+      "legacyTokenSha256": "28856229c1375b9df36c36ccfca3160181be1c1f73975dd5aeee78e085995132",
+      "featureEntry": "frontend/src/features/local-control.ts"
+    },
+    {
+      "path": "14-memory-panel.css",
+      "responsibility": "Memory dialog, cards, editing, installation and responsive layout",
+      "legacyTokenSha256": "d98cd67bf1fc8aef71b327b8ccb1259305ddeb9079748a478b4e4d255a01452e",
+      "featureEntry": "frontend/src/features/memory/panel.ts"
     }
   ]
 }

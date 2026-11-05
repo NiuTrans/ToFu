@@ -28,12 +28,24 @@ the composed-sheet size budgets.
   order.
 - Scope selectors to their component/feature and remove obsolete rules with the
   markup they served. Do not rely on generated hashes or incidental DOM depth.
+- `settings/00-status-colors.css` resolves shared status roles against Settings'
+  paper surface. A chat theme must not change status contrast inside that shell.
 - Conversation reading styles: `23-turn-reading-system.css` owns turn/round
   geometry; `23-reading-{prose,process,activity,evidence,actions,responsive,
-  editor,background,execution}.css` own the named content. Manifest order is
+  editor,background,execution,tool-summary,tool-panel,context,context-rail}.css`
+  own the named content. The tool-summary owner sets shared intent/identity/
+  outcome chrome across native tool families; `23-reading-tool-panel.css`
+  draws a grouped reply's reasoning pill and tool-panel card over it;
+  `23-reading-context.css` draws context-note folds, rows and receipts;
+  `23-reading-context-rail.css` owns the per-turn context rail whole: track
+  reservation, rail track and sticky card, `--tctx-*` section vocabulary and the narrow-pane
+  fold (markup: `conversation/ui/turn-context-rail/`); specialized owners
+  retain evidence bodies. Tool-summary and tool-panel read row inks from the
+  `--tool-row-*` roles in `00-design-tokens.css`: retune tool rows there,
+  never with a per-family or per-theme override. Manifest order is
   explicit; these owners pass the token gate without legacy exemptions.
 - `02-*` owners separate composer geometry/field/controls/menus, shell actions,
-  Update, persisted image receipts and message residency/navigation. Five
+  Update, persisted image receipts and message residency/navigation. Six
   `02-inspector-*` sheets import directly from diagnostics-presenters; the tool
   anchors remain critical. Field and edited Inspector sheets pass strict tokens.
 - `08-*` owners separate Swarm, injections, signals, Scheduler/Timer panels,
@@ -51,6 +63,12 @@ the composed-sheet size budgets.
   separates shared reader chrome from preview sources/editors/proposals. The
   manifest names each direct component importer, covering Paper, chat preview
   and Research reuse without adding these sheets to startup.
+- `14-*` owners separate browser setup, shared capability controls, Memory,
+  Local Control, branches, references, agent evidence, toasts and reasoning.
+  Memory body and Local Control styles import from their feature entries.
+  `14-memory-shell.css` stays before shared mobile rules; global modal-link
+  and toggle rules stay in `14-capability-controls.css`. Memory responsive
+  body rules follow the panel; Skills toast motion belongs to Settings.
 - Preserve keyboard focus, contrast, zoom, reduced motion, touch targets,
   safe-area behavior, long localized text, and narrow/mobile layouts.
 - Treat large images, fonts, animations, and CSS growth as bundle/resource

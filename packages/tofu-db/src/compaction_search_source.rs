@@ -75,7 +75,8 @@ pub(crate) fn page(
                     message.get("role").and_then(Value::as_str)
                 {
                     let turn_id = format!(
-                        "history:{}",
+                        "{}{}",
+                        crate::turn_search_projection::ARCHIVED_SOURCE_PREFIX,
                         serde_json::to_string(&json!([archive, index])).map_err(|_| {
                             invalid_data("archive search identity cannot be encoded")
                         })?

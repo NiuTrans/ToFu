@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.compaction.test_compaction_history_wire import compact as compact
+
 from lib.tasks_pkg.compaction._tokens import (
     _compaction_trigger_threshold,
     _count_tokens_authoritative,
@@ -24,6 +26,53 @@ from lib.tasks_pkg.compaction._tokens import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.usefixtures('compact')
+@pytest.mark.parametrize('mode', ['manual', 'window', 'economic'])
+def test_only_economic_compaction_requires_the_foldable_region_estimate(monkeypatch, mode):
+    from copy import deepcopy
+    from lib.tasks_pkg.compaction._layer2 import _compact as owner
+
+    cold = 'economic-estimate-only-cold-evidence'
+    messages = [
+        {'role': 'system', 'content': 'Preserve scoped policy.'},
+        {'role': 'user', 'content': 'Complete the scoped work.'},
+        {'role': 'assistant', 'content': (cold + ' ') * 1000},
+        {'role': 'user', 'content': 'Continue the remaining work.'},
+    ]
+    original = deepcopy(messages)
+    estimate = owner._estimate_total_tokens
+
+    class EconomicEstimateRequested(RuntimeError):
+        pass
+
+    def count(rows):
+        if (any(cold in str(row.get('content')) for row in rows)
+                and not any(row.get('role') == 'system' for row in rows)):
+            raise EconomicEstimateRequested('foldable-only economic estimate')
+        return estimate(rows)
+
+    monkeypatch.setattr(owner, '_estimate_total_tokens', count)
+    meta = {}
+    options = dict(
+        preserve_budget_tokens=1, _result_meta=meta,
+        _proactive_economic=mode != 'manual',
+        _message_tokens_before=2_000_000 if mode == 'window' else 50_000,
+        _compaction_trigger='window' if mode == 'window' else 'manual',
+        _dispatch_prompt_measure=lambda candidate: 1,
+        _dispatch_prompt_target=1_000_000,
+    )
+    task = {'id': 'economic-estimate-guard', '_userId': 41, 'config': {}}
+    if mode == 'economic':
+        with pytest.raises(EconomicEstimateRequested):
+            owner.execute_compact_tool(messages, task, **options)
+        assert messages == original and meta['compacted'] is False
+    else:
+        owner.execute_compact_tool(messages, task, **options)
+        assert meta['compacted'] is True
+        assert meta['projected_summary_usage_tokens'] == 0
+        assert meta['economics'] is None
 
 
 @pytest.mark.unit
@@ -87,6 +136,9 @@ def test_measured_usage_cache_outranks_higher_heuristic(monkeypatch):
         # measured tier, not an estimate, so calibration stays off.
         'raw_estimate_tokens': 111_552,
         'calibrated': False,
+        # A provider-measured tier is already exact: the provider anchor may
+        # only ever clamp an ESTIMATE tier, so it reports as not applied.
+        'provider_anchored': False,
     }
 
 

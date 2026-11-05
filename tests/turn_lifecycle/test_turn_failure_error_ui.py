@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from tests._runtime_sections import native_module_path, runtime_section
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -22,9 +23,8 @@ ROOT = Path(__file__).resolve().parents[2]
 BUNDLER = ROOT / 'scripts' / 'vite_test_bundle.mjs'
 
 
-@pytest.mark.skipif(not shutil.which('node') or not BUNDLER.is_file(),
-                    reason='node + vite test bundler not installed')
 def test_failed_turn_projection_and_presentation_keep_typed_error(tmp_path):
+    require_node_modules('vite')
     entry = tmp_path / 'turn-failure-entry.ts'
     view_model = ROOT / 'frontend/src/conversation/presentation/conversation-view-model.ts'
     presentation = ROOT / 'frontend/src/core/turn-presentation.ts'
@@ -213,7 +213,6 @@ if (settledVm.finish?.label !== 'Failed'
     assert run.returncode == 0, run.stderr
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
 def test_failed_finish_chip_and_visible_card_use_real_error_kind(tmp_path):
     typed_error_owner = native_module_path(
         'typed-error-envelope-for-finish-ui.js',
@@ -342,7 +341,6 @@ def test_terminal_failure_styles_keep_complete_details_user_collapsible():
     assert 'user-select:text' in surface_footer_body.replace(' ', '')
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
 def test_finish_bar_shows_task_completion_timing(tmp_path):
     """Terminal assistant Turns render settle clock time + wall-clock duration.
 
@@ -420,3 +418,172 @@ console.log(JSON.stringify({ timed, subSecond, hours, noDuration, noClock }));
     assert '1m05s' not in rendered['noDuration']
     assert '完成于' in rendered['noDuration']
     assert 'finish-tag timing' not in rendered['noClock']
+
+
+_REFUSAL_ENVELOPE_JS = r"""{
+  kind:'content_filter', severity:'error', retryable:false,
+  message:'⚠️ 该回复被模型安全过滤器拦截\nResponse blocked by the model\'s safety filter',
+  detail:'claude-opus-5.5 declined the request (category: cyber). No fallback model is configured.',
+  hint:'legacy bilingual refusal hint', model:'claude-opus-5.5',
+  context:'model-refusal', source:'llm-stream', raw:'claude-opus-5.5 declined',
+  titleKey:'err.k.content_filter.titleRefusal', hintKey:'err.k.content_filter.hintRefusal',
+}"""
+
+
+def test_refused_turn_presents_refusal_instead_of_truncation(tmp_path):
+    require_node_modules('vite')
+    entry = tmp_path / 'turn-refusal-entry.ts'
+    view_model = ROOT / 'frontend/src/conversation/presentation/conversation-view-model.ts'
+    finish = ROOT / 'frontend/src/conversation/presentation/turn-finish.ts'
+    entry.write_text(
+        f"export {{ selectConversationViewModel }} from {json.dumps(str(view_model))};\n"
+        f"export {{ presentTurnFinish, isRefusedTurn }} from {json.dumps(str(finish))};\n",
+        encoding='utf-8',
+    )
+    built = tmp_path / 'turn-refusal.cjs'
+    compile_result = subprocess.run(
+        [str(BUNDLER), str(entry), '--bundle', '--format=cjs',
+         '--platform=node', f'--outfile={built}'],
+        cwd=ROOT, capture_output=True, text=True, timeout=60,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+
+    script = f"""
+const {{ selectConversationViewModel, presentTurnFinish, isRefusedTurn }} = require({json.dumps(str(built))});
+const refusal = {_REFUSAL_ENVELOPE_JS};
+const turnWith = (turnId, settlement) => ({{
+  turnId, conversationId:'conv-r', laneId:'main', ordinal:1, actor:'assistant',
+  kind:'reply', status:'truncated', currentAttemptId:null, projectionRevision:3,
+  projection:{{content:''}}, settlement, createdAt:1, updatedAt:1,
+}});
+const stateFor = turn => ({{conversationId:'conv-r',conversationRevision:3,
+  transport:'live',turnsById:{{[turn.turnId]:turn}},laneOrder:{{main:[turn.turnId]}},
+  attemptsById:{{}},queueItems:[],pendingEventsByTurn:{{}},commandPending:{{}},
+  liveRoundUsageByTurn:{{}}}});
+
+const refused = turnWith('turn-refused',
+  {{outcome:'truncated', cause:'model_refusal', error:refusal}});
+const finish = presentTurnFinish(refused);
+if (finish.label !== 'Refused') throw Error('label=' + finish.label);
+if (finish.tone !== 'warning') throw Error('tone=' + finish.tone);
+if (finish.errorKind !== 'content_filter') throw Error('kind=' + finish.errorKind);
+if (finish.detail !== refusal.message) throw Error('detail=' + finish.detail);
+const vm = selectConversationViewModel(stateFor(refused)).mainLane.turns[0];
+const block = vm.blocks.find(b => b.kind === 'activity-event' && b.terminalError);
+if (!block) throw Error('refusal explanation was not rendered');
+if (block.terminalError.context !== 'model-refusal') throw Error('envelope lost');
+if (block.value.summaryKey !== 'activity.error.refused')
+  throw Error('summaryKey=' + block.value.summaryKey);
+
+const legacy = turnWith('turn-legacy',
+  {{outcome:'truncated', cause:'content_filter', error:null}});
+const legacyFinish = presentTurnFinish(legacy);
+if (legacyFinish.label !== 'Refused' || legacyFinish.detail !== 'content_filter')
+  throw Error('historical content-filter turn: ' + JSON.stringify(legacyFinish));
+const legacyVm = selectConversationViewModel(stateFor(legacy)).mainLane.turns[0];
+if (legacyVm.blocks.some(b => b.terminalError))
+  throw Error('an envelope-less settlement invented an error block');
+
+const length = turnWith('turn-length', {{outcome:'truncated', cause:'length'}});
+if (isRefusedTurn(length) || presentTurnFinish(length).label !== 'Truncated')
+  throw Error('length truncation must stay Truncated');
+"""
+    run = subprocess.run(
+        [shutil.which('node'), '-e', script], cwd=ROOT,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert run.returncode == 0, run.stderr
+
+
+def test_refused_finish_chip_says_refused_not_truncated(tmp_path):
+    typed_error_owner = native_module_path(
+        'typed-error-envelope-for-refusal-chip.js',
+        ROOT / 'frontend/src/api/errors.ts',
+    )
+    error_presentation_owner = native_module_path(
+        'typed-error-presentation-for-refusal-chip.js',
+        ROOT / 'frontend/src/error-presentation.ts',
+    )
+    finish_owner = runtime_section('ui/finish_info.js')
+    fn_start = finish_owner.index('function renderFinishInfo(msg, turnId) {')
+    fn_end_marker = (
+        '  if (parts.length === 0) return "";\n'
+        '  return `<div class="message-finish">${parts.join("")}</div>`;\n'
+        '}'
+    )
+    fn_end = finish_owner.index(fn_end_marker, fn_start) + len(fn_end_marker)
+    source = (
+        Path(native_module_path('refusal-chip-token-usage.js',
+                                ROOT / 'frontend/src/token-usage.ts')).read_text(encoding='utf-8')
+        + Path(native_module_path('refusal-chip-turn-finish.js',
+                                  ROOT / 'frontend/src/conversation/presentation/turn-finish.ts')).read_text(encoding='utf-8')
+        + finish_owner[fn_start:fn_end]
+    )
+    source_path = tmp_path / 'refusal-chip-render.js'
+    source_path.write_text(source, encoding='utf-8')
+
+    harness = tmp_path / 'refusal-chip-harness.js'
+    harness.write_text(r"""
+const fs = require('fs');
+global.window = global;
+global.runtimeScope = global;
+global.escapeHtml = (value) => String(value ?? '')
+  .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;');
+const copy = {
+  'err.k.content_filter.chip':'内容过滤',
+  'err.k.content_filter.titleRefusal':'模型拒绝回答',
+  'err.k.content_filter.hintRefusal':'同一模型通常会再次拒绝',
+  'err.k._howToFix':'解决办法：',
+  'err.k._modelSuffix':'（模型：{model}）',
+  'finishInfo.reasonRefused':'已拒绝',
+  'finishInfo.reasonFailed':'生成失败',
+  'finishInfo.reasonFailedTip':'服务端没有记录具体错误说明',
+};
+global.t = (key, params) => {
+  let value = Object.hasOwn(copy, key) ? copy[key] : key;
+  for (const [name, replacement] of Object.entries(params || {}))
+    value = value.replaceAll('{' + name + '}', String(replacement));
+  return value;
+};
+global.Icon = () => '';
+global._detectBrand = () => 'generic';
+global._brandSvg = () => '';
+global._isThinkingCapable = () => false;
+global._providerDisplayName = (value) => String(value || '');
+global.calcCostCny = () => ({ costCny:0 });
+global._subscriptionQuotaForMessage = () => null;
+global.renderWaitingOnBlock = () => '';
+
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+global.isTypedErrorEnvelope = global.isErrorEnvelope;
+global.normalizeTypedErrorEnvelope = global.normalizeErrorEnvelope;
+eval(fs.readFileSync(process.argv[3], 'utf8'));
+Object.assign(global, createErrorEnvelopePresentation({
+  translate: global.t,
+  iconHtml: global.Icon,
+}));
+eval(fs.readFileSync(process.argv[4], 'utf8'));
+global.ConversationTurnStore = { finishPresentation: (turn) => presentTurnFinish(turn) };
+const refusal = """ + _REFUSAL_ENVELOPE_JS + r""";
+const chip = (settlement) => renderFinishInfo({
+  _turnStatus:'truncated', _turnSettlement:{outcome:'truncated', ...settlement},
+}, false);
+console.log(JSON.stringify({
+  refused: chip({cause:'model_refusal', error:refusal}),
+  legacy: chip({cause:'content_filter', error:null}),
+  length: chip({cause:'length'}),
+}));
+""", encoding='utf-8')
+    run = subprocess.run(
+        [shutil.which('node'), str(harness), typed_error_owner,
+         error_presentation_owner, str(source_path)],
+        cwd=ROOT, capture_output=True, text=True, timeout=30,
+    )
+    assert run.returncode == 0, run.stderr
+    rendered = json.loads(run.stdout.strip().splitlines()[-1])
+    assert '已拒绝' in rendered['refused']
+    assert 'data-error-kind="content_filter"' in rendered['refused']
+    assert '模型拒绝回答' in rendered['refused']
+    assert 'Truncated' not in rendered['refused']
+    assert '已拒绝' in rendered['legacy'] and 'Truncated' not in rendered['legacy']
+    assert 'Truncated' in rendered['length']

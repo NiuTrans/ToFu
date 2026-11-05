@@ -26,7 +26,8 @@ import re
 
 from lib.log import get_logger
 from lib.production.research import RESEARCH_RESUME_TTL_S
-from lib.production.stages import Stage, run_independent_stages, run_stages
+from lib.production.stages import Stage
+from lib.production.workflows import AgentToolWorkflow, WorkflowNode, run_workflow
 
 logger = get_logger(__name__)
 
@@ -376,6 +377,13 @@ def longform_recipe_stages(sections: list | None = None, *,
     return stages
 
 
+def _report_workflow(name: str, stages: list, *, mode='sequence') -> AgentToolWorkflow:
+    """Fixed planning/section/publication nodes; outline data sizes the fan-out."""
+    return AgentToolWorkflow('longform.' + name, '1', tuple(
+        WorkflowNode(stage, 'deterministic' if stage.name in ('research', 'assemble') else 'model',
+                     {'type': 'object'}) for stage in stages), mode=mode)
+
+
 def build_report_from_topic(topic: str, workdir: str, *, lang: str = 'zh',
                             depth: str = 'standard', abort_event=None,
                             emit=None) -> dict:
@@ -397,14 +405,16 @@ def build_report_from_topic(topic: str, workdir: str, *, lang: str = 'zh',
     ctx['max_429_attempts'] = resolve_resource_budget(
         'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', maximum=64)
 
-    run_stages(longform_recipe_stages(ctx=ctx), ctx, state_path=state_path,
-               emit=emit, abort_check=abort_check)
+    run_workflow(_report_workflow('planning', longform_recipe_stages(ctx=ctx)),
+                 ctx, state_path=state_path, emit=emit, abort_check=abort_check)
     section_stages = _section_stages(ctx)
-    run_independent_stages(
-        section_stages, ctx, state_path=state_path,
+    run_workflow(
+        _report_workflow('sections', section_stages, mode='independent'),
+        ctx, state_path=state_path,
         dependent_stage_names=('assemble',), emit=emit,
         abort_check=abort_check)
-    artifacts = run_stages(
-        [_assemble_stage(ctx)], ctx, state_path=state_path, emit=emit,
+    artifacts = run_workflow(
+        _report_workflow('delivery', [_assemble_stage(ctx)]),
+        ctx, state_path=state_path, emit=emit,
         abort_check=abort_check)
     return artifacts['assemble']

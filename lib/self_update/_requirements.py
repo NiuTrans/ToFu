@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import threading
 import time
 from typing import Optional
@@ -57,11 +56,13 @@ def _requirements_changed(before_sha: Optional[str],
 
 
 def _install_requirements(on_line=None) -> dict:
-    """Run ``pip install -r requirements.txt`` with the current interpreter.
+    """Run ``pip install -r requirements.txt`` for the server's environment.
 
-    Returns ``{'ok': bool, 'detail': str}``. Uses ``sys.executable -m pip``
-    so the install targets the SAME interpreter the server runs under
-    (critical inside a conda env). Never raises — failures are captured.
+    Returns ``{'ok': bool, 'detail': str}``. Uses the interpreter that owns
+    the server's packages: ``sys.executable``, or the source environment's
+    interpreter when the worker runs from a local runtime replica (a replica
+    install would diverge and vanish on rebuild). Never raises — failures are
+    captured.
 
     Args:
         on_line: Optional ``fn(line: str)`` invoked for each pip output line
@@ -76,7 +77,8 @@ def _install_requirements(on_line=None) -> dict:
                     _REQUIREMENTS)
         return {'ok': True, 'detail': 'no requirements.txt'}
 
-    cmd = [sys.executable, '-m', 'pip', 'install', '--progress-bar', 'off',
+    from serverctl_pkg.runtime_replica import authoritative_interpreter
+    cmd = [authoritative_interpreter(), '-m', 'pip', 'install', '--progress-bar', 'off',
            '-r', req_path]
     logger.info('[Update] Installing dependencies: %s', ' '.join(cmd))
     with log_context('self_update.pip_install', logger=logger):

@@ -11,6 +11,10 @@ OPERATIONS = {
     # A claim/heartbeat is a live CAS. Receipts would replay an obsolete lease.
     'worker_job.claim_next': ops.OperationSpec(
         'command', False, ops._worker_job_claim_next),
+    # Read-only claimability: idle workers learn "nothing now, next in N ms"
+    # without a write transaction; claim_next re-validates what it claims.
+    'worker_job.claim_horizon': ops.OperationSpec(
+        'query', False, ops._worker_job_claim_horizon),
     'worker_job.defer': ops.OperationSpec(
         'command', False, ops._worker_job_defer),
     'worker_job.heartbeat': ops.OperationSpec(

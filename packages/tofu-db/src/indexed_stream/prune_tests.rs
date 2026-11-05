@@ -66,6 +66,7 @@ fn live_events(db: &AuthorityDatabase, task_id: &str) -> io::Result<usize> {
             types: vec![],
             type_prefixes: vec![],
             payload_types: None,
+            inspector_projection: false,
         },
     )?;
     let page: Value = serde_json::from_slice(&raw)?;

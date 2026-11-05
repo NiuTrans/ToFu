@@ -1,6 +1,6 @@
 """Checkpointed, capability-neutral stage graphs for long productions.
 
-A stage is a 7-tuple:
+A stage declares its work and checkpoint policy:
 
     Stage(name, run, gate, retry, resumable, resume_ttl_s, checkpoint_version)
 
@@ -16,6 +16,8 @@ A stage is a 7-tuple:
                                  upstream stage invalidates its whole suffix.
   * ``checkpoint_version``       optional semantic revision. A mismatch also
                                  invalidates that stage and its whole suffix.
+  * ``checkpoint_contract``      optional authored workflow fingerprint;
+                                 validated legacy checkpoints adopt it in place.
 
 Each passing artifact is committed before the next stage begins. A restart
 resumes at the first unfinished, stale, or contract-invalid stage. Invalidating
@@ -72,6 +74,9 @@ class Stage:
     resumable: bool = True
     resume_ttl_s: Optional[float] = None
     checkpoint_version: str = ''
+    # Optional fixed-workflow lineage. Legacy checkpoints are adopted only
+    # after the current gate validates them, preserving their original age.
+    checkpoint_contract: str = ''
 
 
 # ── State file (the checkpoint) ───────────────────────────
@@ -112,6 +117,8 @@ def _commit(state_path: str, state: dict, stage: Stage, artifact: Any) -> None:
         'at': round(time.time(), 3),
         'checkpoint_version': stage.checkpoint_version,
     }
+    if stage.checkpoint_contract:
+        entries[stage.name]['checkpoint_contract'] = stage.checkpoint_contract
     state['version'] = STATE_VERSION
     try:
         write_json_atomic(state_path, state)
@@ -131,6 +138,9 @@ def _checkpoint_reusable(state: dict, stage: Stage, now: float) -> tuple[bool, s
     if (stage.checkpoint_version and
             entry.get('checkpoint_version') != stage.checkpoint_version):
         return False, 'version changed'
+    if (stage.checkpoint_contract and entry.get('checkpoint_contract') and
+            entry['checkpoint_contract'] != stage.checkpoint_contract):
+        return False, 'workflow contract changed'
     if stage.resume_ttl_s is not None:
         try:
             age = max(0.0, now - float(entry['at']))
@@ -141,6 +151,62 @@ def _checkpoint_reusable(state: dict, stage: Stage, now: float) -> tuple[bool, s
         if age > ttl:
             return False, f'expired ({age:.0f}s > {ttl:.0f}s)'
     return True, ''
+
+
+def _verify_artifact(stage, ctx, artifact, *, aborted, abort_exceptions,
+                     checkpoint=False):
+    """Validate current evidence without turning read failure into producer replay."""
+    if aborted():
+        raise StageAborted(f'aborted before validating stage {stage.name!r}')
+    try:
+        errors = list(stage.gate(ctx, artifact) or []) if stage.gate else []
+    except (StageAborted, *abort_exceptions):
+        raise
+    except Exception as exc:
+        if aborted():
+            raise StageAborted(f'aborted while validating stage {stage.name!r}') from exc
+        phase = 'checkpoint' if checkpoint else 'artifact'
+        raise StageFailed(stage.name,
+                          f'{phase} verification failed: {type(exc).__name__}: {exc}') from exc
+    if aborted():
+        raise StageAborted(f'aborted after validating stage {stage.name!r}')
+    return errors
+
+
+def _checked_checkpoint(state, stage, ctx, *, state_path, aborted, abort_exceptions,
+                        emit, index, total):
+    reusable, reason = _checkpoint_reusable(state, stage, time.time())
+    if not stage.resumable or not reusable:
+        return reusable, reason
+    try:
+        errors = _verify_artifact(stage, ctx, stage_artifact(state, stage.name),
+            aborted=aborted, abort_exceptions=abort_exceptions, checkpoint=True)
+        if not errors:
+            _adopt_checkpoint_contract(state_path, state, stage)
+            if aborted():
+                raise StageAborted(f'aborted after adopting stage {stage.name!r}')
+    except StageFailed as exc:
+        emit({'type': 'stage_failed', 'stage': stage.name,
+              'index': index, 'total': total, 'detail': exc.detail,
+              'errors': exc.errors[:4]})
+        raise
+    if errors:
+        return False, 'checkpoint gate rejected: ' + '; '.join(str(error) for error in errors[:4])
+    return True, ''
+
+
+def _adopt_checkpoint_contract(state_path: str, state: dict, stage: Stage) -> None:
+    """Stamp a validated legacy checkpoint without refreshing its age."""
+    if stage.checkpoint_contract and not state['stages'][stage.name].get('checkpoint_contract'):
+        from lib.json_store import write_json_atomic
+        entry = state['stages'][stage.name]
+        adopted = dict(entry, checkpoint_contract=stage.checkpoint_contract)
+        state['stages'][stage.name] = adopted
+        try:
+            write_json_atomic(state_path, state)
+        except Exception as exc:
+            state['stages'][stage.name] = entry
+            raise StageFailed(stage.name, 'checkpoint contract adoption failed') from exc
 
 
 def _invalidate_suffix(state_path: str, state: dict, stages: list,
@@ -197,7 +263,8 @@ def _execute_stage(stage: Stage, ctx: dict, *, index: int, total: int,
                            stage.name, attempt, attempts, exc, exc_info=True)
             continue
 
-        errors = list(stage.gate(ctx, artifact) or []) if stage.gate else []
+        errors = _verify_artifact(stage, ctx, artifact, aborted=aborted,
+                                  abort_exceptions=abort_exceptions)
         if errors:
             last_detail = 'gate rejected the artifact'
             last_errors = errors
@@ -251,8 +318,10 @@ def run_stages(stages: list, ctx: dict, *, state_path: str,
         if _aborted():
             raise StageAborted(f'aborted before stage {stage.name!r}')
 
-        reusable, stale_reason = _checkpoint_reusable(
-            state, stage, time.time())
+        reusable, stale_reason = _checked_checkpoint(
+            state, stage, ctx, state_path=state_path,
+            aborted=_aborted, abort_exceptions=abort_exceptions,
+            emit=_emit, index=index, total=total)
         if stage.resumable and reusable:
             artifacts[stage.name] = stage_artifact(state, stage.name)
             logger.info('[Stages] %s: resumed from checkpoint (skipped)', stage.name)
@@ -361,8 +430,10 @@ def run_independent_stages(
         if _aborted():
             raise StageAborted(
                 f'aborted before independent stage {stage.name!r}')
-        reusable, stale_reason = _checkpoint_reusable(
-            state, stage, time.time())
+        reusable, stale_reason = _checked_checkpoint(
+            state, stage, ctx, state_path=state_path,
+            aborted=_aborted, abort_exceptions=abort_exceptions,
+            emit=_emit, index=index, total=total)
         if stage.resumable and reusable:
             artifacts[stage.name] = stage_artifact(state, stage.name)
             logger.info('[Stages] %s: resumed independent checkpoint (skipped)',

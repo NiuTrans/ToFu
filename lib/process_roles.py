@@ -8,6 +8,8 @@ new owner cannot silently start it in every Kubernetes replica.
 
 from __future__ import annotations
 
+# pyright: strict
+
 from collections.abc import Iterable
 
 

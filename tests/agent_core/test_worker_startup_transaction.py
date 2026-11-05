@@ -227,3 +227,88 @@ def test_initializer_exit_before_start_returns_does_not_resurrect_worker(monkeyp
         assert pool.scheduling_snapshot()['residentThreads']==0
     finally:release.set();pool.shutdown(wait=True)
     assert not ran.is_set()
+
+
+def test_blocked_physical_start_does_not_delay_another_submitter(monkeypatch):
+    pool = kernel('startup-isolated')
+    start_entered, start_release, completed = threading.Event(), threading.Event(), threading.Event()
+    stalled, finished_at = [], []
+    real = threading.Thread.start
+
+    def start(thread):
+        if thread.name == 'startup-isolated_0':
+            start_entered.set()
+            assert start_release.wait(5)
+        return real(thread)
+
+    def second():
+        if pool.submit(lambda: 'second').result(5) == 'second':
+            finished_at.append(time.monotonic())
+            completed.set()
+
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    blocked = threading.Thread(target=lambda: stalled.append(pool.submit(lambda: 'stalled')))
+    other = threading.Thread(target=second)
+    blocked.start()
+    try:
+        assert start_entered.wait(2), 'first job must need a physical start'
+        began = time.monotonic()
+        other.start()
+        done = completed.wait(2)
+        released = start_release.is_set()
+        start_release.set()
+        assert completed.wait(5)
+        print({'second_submitter_round_trip_ms': round((finished_at[0] - began) * 1000, 3),
+               'completed_while_other_start_blocked': done and not released})
+        assert done and not released, 'second submitter waited behind another Thread.start()'
+    finally:
+        start_release.set()
+        for thread in (blocked, other):
+            if thread.ident is not None:
+                thread.join(5)
+        pool.shutdown(wait=True)
+    assert stalled[0].result(1) == 'stalled'
+
+
+def test_admission_never_relies_on_another_owners_unresolved_start(monkeypatch):
+    pool = kernel('startup-owned')
+    start_entered, start_release = threading.Event(), threading.Event()
+    refusals, admitted = [], []
+    real = threading.Thread.start
+
+    def start(thread):
+        if thread.name == 'startup-owned_0':
+            start_entered.set()
+            assert start_release.wait(5)
+            raise OSError('withdrawn owner start refused')
+        return real(thread)
+
+    def withdrawn_owner():
+        try:
+            pool.submit_task('withdrawn', lambda: None)
+        except OSError as error:
+            refusals.append(error)
+
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    owner = threading.Thread(target=withdrawn_owner)
+    owner.start()
+    try:
+        assert start_entered.wait(2), 'withdrawn job must need a physical start'
+        assert pool.cancel_task('withdrawn')
+        # The withdrawn owner's unresolved reservation now looks surplus, but
+        # its start fails: the next job must own a carrier of its own.
+        submitter = threading.Thread(
+            target=lambda: admitted.append(pool.submit_task('admitted', lambda: 'ran')))
+        submitter.start()
+        submitter.join(2)
+        assert admitted, 'admission waited behind another Thread.start()'
+        start_release.set()
+        assert admitted[0].result(2) == 'ran'
+    finally:
+        start_release.set()
+        owner.join(5)
+        if 'submitter' in locals():
+            submitter.join(5)
+        pool.shutdown(wait=True)
+    assert len(refusals) == 1
+    assert pool.scheduling_snapshot()['startingWorkers'] == 0

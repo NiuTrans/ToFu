@@ -202,12 +202,15 @@ def test_skills_index_marks_explicit_only_and_shadowed(isolated):
 
     block = build_skills_index(project_path=proj)
     assert '- quiet (project) explicit-only: guide for quiet tasks' in block
-    assert '- shared (project): guide for shared tasks' in block
+    # Skills are owner-global (owner decision 2026-10-31): the global package
+    # wins its id even inside a project that carries a same-id copy.
+    assert '- shared (global): guide for shared tasks' in block
+    assert '- shared (project)' not in block
     # Codex-style trigger rules in the header.
     assert 'must use that guide' in block
     assert 'Do not carry a guide' in block
     assert 'explicit-only activate' in block
-    # The surviving project package names its masked same-id duplicate.
+    # The surviving global package names its masked same-id project copy.
     assert 'shared shadows same-id package(s)' in block
     # Byte-stable with the new annotations (prompt-cache contract).
     assert build_skills_index(project_path=proj) == block
@@ -408,7 +411,7 @@ def test_tool_registration_surface(isolated):
     # No base tools / lean mode → no skill surface. Zero installed packages
     # still gets catalog discovery, so installation can be requested.
     assert _build_skills(
-        SimpleNamespace(lean=False, has_base_tools=False)) == []
+        SimpleNamespace(lean=False, has_base_tools=False, cfg={})) == []
     assert _build_skills(
         SimpleNamespace(lean=True, has_base_tools=True)) == []
     assert _build_skill_install(

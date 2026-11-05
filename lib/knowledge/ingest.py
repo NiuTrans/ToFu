@@ -592,71 +592,13 @@ def _ocr_scanned_pdf(
     max_chars: int,
 ) -> tuple[str, list[str]]:
     """Best-effort local OCR through PyMuPDF/Tesseract; never required."""
-    warnings: list[str] = []
-    char_limit = max(1, int(max_chars))
+    from .ocr import recognize_pdf
+
     try:
-        try:
-            import pymupdf
-        except ImportError:
-            import fitz as pymupdf
-        from lib.pdf_parser._common import PYMUPDF_LOCK
-        with PYMUPDF_LOCK:
-            doc = pymupdf.open(stream=raw, filetype='pdf')
-            try:
-                total = doc.page_count
-                requested_pages = total if page_limit is None else max(0, int(page_limit))
-                pages_to_process = min(total, requested_pages)
-                parts: list[str] = []
-                used_chars = 0
-                text_limit_reached = False
-                for page_no in range(pages_to_process):
-                    if used_chars >= char_limit:
-                        break
-                    page = doc[page_no]
-                    text = ''
-                    for language in ('chi_sim+eng', 'eng'):
-                        try:
-                            tp = page.get_textpage_ocr(
-                                language=language, dpi=150, full=True)
-                            text = page.get_text('text', textpage=tp) or ''
-                            if text.strip():
-                                break
-                        except Exception as exc:
-                            logger.debug('[Knowledge] OCR page %d (%s) failed: %s',
-                                         page_no + 1, language, exc)
-                    if text.strip():
-                        rendered = f'## Page {page_no + 1}\n\n{text.strip()}'
-                        separator_chars = 2 if parts else 0
-                        remaining = max(
-                            0, char_limit - used_chars - separator_chars)
-                        if len(rendered) > remaining:
-                            if remaining:
-                                parts.append(rendered[:remaining])
-                            used_chars = char_limit
-                            text_limit_reached = True
-                            warnings.append(
-                                'OCR stopped at the '
-                                f'{char_limit:,}-character text budget')
-                            break
-                        parts.append(rendered)
-                        used_chars += separator_chars + len(rendered)
-                        if (used_chars >= char_limit
-                                and page_no + 1 < pages_to_process):
-                            text_limit_reached = True
-                            warnings.append(
-                                'OCR stopped at the '
-                                f'{char_limit:,}-character text budget')
-                            break
-                if total > requested_pages and not text_limit_reached:
-                    warnings.append(
-                        f'OCR read {pages_to_process} of {total} pages; remaining pages were not OCRed')
-                return '\n\n'.join(parts), warnings
-            finally:
-                doc.close()
+        return recognize_pdf(raw, page_limit=page_limit, max_chars=max_chars)
     except Exception as exc:
         logger.info('[Knowledge] local PDF OCR unavailable: %s', exc)
-        warnings.append('Scanned PDF OCR was unavailable; image-only pages may be missing')
-        return '', warnings
+        return '', ['Scanned PDF OCR was unavailable; image-only pages may be missing']
 
 
 def _extract_admitted_pdf(raw: bytes, kind: str, limit: int) -> dict:
@@ -732,6 +674,7 @@ def extract(
     *,
     _depth: int = 0,
     _pdf_already_admitted: bool = False,
+    _defer_image_ocr: bool = False,
     html_projector: HtmlProjector | None = None,
 ) -> dict:
     """Extract text/provenance, borrowing an optional caller-owned HTML projector."""
@@ -745,7 +688,7 @@ def extract(
 
     if kind in IMAGE_EXTENSIONS:
         try:
-            asset = standalone_image(raw, filename)
+            asset = standalone_image(raw, filename, ocr=not _defer_image_ocr)
         except KnowledgeImageError as exc:
             raise KnowledgeIngestError(str(exc)) from exc
         return {

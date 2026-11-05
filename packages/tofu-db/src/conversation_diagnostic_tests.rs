@@ -445,6 +445,33 @@ fn diagnostic_projection_revision_and_head_budgets_fail_closed() {
 }
 
 #[test]
+fn diagnostic_live_text_tail_is_a_retryable_conflict_not_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = AuthorityDatabase::initialize(dir.path()).unwrap();
+    seed(&mut db, json!({"content":"base"}), true);
+    // A streaming Turn: one structural patch plus two folded text revisions.
+    replace_large(&mut db, |turn| {
+        turn["_projectionHead"]["textTail"] = json!({
+            "format":"tofu.turn-text-tail/v1","revisions":2,"projectionBytes":64,
+            "content":{"pages":1,"bytes":6,"lastPageBytes":6},
+            "thinking":{"pages":0,"bytes":0,"lastPageBytes":0}});
+        turn["projectionRevision"] = json!(4);
+    });
+    assert_eq!(
+        query(&mut db, 11, payload("turn")).unwrap_err().code(),
+        "database_conflict"
+    );
+    // Without the tail the same revision drift remains a corruption fence.
+    replace_large(&mut db, |turn| {
+        turn["_projectionHead"].as_object_mut().unwrap().remove("textTail");
+    });
+    assert_eq!(
+        query(&mut db, 11, payload("turn")).unwrap_err().code(),
+        "database_integrity"
+    );
+}
+
+#[test]
 fn diagnostic_source_hint_rechecks_snapshot_and_turn_envelope() {
     let dir = tempfile::tempdir().unwrap();
     let mut db = AuthorityDatabase::initialize(dir.path()).unwrap();
@@ -998,6 +1025,70 @@ fn diagnostic_chunk_requires_canonical_source_token_in_compiler_and_ir() {
     );
     request.source_token = None;
     assert!(ir.validate().is_err());
+}
+
+fn set_conversation_revision(db: &mut AuthorityDatabase, revision: u64) {
+    let mut tx = db.begin(7, 11).unwrap();
+    let key = EntityKey::new(
+        7,
+        11,
+        crate::generated_tofudb_ir::CONVERSATION_DOCUMENT_NAMESPACE,
+        b"conv",
+    )
+    .unwrap();
+    let mut header: Value = serde_json::from_slice(
+        &versioned_document::get_value_with_version(db, &mut tx, &key, "conversations", "conv")
+            .unwrap()
+            .unwrap()
+            .0,
+    )
+    .unwrap();
+    header["rev"] = json!(revision);
+    restore(db, &mut tx, key, "conversations", "conv", header);
+    db.commit(tx).unwrap();
+}
+
+#[test]
+fn diagnostic_source_token_survives_unrelated_conversation_writes() {
+    // The token binds the Turn's source generation, not the conversation
+    // revision: a reader continues a download, or re-verifies a complete copy,
+    // at a later revision while every read stays fenced on the current one.
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = AuthorityDatabase::initialize(dir.path()).unwrap();
+    seed(&mut db, json!({"content": "x".repeat(200_000)}), true);
+    let before = query(&mut db, 11, payload("turn")).unwrap();
+    let first = query(&mut db, 11, chunk_payload(&before)).unwrap();
+    assert!(!first["nextOffset"].is_null());
+    set_conversation_revision(&mut db, 13);
+    assert_eq!(
+        query(&mut db, 11, chunk_payload(&before)).unwrap_err().code(),
+        "database_conflict"
+    );
+    let mut descriptor = payload("turn");
+    descriptor["revision"] = json!(13);
+    let after = query(&mut db, 11, descriptor).unwrap();
+    assert_eq!(after["source"], before["source"]);
+    assert_eq!(after["patches"], before["patches"]);
+    for cold in [false, true] {
+        if cold {
+            source_plan::clear();
+        }
+        let mut rest = chunk_payload(&before);
+        rest["revision"] = json!(13);
+        rest["offset"] = first["nextOffset"].clone();
+        let chunk = query(&mut db, 11, rest).unwrap();
+        assert_eq!(chunk["revision"], 13);
+        assert_eq!(chunk["sourceToken"], before["source"]["token"]);
+        assert_eq!(chunk["offset"], first["nextOffset"]);
+    }
+    // Any change to the Turn's own envelope retires the token, revision or not.
+    replace_large(&mut db, |turn| turn["updatedAt"] = json!(200));
+    let mut stale = chunk_payload(&before);
+    stale["revision"] = json!(13);
+    assert_eq!(
+        query(&mut db, 11, stale).unwrap_err().code(),
+        "database_conflict"
+    );
 }
 
 fn replace_checkpoint(db: &mut AuthorityDatabase, mutate: impl FnOnce(&mut Value)) {

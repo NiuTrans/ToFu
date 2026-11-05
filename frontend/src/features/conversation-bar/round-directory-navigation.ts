@@ -10,6 +10,7 @@ const PAGE_SIZE = 50;
  * bounded number of times instead of surfacing a failure the reader cannot act
  * on. */
 const ROUND_DIRECTORY_HEAD_RETRIES = 3;
+const JUMP_RESOLVE_ATTEMPTS = 3;
 export interface ExactNavigationPorts {
   host: HTMLElement;
   translate(key: string, params?: Record<string, string | number>): string;
@@ -52,7 +53,14 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
   const disclosure = createAnchoredDisclosure({ anchor: position, panel });
   host.replaceChildren(previous, position, next);
   let conversationId = ''; let state: TurnState | null = null;
-  let version = ''; let generation = 0; let disposed = false; let busy = false;
+  let version = ''; let generation = 0; let session = 0; let disposed = false; let busy = false;
+  /* Rank reads also run in the background (scroll anchoring, head refresh),
+   * so a jump arriving during one waits for its slot rather than being
+   * dropped; only a jump in progress disables the jump controls. */
+  let jumping = false; let pendingJump: number | null = null;
+  /* A failed jump stays reported until the reader acts again: the refresh
+   * that a rank change starts must not erase the only sign it failed. */
+  let failure: 'read' | 'jump' | null = null;
   let total: number | null = null; let activeId = ''; let activeRound: number | null = null;
   let page = 0; let entries: ConversationRoundEntry[] = [];
   // Publication generation fences results; slot identity owns cleanup even
@@ -61,22 +69,25 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
   let slot: object | null = null; let queued: number | null = null;
   function release(owned: object): void {
     if (slot !== owned) return;
-    slot = null; busy = false;
+    slot = null; busy = false; jumping = false;
     if (disposed) return;
+    const jump = pendingJump; pendingJump = null;
     const next = queued; queued = null;
     paint();
-    if (next !== null) void readPage(next);
+    if (jump !== null) { queued = next; void navigate(jump); }
+    else if (next !== null) void readPage(next);
   }
   const ranks = new Map<string, number>();
   const current = (id: string, token: number): boolean => !disposed && id === conversationId && token === generation;
+  const present = (id: string, token: number): boolean => !disposed && id === conversationId && token === session;
 
   function paint(): void {
     label.textContent = t('conversationBar.turns');
     if (total === 0) activeRound = 0;
     readout.textContent = `${activeRound ?? '—'} / ${total ?? '—'}`;
     readout.style.width = `${2 * String(Math.max(total ?? 1, 1)).length + 3}ch`;
-    previous.disabled = busy || activeRound === null || activeRound <= 1;
-    next.disabled = busy || activeRound === null || total === null || activeRound >= total;
+    previous.disabled = jumping || activeRound === null || activeRound <= 1;
+    next.disabled = jumping || activeRound === null || total === null || activeRound >= total;
     previous.title = t('conversationBar.previousTurn'); previous.setAttribute('aria-label', previous.title);
     next.title = t('conversationBar.nextTurn'); next.setAttribute('aria-label', next.title);
     position.disabled = !conversationId || total === 0;
@@ -85,8 +96,9 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
     first.textContent = t('conversationBar.firstTurn'); last.textContent = t('conversationBar.lastTurn');
     go.textContent = t('conversationBar.goToTurn'); input.setAttribute('aria-label', t('conversationBar.turnNumber'));
     input.max = String(total ?? 1);
-    for (const node of [first, last, go, input]) node.disabled = busy || !total;
-    retry.hidden = !errorNote.textContent; retry.disabled = busy; retry.textContent = t('conversationBar.retryHistory');
+    for (const node of [first, last, go, input]) node.disabled = jumping || !total;
+    errorNote.textContent = failure ? t('conversationBar.historyFailed') : '';
+    retry.hidden = !failure; retry.disabled = busy; retry.textContent = t('conversationBar.retryHistory');
     older.textContent = t('conversationBar.olderTurns'); newer.textContent = t('conversationBar.newerTurns');
     panel.setAttribute('aria-label', t('conversationBar.jumpToTurn'));
     older.disabled = busy || page === 0; newer.disabled = busy || total === null || (page + 1) * PAGE_SIZE >= total;
@@ -96,7 +108,7 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
     for (const node of Array.from(list.children)) if (!keep.has((node as HTMLElement).dataset.turnId || '')) node.remove();
     entries.forEach((entry, offset) => {
       const row = existing.get(entry.turnId) ?? button('turn-jump-entry'); row.dataset.turnId = entry.turnId;
-      row.dataset.roundNumber = String(entry.roundNumber); row.disabled = busy;
+      row.dataset.roundNumber = String(entry.roundNumber); row.disabled = jumping;
       const projection = state?.turnsById[entry.turnId]?.projection;
       const text = String(projection?.content || projection?.segments?.find(segment => segment.type === 'text')?.text || '').trim().slice(0, 120);
       row.textContent = [t('conversationBar.turnPosition', { current: entry.roundNumber, total: total ?? 0 }), text,
@@ -136,7 +148,7 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
     if (busy) { queued = wantedPage; return; }
     const id = conversationId; const token = generation;
     const owned = {}; slot = owned;
-    busy = true; errorNote.textContent = ''; paint();
+    busy = true; paint();
     let refreshAnchor = false;
     try {
       const result = await readFenced(id, () =>
@@ -150,35 +162,48 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
       ranks.clear(); for (const entry of entries) ranks.set(entry.turnId, entry.roundNumber);
       if (refreshAnchor) activeRound = ranks.get(activeId) ?? null;
       else if (activeId && activeRound !== null) ranks.set(activeId, activeRound);
-    } catch { if (current(id, token)) errorNote.textContent = t('conversationBar.historyFailed'); }
+      if (failure === 'read') failure = null;
+    } catch { if (current(id, token) && failure !== 'jump') failure = 'read'; }
     finally {
       if (current(id, token) && refreshAnchor && activeRound === null && activeId && queued === null) queued = page;
       release(owned);
     }
   }
+  /* Ranks can change under a jump: a Turn is created or deleted, or history
+   * repair replaces the projection while a reply streams. The round is then
+   * re-resolved under the new ranks instead of dropping the jump, which left
+   * the reader with nothing happening. Only leaving the conversation abandons
+   * it; past the bound the latest resolution stands. */
   async function navigate(round: number): Promise<void> {
-    if (busy || total === null || !Number.isSafeInteger(round) || round < 1 || round > total) return;
-    const id = conversationId; const token = generation;
+    if (jumping || total === null || !Number.isSafeInteger(round) || round < 1 || round > total) return;
+    failure = null;
+    if (busy) { pendingJump = round; paint(); return; }
+    const id = conversationId; const token = session;
     const owned = {}; slot = owned;
-    busy = true; errorNote.textContent = ''; paint();
+    busy = true; jumping = true; paint();
     try {
-      // Revalidate the rank under the current head even if its body was loaded.
-      const result = await readFenced(id, () => directory(id, round - 1, 1));
-      if (!current(id, token)) return;
-      const entry = result.entries[0];
-      if (!entry || entry.roundNumber !== round) throw new Error('Round was deleted');
-      await ports.hydrateRound?.(id, entry);
-      if (!current(id, token)) return;
-      total = result.totalRounds; activeId = entry.turnId; activeRound = round;
-      ranks.set(activeId, round); disclosure.close(true); ports.scrollToTurn(activeId);
-    } catch { if (current(id, token)) errorNote.textContent = t('conversationBar.historyFailed'); }
+      for (let attempt = 1; ; attempt++) {
+        const revision = ports.directoryKey?.(id);
+        // Revalidate the rank under the current head even if its body was loaded.
+        const result = await readFenced(id, () => directory(id, round - 1, 1));
+        if (!present(id, token)) return;
+        const entry = result.entries[0];
+        if (!entry || entry.roundNumber !== round) throw new Error('Round was deleted');
+        await ports.hydrateRound?.(id, entry);
+        if (!present(id, token)) return;
+        if (ports.directoryKey?.(id) !== revision && attempt < JUMP_RESOLVE_ATTEMPTS) continue;
+        total = result.totalRounds; activeId = entry.turnId; activeRound = round;
+        ranks.set(activeId, round); disclosure.close(true); ports.scrollToTurn(activeId);
+        return;
+      }
+    } catch { if (present(id, token)) failure = 'jump'; }
     finally { release(owned); }
   }
   const onPrevious = (): void => { if (activeRound !== null) void navigate(activeRound - 1); };
   const onNext = (): void => { if (activeRound !== null) void navigate(activeRound + 1); };
   const onPosition = (): void => {
     if (disclosure.isOpen()) { disclosure.close(true); return; }
-    input.value = String(activeRound ?? 1); disclosure.open(); paint();
+    failure = null; input.value = String(activeRound ?? 1); disclosure.open(); paint();
     void readPage(Math.floor(Math.max(0, (activeRound ?? 1) - 1) / PAGE_SIZE));
   };
   const onSubmit = (event: Event): void => { event.preventDefault(); void navigate(Number(input.value)); };
@@ -188,7 +213,7 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
     if (target === first) void navigate(1);
     else if (target === last && total !== null) void navigate(total);
     else if (target === older || target === newer) void readPage(page + (target === older ? -1 : 1));
-    else if (target === retry) void readPage(page);
+    else if (target === retry) { failure = null; void readPage(page); }
     else if (target.dataset.roundNumber) void navigate(Number(target.dataset.roundNumber));
   };
   previous.addEventListener('click', onPrevious); next.addEventListener('click', onNext);
@@ -207,8 +232,9 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
          * the projection, since those ranks belong to another thread.
          * `busy` stays as it is: a read may still be in flight and hands its
          * slot to the queued refresh when it settles. */
-        generation++; errorNote.textContent = ''; version = nextVersion;
+        generation++; version = nextVersion;
         if (switched) {
+          session++; failure = null; pendingJump = null;
           entries = []; ranks.clear(); total = null; activeRound = null;
           disclosure.close(false); activeId = ''; page = 0;
         }
@@ -236,7 +262,7 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
       }
     },
     destroy() {
-      disposed = true; generation++; disclosure.destroy(); ranks.clear(); entries = []; state = null;
+      disposed = true; generation++; session++; disclosure.destroy(); ranks.clear(); entries = []; state = null;
       previous.removeEventListener('click', onPrevious); next.removeEventListener('click', onNext);
       position.removeEventListener('click', onPosition); panel.removeEventListener('click', onPanel); form.removeEventListener('submit', onSubmit);
       host.replaceChildren();

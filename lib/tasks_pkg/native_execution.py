@@ -374,9 +374,6 @@ async def run_native_task(
         result = project_terminal(owner_task, request)
         if result is not None:
             raise TypeError('native terminal projector must return None')
-        if status=='done' and rounds.open_round is not None:
-            from lib.tasks_pkg.orchestrator._completion_translation import submit_final_translation
-            submit_final_translation(owner_task,rounds.open_round,owner_task.get('content') or '')
         rounds.finish('stop' if status == 'done' else status)
         if (status == 'done' and context_policy is not None
                 and isinstance(owner_task.get('messages'), list)):
@@ -402,12 +399,24 @@ async def run_native_task(
             raise ValueError('native application gateway composition differs')
         if callbacks or approval_policy is not None or progress_policy is not None:
             raise ValueError('native application gateway has one callback/policy owner')
-        parallel_names = configuration.get('parallel_tool_names', sorted(gateway.parallel_names))
-        if (not isinstance(parallel_names, list) or any(not isinstance(name, str) for name in parallel_names)
-                or not set(parallel_names).issubset(gateway.parallel_names)
-                or len(parallel_names) != len(set(parallel_names))):
-            raise ValueError('native application parallel tools differ from canonical scheduling policy')
-        configuration = dict(configuration, parallel_tool_names=parallel_names)
+        # Owner decision 2026-10-28: every call of a round starts at once unless
+        # the composition explicitly keeps the qualified read scheduler.
+        concurrent = configuration.get('concurrent_tool_dispatch', 'parallel_tool_names' not in configuration)
+        if type(concurrent) is not bool or (concurrent and 'parallel_tool_names' in configuration):
+            raise ValueError('native application concurrent dispatch excludes read qualification')
+        parallel_names = []
+        if concurrent:
+            gateway.select_concurrent_dispatch()
+            configuration = dict(configuration, concurrent_tool_dispatch=True)
+        else:
+            parallel_names = configuration.get('parallel_tool_names', sorted(gateway.parallel_names))
+            if (not isinstance(parallel_names, list) or any(not isinstance(name, str) for name in parallel_names)
+                    or not set(parallel_names).issubset(gateway.parallel_names)
+                    or len(parallel_names) != len(set(parallel_names))):
+                raise ValueError('native application parallel tools differ from canonical scheduling policy')
+            configuration = {key: value for key, value in configuration.items()
+                             if key != 'concurrent_tool_dispatch'}
+            configuration['parallel_tool_names'] = parallel_names
         no_progress = configuration.get('no_progress_rounds', 0)
         terminal_failures = configuration.get('nonretryable_failure_rounds', 0)
         if configuration.get('progress_control') is True or no_progress != 0 or terminal_failures != 0:
@@ -417,7 +426,7 @@ async def run_native_task(
         callbacks = gateway.callbacks()
         if file_recovery is not None:
             file_recovery.bind_gateway(gateway)
-        if prepare_wire_tools is not None or file_recovery is not None or parallel_names:
+        if prepare_wire_tools is not None or file_recovery is not None or parallel_names or concurrent:
             configuration=dict(configuration,tool_sibling_control=True)
             rounds.response_policy=gateway.prepare_response
         approval_policy = gateway if ('approval_control' in configuration

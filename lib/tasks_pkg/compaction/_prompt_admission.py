@@ -13,7 +13,9 @@ from __future__ import annotations
 from typing import Any
 
 from lib.context_telemetry import validated_tool_schema_token_count
-from lib.llm.llm_errors import ContextCompactionError, PromptTooLongError
+from lib.llm.llm_errors import (
+    AbortedError, ContextCompactionError, LocalRequestPreparationError, PromptTooLongError,
+)
 from lib.log import audit_log, get_logger
 from lib.tasks_pkg.compaction._layer2 import force_compact_if_needed
 from lib.tasks_pkg.compaction._pipeline import recompose_context_after_compaction
@@ -344,6 +346,10 @@ def enforce_dispatch_prompt_limit(
     )
     hard_ceiling, target = _resolved_ceiling(
         task, round_num=round_num, input_tokens=after_summary['totalTokens'])
+    if task.get('aborted'):
+        from lib.tasks_pkg.compaction._summary_budget import cancel_summary_attempt
+        cancel_summary_attempt(task)
+        raise AbortedError('Owner stopped prompt admission after summary settlement')
     if after_summary['totalTokens'] <= target:
         _record(
             task,
@@ -362,6 +368,9 @@ def enforce_dispatch_prompt_limit(
     # models or delete conversation history. Unknown/irreducible false returns
     # still use PromptTooLongError below.
     from lib.tasks_pkg.compaction._summary_budget import summary_failure_reason
+    from lib.tasks_pkg.compaction._summary_failure import reconstructed_summary_failure
+    credential_cause = reconstructed_summary_failure(
+        task, summary_usage=compaction_meta.get('summary_usage'))
     local_failure = str(
         compaction_meta.get('summaryFailureReason')
         or summary_failure_reason(task)
@@ -406,6 +415,25 @@ def enforce_dispatch_prompt_limit(
                 action='defer_compaction_physical_fit',
             )
             return after_summary
+        if credential_cause is not None and local_failure == 'summary_credentials_unavailable':
+            _record(
+                task,
+                round_num=round_num,
+                stage='after_summary',
+                hard_ceiling=hard_ceiling,
+                target=target,
+                measurement=after_summary,
+                action='refuse_summary_credentials',
+            )
+            # Reuse the existing typed vocabulary and envelope recovery action.
+            # Only issued current evidence reconstructs the direct cause; no
+            # prompt, source reference or original exception message is retained.
+            raise LocalRequestPreparationError(
+                'Local prompt admission refused: summary credentials are '
+                'unavailable and required context remains over the prompt '
+                'ceiling. No main-provider request was sent.',
+                stage='prompt_admission_summary',
+            ) from credential_cause
         _record(
             task,
             round_num=round_num,

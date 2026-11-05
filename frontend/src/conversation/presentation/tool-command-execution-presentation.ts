@@ -301,8 +301,14 @@ export function createToolCommandExecutionPresentation(
     ))}</div>`;
   }
 
-  function descriptionHtml(description: BoundedText): string {
-    return commandCardDescriptionHtml(description.value);
+  /* Without a model-written description the row would carry only an icon and
+   * a verdict; the command itself is then the most honest intent. Only its
+   * first line is shown: the open command pane remains the exact evidence. */
+  function intentHtml(description: BoundedText, command: BoundedText): string {
+    if (description.value) return commandCardDescriptionHtml(description.value);
+    const firstLine = command.value.trim().split('\n', 1)[0];
+    if (!firstLine) return '';
+    return `<span class="ptool-cmd-desc-inline ptool-cmd-desc-command">${escapeHtmlText(firstLine)}</span>`;
   }
 
   /* One explicit fold chip per collapsible pane (owner call 2026-09-05:
@@ -364,8 +370,8 @@ export function createToolCommandExecutionPresentation(
     const argumentsProjection = projectArguments(field(round, 'toolArgs'));
     const command = boundedText(stringField(round, 'query'), COMMAND_UNITS);
     const description = argumentsProjection.description;
-    const collapsible = commandIsCollapsible(command, description);
-    const key = collapsible ? interactionKey(round) : '';
+    const key = interactionKey(round);
+    const collapsible = Boolean(key && command.value) || commandIsCollapsible(command, description);
     const bodyOpen = Boolean(collapsible && key && interaction.bodyExpanded);
     const partial = boundedText(
       stringField(round, '_partialOutput'),
@@ -403,7 +409,7 @@ export function createToolCommandExecutionPresentation(
     return `<div class="ptool-cmd-block ptool-cmd-running${bodyOpen ? ' cmd-open' : ''}"${collapsible ? ` data-cmd-key="${escapeHtmlText(key)}"` : ''} data-progress-status="${escapeHtmlText(progressStatus)}">
            <div class="ptool-cmd-header">
              <span class="ptool-cmd-icon">${header.iconHtml}</span>
-             ${descriptionHtml(description)}
+             ${intentHtml(description, command)}
              <div class="ptool-cmd-meta"><span class="ptool-cmd-identity">${commandCardContextHtml('terminal', translate)}${header.rootPillHtml}${grepInterceptBadgeHtml()}</span>
              <span class="ptool-cmd-right">${collapsible ? foldChipHtml('cmd', bodyOpen) : ''}${header.interruptHtml}<span class="ptool-cmd-verdict">${statusLabel ? `<span class="ptool-cmd-label">${escapeHtmlText(statusLabel)}</span>` : ''}${header.timerHtml}<span class="ptool-spinner"></span></span></span></div>
            </div>${argumentsLimitHtml}${descriptionLimitHtml}
@@ -500,7 +506,7 @@ export function createToolCommandExecutionPresentation(
           : (backgrounded ? translate('bgCommand.moved')
           : backgroundCompleted && exitCode === '?' ? translate('toolCmd.finished')
             : isOk
-              ? translate('toolCommandExecution.ok')
+              ? `exit ${exitCode}`
               : translate('toolCommandExecution.failed'));
     const reasonProjection = notRun
       ? boundedText(
@@ -508,8 +514,8 @@ export function createToolCommandExecutionPresentation(
         RESULT_UNITS,
       )
       : EMPTY_BOUNDED_TEXT;
-    const collapsible = commandIsCollapsible(command, description);
     const key = interactionKey(round);
+    const collapsible = Boolean(key && command.value) || commandIsCollapsible(command, description);
     const bodyOpen = Boolean(collapsible && key && interaction.bodyExpanded);
     const hasOutput = !notRun && (Boolean(output) || nativeOutput);
     const outputOpen = Boolean(hasOutput && key && interaction.outputExpanded);
@@ -533,7 +539,9 @@ export function createToolCommandExecutionPresentation(
 
     if (nativeOutput && !notRun) {
       const preview = stringField(lazyReference, 'preview');
-      outputHtml = `<details class="ptool-result-block" data-lazy-tool-result="" data-tool-result-authority="${lazyReference ? 'deferred' : 'toolContent'}">
+      // The header's output chip drives this native disclosure (its toggle
+      // event starts the lazy load); the summary stays only for semantics.
+      outputHtml = `<details class="ptool-result-block" data-lazy-tool-result="" data-tool-result-authority="${lazyReference ? 'deferred' : 'toolContent'}"${outputOpen ? ' open' : ''}>
         <summary>${escapeHtmlText(translate('toolCmd.foldOutput'))}</summary>
         <div class="ptool-result-body"><pre class="ptool-cmd-output"><code>${escapeHtmlText(lazyReference ? preview : output)}</code></pre>${outputLimitHtml}</div>
       </details>`;
@@ -554,12 +562,12 @@ export function createToolCommandExecutionPresentation(
       )
       : '';
 
-    return `<div class="ptool-cmd-block ${statusClassName}${bodyOpen ? ' cmd-open' : ''}${hasOutput ? ' ptool-cmd-hasoutput' : ''}${outputOpen ? ' output-open' : ''}" data-rn="${escapeHtmlText(field(round, 'roundNum'))}"${collapsible ? ` data-cmd-key="${escapeHtmlText(key)}"` : ''}${hasOutput && !nativeOutput ? ` data-output-key="${escapeHtmlText(key)}"` : ''}>
+    return `<div class="ptool-cmd-block ${statusClassName}${bodyOpen ? ' cmd-open' : ''}${hasOutput ? ' ptool-cmd-hasoutput' : ''}${outputOpen ? ' output-open' : ''}" data-rn="${escapeHtmlText(field(round, 'roundNum'))}"${collapsible ? ` data-cmd-key="${escapeHtmlText(key)}"` : ''}${hasOutput ? ` data-output-key="${escapeHtmlText(key)}"` : ''}>
          <div class="ptool-cmd-header">
            <span class="ptool-cmd-icon">${header.iconHtml}</span>
-           ${descriptionHtml(description)}
+           ${intentHtml(description, command)}
            <div class="ptool-cmd-meta"><span class="ptool-cmd-identity">${commandCardContextHtml('terminal', translate)}${header.rootPillHtml}${grepInterceptBadgeHtml()}</span>
-           <span class="ptool-cmd-right">${collapsible ? foldChipHtml('cmd', bodyOpen) : ''}${hasOutput && !nativeOutput ? foldChipHtml('output', outputOpen) : ''}${header.rightControlsHtml}<span class="ptool-cmd-verdict"><span class="ptool-cmd-status">${escapeHtmlText(statusLabel)}</span></span></span></div>
+           <span class="ptool-cmd-right">${collapsible ? foldChipHtml('cmd', bodyOpen) : ''}${hasOutput ? foldChipHtml('output', outputOpen) : ''}${header.rightControlsHtml}<span class="ptool-cmd-verdict"><span class="ptool-cmd-status">${escapeHtmlText(statusLabel)}</span></span></span></div>
          </div>${argumentsLimitHtml}${descriptionLimitHtml}
          <pre class="ptool-cmd-code${collapsible ? ' ptool-cmd-collapsible' : ''}"><code>${workingDirectoryHtml(argumentsProjection)}$ ${escapeHtmlText(command.value)}</code></pre>${commandLimitHtml}
          ${qrStripHtml(metadata)}${outputHtml}

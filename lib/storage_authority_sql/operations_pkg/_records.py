@@ -1522,6 +1522,12 @@ def _event_type_filter(payload: Mapping[str, Any]) -> tuple[str, tuple]:
 
 
 def _event_list(session: Session, payload: Mapping[str, Any]) -> Any:
+    from lib.task_replay.generated_request_inspector_projection import PROJECTION
+    from lib.task_replay.request_inspector_projection import project_request_inspector_event
+
+    projection = payload.get('payload_projection', 'full')
+    if projection not in ('full', PROJECTION):
+        raise StorageError('database_protocol_error', 'Invalid event payload_projection')
     task_id = _required_text(payload, "task_id")
     after = _integer(payload, "after_sequence", default=-1, minimum=-1)
     limit = _integer(payload, "limit", default=500, minimum=1, maximum=1000)
@@ -1544,7 +1550,7 @@ def _event_list(session: Session, payload: Mapping[str, Any]) -> Any:
         " ORDER BY sequence LIMIT ?",
         (*select_params, task_id, after, *type_params, limit),
     )
-    return [
+    result = [
         {
             "sequence": int(row["sequence"]),
             "event": (_load(decode_task_event_payload(row["event_json"]))
@@ -1553,6 +1559,10 @@ def _event_list(session: Session, payload: Mapping[str, Any]) -> Any:
         }
         for row in rows
     ]
+    if projection == PROJECTION:
+        for row in result:
+            row['event'] = project_request_inspector_event(row['event'])
+    return result
 
 
 def _event_latest(session: Session, payload: Mapping[str, Any]) -> Any:

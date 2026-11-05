@@ -9,13 +9,12 @@ from __future__ import annotations
 import html
 import json
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests._jsdom import run_harness
+from tests._jsdom import require_node_modules, run_harness
 from tests._runtime_sections import native_module_path, runtime_section_path
 
 pytestmark = pytest.mark.unit
@@ -26,8 +25,7 @@ REF = 'tr:mkdir-p-work-cp-mnt-dolp:7d26e5a5'
 
 
 def _render(rounds, tmp_path):
-    if shutil.which('node') is None:
-        pytest.skip('node is required for the tool-round renderer')
+    require_node_modules('vite')
     fixture = tmp_path / 'rounds.json'
     fixture.write_text(json.dumps(rounds), encoding='utf-8')
     process = subprocess.run([

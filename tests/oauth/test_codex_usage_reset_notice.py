@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests._jsdom import run_harness
+from tests._jsdom import require_node_modules, run_harness
 from tests._runtime_sections import native_module_path, runtime_section_path
 
 pytestmark = pytest.mark.unit
@@ -283,8 +282,7 @@ _NODE_HARNESS = r"""
 
 
 def test_typed_notice_controller_contract():
-    if not shutil.which("node"):
-        pytest.skip("node is required")
+    require_node_modules('vite')
     bundle = native_module_path(
         "codex-reset-notice.js", NOTICE_OWNER)
     result = subprocess.run(

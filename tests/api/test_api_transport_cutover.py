@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import shutil
 import subprocess
 import pytest
 
 from tests._runtime_sections import runtime_section, runtime_section_path
+from tests._jsdom import require_node_modules, require_shipped_graph
 
 
 pytestmark = pytest.mark.unit
@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_retained_registry_imports_one_required_transport_owner():
     registry = runtime_section('api.js')
-    main = (ROOT / 'frontend/src/main.ts').read_text(encoding='utf-8')
+    application = (ROOT / 'frontend/src/application.ts').read_text(encoding='utf-8')
     runtime = (ROOT / 'frontend/src/runtime/app-runtime.js').read_text(
         encoding='utf-8')
     transport = (ROOT / 'frontend/src/api/transport.ts').read_text(encoding='utf-8')
@@ -26,8 +26,8 @@ def test_retained_registry_imports_one_required_transport_owner():
     assert 'createEndpointRegistry(requiredApiTransport' in registry
     ports = (ROOT / 'frontend/src/api/endpoint-registry/ports.ts').read_text()
     assert 'transport.request<T>(path, supplied || {})' in ports
-    assert 'apiTransport' not in main
-    assert 'window.TofuModules = Object.freeze({' in main
+    assert 'apiTransport' not in application
+    assert 'window.TofuModules = Object.freeze({' in application
     assert 'export const apiTransport' in transport
     assert 'resolvePath,' in transport
     assert "const folders = {" in (ROOT / 'frontend/src/api/endpoint-registry/folders.ts').read_text()
@@ -35,6 +35,7 @@ def test_retained_registry_imports_one_required_transport_owner():
 
 
 def test_server_and_vite_tags_have_no_runtime_transport_fallback():
+    require_shipped_graph()
     from lib.vite_assets import VITE_MANIFEST, _dev_tags, _manifest_tags
 
     route_source = (ROOT / 'routes/common.py').read_text(encoding='utf-8')
@@ -64,8 +65,7 @@ def test_registry_has_no_transport_rollback_or_dom_injection():
 
 
 def test_read_only_resolvers_recover_only_unattributed_gateway_failures():
-    if not shutil.which("node"):
-        pytest.skip("node unavailable")
+    require_node_modules('vite')
     registry_path = runtime_section_path("api.js", scope_prelude=False)
     from tests._runtime_sections import native_module_path
     owner_path = native_module_path(".native/api-endpoint-registry.js", ROOT / "frontend/src/api/endpoint-registry/index.ts")

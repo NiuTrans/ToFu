@@ -71,6 +71,38 @@ def test_source_capture_reuses_certification_inventory_and_native_fingerprint(tm
         provenance.capture_sources()
 
 
+def test_certification_tracks_workload_modules_including_local_edits(tmp_path, monkeypatch):
+    import subprocess
+    from scripts import certify_storage_backends as certification
+
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    module = tmp_path / 'scripts/tofudb_workloads/records.py'
+    module.parent.mkdir(parents=True)
+    module.write_text('synthetic workload v1\n')
+    subprocess.run(['git', 'add', 'scripts'], cwd=tmp_path, check=True)
+    monkeypatch.setattr(certification, 'ROOT', tmp_path)
+    first = certification.verification_sources()
+    relative = module.relative_to(tmp_path).as_posix()
+    assert first[relative] == certification.fingerprint(module)
+    module.write_text('synthetic workload v2\n')
+    second = certification.verification_sources()
+    assert second[relative] != first[relative]
+    extra = module.with_name('future_owner.py')
+    extra.write_text('untracked workload input\n')
+    assert certification.verification_sources()[extra.relative_to(tmp_path).as_posix()]
+
+
+def test_historical_sources_without_new_workload_modules_do_not_claim_currentness():
+    receipt, authority = native_receipt()
+    current = sources()
+    current['files']['scripts/tofudb_workloads/records.py'] = 'f' * 64
+    result = provenance.qualify_provenance(
+        receipt, backend='tofudb', binary_sha256='c' * 64,
+        authority=authority, current_sources=current)
+    assert result['frozen_build_comparable'] is True
+    assert result['current_source_qualified'] is False
+
+
 def test_artifact_capture_uses_owned_native_identity_and_loaded_library(tmp_path, monkeypatch):
     binary = tmp_path / 'tofu-db'
     library = tmp_path / 'libtofu_db.so'

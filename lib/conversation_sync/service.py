@@ -30,6 +30,33 @@ from lib.turn_projection_segments import (
 )
 
 
+#: Rank and history-page reads answer at the newest head the reader has not
+#: passed. Storage checks the head before reading any Turn, so another commit
+#: landing between observing the head and re-reading at it needs a storage
+#: round trip, not a browser one. Bounded because a head that never settles
+#: is not a reader's.
+STREAMING_HEAD_READ_ATTEMPTS = 4
+
+
+def _without_diagnostic_body(change: Any) -> Any:
+    """Copy only the diagnostic envelope; never rewrite its canonical patch.
+
+    Request Inspector already owns authenticated, demand-driven evidence reads.
+    Its multi-megabyte request snapshots must not head-of-line block ordinary
+    progress/terminal replay. The repository's full event remains untouched.
+    """
+    if not isinstance(change, dict) or change.get('type') != 'attempt.event':
+        return change
+    payload = change.get('payload')
+    attempt = payload.get('event') if isinstance(payload, dict) else None
+    body = attempt.get('payload') if isinstance(attempt, dict) else None
+    if not isinstance(body, dict) or 'event' not in body:
+        return change
+    return {**change, 'payload': {**payload, 'event': {
+        **attempt, 'payload': {key: value for key, value in body.items() if key != 'event'},
+    }}}
+
+
 def _backfill_legacy_observation_attempt_ids(turn: Any) -> Any:
     """Legacy/read-adapter boundary: client-perception receipts persisted
     before attempt tracking lack the now-required attemptId. Backfill the
@@ -235,13 +262,28 @@ class ConversationSyncService:
         expected_sync_sequence: int, offset: int = 0, limit: int = 50,
         anchor_turn_id: str = "",
     ) -> dict[str, Any]:
-        stored = self._repository.round_directory(
-            conversation_id, user_id, lane_id=lane_id,
-            expected_sync_sequence=expected_sync_sequence, offset=offset,
-            limit=limit, anchor_turn_id=anchor_turn_id,
-        )
-        if stored is None:
-            raise ConversationSyncNotFound("Conversation not found")
+        """Return exact input ranks at the newest head the caller has not passed.
+
+        Ranks change only when a Turn is created or deleted, yet every streamed
+        attempt event advances the sync head, so while a reply streams the
+        caller's replayed head is almost always behind. Answering at the head
+        the read observed keeps the ranks exact for that head (``syncSeq``
+        reports it); the caller's own replay delivers any rank change in
+        between. Only a head behind the caller remains ``stale``.
+        """
+        sequence = expected_sync_sequence
+        for _attempt in range(STREAMING_HEAD_READ_ATTEMPTS):
+            stored = self._repository.round_directory(
+                conversation_id, user_id, lane_id=lane_id,
+                expected_sync_sequence=sequence, offset=offset,
+                limit=limit, anchor_turn_id=anchor_turn_id,
+            )
+            if stored is None:
+                raise ConversationSyncNotFound("Conversation not found")
+            head = int(stored.get("syncSeq") or 0)
+            if stored.get("stale") is not True or head < expected_sync_sequence:
+                break
+            sequence = head
         return decode("ConversationRoundDirectory", stored)
 
     def turn_page(
@@ -257,27 +299,42 @@ class ConversationSyncService:
         tool_payload: str = "full",
         max_projection_bytes: int = 0,
     ) -> dict[str, Any]:
-        """Return one bounded historical lane page at an exact replay head."""
+        """Return one bounded lane page at the newest head the caller has not passed.
+
+        Every streamed attempt event advances the sync head and the caller's
+        replayed head trails it by the stream latency, so an exact-head read
+        fails almost every time while a reply streams. Storage still reads at
+        one exact head; a stale read is repeated at the head storage reported,
+        and ``syncSeq`` names the head the page is exact for. The caller
+        publishes the page once its own replay reaches that head. Only a head
+        behind the caller, or one that keeps moving, remains stale.
+        """
         if tool_payload not in {"full", "lazy"} or (tool_payload == "lazy" and segment_payload != "refs"):
             raise ValueError("Lazy tool payload requires reference segments")
         if segment_payload not in {"full", "refs"}:
             raise ValueError("Invalid conversation segment payload")
-        stored = self._repository.turn_page(
-            conversation_id,
-            user_id,
-            lane_id=lane_id,
-            expected_sync_sequence=expected_sync_sequence,
-            before_ordinal=before_ordinal,
-            limit=limit,
+        sequence = expected_sync_sequence
+        for _attempt in range(STREAMING_HEAD_READ_ATTEMPTS):
+            stored = self._repository.turn_page(
+                conversation_id,
+                user_id,
+                lane_id=lane_id,
+                expected_sync_sequence=sequence,
+                before_ordinal=before_ordinal,
+                limit=limit,
 
-            **({"max_projection_bytes": max_projection_bytes} if max_projection_bytes else {}),
-        )
-        if stored is None:
-            raise ConversationSyncNotFound("Conversation not found")
-        if stored.get("stale") is True:
-            raise ConversationTurnPageStale(
-                int(stored.get("syncSequence") or 0)
+                **({"max_projection_bytes": max_projection_bytes} if max_projection_bytes else {}),
             )
+            if stored is None:
+                raise ConversationSyncNotFound("Conversation not found")
+            if stored.get("stale") is not True:
+                break
+            head = int(stored.get("syncSequence") or 0)
+            if head < expected_sync_sequence:
+                raise ConversationTurnPageStale(head)
+            sequence = head
+        else:
+            raise ConversationTurnPageStale(sequence)
         sequence = int(stored.get("syncSequence") or 0)
         response = {
             "ok": True,
@@ -414,7 +471,10 @@ class ConversationSyncService:
         *,
         after_sequence: int,
         limit: int = 500,
+        diagnostic_payload: str = "full",
     ) -> dict[str, Any]:
+        if diagnostic_payload not in {"full", "none"}:
+            raise ValueError("Invalid conversation diagnostic payload")
         stored = self._repository.changes(
             conversation_id,
             user_id,
@@ -425,18 +485,15 @@ class ConversationSyncService:
             raise ConversationSyncNotFound("Conversation not found")
         head = int(stored.get("head") or 0)
         if stored.get("resetRequired"):
-            reset = {
-                "contract": "tofu.conversation-sync.event/v1",
-                "type": "sync.reset_required",
-                "conversationId": conversation_id,
-                "cursor": encode_cursor(conversation_id, user_id, head),
-                "reason": str(stored.get("resetReason") or "cursor_invalid"),
-            }
-            decode("SyncResetRequired", reset)
+            reset = self.reset_required(
+                conversation_id, user_id, head,
+                reason=str(stored.get("resetReason") or "cursor_invalid"),
+            )
             return {"head": head, "events": [], "reset": reset, "hasMore": False}
-        events = public_value_with_stable_segments(
-            list(stored.get("events") or [])
-        )
+        events = list(stored.get("events") or [])
+        if diagnostic_payload == "none":
+            events = [_without_diagnostic_body(event) for event in events]
+        events = public_value_with_stable_segments(events)
         for event in events:
             decode("ConversationChange", event)
         return {
@@ -445,6 +502,18 @@ class ConversationSyncService:
             "reset": None,
             "hasMore": bool(stored.get("hasMore")),
         }
+
+    def reset_required(
+        self, conversation_id: str, user_id: int, sequence: int, *, reason: str,
+    ) -> dict[str, Any]:
+        """Require one authoritative snapshot instead of replay from a cursor."""
+        return decode("SyncResetRequired", {
+            "contract": "tofu.conversation-sync.event/v1",
+            "type": "sync.reset_required",
+            "conversationId": conversation_id,
+            "cursor": encode_cursor(conversation_id, user_id, sequence),
+            "reason": reason,
+        })
 
     def heartbeat(
         self,

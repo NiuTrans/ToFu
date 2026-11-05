@@ -95,12 +95,20 @@ def test_routed_project_delivery_exposes_native_publishers():
 
 
 def test_unrelated_project_turn_keeps_publication_discoverable_without_full_wire_cost(tmp_path):
+    from lib.tools.gateway import local_wire_tools
     from lib.tools.registry import assemble_tool_list
     ctx = context(project_path=str(tmp_path), project_enabled=True,
                   conv_id='unrelated-project-' + tmp_path.name,
                   messages=[{'role': 'user', 'content': 'Fix a Python function in the repository.'}])
     surface, _ = assemble_tool_list(ctx)
-    assert not NAMES.intersection(item['function']['name'] for item in surface)
+    # Routing never drops a searchable family: the publishers stay provider
+    # candidates, and Tool Search (not routing) keeps their schemas deferred.
+    assert NAMES <= {item['function']['name'] for item in surface}
+    projected = {item['function']['name'] for item in local_wire_tools(
+        surface, discovery_policy_by_name=ctx.discovery_policy_by_name,
+        discovery_catalog_size=len(ctx.executable_tool_catalog))}
+    assert not NAMES & projected
+    assert {'search_tools', 'execute_tools'} <= projected
     assert NAMES <= {item['function']['name'] for item in ctx.executable_tool_catalog}
 
 

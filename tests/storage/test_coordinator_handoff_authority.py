@@ -27,8 +27,8 @@ def contract_owner(monkeypatch):
     links.test_automatic_dependent_waits_for_review_and_publication_then_reuses_its_grant,
     links.test_automatic_rework_records_exact_link_and_replays_without_duplicate_birth,
 ], ids=lambda scenario: scenario.__name__)
-def test_handoff_on_selected_authority(semantic_authority, run, scenario):
-    factory, _, _ = semantic_authority
+def test_handoff_on_selected_authority(detached_semantic_authority, run, scenario):
+    factory, _, _ = detached_semantic_authority
     r = run
     for (namespace, key), row in r.c.client.rows.items():
         factory(write=True).command('record.put', {'namespace': namespace,

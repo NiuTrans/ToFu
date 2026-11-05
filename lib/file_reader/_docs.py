@@ -3,13 +3,15 @@
 Non-image readers dispatched to by ``read_local_file``:
   - ``_read_pdf``    → ``lib.pdf_parser.extract_pdf_text`` (lazy import).
   - ``_read_office`` → ``lib.doc_parser.extract_document_text`` (lazy import).
-  - ``_read_text``   → direct read with encoding detection + binary guard.
+  - ``_read_text``   → direct read with encoding detection + binary guard,
+    rendered by ``render_text_bytes`` (also used for already-pinned bytes).
 
 The ``lib.pdf_parser`` / ``lib.doc_parser`` imports stay LAZY (inside the
 functions) — both are façade packages and importing them eagerly would drag
 heavy optional deps into every ``import lib.file_reader``.
 """
 
+import io
 import os
 
 from lib.log import get_logger
@@ -78,31 +80,72 @@ def _read_office(path: str, filename: str, file_size: int) -> str:
         return f'Error: Document parsing failed: {e}'
 
 
+def video_reader_hint(head: bytes, filename: str) -> str:
+    """Name inspect_video for binary bytes that are a video or audio file, else ''."""
+    from lib.video_analysis import (
+        AUDIO_EXTS, VIDEO_EXTS, sniff_audio_container, sniff_video_container,
+    )
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in AUDIO_EXTS and (ext in VIDEO_EXTS or sniff_video_container(head)):
+        return (' It is a video: watch it with inspect_video on the same path '
+                '(timestamped key frames, probe facts and transcript).')
+    if ext in AUDIO_EXTS or sniff_audio_container(head):
+        return (' It is an audio file: listen to it with inspect_video on the same '
+                'path (probe facts and transcript).')
+    return ''
+
+
+def _binary_refusal(head: bytes, filename: str, file_size: int) -> str:
+    """The binary-file error when the first 8KB look binary, else ''.
+
+    The project reader's rule: a NUL byte, or more than 30% control bytes.
+    Compressed media and archives spread their bytes over the whole range,
+    so only the NUL test recognizes them.
+    """
+    if head:
+        non_text = sum(1 for b in head if b < 8 or (b > 13 and b < 32 and b != 27))
+        if b'\x00' in head or non_text > len(head) * 0.3:
+            return (f'Error: File appears to be binary: {filename} ({file_size:,} bytes). '
+                    f'Cannot read as text.{video_reader_hint(head, filename)} '
+                    f'Supported binary formats: '
+                    f'images ({", ".join(sorted(IMAGE_EXTENSIONS))}), '
+                    f'PDF (.pdf), Office ({", ".join(sorted(OFFICE_EXTENSIONS))})')
+    return ''
+
+
 def _read_text(path: str, filename: str, file_size: int) -> str:
     """Read a text file with encoding detection."""
     # Quick binary check — read first 8KB to detect binary
     try:
         with open(path, 'rb') as f:
-            header = f.read(8192)
+            refusal = _binary_refusal(f.read(8192), filename, file_size)
+            if refusal:
+                return refusal
+            f.seek(0)
+            data = f.read()
     except Exception as e:
         logger.error('[FileReader] Failed to read %s: %s', path, e, exc_info=True)
         return f'Error: Failed to read file: {e}'
+    return render_text_bytes(data, filename, file_size)
 
-    # If more than 30% non-printable bytes, it's likely binary
-    if header:
-        non_text = sum(1 for b in header if b < 8 or (b > 13 and b < 32 and b != 27))
-        if non_text > len(header) * 0.3:
-            return (f'Error: File appears to be binary: {filename} ({file_size:,} bytes). '
-                    f'Cannot read as text. Supported binary formats: '
-                    f'images ({", ".join(sorted(IMAGE_EXTENSIONS))}), '
-                    f'PDF (.pdf), Office ({", ".join(sorted(OFFICE_EXTENSIONS))})')
+
+def render_text_bytes(data: bytes, filename: str, file_size: int) -> str:
+    """Render file bytes exactly as ``_read_text`` renders the file.
+
+    Callers holding descriptor-pinned bytes render what they observed instead
+    of reopening a path that may have changed since.
+    """
+    refusal = _binary_refusal(data[:8192], filename, file_size)
+    if refusal:
+        return refusal
 
     # Read as text with encoding detection
     text = None
+    # TextIOWrapper keeps open(path, encoding=...) semantics, including
+    # universal-newline translation.
     for encoding in ('utf-8', 'utf-8-sig', 'gbk', 'gb18030', 'latin-1'):
         try:
-            with open(path, encoding=encoding) as f:
-                text = f.read()
+            text = io.TextIOWrapper(io.BytesIO(data), encoding=encoding).read()
             break
         except (UnicodeDecodeError, LookupError) as _e_audit:
             logger.debug('[file_reader] _read_text caught %s: %s', type(_e_audit).__name__, _e_audit)
@@ -110,8 +153,7 @@ def _read_text(path: str, filename: str, file_size: int) -> str:
 
     if text is None:
         # Last resort
-        with open(path, encoding='utf-8', errors='replace') as f:
-            text = f.read()
+        text = io.TextIOWrapper(io.BytesIO(data), encoding='utf-8', errors='replace').read()
 
     ext = os.path.splitext(filename)[1].lower()
     logger.info('[FileReader] Text file read: %s (%s, %s chars)',

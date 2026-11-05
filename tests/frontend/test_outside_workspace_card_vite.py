@@ -9,11 +9,11 @@ non-refusal failure keeps the established header chip and full detail.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -21,16 +21,12 @@ ROOT = Path(__file__).resolve().parents[2]
 BUNDLER = ROOT / "scripts" / "vite_test_bundle.mjs"
 
 
-def _ready() -> bool:
-    return bool(shutil.which("node")) and BUNDLER.is_file()
-
-
-pytestmark = [pytest.mark.unit, pytest.mark.skipif(
-    not _ready(), reason="node + Vite test bundler required")]
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(scope="module")
 def presenters_bundle(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    require_node_modules('vite')
     work = tmp_path_factory.mktemp("outside-workspace-card")
     entry = work / "entry.ts"
     entry.write_text(f"""

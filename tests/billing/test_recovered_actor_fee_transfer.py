@@ -4,7 +4,7 @@ from copy import deepcopy
 import pytest
 
 from lib.agent_core.execution_budget import _ensure_execution_budget, inherit_execution_budget
-from lib.billing.cost import native_task_cost, transfer_native_child_fees
+from lib.billing.native_cost import native_task_cost, transfer_native_child_fees
 from tests.billing.test_native_task_cost import task as quote_task
 
 pytestmark = pytest.mark.unit

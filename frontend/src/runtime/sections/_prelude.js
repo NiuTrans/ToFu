@@ -16,6 +16,12 @@ import { installApplicationInteractions, installViewportHeightGuard } from '../a
 // Temporary receipt ports; remove with retained tool dispatch.
 import { renderChecklistCard } from '../conversation/ui/checklist-card';
 import { renderTimerCard } from '../conversation/ui/timer-card';
+// Context rail bridge (info-rail.js); remove when the Surface port takes the rail host directly.
+import {
+  renderTurnContextRailHtml,
+  renderTurnContextRootBranchHtml,
+  renderTurnContextChecklistRowHtml,
+} from '../conversation/ui/turn-context-rail';
 import { refreshTimerCountdowns, toggleTimerWatcher, toggleTimerInstruction, toggleTimerPoll } from '../conversation/ui/timer-card/interactions';
 
 // Temporary multimedia receipt port; remove with retained tool dispatch.
@@ -28,13 +34,14 @@ import { resolvePath as resolveWorkUnitResourceUrl } from '../api/transport';
 import { inspectorReference } from '../features/inspector-evidence';
 
 import { isContextInjectionNote, contextNoteDisplayKind, sameContextNoteScope } from '../conversation/presentation/context-note-grouping';
+import { contextNoteFacet, contextNoteTextRuns } from '../conversation/presentation/context-note-presentation';
 
 // Temporary lexical port; remove with the retained finish-info renderer.
 import { normalizeTokenUsage } from '../token-usage';
 import { createPaperPreviewChanges } from '../features/paper/preview-changes';
 import { featureRegistry } from '../feature-registry';
 /* Generated once during the classic-to-ESM migration. Vite owns this module. */
-import { _applyI18n, _i18nLang, _onLanguageChange, _syncLangPicker, setLanguage, t } from '../i18n';
+import { _applyI18n, _i18nLang, _onLanguageChange, setLanguage, t } from '../i18n';
 import { iconHtml, statusDotIconHtml, welcomePillsHtml } from '../icons';
 import { escapeHtml, raw, safeHtml } from '../html-safety';
 import { createDialogServices } from '../lazy-dialog-controller';
@@ -54,6 +61,9 @@ import { createBackendAvailabilityMonitor } from '../backend-availability-monito
 import { createAvailabilityHealthProbeCoordinator } from '../availability-health-probe';
 import { createFeatureFlagsLoader } from '../core/feature-flags-loader';
 import { createModelPickerStartup } from '../features/model-catalog/model-picker-startup';
+// Temporary voice boot/action ports; remove with retained application composition.
+import { initVoiceInput, toggleVoiceInput, destroyVoiceInput } from '../features/voice-input';
+import { audioCapabilities } from '../features/voice/audio-capabilities';
 import { createImageViewerActionsController } from '../image-viewer-actions';
 
 import { showAttachmentPreview, closeAttachmentPreview } from '../attachment-preview-lifecycle';
@@ -92,6 +102,7 @@ import {
 import { createCompactionHistoryState } from '../core/compaction-history-state';
 import { HTTP_RESULT } from '../core/http-result';
 import { createCurrentUserIdentityController } from '../core/current-user';
+import { createConversationCatalogAvailability } from '../conversation/application/conversation-catalog-availability';
 import {
   frameBelongsToOwner,
   narrowConvCatalogFrame,
@@ -136,6 +147,10 @@ import { createSendPreparationOverlayController } from '../conversation/applicat
 import { createComposerTranslationStatus } from '../conversation/application/composer-translation-status';
 import { createPreferenceActionsController } from '../features/memory/preference-actions';
 import { createProjectCoordinationSurface } from '../features/project-coordination-surface';
+import { createGlobalRouterEntry } from '../features/global-router';
+import { createRouterWatchdogEntry } from '../features/router-watchdog';
+import { createSameTaskReadJoin } from '../features/project-coordination-read-join';
+import { createCoordinatorConversationGroups } from '../features/coordinator-conversation-group';
 
 import { createProjectConversationNavigation } from '../features/project-conversation-navigation';
 
@@ -164,13 +179,14 @@ import { createFolderPresetMutations, folderPresetWorkspace } from '../conversat
 
 import { openFolderSettings, openFolderDeleteConfirmation } from '../conversation/ui/folder-settings';
 import { createAutomationManagementClient } from '../api/automations';
-import { renderComposerModelNotice } from '../conversation/ui/composer-model-notice';
+import { holdComposerModelNotice, renderComposerModelNotice } from '../conversation/ui/composer-model-notice';
 
 // Temporary shell badge port; remove with the retained new-chat presentation.
 import { paintNewChatFolderBadges } from '../conversation/ui/new-chat-folder-badges';
 import { paintOptionalProjectAttachment } from '../conversation/ui/optional-project-attachment';
 import { createTurnReviewPresentation } from '../features/turn-review/presentation';
 import { createConversationSurfaceController } from '../conversation/application/conversation-surface-controller';
+import { createAnimationFrameScheduler } from '../conversation/ui/animation-frame-scheduler';
 import { entityRecordValues, entityRecordKeys } from '../core/entity-record';
 import { createConversationStartup } from '../conversation/application/conversation-startup';
 import {
@@ -182,6 +198,9 @@ import { createThinkingDepthSlider, projectReasoningControl, THINKING_DEPTH_LABE
 
 import { createProjectContext } from '../features/conversation-bar/project-context';
 import { createContextMeter } from '../features/conversation-bar/context-meter';
+import {
+  cancelledCompactionNotice, createScheduledCompactions, readCancelledCompaction, scheduledCompactionNotice,
+} from '../features/conversation-bar/scheduled-compaction';
 import { createTurnNavigation } from '../features/conversation-bar/turn-navigation';
 import { createConversationModelController, captureComposerModel, commitComposerModel } from '../conversation/application/conversation-model';
 import { createBranchComposerSession } from '../conversation/application/branch-composer';
@@ -194,6 +213,7 @@ import {
 import {
   activeConversationAttemptIds,
   activeMainConversationAttemptId,
+  conversationCompactionArchiveIds,
   conversationHasActor,
   latestConversationTurn,
   orderedConversationTurns,
@@ -211,7 +231,7 @@ import {
 import {
   mergeSwarmAgent, mergeSwarmAgentCards, normalizeSwarmAgent,
   swarmRoundAgentIds, swarmStatusAgents, swarmFrameMatchesExecution, swarmFrameExecutionTaskId,
-  swarmLaunchSelection, swarmLaunchFailure, swarmRoundRunId, swarmAgentLogId, swarmAgentWaitLabel,
+  swarmLaunchSelection, swarmLaunchFailure, swarmRoundRunId, swarmAgentLogId, swarmAgentPhaseLabel, swarmAgentBrief,
   swarmRoundIsActive, swarmRoundNeedsRecovery, swarmStatusFingerprint,
 } from '../conversation/presentation/swarm-agent-presentation';
 import {
@@ -337,13 +357,15 @@ import {
   createWriteGateRefusalPresentation,
 } from '../conversation/presentation/write-gate-refusal';
 import {
-  conversationDisplayTitle as _conversationDisplayTitle,
+  conversationDisplayTitle,
   conversationTimestampLabels,
   stripNoTranslateTags,
 } from '../conversation/presentation/shell-localization';
 import { mountFolderConfigControls, installFolderConfigInteractions, makeFolderContextMenuAccessible } from '../conversation/ui/folder-config-control';
 import { createPlanDecisionBar } from '../conversation/ui/plan-decision-bar';
-import { createSendStartupLease, createComposerSubmissionGate, awaitSendPreparation } from '../core/send-startup';
+import {
+  createSendStartupLease, createComposerSubmissionGate, awaitSendPreparation, retryTransientSendStartup,
+} from '../core/send-startup';
 import { sendFailureToastDetail } from '../conversation/presentation/send-failure-message';
 import {
   DOMPurify, canEnsureHljsLanguage, ensureHljsLanguage, hljs, loadHtml2Canvas, loadKatex, marked,
@@ -361,6 +383,8 @@ installMarkdownPolicy(marked);
 // Temporary lexical names consumed by retained sections. The typed icon owner
 // remains module-private; only `Icon` is injected into declared lazy features.
 const Icon = iconHtml;
+const _conversationDisplayTitle = (title, localizedDefaultTitle) =>
+  conversationDisplayTitle(title, localizedDefaultTitle, t);
 const turnProvenancePresentation = createTurnProvenancePresentation({
   translate: t,
   iconHtml,
@@ -369,7 +393,7 @@ const {
   inlineMarkdown: _tpInlineMd,
   renderMcpLoginHintHtml,
   renderTurnProvenanceHtml,
-
+  contextProvenanceFacts,
   renderContextProvenanceHtml,
   renderPreferenceLearnedHtml,
 } = turnProvenancePresentation;
@@ -465,6 +489,59 @@ const humanGuidancePresentation = Object.freeze({
   clearConversation: (conversationId) =>
     humanGuidancePresentationState.clearConversation(conversationId),
 });
+/* A non-blocking question is answered by an ordinary quoted chat message.
+ * It leaves at once only from an idle ordinary composer; otherwise the
+ * quote and answer join the user's unsent draft and wait for them. */
+async function replyToGuidanceInChat({ conversationId, quote, responseText }) {
+  const conversation = typeof getActiveConv === 'function'
+    ? getActiveConv()
+    : null;
+  const input = document.getElementById('userInput');
+  if (
+    !conversation
+    || conversation.id !== conversationId
+    || !input
+    || typeof _addReplyQuote !== 'function'
+    || typeof getPendingReplyQuotes !== 'function'
+    || typeof sendMessage !== 'function'
+  ) {
+    throw new Error('Conversation is not active.');
+  }
+  const pendingQuotes = () => getPendingReplyQuotes() || [];
+  const composerEmpty = !input.value.trim()
+    && (typeof pendingImages === 'undefined' || pendingImages.length === 0)
+    && (typeof pendingPdfTexts === 'undefined' || pendingPdfTexts.length === 0)
+    && (typeof pendingVideos === 'undefined' || pendingVideos.length === 0)
+    && pendingQuotes().length === 0
+    && !(typeof getPendingConvRefs === 'function'
+      && (getPendingConvRefs() || []).length > 0)
+    // Branch and image-generation composers would reroute the answer.
+    && !(typeof isBranchModeActive === 'function' && isBranchModeActive())
+    && !(typeof imageGenMode !== 'undefined' && imageGenMode);
+  _addReplyQuote(quote);
+  const announceInput = () => {
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  if (composerEmpty) {
+    input.value = responseText;
+    announceInput();
+    await sendMessage();
+    /* An accepted send consumes the composer draft; a cancelled delivery
+     * choice or a failed send leaves the quoted answer drafted. */
+    const drafted = quote
+      ? pendingQuotes().includes(quote)
+      : input.value.trim() === responseText.trim();
+    if (!drafted) return 'sent';
+    input.focus();
+    return 'drafted';
+  }
+  input.value = input.value.trim()
+    ? `${input.value}\n\n${responseText}`
+    : responseText;
+  announceInput();
+  input.focus();
+  return 'drafted';
+}
 const humanGuidanceActions = createHumanGuidanceActions({
   translate: t,
   activeConversation: () => {
@@ -504,6 +581,7 @@ const humanGuidanceActions = createHumanGuidanceActions({
       responseText,
     );
   },
+  replyInChat: (request) => replyToGuidanceInChat(request),
   markSubmitted: (conversationId, guidanceId, originalResponse) => {
     humanGuidancePresentation.patch(
       conversationId,

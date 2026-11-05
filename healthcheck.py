@@ -15,7 +15,7 @@ Checks:
   2. Top-level imports      — Server + all blueprints load
   3. Lazy imports           — Every `from X import Y` inside route functions resolves
   4. Storage schema         — Required Sidecar tables are declared
-  5. Static vendor files    — All local JS/CSS deps exist and are non-trivial
+  5. Static vendor files    — Local standalone dependency bytes match the lock
   6. HTML references        — Every src/href in HTML points to a real file
   7. CDN leak detection     — No external CDN URLs remain in served files
   8. JS defensive guards  — Core JS libraries have typeof guards
@@ -333,14 +333,17 @@ if '--runtime' in sys.argv:
                 _br = _pw.chromium.launch(headless=True, args=['--no-sandbox'])
                 try:
                     _pg = _br.new_page()
-                    _pg.set_content('<h1>tofu</h1>')
-                    _gw = _pg.evaluate(
+                    _pg.set_content('<h1>tofu 中文</h1>')
+                    _widths = _pg.evaluate(
                         "(()=>{const c=document.createElement('canvas')"
                         ".getContext('2d');c.font='60px sans-serif';"
-                        "return c.measureText('tofu').width;})()")
+                        "return [c.measureText('tofu').width,"
+                        "c.measureText('中').width,"
+                        "c.measureText(String.fromCodePoint(0x10ffff)).width];})()")
+                    _gw = _widths[0]
                 finally:
                     _br.close()
-            if _gw and _gw > 0:
+            if _gw and _gw > 0 and _widths[1] != _widths[2]:
                 _exe = (_diag or {}).get('executable') or ''
                 _which = ''
                 if _exe:
@@ -350,13 +353,18 @@ if '--runtime' in sys.argv:
                    f"(glyph width {_gw:.0f}px){_which}")
                 if _exe:
                     print(f"      binary: {_exe}")
-            else:
+            elif not _gw or _gw <= 0:
                 _browser_issue(
                     "Chromium launches but renders NO text (zero fonts) — "
                     "screenshots will come back blank-but-styled. Install "
                     "fontconfig + a font family into the env "
                     "(conda install -c conda-forge "
                     "fontconfig font-ttf-dejavu-sans-mono)")
+            else:
+                _browser_issue(
+                    "Chromium renders Latin text but Chinese is missing-glyph "
+                    "boxes. Install CJK coverage (conda install -c conda-forge "
+                    "font-ttf-noto-cjk, or apt-get install fonts-noto-cjk)")
         except Exception as _e:
             _msg = str(_e).replace('\n', ' ')[:200]
             # Report the RESOLVED cause when we know it, not just the symptom:
@@ -445,7 +453,7 @@ section("2. Top-Level Imports")
 
 tl_checks = [
     ("lib.storage",       ["get_storage_client", "start_storage", "stop_storage"]),
-    ("lib",               ["LLM_MODEL", "LLM_API_KEY", "LLM_BASE_URL"]),
+    ("lib",               ["LLM_MODEL", "LLM_API_KEYS", "LLM_BASE_URL"]),
     ("lib.llm",           ["chat", "build_body", "stream_chat"]),
     ("lib.memory.storage", ["list_memories", "create_memory", "update_memory", "delete_memory", "toggle_memory"]),
     ("lib.browser.queue", ["wait_for_commands", "mark_poll", "resolve_batch",
@@ -598,34 +606,17 @@ section("5. Static Vendor Files")
 # marked/purify/highlight/html2canvas/pdfjs, the code-highlight theme and the
 # @font-face stack all ship inside the content-hashed Vite graph now
 # (frontend/src → static/vite/, guarded by lib/vite_assets.validate_vite_artifact).
-# Only the KaTeX pair remains a hand-vendored file because the standalone
-# artifact export view (routes/artifacts.py) loads it directly.
-vendor_files = {
-    'static/vendor/katex/katex.min.js':    100000,
-    'static/vendor/katex/katex.min.css':   10000,
-}
+# Standalone artifact resources are generated from the same lock as the Vite
+# application. Verify exact bytes, including every font referenced by its CSS.
+from lib.http_transport.frontend_vendor import vendor_asset_mismatches
+from lib.http_transport.generated_frontend_vendor import KATEX_VERSION, KATEX_STATIC_SHA256
 
-for path, min_size in vendor_files.items():
-    p = ROOT / path
-    if not p.exists():
-        fail(f"MISSING: {path}")
-    else:
-        sz = p.stat().st_size
-        if sz < min_size:
-            fail(f"{path}: suspiciously small ({sz} bytes, expected >{min_size})")
-        else:
-            ok(f"{path} ({sz:,} bytes)")
-
-# Check KaTeX fonts
-katex_font_dir = ROOT / 'static/vendor/katex/fonts'
-if katex_font_dir.exists():
-    font_count = len(list(katex_font_dir.glob('*.woff2')))
-    if font_count >= 10:
-        ok(f"KaTeX fonts: {font_count} .woff2 files")
-    else:
-        warn(f"KaTeX fonts: only {font_count} .woff2 files (expected ≥10)")
+vendor_mismatches = vendor_asset_mismatches(ROOT)
+if vendor_mismatches:
+    for mismatch in vendor_mismatches:
+        fail(mismatch)
 else:
-    warn("KaTeX fonts directory missing — math rendering may have broken glyphs")
+    ok(f"KaTeX {KATEX_VERSION}: {len(KATEX_STATIC_SHA256)} locked assets verified")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -721,7 +712,8 @@ section("8. JS Defensive Guards")
 # retains every package seam and that HTML shells do not load CDN scripts.
 _guard_files = [
     'frontend/src/vendor-runtime.ts',
-    'frontend/src/features/paper/pdf-viewer.ts',
+    'frontend/src/markdown-vendors.ts',
+    'frontend/src/features/paper/pdf-loader.ts',
     'frontend/src/runtime/app-runtime.js',
 ]
 core_js_parts = []

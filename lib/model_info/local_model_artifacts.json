@@ -1,0 +1,122 @@
+{
+  "contract_version": "tofu.local-model-artifacts/v1",
+  "creators": [
+    {
+      "creator_id": "alibaba",
+      "name": "Alibaba / Qwen",
+      "website": "https://qwen.ai"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "qwen3-reranker-0.6b-bf16",
+      "model": {
+        "creator_id": "alibaba",
+        "model_id": "qwen3-reranker-0.6b",
+        "display_name": "Qwen3-Reranker-0.6B",
+        "capabilities": [
+          "reranking"
+        ],
+        "context_window": 32768,
+        "quality_rank": 0,
+        "list_pricing": {
+          "input": 0.01,
+          "output": 0.01,
+          "currency": "USD",
+          "unit": "per_million_tokens"
+        },
+        "inference_profile": {
+          "source": "official",
+          "reasoning": {
+            "support": "unsupported",
+            "wire_format": "none"
+          }
+        },
+        "registration_metadata": {
+          "release_date": "2025-06-05",
+          "checked_at": "2026-10-22",
+          "source_urls": [
+            "https://qwenlm.github.io/blog/qwen3-embedding/",
+            "https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/blob/e61197ed45024b0ed8a2d74b80b4d909f1255473/README.md",
+            "https://www.siliconflow.com/models/qwen3-reranker-0-6b",
+            "https://www.siliconflow.com/articles/en/most-accurate-reranker-for-rag-pipelines"
+          ],
+          "field_sources": {
+            "release_date": [
+              "https://qwenlm.github.io/blog/qwen3-embedding/"
+            ],
+            "list_pricing": [
+              "https://www.siliconflow.com/articles/en/most-accurate-reranker-for-rag-pipelines",
+              "https://www.siliconflow.com/models/qwen3-reranker-0-6b"
+            ],
+            "capabilities": [
+              "https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/blob/e61197ed45024b0ed8a2d74b80b4d909f1255473/README.md",
+              "https://www.siliconflow.com/models/qwen3-reranker-0-6b"
+            ],
+            "context_window": [
+              "https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/blob/e61197ed45024b0ed8a2d74b80b4d909f1255473/README.md"
+            ],
+            "inference_profile": [
+              "https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/blob/e61197ed45024b0ed8a2d74b80b4d909f1255473/README.md",
+              "https://www.siliconflow.com/models/qwen3-reranker-0-6b"
+            ]
+          }
+        }
+      },
+      "source": {
+        "kind": "huggingface_safetensors",
+        "repository": "Qwen/Qwen3-Reranker-0.6B",
+        "revision": "e61197ed45024b0ed8a2d74b80b4d909f1255473",
+        "license": "Apache-2.0",
+        "files": [
+          {
+            "name": "README.md",
+            "bytes": 14742,
+            "sha256": "5bba8c734f6dd3ae48317b4139317e45a7fce48fc55e15670b23a0dd15492ab6"
+          },
+          {
+            "name": "config.json",
+            "bytes": 727,
+            "sha256": "d479c427a9ca5295218063d4f9aca4f297ab4ac27487cca7af42c84643d51ef0"
+          },
+          {
+            "name": "generation_config.json",
+            "bytes": 214,
+            "sha256": "81051cd3f6e77013827148d0b8a6ead93f8ac390d5ab805f849199f0af6a08db"
+          },
+          {
+            "name": "merges.txt",
+            "bytes": 1671853,
+            "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+          },
+          {
+            "name": "model.safetensors",
+            "bytes": 1191588280,
+            "sha256": "27cd75a405b9c1b46b59abfd88aaa209e6fed2a1972cde9b70e7659537c5e65b"
+          },
+          {
+            "name": "tokenizer.json",
+            "bytes": 11422654,
+            "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+          },
+          {
+            "name": "tokenizer_config.json",
+            "bytes": 9706,
+            "sha256": "253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0"
+          },
+          {
+            "name": "vocab.json",
+            "bytes": 2776833,
+            "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+          }
+        ]
+      },
+      "execution": {
+        "backend": "transformers",
+        "architecture": "Qwen3ForCausalLM",
+        "scoring": "qwen3_yes_no",
+        "weight_dtype": "bfloat16"
+      }
+    }
+  ]
+}

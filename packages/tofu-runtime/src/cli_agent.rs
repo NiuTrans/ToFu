@@ -406,6 +406,11 @@ pub(crate) fn run_configuration(runtime: Arc<tokio::runtime::Runtime>, input: In
         || parallel_names.iter().any(|name| tools.get(name).is_none_or(|tool|tool["permission"] != "read")) {
         return Err("parallel tools must belong to the admitted read catalog".into());
     }
+    let concurrent_tools = config["concurrent_tool_dispatch"] == true;
+    if concurrent_tools && (config.get("parallel_tool_names").is_some()
+        || config["round_control"] != true || config["tool_sibling_control"] != true) {
+        return Err("concurrent tools require host call order on round settlement".into());
+    }
     let model_tools = if prepared_tools.is_some() {Vec::new()} else {tofu_runtime::model_tool_wire::project(tools, config.get("wire_tools"))?};
     template.insert("tools".into(),Value::Array(model_tools));
     let messages = config["messages"]
@@ -751,6 +756,7 @@ pub(crate) fn run_configuration(runtime: Arc<tokio::runtime::Runtime>, input: In
         progress_limits,
         prepare_history: config["round_preparation"] == true,
         tool_siblings: config["tool_sibling_control"] == true,
+        tool_order: concurrent_tools,
         prepared_tools,
         preparation_deadline: (config["round_preparation"] == true || config["progress_control"] == true || config["checkpoint_control"]==true).then(||Arc::new(std::sync::OnceLock::new())),
     };
@@ -763,10 +769,15 @@ pub(crate) fn run_configuration(runtime: Arc<tokio::runtime::Runtime>, input: In
         ).map_err(|_|"invalid approval composition")?)
     } else {None};
     let authorization = HostPolicy { owner, writes: approvals.is_some() };
-    let scheduling = if parallel_names.is_empty() { None } else {
-        Some(tofu_runtime::tool_scheduler::Scheduler::new(tofu_runtime::tool_scheduler::Budget {
-            workers: runtime.metrics().num_workers(), inflight_calls: 0, inflight_bytes: 0,
-        }, parallel_names).map_err(|_|"invalid native tool scheduler")?)
+    let scheduler_budget = tofu_runtime::tool_scheduler::Budget {
+        workers: runtime.metrics().num_workers(), inflight_calls: 0, inflight_bytes: 0,
+    };
+    let scheduling = if concurrent_tools {
+        Some(tofu_runtime::tool_scheduler::Scheduler::concurrent(scheduler_budget)
+            .map_err(|_|"invalid native tool scheduler")?)
+    } else if parallel_names.is_empty() { None } else {
+        Some(tofu_runtime::tool_scheduler::Scheduler::new(scheduler_budget, parallel_names)
+            .map_err(|_|"invalid native tool scheduler")?)
     };
     let agent = Agent {
         provider: &provider,

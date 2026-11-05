@@ -44,7 +44,7 @@ _MAX_ENTRIES = 4000
 # Human verb per tool, used by friendly_label().
 _TOOL_VERB = {
     'web_search': 'web search result',
-    'grep_search': 'grep matches',
+    'search_files': 'search matches',
     'fetch_url': 'fetched page',
     'find_files': 'find results',
     'get_conversation': 'past conversation',
@@ -53,7 +53,7 @@ _TOOL_VERB = {
 # Split-persist filename prefix → tool name (see _persist.py).
 _PREFIX_TOOL = {
     'search': 'web_search',
-    'grep': 'grep_search',
+    'grep': 'search_files',
     'fetch': 'fetch_url',
     'find': 'find_files',
 }
@@ -154,7 +154,7 @@ def describe_filename(name: str) -> tuple[str, str] | None:
         # grep_{id}_{safe_fname} — the id and filename both contain
         # underscores so they can't be split reliably; surface the tool
         # only (still far better than the raw filename).
-        return 'grep_search', ''
+        return 'search_files', ''
 
     m = _DEFAULT_SPILL_RE.match(base)
     if m:
@@ -176,7 +176,7 @@ def friendly_label(tool_name: str, description: str = '') -> str:
     if not desc:
         return verb
     # Quote free-text descriptions (titles, patterns); leave path/URL bare.
-    if tool_name in ('grep_search', 'fetch_url'):
+    if tool_name in ('search_files', 'fetch_url'):
         return f'{verb} — {desc}'
     return f'{verb} — "{desc}"'
 

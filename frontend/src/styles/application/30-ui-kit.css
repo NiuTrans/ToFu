@@ -117,6 +117,9 @@ pre.ui-text-block{white-space:pre-wrap;word-break:break-word}
 .ui-icon-btn:disabled{opacity:0.5;cursor:default;pointer-events:none}
 .ui-icon-btn--sm{width:var(--control-h-sm);height:var(--control-h-sm);border-radius:var(--radius-xs)}
 .ui-icon-btn--lg{width:var(--control-h-lg);height:var(--control-h-lg)}
+/* Toggle state: aria-pressed="true" reads as on in every theme. */
+.ui-icon-btn[aria-pressed="true"]{background:var(--accent-subtle);color:var(--accent)}
+.ui-icon-btn[aria-pressed="true"]:hover{background:var(--accent-subtle);color:var(--accent-hover)}
 
 /* Author display must not override the platform's hidden attribute. */
 .ui-btn[hidden],.ui-icon-btn[hidden]{display:none}
@@ -384,8 +387,10 @@ dialog.ui-drawer:not([open]){display:none}
 .ui-choice>input.ui-switch:checked::after{transform:translateX(14px)}
 
 /* ── Tabs ──────────────────────────────────────────────────────────────── */
+.ui-tabs{min-width:0}
 .ui-tabs__list{
   display:flex;gap:var(--space-1);
+  max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;
   border-bottom:1px solid var(--border);
 }
 .ui-tabs__tab{

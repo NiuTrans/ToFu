@@ -14,8 +14,10 @@ Two bindings, one branch:
    dispatch on it (main solve, L2/advanced compaction summaries, Flow role
    replan turns) can only pick that group's slots — never silently cross
    into another request or operator credential. See
-   ``lib/llm_dispatch/provider_pin.py``. BRANCH: only when
-   ``task['_pinned_provider_id']`` is truthy.
+   ``lib/llm_dispatch/provider_pin.py``. A root task without its own group
+   clears any pin on the caller's context: it dispatches through its
+   configured pool, never through a route group it does not own. A child
+   without its own group keeps its parent's pin.
 
 2. **Conversation-sticky routing.** Bind this worker thread to the
    conversation so every LLM dispatch on it prefers the API key that last
@@ -35,7 +37,10 @@ logger = get_logger(__name__)
 
 
 def bind_provider_and_affinity(task, tid):
-    """Apply the hard provider pin (when pinned) + conv affinity (always).
+    """Bind the task's own route pin and conversation affinity.
+
+    A root without its own route group clears the caller's pin; a child
+    without one keeps its parent's. The affinity is always rebound.
 
     Args:
         task: Live task dict; reads ``_pinned_provider_id`` and ``convId``.
@@ -43,11 +48,16 @@ def bind_provider_and_affinity(task, tid):
     """
     # ── Hard provider pin (multi-tenant isolation) ──
     from lib.llm_dispatch.provider_pin import set_pinned_provider
+    from lib.tasks_pkg.invocation import is_child_invocation
     _pinned_provider_id = task.get('_pinned_provider_id') or ''
     if _pinned_provider_id:
         set_pinned_provider(_pinned_provider_id)
         logger.info('[Task %s] Provider-pinned to %s (hard isolation)',
                     tid, _pinned_provider_id)
+    elif not is_child_invocation(task):
+        # A retired or foreign group left on the caller's context would
+        # confine this root's dispatch to slots it does not own (no_slot).
+        set_pinned_provider(None)
 
     # ── Conversation-sticky routing (UNCONDITIONAL — an empty convId
     #    clears the pooled thread's stale affinity from its previous

@@ -347,35 +347,26 @@ def test_prefetch_loads_body_only_for_selected_metadata(
     assert bounded_body_paths == [(selected_memory['filepath'], 6_000)]
 
 
-def test_memory_hint_requests_metadata_only(monkeypatch):
+def test_memory_hint_checks_availability_without_listing(monkeypatch):
     import lib.memory.injection as injection
 
     captured = {}
 
-    def fake_eligible(
-        project_path,
-        extra_paths=None,
-        *,
-        include_body=True,
-        record_view='complete',
-    ):
-        captured.update(
-            project_path=project_path,
-            extra_paths=extra_paths,
-            include_body=include_body,
-            record_view=record_view,
-        )
-        return [{'id': 'exists'}]
+    def fake_available(project_path=None, extra_paths=None):
+        captured.update(project_path=project_path, extra_paths=extra_paths)
+        return True
 
-    monkeypatch.setattr(injection, 'get_eligible_memories', fake_eligible)
+    monkeypatch.setattr(injection, 'has_eligible_memories', fake_available)
+    assert not hasattr(injection, 'get_eligible_memories')
 
     assert injection.build_memory_context('/project', ['/extra'])
     assert captured == {
         'project_path': '/project',
         'extra_paths': ['/extra'],
-        'include_body': False,
-        'record_view': 'retrieval',
     }
+    monkeypatch.setattr(
+        injection, 'has_eligible_memories', lambda *_args, **_kwargs: False)
+    assert injection.build_memory_context('/project') is None
 
 
 def test_memory_hint_reuses_known_prefetch_availability(monkeypatch):
@@ -383,9 +374,9 @@ def test_memory_hint_reuses_known_prefetch_availability(monkeypatch):
 
     monkeypatch.setattr(
         injection,
-        'get_eligible_memories',
+        'has_eligible_memories',
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError('known availability rebuilt the memory corpus')),
+            AssertionError('known availability rescanned the memory store')),
     )
 
     assert injection.build_memory_context(

@@ -17,7 +17,6 @@ ROOT = Path(__file__).resolve().parents[2]
 OWNER = ROOT / 'frontend/src/conversation/presentation/turn-serving-route.ts'
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
 def test_serving_route_uses_response_authoring_round(tmp_path):
     owner_bundle = native_module_path('turn-serving-route.js', OWNER)
     harness = tmp_path / 'serving-route-harness.js'
@@ -38,7 +37,7 @@ const kimi = resolveTurnServingRoute({
   model: 'kimi-k3',
   lastRoundUsage: {round: 50, model: 'kimi-k3', tokensIn: 100000, tokensOut: 50},
   apiRounds: [
-    {round: 50, tag: 'R50', ...dispatch('kimi-k3', 'sankuai', 'sankuai_key_0', 'k123')},
+    {round: 50, tag: 'R50', ...dispatch('kimi-k3', 'example-corp', 'example_corp_key_0', 'k123')},
     compaction('gemini-3.5-flash-lite', 'gemini'),
   ],
 });
@@ -58,7 +57,7 @@ const fallback = resolveTurnServingRoute({
     tokensIn: 30000, tokensOut: 100,
   },
   apiRounds: [
-    {round: 1, tag: 'R1', ...dispatch('kimi-k3', 'sankuai', 'sankuai_0', 'k123')},
+    {round: 1, tag: 'R1', ...dispatch('kimi-k3', 'example-corp', 'example_corp_0', 'k123')},
     {round: 1, tag: 'R1-FALLBACK', ...dispatch('glm-5.3', 'zhipu', 'zhipu_0', 'f123')},
     compaction('gemini-3.5-flash-lite', 'gemini'),
   ],
@@ -66,7 +65,7 @@ const fallback = resolveTurnServingRoute({
 const billed = resolveTurnServingRoute({
   model: 'kimi-k3',
   apiRounds: [
-    {round: 1, tag: 'R1', ...dispatch('kimi-k3', 'sankuai', 'sankuai_0', 'k123')},
+    {round: 1, tag: 'R1', ...dispatch('kimi-k3', 'example-corp', 'example_corp_0', 'k123')},
     {round: 1, tag: 'R1-BILLED', responseAuthoring: false,
       ...dispatch('gemini-discarded', 'gemini', 'g_0', 'd123')},
     compaction('gemini-3.5-flash-lite', 'gemini'),
@@ -112,7 +111,7 @@ console.log(JSON.stringify({kimi, sol, fallback, billed, legacyFallback, snapsho
 
     assert routes['kimi'] == {
         'model': 'kimi-k3', 'logicalModel': 'kimi-k3',
-        'providerId': 'sankuai', 'keyName': 'sankuai_key_0',
+        'providerId': 'example-corp', 'keyName': 'example_corp_key_0',
         'keyTail': 'k123', 'source': 'last-round',
     }
     assert routes['sol']['model'] == 'gpt-5.6-sol'
@@ -120,7 +119,7 @@ console.log(JSON.stringify({kimi, sol, fallback, billed, legacyFallback, snapsho
     assert routes['fallback']['model'] == 'glm-5.3'
     assert routes['fallback']['providerId'] == 'zhipu'
     assert routes['billed']['model'] == 'kimi-k3'
-    assert routes['billed']['providerId'] == 'sankuai'
+    assert routes['billed']['providerId'] == 'example-corp'
     assert routes['legacyFallback']['model'] == 'glm-5.3'
     assert routes['snapshot'] == {
         'model': 'beta-wire-b', 'logicalModel': 'alpha',
@@ -130,7 +129,6 @@ console.log(JSON.stringify({kimi, sol, fallback, billed, legacyFallback, snapsho
     assert routes['count'] == 1
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
 def test_finish_bar_renders_response_route_not_trailing_compaction(tmp_path):
     owner_bundle = native_module_path('turn-serving-route.js', OWNER)
     finish_owner = runtime_section('ui/finish_info.js')
@@ -188,7 +186,7 @@ const kimi = renderFinishInfo({...base,
   model: 'kimi-k3',
   lastRoundUsage: {round: 50, model: 'kimi-k3', tokensIn: 10, tokensOut: 5},
   apiRounds: [
-    {round: 50, tag: 'R50', ...dispatch('kimi-k3', 'sankuai', 'sankuai_0', '1234')},
+    {round: 50, tag: 'R50', ...dispatch('kimi-k3', 'example-corp', 'example_corp_0', '1234')},
     {kind: 'compaction', tag: 'COMPACTION-L2', ...dispatch('gemini-3.5-flash-lite', 'gemini', 'g_0', '9999')},
   ],
 }, false);
@@ -222,7 +220,7 @@ console.log(JSON.stringify({kimi, sol, fallback, routed}));
     rendered = json.loads(run.stdout.strip().splitlines()[-1])
 
     assert 'kimi-k3' in rendered['kimi']
-    assert 'sankuai' in rendered['kimi']
+    assert 'example-corp' in rendered['kimi']
     assert 'gemini' not in rendered['kimi']
     assert 'gpt-5.6-sol' in rendered['sol']
     assert 'gpt-5.6-terra' not in rendered['sol']
@@ -233,7 +231,6 @@ console.log(JSON.stringify({kimi, sol, fallback, routed}));
     assert 'deepseek-v4-pro' in rendered['routed']
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
 def test_model_first_picker_collapses_provider_supply_and_quarantines_pending(
         tmp_path):
     owner = native_module_path('model-routing-picker.js', ROOT / 'frontend/src/application-shell/model-picker/catalog.ts')

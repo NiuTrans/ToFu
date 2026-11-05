@@ -3,6 +3,8 @@
 Root and child agents enter the mature preparation/request/tool/settlement
 owner. A child owns its task and resources, never its parent's conversation
 lifecycle. The scheduler supplies scoped tools and a required evidence sink.
+Silence is judged for every agent by ``lib.tasks_pkg.liveness``; its stall
+verdict reaches an invocation through ``stop_stalled_invocation``.
 """
 from __future__ import annotations
 
@@ -12,7 +14,6 @@ from typing import Any
 import math
 import time
 from lib.log import clear_log_context, get_logger, set_req_id
-from lib.tasks_pkg.explained_wait import explained_wait
 
 logger = get_logger(__name__)
 
@@ -58,19 +59,19 @@ def is_child_invocation(task: dict) -> bool:
     return isinstance(policy, InvocationPolicy) and policy.is_child
 
 
-def _stop_internal_invocation(task: dict, reason: str, *, beacon=None) -> bool:
+def _stop_internal_invocation(task: dict, reason: str, *,
+                              silent_seconds: float | None = None,
+                              stall_timeout: float | None = None) -> bool:
     """Publish cause before the physical abort wakes provider/tool consumers."""
     from lib.error_envelope import make_envelope
     detail = ('Invocation stalled: no model or tool progress was observed'
               if reason == 'stalled' else 'Invocation execution deadline exceeded')
-    if beacon is not None:
-        # Numeric beacon facts only: notes, prompts and provider payloads are
+    if silent_seconds is not None and stall_timeout is not None:
+        # Numeric liveness facts only: notes, prompts and provider payloads are
         # deliberately excluded from public diagnostics.
-        key = task.get('_invocationProgressKey') or task['id']
-        elapsed = beacon.seconds_since_activity(key)
         task['_invocationStopEvidence'] = {
-            'silentSeconds': elapsed, 'stallTimeoutSeconds': beacon.stall_timeout}
-        detail += f' for {elapsed:.1f}s (stall threshold {beacon.stall_timeout:g}s)'
+            'silentSeconds': silent_seconds, 'stallTimeoutSeconds': stall_timeout}
+        detail += f' for {silent_seconds:.1f}s (stall threshold {stall_timeout:g}s)'
     task['_invocationStopReason'] = reason
     task['error'] = make_envelope('internal', detail=detail,
                                   context='invocation-guard', source='task-engine',
@@ -80,8 +81,26 @@ def _stop_internal_invocation(task: dict, reason: str, *, beacon=None) -> bool:
     return True
 
 
+def stop_stalled_invocation(task: dict, *, silent_seconds: float,
+                            stall_timeout: float) -> bool:
+    """Deliver the liveness judge's stall verdict in band; False if already stopping.
+
+    Explicit Stop and deadlines are observed first and keep their own cause, so
+    a silence verdict can never impersonate or overwrite an owner stop.
+    """
+    if invocation_abort_requested(task):
+        return False
+    return _stop_internal_invocation(task, 'stalled', silent_seconds=float(silent_seconds),
+                                     stall_timeout=float(stall_timeout))
+
+
 def invocation_abort_requested(task: dict) -> bool:
-    """Observe inherited cancellation without granting upward cancellation rights."""
+    """Observe inherited cancellation without granting upward cancellation rights.
+
+    Silence is not judged here: ``lib.tasks_pkg.liveness`` decides it for root
+    and child agents alike and delivers a stall through
+    ``stop_stalled_invocation``.
+    """
     if task.get('aborted') or (task.get('abort_event') is not None
                               and task['abort_event'].is_set()):
         task['aborted'] = True
@@ -105,10 +124,6 @@ def invocation_abort_requested(task: dict) -> bool:
            for deadline in (limits.get('deadline'), account_deadline)):
         task['_executionLimitReason'] = 'execution_deadline_exceeded'
         return _stop_internal_invocation(task, 'deadline')
-    beacon = task.get('_invocationProgressBeacon')
-    if (beacon is not None and not explained_wait(task)
-            and not beacon.is_making_progress(task.get('_invocationProgressKey') or task['id'])):
-        return _stop_internal_invocation(task, 'stalled', beacon=beacon)
     deadline = task.get('_invocationDeadline')
     if deadline is not None and time.monotonic() >= deadline:
         return _stop_internal_invocation(task, 'deadline')
@@ -116,7 +131,11 @@ def invocation_abort_requested(task: dict) -> bool:
 
 
 def deliver_invocation_event(task: dict, event: dict) -> None:
-    """Required, ordered handoff, unlike a best-effort observer notification."""
+    """Required, ordered handoff, unlike a best-effort observer notification.
+
+    A child's Request Inspector snapshot is accepted into its ordered evidence
+    lane and the sink receives it at once: the paid call never waits for it.
+    """
     beacon = task.get('_invocationProgressBeacon')
     if beacon is not None:
         beacon.touch(task.get('_invocationProgressKey') or task['id'], str(event.get('type') or 'event'))
@@ -128,15 +147,7 @@ def deliver_invocation_event(task: dict, event: dict) -> None:
         raise RuntimeError('Invocation evidence delivery previously failed') from previous
     try:
         if event.get('type') == 'messages_snapshot' and not task.get('_invocationStorageFree'):
-            from lib.tasks_pkg.persistence_wait import wait_for_persistence
-            from lib.tasks_pkg.event_log import append_persistent_event
-            # The append is idempotent on its natural (task, sequence) key.
-            # Already-observed evidence waits for ACK even after user Stop;
-            # transient storage pressure cannot poison invocation delivery.
-            wait_for_persistence(
-                task, lambda: append_persistent_event(
-                    task['_inspectorTaskId'], event['seq'], event),
-                label='invocation evidence append', cancellable=False)
+            _accept_invocation_evidence(task, event)
         sink(event)
     except Exception as exc:
         task['_invocationDeliveryError'] = exc
@@ -145,15 +156,64 @@ def deliver_invocation_event(task: dict, event: dict) -> None:
         raise
 
 
-def invocation_output_projection(task: dict[str, Any]) -> dict[str, Any]:
-    """Use the ordinary checkpoint assembly, never an event-log reconstruction."""
-    from lib.tasks_pkg.segments import assemble_segments, segments_to_json
-    return {
-        'content': task.get('content') or '',
-        'thinking': task.get('thinking') or '',
-        'segments': segments_to_json(assemble_segments(task)),
-        'toolRounds': [dict(row) for row in task.get('toolRounds') or []],
-    }
+def _accept_invocation_evidence(task: dict, event: dict) -> None:
+    """Queue one snapshot append behind the child's earlier Inspector evidence."""
+    from lib.conversation_sync.settled_rows import detach_sharing_settled
+    from lib.tasks_pkg.event_delivery import coordinator, invocation_evidence_lane
+    inspector_task_id = task['_inspectorTaskId']
+    sequence = event['seq']
+    # Detached like a root-lane frame, copied and charged in one visit: later
+    # prompt mutation cannot alter it.
+    detached, retained_bytes = detach_sharing_settled(event)
+    pending = {'event': detached, 'projected': False}
+
+    def persist():
+        from lib.tasks_pkg.event_log import (
+            append_persistent_event, project_persistent_event,
+        )
+        # Projection advances the snapshot codec in this lane's FIFO order and
+        # failure may reset its baseline. Freeze the occurrence once: a lost
+        # ACK must replay the original delta, never a new payload under the
+        # already-committed (task, sequence) key.
+        if not pending['projected']:
+            pending['event'] = project_persistent_event(inspector_task_id, pending['event'])
+            pending['projected'] = True
+        append_persistent_event(inspector_task_id, sequence, pending['event'])
+
+    # The lane retries transient pressure on this exact append; Stop halts
+    # execution, not persistence of already-observed evidence. Sequence -1:
+    # the child's own event cursor is not a public replay frame.
+    coordinator().submit(invocation_evidence_lane(task), -1,
+                         retained_bytes, persist, lambda: None,
+                         accept_after_stop=True)
+
+
+def settle_invocation_evidence(task: dict) -> None:
+    """Drain a finished child's accepted Inspector evidence, then release its lane.
+
+    Accepted evidence outlives Stop, so this waits without a cancellation check;
+    only shutdown ends a still-retrying head. A failed head is retried once
+    more; a refusal becomes the invocation's delivery failure with the authority
+    verdict, and the unrepairable remainder is released.
+    """
+    lane = task.get('_invocationEvidenceLane')
+    if lane is None:
+        return
+    from lib.tasks_pkg.event_delivery import EventDeliveryError, coordinator
+    owner = coordinator()
+    try:
+        owner.flush(lane, timeout=None)
+    except Exception as error:
+        # Never raised: a teardown caller may already be propagating the
+        # invocation's own failure. The barrier error only wraps the verdict.
+        failure = (error.__cause__ if isinstance(error, EventDeliveryError)
+                   and error.__cause__ is not None else error)
+        if task.get('_invocationDeliveryError') is None:
+            task['_invocationDeliveryError'] = failure
+        task['aborted'] = True
+        task['abort_event'].set()
+        owner.revoke(lane)
+    task.pop('_invocationEvidenceLane', None)
 
 
 def invocation_affinity_id(task: dict) -> str:
@@ -223,7 +283,10 @@ def _execute_invocation(task: dict[str, Any], *, policy: InvocationPolicy) -> No
             return _execute_task_invocation(task, policy=policy)
 
     try:
-        with isolated_conv_affinity(invocation_affinity_id(task)):
+        # Only a child's scope is ephemeral: a root scope IS the conversation,
+        # so its recorded warm key must survive the turn end.
+        with isolated_conv_affinity(invocation_affinity_id(task),
+                                    ephemeral=policy.is_child):
             invocation_abort_requested(task)
             return copy_context().run(run_in_scope)
     finally:
@@ -234,4 +297,4 @@ def _execute_invocation(task: dict[str, Any], *, policy: InvocationPolicy) -> No
 
 __all__ = ['InvocationPolicy', 'ROOT_INVOCATION_POLICY', 'execute_invocation',
            'is_child_invocation', 'deliver_invocation_event',
-           'invocation_output_projection']
+           'settle_invocation_evidence', 'stop_stalled_invocation']

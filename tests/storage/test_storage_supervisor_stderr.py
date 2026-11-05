@@ -129,16 +129,21 @@ def _run_drainer(lines, *, caplog):
 
 def test_engine_json_lines_mirror_at_matching_severity_and_forward(caplog,
                                                                    capfd):
+    emitted_at = '2026-11-01T09:27:30.172+00:00'
     lines = [
         json.dumps({
-            'source': 'tofu-db', 'level': 'error',
+            'source': 'tofu-db', 'timestamp': emitted_at, 'level': 'error',
             'target': 'background_pack', 'message': 'pack failed'}) + '\n',
         json.dumps({
-            'source': 'tofu-db', 'level': 'warn',
+            'source': 'tofu-db', 'timestamp': emitted_at, 'level': 'warn',
             'target': 'integrity_fence', 'message': 'fenced write'}) + '\n',
         json.dumps({
-            'source': 'tofu-db', 'level': 'warn',
+            'source': 'tofu-db', 'timestamp': emitted_at, 'level': 'warn',
             'target': 'background_pack', 'message': 'ordinary warn'}) + '\n',
+        # An engine built before the timestamp field still routes.
+        json.dumps({
+            'source': 'tofu-db', 'level': 'error',
+            'target': 'main', 'message': 'older engine'}) + '\n',
         'fsync_stats: commits=12 p99=3ms\n',
         'plain non-json child line\n',
     ]
@@ -148,6 +153,12 @@ def test_engine_json_lines_mirror_at_matching_severity_and_forward(caplog,
     error_records = [r for r in records if 'pack failed' in r.getMessage()]
     assert len(error_records) == 1
     assert error_records[0].levelno == logging.ERROR
+    # The engine's emit instant survives the drain, which can lag it.
+    assert error_records[0].getMessage() == (
+        f'tofu-db engine pid=4321 at={emitted_at} [background_pack] pack failed')
+    older = [r for r in records if 'older engine' in r.getMessage()]
+    assert [r.getMessage() for r in older] == [
+        'tofu-db engine pid=4321 at=- [main] older engine']
 
     fence_records = [r for r in records if 'fenced write' in r.getMessage()]
     assert len(fence_records) == 1

@@ -44,8 +44,6 @@ the storyboard for it.
 
 from __future__ import annotations
 
-import json
-import os
 import re
 
 from lib.log import get_logger
@@ -446,23 +444,16 @@ def start_video_abstract(paper_hash: str, *, lang: str = 'zh',
     same (paper_hash, lang, voice, narration, burn_in, quality) joins the
     in-flight task instead of starting a parallel render — same contract
     as the motion main route. ``force=True`` (the frontend's Regenerate
-    button) explicitly bypasses the index, like the podcast's ``force``.
+    button) explicitly supersedes the live index. Podcast force only bypasses
+    completed cache.
 
     Returns ``{'ok', 'task_id', 'scenes', 'source_kind'}`` (plus
     ``deduped: True`` on a join) or
     ``{'ok': False, 'reason': 'report_required'|'empty_source'|'budget_failed'}``.
     """
     from lib import motion_video as mv
-    from lib.motion_video._env import motion_root
-    from lib.motion_video.engine import run_motion_task
-    from lib.motion_video.runtime import (
-        _motion_index_get,
-        _motion_claim_task,
-        _motion_index_register,
-        _motion_runtime,
-        _motion_task_id,
-        _new_motion_task,
-    )
+    from lib.motion_video.runtime import _motion_index_get
+    from lib.motion_video.service import start_motion_video
     from lib.paper.podcast_engine.worker import load_source_text, has_report
 
     if not has_report(paper_hash, user_id=user_id):
@@ -471,10 +462,10 @@ def start_video_abstract(paper_hash: str, *, lang: str = 'zh',
     # The model is part of the dedup identity: joining an in-flight render
     # made with a DIFFERENT model would silently serve the wrong film — the
     # cache-key-skew family (same class as the podcast cache row).
-    dedup_key = (user_id, 'paper', paper_hash, lang, voice, bool(narration),
+    dedup_key = ('paper', paper_hash, lang, voice, bool(narration),
                  bool(burn_in), quality, scene_author, model or '')
     if not force:
-        existing = _motion_index_get(dedup_key)
+        existing = _motion_index_get((user_id, *dedup_key))
         if existing:
             logger.info('[Paper:Video] dedup join: %s (paper=%s)',
                         existing, paper_hash[:8])
@@ -500,51 +491,15 @@ def start_video_abstract(paper_hash: str, *, lang: str = 'zh',
         return {'ok': False, 'reason': 'budget_failed',
                 'errors': budget_errors[:6]}
 
-    task_id = _motion_task_id()
-    workdir = os.path.join(motion_root(), 'jobs', task_id)
-    scenes_path = os.path.join(workdir, 'scenes.json')
-    task = None
-    joined_task_id = None
-    task_kwargs = {
-        'srt_path': '', 'workdir': workdir, 'voice': voice, 'speed': speed,
-        'alignment': alignment, 'narration': narration, 'quality': quality,
-        'parallel': parallel, 'width': 1080, 'height': 1440,
-        'scenes_path': scenes_path,
-    }
-    if force:
-        # Force explicitly supersedes a live identity. Create first so index
-        # pruning can never mistake the replacement for an orphan.
-        task = _new_motion_task(
-            task_id, user_id=user_id, **task_kwargs)
-        _motion_index_register(dedup_key, task_id)
-    else:
-        task, joined_task_id = _motion_claim_task(
-            dedup_key, task_id, user_id=user_id, **task_kwargs)
-    if joined_task_id:
-        logger.info('[Paper:Video] concurrent dedup join: %s (paper=%s)',
-                    joined_task_id, paper_hash[:8])
-        return {'ok': True, 'task_id': joined_task_id, 'deduped': True,
+    task_id, joined = start_motion_video(
+        user_id=user_id, dedup_key=dedup_key, force=force, scenes=scenes,
+        voice=voice, speed=speed, alignment=alignment, narration=narration,
+        quality=quality, parallel=parallel, burn_in=burn_in, burn_in_fontsdir='',
+        paper_hash=paper_hash, model=model or '',
+        scene_author=bool(scene_author) if scene_author is not None else None)
+    if joined:
+        return {'ok': True, 'task_id': task_id, 'deduped': True,
                 'scenes': 0, 'source_kind': 'joined'}
-
-    os.makedirs(workdir, exist_ok=True)
-    with open(scenes_path, 'w', encoding='utf-8') as f:
-        json.dump(scenes, f, ensure_ascii=False, indent=1)
-
-    assert task is not None
-    task['burn_in'] = burn_in
-    task['burn_in_fontsdir'] = ''
-    task['paper_hash'] = paper_hash
-    # The composing model, threaded to the scene author (engine compose
-    # stage) and persisted in the manifest so a crash-resume does not
-    # silently swap the user's pick for the dispatcher default.
-    task['model'] = model or ''
-    # Written ONLY when the caller stated a preference. Leaving the key absent
-    # is what lets scene_author_enabled() own the default — hard-coding True
-    # here would re-create the per-caller copy that made this panel ship
-    # template cards for a whole release after the tool path was fixed.
-    if scene_author is not None:
-        task['scene_author'] = bool(scene_author)
-    _motion_runtime.spawn(task_id, run_motion_task, task)
     logger.info('[Paper:Video] abstract started: %s (paper=%s scenes=%d '
                 'narration=%s)', task_id, paper_hash[:8], len(scenes),
                 narration)

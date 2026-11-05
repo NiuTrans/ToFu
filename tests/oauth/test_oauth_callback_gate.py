@@ -17,22 +17,16 @@ DB-free; skips when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -178,6 +172,7 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 def _run(section_source: str) -> subprocess.CompletedProcess:
     # Unique per invocation (xdist workers share this directory).
+    require_node_modules('jsdom')
     fd, harness = tempfile.mkstemp(
         prefix='_oauth_gate_harness_', suffix='.js', dir=HERE)
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -198,8 +193,6 @@ def _run(section_source: str) -> subprocess.CompletedProcess:
                 pass
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_oauth_callback_message_gate():
     from tests._runtime_sections import runtime_section
     proc = _run(runtime_section('settings/oauth.js'))

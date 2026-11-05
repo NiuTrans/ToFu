@@ -214,7 +214,10 @@ def _model_projection(value: Mapping[str, Any]) -> tuple[str, str]:
         program_input = ToolResultProgramInputV2.from_dict(value.get('programInput'))
         if program_input is not None:
             payload['programInput'] = program_input.to_dict()
-    return _compact_json(payload), "partial"
+    from lib.tools.result_projection_text import compact_text_field
+    from lib.tools.result_surfaces_generated import CONTRACT
+    return compact_text_field(payload, CONTRACT['partialProjectionText']['bodyField'],
+                              original=_compact_json(payload)), "partial"
 
 
 @dataclass(frozen=True)
@@ -552,10 +555,11 @@ def tool_result_observation(
             if isinstance(evidence.get("error"), Mapping) else None),
     }
     projection_kind = str(evidence.get("projectionKind") or "text")
-    if projection_kind == 'error' and not isinstance(parsed, dict):
+    if projection_kind in {'error', 'partial'} and not isinstance(parsed, dict):
         from lib.tools.result_projection_text import load_text_field
         from lib.tools.result_surfaces_generated import CONTRACT
-        parsed = load_text_field(content_text, CONTRACT['errorProjectionText']['bodyField'])
+        policy = CONTRACT['errorProjectionText' if projection_kind == 'error' else 'partialProjectionText']
+        parsed = load_text_field(content_text, policy['bodyField'])
     if projection_kind == "text":
         observation["summary"] = content_text
         return observation

@@ -74,7 +74,10 @@ _daemon_alive() {
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
     local cmdline
-    cmdline="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    # -ww: without it ps cuts args at an inherited $COLUMNS (readline-using
+    # parents export COLUMNS=80). A long checkout path then hides the live
+    # watchdog from status/stop, and daemon launches a second owner.
+    cmdline="$(ps -ww -p "$pid" -o args= 2>/dev/null || true)"
     [[ "$cmdline" == *"$BASE_DIR/supervisor.sh __watchdog__"* ]]
 }
 
@@ -85,7 +88,17 @@ _owner_alive() {
     local owner_pid="${TOFU_SUPERVISOR_OWNER_PID:-}"
     [[ -z "$owner_pid" ]] && return 0
     [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] || return 1
-    kill -0 "$owner_pid" 2>/dev/null
+    kill -0 "$owner_pid" 2>/dev/null || return 1
+    # Signal 0 still reaches an owner that exited but is not yet reaped; the
+    # same rule as runtime_guards.pid_is_alive: a zombie whose last thread is
+    # gone is dead. Without /proc the signal probe stands.
+    local stat rest
+    { read -r stat < "/proc/$owner_pid/stat"; } 2>/dev/null || return 0
+    rest="${stat##*) }"
+    local -a fields
+    read -r -a fields <<< "$rest"
+    [[ "${fields[0]:-}" != Z && "${fields[0]:-}" != X ]] && return 0
+    [[ "${fields[17]:-}" =~ ^[0-9]+$ && "${fields[17]}" -gt 1 ]]
 }
 
 # The self-healing loop. Runs as the setsid session leader ($$ == session id
@@ -133,8 +146,8 @@ cmd_watchdog() {
             break
         fi
         # The checkout path is this daemon's explicit ownership boundary. If
-        # it is removed or atomically replaced, supervisor.py's service hook
-        # exits and the watchdog must not manufacture an immortal deleted-tree
+        # it is removed or moved away, supervisor.py's ownership check retires
+        # it and the watchdog must not manufacture an immortal deleted-tree
         # process by trying to restart a source file that no longer exists.
         if [[ ! -f "$BASE_DIR/supervisor.py" || ! -f "$BASE_DIR/supervisor.sh" ]]; then
             echo "[watchdog] source checkout disappeared — retiring."

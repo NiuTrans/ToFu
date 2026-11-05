@@ -107,7 +107,7 @@ function setup(opts) {
   global.AbortController = win.AbortController;
   global.AbortSignal = win.AbortSignal;
   for (const name of [
-    'Element', 'HTMLElement', 'HTMLButtonElement', 'HTMLInputElement',
+    'Element', 'HTMLElement', 'HTMLButtonElement', 'HTMLInputElement', 'HTMLSelectElement',
     'HTMLTextAreaElement', 'Event', 'EventTarget', 'CustomEvent',
   ]) {
     global[name] = win[name];

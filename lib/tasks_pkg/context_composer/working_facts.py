@@ -49,8 +49,12 @@ def refresh_working_facts(messages, *, task, model):
     from lib.tasks_pkg.context_composer import (
         ComposeRequest, append_context_blocks, can_append_injection, context_block, disabled_context_blocks,
     )
+    from lib.tasks_pkg.conversation_delivery import has_no_saved_conversation
     from lib.tasks_pkg.manager import task_user_id
+    # A headless job label owns no facts, and its surface withholds the
+    # working-fact tools that the recovery text below would name.
     if (task.get('aborted') or task.get('_transientRuntime') or not task.get('convId')
+            or has_no_saved_conversation(task)
             or not task.get('_userId') or not can_append_injection(messages)):
         return None
     disabled = disabled_context_blocks(task.get('config') or {})

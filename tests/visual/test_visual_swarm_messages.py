@@ -1,4 +1,4 @@
-"""Chromium regression for mailbox roles, millisecond timestamps and availability."""
+"""Chromium regression for mailbox roles, millisecond timestamps and disclaimer-free history."""
 import json
 
 import pytest
@@ -10,7 +10,7 @@ pytestmark = pytest.mark.visual
 
 
 @pytest.mark.parametrize('width', [1280, 390])
-def test_mailbox_parent_time_and_history_notice(frontend_visual_page, width):
+def test_mailbox_parent_time_and_history_without_disclaimers(frontend_visual_page, width):
     page = frontend_visual_page
 
     page.add_style_tag(path=str(ROOT / 'frontend/src/styles/application/08-swarm-messages.css'))
@@ -21,7 +21,7 @@ def test_mailbox_parent_time_and_history_notice(frontend_visual_page, width):
     locale = json.loads((ROOT / 'frontend/src/i18n/locales/zh.json').read_text())
     page.evaluate("""locale => {
       document.body.innerHTML = '<main id="fixture"></main>';
-      window.snapshot = {swarm_id:'run', messageReceiptsAvailable:true,
+      window.snapshot = {swarm_id:'run',
         messageParticipants:[{id:'run',label:'Coordinator'}, {id:'worker',label:'coder'}],
         messageReceipts:[{swarmRunId:'run',agentId:'worker',messageId:'message',
           senderTaskId:'run',submittedAt:1792033483000,state:'input_confirmed',
@@ -33,12 +33,15 @@ def test_mailbox_parent_time_and_history_notice(frontend_visual_page, width):
     assert '协调者' not in direction
     assert '主' in direction
     assert page.locator('.sw-messages-time').inner_text().startswith('2026-10-')
-    assert page.locator('.sw-messages-notice').is_hidden()
     page.locator('.sw-messages-content > summary').click()
     assert page.locator('.sw-messages-body').inner_text() == 'Verified message body'
+    # Completeness is not narrated: the known message stays, with no notice beside it.
     page.evaluate('mailbox.update({...snapshot, messageReceiptsAvailable:false})')
-    assert page.locator('.sw-messages-notice').is_visible()
     assert page.locator('.sw-messages-body').inner_text() == 'Verified message body'
+    assert page.locator('#fixture p').count() == 0
+    # A run without messages hides its section instead of explaining the absence.
+    page.evaluate('mailbox.update({...snapshot, messageReceipts:[]})')
+    assert page.locator('.sw-messages').is_hidden()
     assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
 
 
@@ -59,7 +62,7 @@ def test_mailbox_has_one_content_presentation_per_disclosure_state(frontend_visu
     locale = json.loads((ROOT / f'frontend/src/i18n/locales/{language}.json').read_text())
     page.evaluate("""({locale, content}) => {
       document.body.innerHTML = '<main id="fixture"></main>';
-      window.snapshot = {swarm_id:'run', messageReceiptsAvailable:true,
+      window.snapshot = {swarm_id:'run',
         messageReceipts:[{swarmRunId:'run',agentId:'worker',messageId:'message',
           senderTaskId:'run',submittedAt:1792033483000,state:'submitted',content}]};
       window.mailbox = mountSwarmMessages(document.querySelector('#fixture'), snapshot,

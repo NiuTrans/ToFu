@@ -13,8 +13,9 @@ from typing import Any
 # Generic authoritative viewers and proven-success command cards only.
 # Write, approval, image and swarm cards retain all presentation data.
 _LAZY_READ_TOOLS = frozenset({
-    "read_files", "grep_search", "find_files", "list_dir", "get_conversation",
-    "read_tool_artifact", "search_tool_artifact", "repo_map",
+    "read_files", "search_files", "grep_search", "find_files", "list_dir",
+    "get_conversation", "read_tool_artifact", "search_tool_artifact",
+    "repo_map",
 })
 _MIN_LAZY_CHARS = 4096
 _PREVIEW_CHARS = 240
@@ -22,6 +23,16 @@ _REFERENCE_FIELD = "_snapshotToolResult"
 
 
 _COMMAND_TOOLS = frozenset({"run_command", "code_exec"})
+
+
+def _zero_exit_code(value: Any) -> bool:
+    """Structured zero: an int, or the canonical decimal the producers stamp.
+
+    ``run_command``/``code_exec`` record ``exitCode`` as the exact string they
+    parsed from the executor's end-anchored marker (``'0'``, ``'1'``,
+    ``'timeout'``, ``'not-run'``, ``'background'``, ``'?'``).
+    """
+    return (type(value) is int and value == 0) or value == "0"
 
 
 def _safe_command(round_record: Mapping[str, Any]) -> bool:
@@ -49,8 +60,7 @@ def _safe_command(round_record: Mapping[str, Any]) -> bool:
             "backgroundCompleted", "rejected", "_rejected", "rejection", "error",
         )) or item.get("status") in {"error", "failed", "rejected", "interrupted", "running"}:
             return False
-    return all(type(item.get("exitCode")) is int and item["exitCode"] == 0
-               for item in results)
+    return all(_zero_exit_code(item.get("exitCode")) for item in results)
 
 
 def _supported(round_record: Mapping[str, Any]) -> bool:

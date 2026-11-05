@@ -368,19 +368,22 @@ def test_apply_update_already_latest_is_noop(monkeypatch):
     assert patches == [] and bridge.connect_calls == []
 
 
-def test_apply_update_unknown_server_raises_key_error(monkeypatch):
+def test_apply_update_unknown_server_raises_not_found(monkeypatch):
     _pin_latest(monkeypatch, '1.0.0')
     _patch_config(monkeypatch, {}, _FakeBridge())
-    with pytest.raises(KeyError):
+    with pytest.raises(updates.MCPServerNotFound):
         asyncio.run(apply_update('ghost', user_id=7))
 
 
-def test_apply_update_non_updatable_raises_value_error(monkeypatch):
+def test_apply_update_non_updatable_is_a_typed_client_fault(monkeypatch):
+    from lib.error_envelope import BadRequest
+
     _pin_latest(monkeypatch, '1.0.0')
     cfg = {'transport': 'sse', 'url': 'https://example.com/mcp'}
     _patch_config(monkeypatch, {'x': cfg}, _FakeBridge())
-    with pytest.raises(ValueError):
+    with pytest.raises(BadRequest, match='remote-transport') as caught:
         asyncio.run(apply_update('x', user_id=7))
+    assert caught.value.field == 'id'
 
 
 # ── Route smoke tests (GET /updates, POST /updates/apply) ──────────
@@ -439,18 +442,39 @@ def test_apply_route_requires_id():
     assert status == 400 and body['ok'] is False
 
 
-def test_apply_route_maps_key_error_to_404(monkeypatch):
-    async def _raise_key(name, *, user_id):
-        raise KeyError(name)
-    monkeypatch.setattr('lib.mcp.updates.apply_update', _raise_key)
+def _apply_route_status(monkeypatch, failure):
+    async def _raise(name, *, user_id):
+        raise failure
+    monkeypatch.setattr('lib.mcp.updates.apply_update', _raise)
 
     async def go():
         resp = await _route_app().test_client().post(
             '/api/v1/mcp/updates/apply', json={'id': 'ghost'})
-        return resp.status_code, await resp.get_json()
+        return resp.status_code, await resp.get_data(as_text=True)
 
-    status, body = _run(go())
-    assert status == 404 and body['ok'] is False
+    return _run(go())
+
+
+def test_apply_route_maps_unknown_server_to_404(monkeypatch):
+    status, body = _apply_route_status(
+        monkeypatch, updates.MCPServerNotFound('ghost'))
+    assert status == 404 and 'not in config' in body
+
+
+def test_apply_route_maps_typed_non_updatable_to_400(monkeypatch):
+    from lib.error_envelope import BadRequest
+
+    status, body = _apply_route_status(
+        monkeypatch, BadRequest('local-path', field='id'))
+    assert status == 400 and 'is not updatable (local-path)' in body
+
+
+@pytest.mark.parametrize('failure', [
+    KeyError('private_launch_slot'), ValueError('private_launch_slot'),
+])
+def test_apply_route_builtin_fault_is_a_redacted_500(monkeypatch, failure):
+    status, body = _apply_route_status(monkeypatch, failure)
+    assert status == 500 and 'private_launch_slot' not in body
 
 
 def test_apply_route_success_envelope(monkeypatch):

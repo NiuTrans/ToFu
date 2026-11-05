@@ -1,0 +1,369 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.router/v1",
+  "title": "Global Router v1",
+  "description": "Global Router tool arguments, standing-instruction records and the /api/v4/router wire shapes (docs/ROUTER.md). The router is the bound Coordinator of the owner's router home; its binding view is the project coordination binding (project_coordination_v1.schema.json). Pages are bounded by the project dispatch history page (contracts/project_dispatch_v1.schema.json historyPage), the convention of get_project_workers.",
+  "namespaces": {
+    "instructions": "router.instruction.v1",
+    "applications": "router.instruction.application.v1",
+    "watchdogSignals": "router.watchdog.signal.v1",
+    "watchdogOpenSignals": "router.watchdog.open.v1"
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S"},
+    "projectPath": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "\\S"},
+    "cursor": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "routeToProject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_path"],
+      "properties": {
+        "project_path": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "\\S",
+          "description": "Absolute local path of the target project. A project without an available Project Router gets a new one."},
+        "source_turn_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S",
+          "description": "Without instruction_id (then this or source_steer_id is required): the Turn ID of the owner's own message in your current request; that exact text is forwarded as their request. With instruction_id: the Turn that carried the triggering event, when it has its own Turn."},
+        "source_steer_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S",
+          "description": "Instead of source_turn_id: the steer_id of an owner message sent while you were replying (labelled 'Owner message sent while you were replying \u00b7 steer_id=...'); that exact text is forwarded as their request. Not combined with source_turn_id, event_id or instruction_id."},
+        "note": {"type": "string", "minLength": 1, "pattern": "\\S",
+          "description": "Optional context for the Project Router; for an instruction, the triggering event. Delivered separately as nonhuman context, never as part of the owner's request."},
+        "instruction_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S",
+          "description": "Apply this active standing instruction: its frozen owner text is forwarded instead of a current message."},
+        "event_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S",
+          "description": "Channel event ID that triggered the instruction. With instruction_id, give event_id or source_turn_id."}
+      }
+    },
+    "getRouterProjects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "after_id": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "The next_cursor of the previous page (get_project_workers convention)."}
+      }
+    },
+    "instructionCreate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_turn_id", "label", "idempotency_key"],
+      "properties": {
+        "source_turn_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S",
+          "description": "Turn ID of the owner's own message in your current request that states the instruction; its exact text is frozen."},
+        "label": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*$",
+          "description": "Short plain-text label for lists. Presentation only, never authority."},
+        "project_path": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "\\S",
+          "description": "Target project the instruction may be applied to. Omit only when the owner named none."},
+        "thread": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "\\S",
+          "description": "Optional channel thread key the instruction is scoped to (for example dx:gid:<gid> or github:<owner>/<repo>#<number>)."},
+        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S"}
+      }
+    },
+    "instructionList": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "instruction_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S", "description": "Read one instruction with a page of its recorded applications."},
+        "include_cancelled": {"type": "boolean"},
+        "after_id": {"type": "string", "minLength": 1, "maxLength": 4096,
+                     "description": "The next_cursor of the previous page (get_project_workers convention)."}
+      }
+    },
+    "instructionCancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instruction_id"],
+      "properties": {
+        "instruction_id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "instruction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "owner", "instructionId", "state", "routerConversationId", "sourceTurnId",
+                   "sourceProjectionRevision", "text", "label", "projectPath", "thread", "createdAt", "cancelledAt"],
+      "properties": {
+        "version": {"const": 1},
+        "owner": {"type": "integer", "minimum": 1},
+        "instructionId": {"$ref": "#/$defs/id"},
+        "state": {"enum": ["active", "paused", "cancelled"],
+          "description": "Only an active instruction can be applied. The owner pauses and resumes it; cancellation is final."},
+        "routerConversationId": {"$ref": "#/$defs/id"},
+        "sourceTurnId": {"$ref": "#/$defs/id"},
+        "sourceProjectionRevision": {"type": "integer", "minimum": 0},
+        "text": {"type": "string", "minLength": 1},
+        "label": {"type": "string", "minLength": 1, "maxLength": 120},
+        "projectPath": {"anyOf": [{"$ref": "#/$defs/projectPath"}, {"type": "null"}]},
+        "thread": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 512}, {"type": "null"}]},
+        "createdAt": {"type": "integer", "minimum": 0},
+        "cancelledAt": {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "pausedAt": {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}],
+          "description": "When the owner paused it; null after a resume; absent when it was never paused."}
+      }
+    },
+    "instructionApplication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "owner", "instructionId", "applicationId", "projectPath", "coordinatorConversationId",
+                   "eventId", "triggerTurnId", "note", "commandId", "disposition", "createdAt"],
+      "properties": {
+        "version": {"const": 1},
+        "owner": {"type": "integer", "minimum": 1},
+        "instructionId": {"$ref": "#/$defs/id"},
+        "applicationId": {"$ref": "#/$defs/id"},
+        "projectPath": {"$ref": "#/$defs/projectPath"},
+        "coordinatorConversationId": {"$ref": "#/$defs/id"},
+        "eventId": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "triggerTurnId": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "note": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "commandId": {"$ref": "#/$defs/id"},
+        "disposition": {"enum": ["started", "steered", "queued"]},
+        "createdAt": {"type": "integer", "minimum": 0}
+      }
+    },
+    "instructionPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instructions", "nextCursor"],
+      "properties": {
+        "instructions": {"type": "array", "items": {"$ref": "#/$defs/instruction"}},
+        "nextCursor": {"anyOf": [{"$ref": "#/$defs/cursor"}, {"type": "null"}]}
+      }
+    },
+    "instructionDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instruction", "applications", "nextCursor"],
+      "properties": {
+        "instruction": {"$ref": "#/$defs/instruction"},
+        "applications": {"type": "array", "items": {"$ref": "#/$defs/instructionApplication"}},
+        "nextCursor": {"anyOf": [{"$ref": "#/$defs/cursor"}, {"type": "null"}]}
+      }
+    },
+    "routerState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectPath", "conversationId", "revision", "availability", "capabilities", "workerModel"],
+      "properties": {
+        "projectPath": {"type": "string"},
+        "conversationId": {"type": "string"},
+        "revision": {"type": "integer", "minimum": 0},
+        "availability": {"enum": ["unbound", "available", "unavailable"]},
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["assign", "sendMessage", "steerSubagent"],
+          "properties": {
+            "assign": {"const": false},
+            "sendMessage": {"const": false},
+            "steerSubagent": {"type": "boolean"}
+          }
+        },
+        "workerModel": {"type": "string", "description": "Explicit Worker model; empty means the owner's default model."}
+      }
+    },
+    "ensureRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {}
+    },
+    "workerModelRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "workerModel"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "\\S", "description": "Router home or project path of the bound coordinator."},
+        "workerModel": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S"}, {"type": "null"}],
+          "description": "Model for delegated Workers; null returns to the owner's default model."}
+      }
+    },
+    "instructionListQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "instructionId": {"$ref": "#/$defs/id"},
+        "includeCancelled": {"enum": ["true", "false"]},
+        "cursor": {"$ref": "#/$defs/cursor"}
+      }
+    },
+    "instructionCancelRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instructionId"],
+      "properties": {
+        "instructionId": {"$ref": "#/$defs/id"}
+      }
+    },
+    "instructionPauseRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instructionId"],
+      "properties": {
+        "instructionId": {"$ref": "#/$defs/id"}
+      }
+    },
+    "instructionResumeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instructionId"],
+      "properties": {
+        "instructionId": {"$ref": "#/$defs/id"}
+      }
+    },
+    "workerModelQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "\\S", "description": "Router home or project path of the bound coordinator."}
+      }
+    },
+    "watchdogSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "after_id": {"type": "string", "minLength": 1, "maxLength": 4096,
+                     "description": "The projects next_cursor of the previous snapshot page."},
+        "signals_after_id": {"type": "string", "minLength": 1, "maxLength": 4096,
+                             "description": "The open_signals_next_cursor of the previous snapshot page."}
+      }
+    },
+    "watchdogResolveSignals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signal_ids", "resolution"],
+      "properties": {
+        "signal_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "resolution": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S",
+                       "description": "What you verified or did, with the evidence (conversation/Turn IDs)."}
+      }
+    },
+    "watchdogScheduleRecheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["after_minutes", "reason", "idempotency_key"],
+      "properties": {
+        "after_minutes": {"type": "integer", "minimum": 1,
+                          "description": "Minutes from now until the re-check wakes you."},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S",
+                   "description": "What to re-check and how recovery shows; it returns to you verbatim."},
+        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S"}
+      }
+    },
+    "watchdogMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversation_id", "content", "idempotency_key"],
+      "properties": {
+        "conversation_id": {"$ref": "#/$defs/id",
+                            "description": "A Project Router, the Global Router or a Worker conversation of the owner."},
+        "content": {"type": "string", "minLength": 1, "pattern": "\\S",
+                    "description": "The finding with its evidence and the suggested correction."},
+        "kind": {"enum": ["reference", "question", "steer"]},
+        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S"}
+      }
+    },
+    "watchdogNotifyRouter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message", "idempotency_key"],
+      "properties": {
+        "message": {"type": "string", "minLength": 1, "pattern": "\\S",
+                    "description": "The anomaly, its evidence and what the owner may need to decide or do."},
+        "signal_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S"}
+      }
+    },
+    "watchdogReviewRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "schedule": {"type": "string", "minLength": 9, "maxLength": 512, "pattern": "\\S", "default": "7,37 * * * *",
+                     "description": "Five-field local-time cron of the periodic review (lib/scheduler/cron.py). The default reviews every 30 minutes at :07 and :37, off the :00/:30 contention minutes. Omitted, an existing review keeps its cadence and a new one uses the default."}
+      }
+    },
+    "watchdogReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "schedule", "taskId"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "schedule": {"type": "string", "minLength": 1},
+        "taskId": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}],
+                   "description": "The owner-visible scheduled task; null until the review is first configured."}
+      }
+    },
+    "watchdogState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectPath", "conversationId", "revision", "availability", "capabilities", "review"],
+      "properties": {
+        "projectPath": {"type": "string"},
+        "conversationId": {"type": "string"},
+        "revision": {"type": "integer", "minimum": 0},
+        "availability": {"enum": ["unbound", "available", "unavailable"]},
+        "capabilities": {"$ref": "#/$defs/routerState/properties/capabilities"},
+        "review": {"$ref": "#/$defs/watchdogReview"}
+      }
+    },
+    "watchdogTurnErrorKind": {
+      "description": "Error kinds (lib/error_envelope KINDS) of a failed Turn that are infrastructure faults: provider/API, transport, runtime and storage failures, and the state recovery around them. Only these open a Watchdog turn signal; task outcomes (tool loops, content filters, Stop, human withdrawal) stay with the Coordinator that already wakes on Worker settlement.",
+      "enum": ["quota", "ratelimit", "permission", "oauth_reauth", "no_slot", "dispatch_exhausted", "timeout",
+               "network", "endpoint_unreachable", "upstream_error", "premature_close", "abnormal_stop",
+               "server_offline", "server_busy", "task_start_failed", "event_delivery_failed", "worker_lost",
+               "internal", "generic", "storage_fence", "storage_unavailable", "dispatch_authority_lost",
+               "execution_token_usage_unknown"]
+    },
+    "watchdogUnhealthyChannelState": {
+      "description": "Channel account states (channels_v1 AccountState) that open a Watchdog channel signal.",
+      "enum": ["disconnected", "needs_login", "kicked", "error"]
+    },
+    "watchdogSignal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "owner", "signalId", "source", "state", "subject", "error", "createdAt",
+                   "resolvedAt", "resolution"],
+      "properties": {
+        "version": {"const": 1},
+        "owner": {"type": "integer", "minimum": 1},
+        "signalId": {"$ref": "#/$defs/id"},
+        "source": {"enum": ["turn", "recovery", "outbox", "channel", "compute"]},
+        "state": {"enum": ["open", "resolved"]},
+        "subject": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role"],
+          "properties": {
+            "role": {"enum": ["global_router", "project_router", "worker", "watchdog", "dispatch", "outbox", "channel", "compute"]},
+            "conversationId": {"$ref": "#/$defs/id"},
+            "turnId": {"$ref": "#/$defs/id"},
+            "attemptId": {"$ref": "#/$defs/id"},
+            "projectPath": {"$ref": "#/$defs/projectPath"},
+            "assignmentId": {"$ref": "#/$defs/id"},
+            "outboxItemId": {"$ref": "#/$defs/id"},
+            "thread": {"type": "string", "minLength": 1, "maxLength": 512},
+            "channel": {"type": "string", "minLength": 1, "maxLength": 64},
+            "runId": {"$ref": "#/$defs/id"},
+            "operationId": {"$ref": "#/$defs/id"}
+          }
+        },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "detail"],
+          "properties": {
+            "kind": {"type": "string", "minLength": 1, "maxLength": 64},
+            "detail": {"type": "string", "maxLength": 4000},
+            "hint": {"type": "string", "maxLength": 4000}
+          }
+        },
+        "createdAt": {"type": "integer", "minimum": 0},
+        "resolvedAt": {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "resolution": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 2000}, {"type": "null"}]}
+      }
+    }
+  }
+}

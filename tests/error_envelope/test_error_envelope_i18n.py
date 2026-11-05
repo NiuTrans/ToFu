@@ -100,11 +100,31 @@ def test_endpoint_exception_carries_localizable_keys():
     assert envelope['hintKey'] == 'err.k.endpoint_unreachable.hint'
 
 
-def test_invalid_image_call_sites_pair_custom_hints_with_keys():
-    source = (ROOT / 'lib/tasks_pkg/llm_fallback/_call.py').read_text(encoding='utf-8')
-    assert "_hint_key = 'err.k.invalid_image.hintMany'" in source
-    assert "_hint_key = 'err.k.invalid_image.hintSize'" in source
-    assert 'hint_key=_hint_key,' in source
+@pytest.mark.parametrize('detail,hint_key', [
+    ('many-image size limit', 'err.k.invalid_image.hintMany'),
+    ('image too large', 'err.k.invalid_image.hintSize'),
+])
+def test_invalid_image_call_pairs_custom_hints_with_keys(monkeypatch, detail, hint_key):
+    from lib.llm import InvalidImageError
+    from lib.tasks_pkg.llm_fallback import _call, _retry, _transport
+
+    attempted = []
+    def stream(*_args, **_kwargs):
+        attempted.append(True)
+        raise InvalidImageError(detail)
+
+    monkeypatch.setattr(_transport, 'stream_llm_response', stream)
+    monkeypatch.setattr(_retry, '_get_fallback_model', lambda _task: 'fallback')
+    task = {'id': 'invalid-image-i18n', 'config': {}}
+    result = _call._llm_call_with_fallback(
+        task, {'model': 'image-model'}, 'image-model', 0, 512, False,
+        [], [], 'low', False, {}, [])
+
+    assert attempted == [True]
+    assert result['finish_reason'] == 'error' and result['_loop_action'] == 'break'
+    assert task['error']['kind'] == 'invalid_image'
+    assert task['error']['hintKey'] == hint_key and task['error']['hint']
+    assert all(LOCALES[language][hint_key] for language in ('zh', 'en'))
 
 
 def test_every_error_kind_exists_in_both_locale_chunks():

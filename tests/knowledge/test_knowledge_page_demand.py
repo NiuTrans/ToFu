@@ -48,10 +48,7 @@ def test_visual_traversal_keeps_2049_pages_despite_all_old_page_knobs(monkeypatc
 
 
 def test_ocr_reads_tail_page_when_no_caller_page_range_is_requested(monkeypatch):
-    from lib.knowledge import ingest
-    from lib.pdf_parser import (
-        images,  # initialize native dependency before substituting
-    )
+    from lib.knowledge import _ocr_worker
     visited, closed = [], []
     class Page:
         def __init__(self, index): self.index = index
@@ -63,16 +60,17 @@ def test_ocr_reads_tail_page_when_no_caller_page_range_is_requested(monkeypatch)
             visited.append(index)
             return Page(index)
         def close(self): closed.append('document')
-    monkeypatch.setitem(sys.modules, 'pymupdf', SimpleNamespace(open=lambda **kwargs: Document()))
     monkeypatch.setenv('TOFU_KNOWLEDGE_OCR_MAX_PAGES', '1')
-    text, warnings = ingest._ocr_scanned_pdf(b'synthetic', page_limit=None, max_chars=100000)
+    text, warnings = _ocr_worker.recognize_pdf(
+        SimpleNamespace(open=lambda **kwargs: Document()), b'synthetic',
+        page_limit=None, max_chars=100000, failures={})
     assert visited == list(range(513))
     assert '## Page 513' in text and 'late evidence 512' in text
     assert warnings == [] and closed == ['document']
 
 
-def test_explicit_ocr_page_range_still_controls_output(monkeypatch):
-    from lib.knowledge import ingest
+def test_explicit_ocr_page_range_still_controls_output():
+    from lib.knowledge import _ocr_worker
     visited = []
     class Page:
         def get_textpage_ocr(self, **kwargs): return object()
@@ -81,7 +79,8 @@ def test_explicit_ocr_page_range_still_controls_output(monkeypatch):
         page_count = 10
         def __getitem__(self, index): visited.append(index); return Page()
         def close(self): pass
-    monkeypatch.setitem(sys.modules, 'pymupdf', SimpleNamespace(open=lambda **kwargs: Document()))
-    text, warnings = ingest._ocr_scanned_pdf(b'synthetic', page_limit=2, max_chars=10000)
+    text, warnings = _ocr_worker.recognize_pdf(
+        SimpleNamespace(open=lambda **kwargs: Document()), b'synthetic',
+        page_limit=2, max_chars=10000, failures={})
     assert visited == [0, 1] and '## Page 2' in text and '## Page 3' not in text
     assert any('OCR read 2 of 10' in message for message in warnings)

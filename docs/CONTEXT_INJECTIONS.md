@@ -8,10 +8,12 @@ Every engine-authored conversational context addition uses the public `lib.tasks
 
 | Lane | Interface and invariant |
 |---|---|
-| Snapshot | `context_block(id, content, ...)` then `append_context_blocks`, or ordinary `compose_task_context`. Content-addressed reuse preserves bytes. Registered `platform_static` and `ui_nav_directory` occupy dedicated system-prefix carriers (one per block, authority-ordered); other blocks stay tail user carriers and verified withdrawal appends one tombstone. A system carrier is withdrawn outright on authoritative absence (replace mode, explicit ablation, non-browser surface); transient acquisition failure retains the previous version with an explicit decision receipt. **Tail amalgamation:** blocks are sorted by `(authority, priority, id)`, so same-authority blocks are adjacent; each maximal same-authority run being appended in one pass folds into ONE `<system-reminder>` (`[Context authority: X; N context blocks]`) whose sections keep their own `tofu-context:<id>` markers. Reuse stays per-block granular — `_managed_block_hashes` hashes the wrapper-independent body section (`_canonical_section`), so a changed sibling re-appends alone while unchanged group-mates are reused verbatim; a lone block keeps its standalone envelope byte-identical. |
+| Snapshot | `context_block(id, content, ...)` then `append_context_blocks`, or ordinary `compose_task_context`. Content-addressed reuse preserves bytes. Registered `platform_static`, `ui_nav_directory`, `parallel_execution`, and `delegate_mode` occupy dedicated system-prefix carriers (one per block, authority-ordered); other blocks stay tail user carriers and verified withdrawal appends one tombstone. A system carrier is withdrawn outright on authoritative absence (replace mode, explicit ablation, non-browser surface, or an orchestration-mode transition); transient acquisition failure retains the previous version with an explicit decision receipt. **Tail amalgamation:** blocks are sorted by `(authority, priority, id)`, so same-authority blocks are adjacent; each maximal same-authority run being appended in one pass folds into ONE `<system-reminder>` (`[Context authority: X; N context blocks]`) whose sections keep their own `tofu-context:<id>` markers. Reuse stays per-block granular — `_managed_block_hashes` hashes the wrapper-independent body section (`_canonical_section`), so a changed sibling re-appends alone while unchanged group-mates are reused verbatim; a lone block keeps its standalone envelope byte-identical. |
 | Event/inbox | `append_injection(messages, id, text, task=..., round_num=..., reason=...)`. Preserve payload and chronological identity, including identical retries after compaction. A receipt UUID travels with the carrier. No hand-appended guidance dictionaries, historical-message mutation or duplicate `record_injected_note`; the writer owns note projection for registered recovery events. Non-appended diagnostic/error notes remain segment-owned. |
 | Bootstrap contract | Only registered `worker_policy` may append a system contract, before any dialogue. Runtime events cannot choose a role or elevate authority. Swarm/goal-mode workers are first-class conversational agents: after the objective they go through the same `compose_task_context` boundary as the root agent with the parent's resolved config (same ambient blocks, feature gates and manifest under the child's Inspector ID). A bare `system` carrier is emitted only when the inherited prompt is non-empty — with no inherited prompt `worker_policy` opens the request, so strict providers never see an empty position-0 system message. Checkpoint recovery refreshes every registered injection ID (worker policies and ambient blocks) from the fresh bootstrap before retained dialogue, preserving read-only/tool scope at its original authority and dialogue byte-for-byte. |
 | Telemetry | `record_injection_diagnostic` accepts numeric/boolean metrics only. `context_budget` cannot append a message or intervention card. |
+
+**Per-sibling worker prefix — Problem:** when same-role siblings sent byte-identical tools+system prefixes (per-run identity after the objective, 2026-10-28 07:16), concurrent siblings on the Sankuai Claude route were spread across upstream cache domains and lost their own cached history (54-tool siblings read their previous round's entry on 49.7% of rounds, against 98.6–99.0% with per-sibling prefixes), while no first call read the shared entry. **Decision:** the run binding's team guidance (assignment ID, swarm_run_id, messaging rules) ends the role part of the `worker_policy` system contract; workers without a run binding keep the plain role contract. Evidence and the live A/B are in [Sibling cache affinity](LLM_COST_OPTIMIZATION.md#sibling-cache-affinity). **Alternatives rejected:** a sibling-shared system entry (the measured loss above); a unique system block after the shared ones (no better in the A/B and it reorders composer-owned carriers); staggering launches or capping same-prefix concurrency (delays user work). Spec: `tests/context/test_context_injection_aux.py`.
 
 Chat Goal workers are continuing conversation agents, not delegated bootstrap
 workers: they retain the actual model working set, use the ordinary composer,
@@ -19,7 +21,7 @@ and append only Goal-role guidance and synthetic review/directive events. The
 separate virtual-user reviewer still uses isolated bootstrap inputs. See
 [TASK_EXECUTION_MODES.md](TASK_EXECUTION_MODES.md).
 
-`_policy_prefix.py` owns the static exception: insert after explicit system/developer policy and before dialogue, reuse unchanged bytes, and replace only that engine policy on a genuine profile change. Replace mode with explicit operator policy removes it. Each registered system-placement block owns exactly one dedicated carrier, re-seated in authority order only on a genuine membership/content change; a non-system-role witness never satisfies its reuse. Only `platform_static` top-level legacy envelopes matching producer-recorded hashes migrate once from mixed user carriers; nested project/memory quotes and all other bytes stay unchanged. Missing/mismatched provenance never promotes content or suppresses fresh native policy; no user/tool XML is interpreted as policy. Old archived requests are never rewritten. This prefix migration/change may invalidate one upstream cache prefix; subsequent unchanged rounds are stable. Static prefix insertion cannot split a tool batch; tail blocks still defer.
+`_policy_prefix.py` owns the static exception: insert after explicit system/developer policy and before dialogue, reuse unchanged bytes, and replace only that engine policy on a genuine profile change. Replace mode with explicit operator policy removes it. Each registered system-placement block owns exactly one dedicated carrier, re-seated in authority order only on a genuine membership/content change; a non-system-role witness never satisfies its reuse. Verified top-level legacy envelopes for `platform_static`, `parallel_execution`, and `delegate_mode` migrate once from mixed user carriers when their producer-recorded hashes match; nested project/memory quotes and all other bytes stay unchanged. Missing/mismatched provenance never promotes content or suppresses fresh native policy; no user/tool XML is interpreted as policy. Old archived requests are never rewritten. This prefix migration/change may invalidate one upstream cache prefix; subsequent unchanged rounds are stable. Static prefix insertion cannot split a tool batch; tail blocks still defer.
 
 Both snapshots and events enforce closed tool-call/result batches. Snapshots defer; inbox producers check `can_append_injection` **before draining**. Human-steer classification and producer-owned delivery ACK remain unchanged. Appended never means consumed or acknowledged.
 
@@ -27,19 +29,22 @@ Both snapshots and events enforce closed tool-call/result batches. Snapshots def
 **Scoped guidance — Problem:** Requiring a delivered raw-file version before
 each operation blocked edits and even read-only commands whenever nested rules
 were discovered or changed. **Decision:** Before the first
-model request, acquire declared-root rules and deliver the complete required
-`project_scoped_rules` snapshot through the normal composer. Subsequent rounds
-reuse that snapshot by actual retained content. Tool access acquires nested
+model request, acquire declared-root rules and deliver them as required
+per-file `project_scoped_rules_<instance>` blocks through the normal composer
+(see "Per-rule guidance delivery" below). Subsequent rounds and turns reuse
+each block by actual retained content. Tool access acquires nested
 rules, changed raw-file hashes and verified removals for the next closed model
 request without refusing edits or commands. Unresolved shell targets do not
 create a guidance gate; path permissions and command approval remain separate.
 Open tool batches defer injection without blocking execution.
 **Alternatives rejected:** A read-only-command exemption still blocks ordinary
-edits; disabling acquisition loses applicable instructions. The scoped snapshot owns rule bodies during task preparation; session
+edits; disabling acquisition loses applicable instructions. The scoped blocks own rule bodies during task preparation; session
 `project_rules` retains topology and journal locators. Rule acquisition remains
-bounded and unchanged rounds reuse the snapshot without a second rules copy. Tests: `tests/tasks_pkg/test_project_guidance_bootstrap.py`
-and `tests/project_mod/test_scoped_instructions.py`.
+bounded and unchanged rounds reuse the blocks without a second rules copy. Tests: `tests/tasks_pkg/test_project_guidance_bootstrap.py`,
+`tests/tasks_pkg/test_project_guidance_delta.py` and `tests/project_mod/test_scoped_instructions.py`.
 `systemPromptBlocks.disabled` suppresses optional **registry IDs** through the shared interface. Required rules, accepted checklist state, explicit user branch input, human/background/peer delivery and evidence-triggered safety/recovery cannot be suppressed by advisory ablations. Their explicit product modes/permission controls retain their existing owners. Budget diagnostics are not an opt-in model notice.
+
+A task carrying the `THIRD_PARTY_TEXT` execution profile (`lib/tasks_pkg/execution_profile.py`; Feishu third-party senders, [integrations](modules/integrations_api.md#feishu-bridge-authority)) is a profile, not an ablation: `_with_context_policy` acquires it as a request with no project, tools or memory, and the renderer keeps only `platform_static` and `current_date`, withholding required and unregistered blocks too. `append_injection` carriers are outside the renderer and keep their producers. Tests: `tests/feishu/test_feishu_third_party_profile.py`.
 
 **Private-input discovery — Problem:** A model-visible snapshot directory adds changing context, but availability does not establish adoption or a correct, cheaper answer.
 **Decision:** `context.programmaticInputs` is a request-local boolean experiment, default false; invalid values fail closed (strict validation raises). Explicit true still respects ownership, live catalog and `systemPromptBlocks.disabled`. The callable `tools.inputs()` and `tools.result({ref})` remain available independently.
@@ -47,7 +52,7 @@ and `tests/project_mod/test_scoped_instructions.py`.
 
 Context acquisition never reads JOURNAL history, seeds/rotates a journal, writes `.gitignore`, or invents journal-maintenance instructions. Project/user instructions own maintenance; the prompt supplies only a primary-root locator and the historical-evidence boundary.
 
-Protocol output (assistant messages, tool calls/results), explicit user attachments/quotes, assistant prefill, compaction summaries and separate workflow requests have their own owners. They are not advisory prompt injections. A new exception requires an executable regression and an update to this boundary.
+Protocol output (assistant messages, tool calls/results), explicit user attachments/quotes, compaction summaries and separate workflow requests have their own owners. Interruption recovery appends nothing: it resends the interrupted request ([rewind and resend](contracts/TURN_SETTLEMENT.md#interruption-recovery-rewind-and-resend)). They are not advisory prompt injections. A new exception requires an executable regression and an update to this boundary.
 
 ## Freshness, relevance, and evidence integrity (decision 2026-09-30)
 
@@ -69,17 +74,25 @@ Executable specifications: `tests/context/test_context_integrity.py`, `test_cont
 **Decision:** Keep no-match receipts off the model stream, recognize actual trusted clock bytes, and gate optional project pages with the existing coordinator binding before acquiring a cursor. Suppressed, deferred or truncated pages cannot advance the cursor. Existing scoped inbox and file-overlap delivery remain unchanged.
 **Alternatives rejected:** Merely hiding cards still spends prompt tokens; a task watermark cannot prove visibility after compaction; text/LLM relevance filters or a second coordination state machine would duplicate authority. Tests: `tests/context/test_context_necessity.py`, `tests/project_mod/test_project_brain_signal_driven.py`.
 
+**Transition identity — Problem:** `project_path_change` and the `mcpToolsDelta` chip diff against an in-memory per-scope baseline. Compositions with neither a task id nor a conversation (Request Inspector wire snapshots, throwaway tasks) all resolved to the MCP fallback scope `task:anonymous`, so one snapshot's project path surfaced in an unrelated snapshot as a path move, and snapshot mode wrote shared state despite its side-effect-free contract.
+**Decision:** Transition tracking requires an owned identity — a task id, or a conversation of a non-transient task. Anonymous compositions neither read nor write baselines and never emit a transition note or chip.
+**Alternatives rejected:** A snapshot-only flag leaves every other anonymous caller on one shared baseline; clearing the store between tests hides the product-visible leak; keying anonymous calls by path or config invents an identity that has no previous turn. Test: `tests/context/test_context_composer.py::test_anonymous_compositions_never_share_a_transition_baseline`.
+
+**Fetched evidence — Problem:** `all_search_results_text` is the only corpus `fallback_synthesis` gives the model ("Here are fetched contents … Cite sources.") when a turn ends without prose. Every producer decided entry itself: handlers through their third result element (`is_search`), the streaming prefetch by a tool-name check that omitted `fetch_url`, dedup replays by their cached flag, each recording its raw return before the round aggregate budget settled the model's view. The corpus therefore lacked prefetched pages that the Sources footer cites, held a dedup-replayed page twice, and admitted text that is not web evidence: project-handler failures (repo_map returned `not ok`; the read-before-edit and write-freshness refusals returned `True`), a successful `update_search_settings` (it returned its `ok` flag), the server-staging download receipt, blocked/empty/sparse `browser_read_page` reads and all-failed `fetch_url` batches.
+**Decision:** `tool_dispatch._pipeline._record_round_search_evidence` is the only writer. After the round aggregate budget it admits a call's final `toolContent` when the tool is in `SEARCH_EVIDENCE_TOOLS` (`web_search`, `fetch_url`, `browser_read_page`), its producer declared it (the handler's `is_search`, or the prefetch/dedup cache entry that replays it) and the call settled `done`; an identical text moves to the newest position instead of repeating. `is_search` declares web evidence, never success or failure: other handlers return `False`, and `browser_read_page` declares only a read that delivered an accepted page, the URL its row names in the footer. A `web_search` that found nothing still settles `done` with its diagnostic and stays evidence.
+**Alternatives rejected:** per-handler flags alone (five handlers used the slot as an ok/failure flag, and one false negative, the prefetch, dropped the footer's pages); deciding by tool name alone (the pipeline would need browser read modes and receipt states); retiring the handler's third element (every handler changes for no behavioral gain); keeping failed family results in the corpus (the fallback would cite as sources pages the footer omits; a single failed `fetch_url` already returned `False`, so only all-failed batches and late results behind a failure verdict change). Tests: `tests/tasks_pkg/test_noprose_fallback_evidence.py`, `tests/tasks_pkg/test_repo_map_handler.py`, `tests/tasks_pkg/test_write_freshness_handler.py`.
+
 ## Intervention reason presentation
 
-The human-facing rendering of an intervention's **reason** is owned by the registry, never hand-duplicated in the frontend. A spec whose lane surfaces a model-visible timeline note may declare `InjectionSpec.presentation = NotePresentation(label_key, tone, fallback)`: `label_key` is a `systemNote.reason*` i18n contract key, `tone` is one of the closed `NOTE_TONES` (`ok`/`warn`/`err`/`info`) that selects the chip colour, `fallback` is the port-less English string. Declarations are validated at import (tone membership + key shape).
+The human-facing rendering of a note's **reason** is owned by the registry, never hand-duplicated in the frontend. Every spec whose lane can surface a model-visible timeline note (every `note_display_policies()` entry, including the composer's `session_context_committed` witness) declares `InjectionSpec.presentation = NotePresentation(label_key, tone, fallback, glyph)`: `label_key` is a `systemNote.reason*` i18n contract key, `tone` is one of the closed `NOTE_TONES` (`ok`/`warn`/`err`/`info`) that selects an intervention chip's colour, `fallback` is the port-less English string, and `glyph` names the shared frontend icon (`frontend/src/icons.ts`) a context row shows beside its label. Declarations are validated at import (tone membership, key shape, glyph shape); the display policy also carries each block's `authority`, which tints the row's glyph.
 
 Both conversation render surfaces **derive** this vocabulary from the registry rather than maintaining their own maps:
 
 - `scripts/gen_system_note_presentation.mjs` reads `registry.note_presentations()` and emits the typed contract `frontend/src/conversation/ui/system-note-presentation.generated.ts`; the typed renderer imports it.
 - The retained JS runtime (`tool_rounds.js`) cannot import the TS contract, so it embeds the same map between `BEGIN/END GENERATED` markers; `scripts/check_note_presentation_parity.mjs` fails if the embed drifts.
-- `tests/context/test_context_injection_presentation.py` pins every registry `label_key` to both locales and every `tone` to a `.sw-note-reason-{tone}` stylesheet rule.
+- `tests/context/test_context_injection_presentation.py` pins every registry `label_key` to both locales, every displayable reason to a presentation, and every `tone` to a `.sw-note-reason-{tone}` stylesheet rule; `context-note-presentation.test.ts` resolves every `glyph` in the shared icon set.
 
-Run `npm run generate:note-presentation` after editing a presentation; `npm run check:note-presentation` (contract staleness + parity) gates it. Reasons absent from the registry (a newer backend, or a snapshot block with no timeline note) render the neutral `info` chip with the raw reason id, preserving the closed-world fallback. Adding a new intervention reason therefore requires exactly one registry edit plus `generate` — no frontend map edits.
+`npm run generate:note-presentation` regenerates both surfaces; `build:frontend` does the same before composing the retained runtime. `check:frontend` includes `check:note-presentation` (contract staleness + parity), and the published graph's authoring digest includes the backend registry and both generators. Reasons absent from the registry (a newer backend, or a snapshot block with no timeline note) render the neutral `info` chip with the raw reason id, preserving the closed-world fallback. Adding a new intervention reason therefore requires exactly one registry edit plus `generate` — no frontend map edits.
 
 ## Debugging and resource bounds
 
@@ -101,14 +114,14 @@ The toolbar measures last prompt usage / **full** model window, falling back to 
 | `role_directive` | Keep only for an explicitly specialized role | Required; 5,000 tokens |
 | `goal_objective` | Chat Goal worker's durable objective restated verbatim (inline bound 4,000 chars; byte-stable per run so prefix caching holds and compaction cannot drift scope) | Required; 8,000 tokens |
 | `project_rules` | Task project topology/JOURNAL locator; standalone/remote context retains root rules in full | Required; no advisory clipping |
-| `project_scoped_rules` | Accessed-path ancestor guidance from declared roots; acquired versions refresh at closed model boundaries without an execution gate | Required; no advisory clipping; acquisition rejects over 128 files or 1 MiB rather than omitting rules |
+| `project_scoped_rules` | Accessed-path ancestor guidance from declared roots, one `project_scoped_rules_<instance>` block per rule file; each text is delivered once while it stays in model-visible history (rounds and turns), identical bytes at another path are a one-line scope note, changes supersede and deletions retract at closed model boundaries without an execution gate | Required; no advisory clipping; a task's own acquisition rejects over 128 files or 1 MiB rather than omitting rules (inherited, already-visible blocks do not count) |
 | `user_context` | Optional enabled, nonempty preferences; not task evidence | 1,000 tokens |
 | `memory_guidance` | Short evidence/retention boundary when memory and tools are enabled; no duplicate CRUD tutorial | 180 tokens |
 | `skills_index` | Discovery index only with admitted `load_skill` in the frozen wire or executable catalog; task-frozen; bodies on demand; capability removal suppresses even a cached index | 1,400 tokens |
 | `ui_nav_directory` | Browser-frontend conversation turns only (Conversation Sync v3 turn authority; `non_browser_surface` otherwise); static contract-generated directory of valid `setting:`/`page:` jump keys; never hand-maintained; degraded silently when the contract is absent; dedicated system carrier, withdrawn off-surface | 1,400 tokens |
 | `selected_skills` | Exact `$skill-id` references from current user text; owner-resolved instruction pages and content-hash receipts | 8,000 tokens; at most three initial pages, 6,500-token acquisition target |
 | `credential_vault` | Nonempty name-to-variable index only with admitted `run_command` in the frozen wire or executable catalog; never values or permission to use every entry | 1,000 tokens |
-| `parallel_execution` | Available spawn lane; current schema owns role/tool scope. Waiting guidance uses explicit returned handles with `poll(wait_s=...)`, never retired discovery names or no-ID dashboard polling | 128 tokens |
+| `parallel_execution` | Available spawn lane; current schema owns role/tool scope. Waiting guidance uses explicit returned handles with `poll(wait_s=...)`, never retired discovery names or no-ID dashboard polling. Dedicated system carrier, withdrawn (`superseded_by_delegate_mode`) while `delegate_mode` applies | 128 tokens |
 | `programmatic_execution` | Enabled mode and a wire/deferred code action or admission-compiled execution gateway; use the actual exposed action | 128 tokens |
 | `programmatic_inputs` | Explicit `context.programmaticInputs=true` experiment (default false), owner-bound captures and admitted program action; versioned references, no arguments or source bodies; failed acquisition or opt-out withdraws stale snapshots | 256 content tokens, 4 entries, 4,096 bytes; omit whole block under global budget pressure |
 | `project_context` | Only the exact available owner/project-bound coordinator receives unseen Project Brain narrative and overview; ordinary workers use scoped inbox/overlap notices, never the global feed. Absent pages, disabling and acquisition failures stay diagnostic-only. Only a complete admitted/reused page may await provider-success cursor ACK | Optional; 1,800 tokens; omit whole page under block/global budget pressure |
@@ -119,6 +132,7 @@ The toolbar measures last prompt usage / **full** model window, falling back to 
 | `task_state_v1` | Required projection only with explicit global-context-plan feature | 2,400 tokens |
 | `relevant_memories` | Optional high-confidence owner-scoped retrieval from the latest authored request; evidence, not instructions. No match adds no prompt/timeline notice and does not invalidate historical evidence. Explicit disabling withdraws the block; provider failure retains last-known evidence with a diagnostic receipt, never claiming a fresh empty selection | 1,500 tokens; zero appended tokens for no match |
 | `plan_mode` | Contract only while explicitly enabled | Required; 900 tokens |
+| `delegate_mode` | Orchestration contract only when Delegate Mode actually narrowed the root at assembly (a catalog without `spawn_agents` keeps the ordinary surface and gets no contract); dedicated system carrier, withdrawn with `delegate_mode_off`. See [Delegate Mode](TASK_EXECUTION_MODES.md#delegate-mode) | Required; 900 tokens |
 | `environment` | Current routing facts and authenticated owner browser-extension connection evidence; multi-root/remote warnings only when applicable; explicit environment-off mode respected | Required when enabled; 400 tokens |
 | `project_path_change` | One warning for an observed root move; never first sight/steady state | Required; 160 tokens |
 | `mcp_tools_delta` | Reachable names absent from frozen wire, with discovery/execution available; no partial schemas. Under `mcpToolExposure='delegate'` it renders the WHOLE connected catalog (wire is empty by construction, no freeze state written) and adds spawn_agents delegation guidance | 700 tokens; at most 8 names + 80-character hints |
@@ -129,9 +143,10 @@ The toolbar measures last prompt usage / **full** model window, falling back to 
 | `execution_allowance` | Finite invocation allowance after pre-notice full-prompt measurement and before final admission: input/output headroom after tree/local consumption and live reservations, effective tool slots and earliest deadline. Reports an input-only comparable-request upper bound excluding output/notice/growth/provider adaptation; 6/3/1 settled-headroom request milestones complement 50/20/5-percent milestones. Required archive/review handoffs remain original checks; never waives original checks or role permissions | Required; final prompt is remeasured after an appended notice; 350 tokens per notice, compact complete facts when needed; if still over the ceiling, explicitly defer in Inspector without advancing the watermark; at most four finite milestones plus one unknown-usage observation per invocation. Emitted as a round-lifecycle snapshot block so the renderer's content-addressed reuse supersedes the prior carrier (and compaction retires superseded copies) instead of stacking a permanent bare `_isMeta` message per milestone |
 | `tool_stagnation` | Repeated identical outcomes, not elapsed time or call count | Required; breaker-owned caps |
 | `tool_repeat_reminder` | Early exact-repeat notice one rung below the corrective nudge; never vetoes, audits on its own ledger, cleared by a real human steer | Required; once per repeat digest |
-| `partial_stream_retry` | Partial transport cut without assistant-prefill support | Required; recovery-owned caps |
+| `partial_stream_retry` | Historical receipts only; a partial transport cut now rewinds and resends the unchanged request | Required; recovery-owned caps |
 | `terminal_recovery` | Empty terminal output or unexecuted packet | Required; at most two retries |
 | `intermediate_response` | Provider-marked commentary-only output, not every short answer | Required; bounded retries |
+| `output_contract` | Delegated worker's `stop` answer fails its spawn `output_schema` (parse or JSON-pointer validation error); asks for only the corrected object. No timeline note; the vetoed answer is kept as continuation prose | Required; once per worker, then settles `completed` with `contract_error` |
 | `todo_incomplete` | Historical receipts only; new execution never emits checklist-only continuations | Read compatibility, not a live completion gate |
 | `intent_stall` | Retryable tool failure then prose-only stop, without human handoff | Required; once per task |
 | `fallback_synthesis` | Fetched evidence exists but final answer is missing | Required; fallback-owner policy |
@@ -143,6 +158,7 @@ The toolbar measures last prompt usage / **full** model window, falling back to 
 | `branch_context` | Explicit branch title/selection without rewriting original request | Required user projection |
 | `paper_tool_guidance` | Short hint only when both discovery/execution gateways exposed | One hint per Paper message view |
 | `worker_policy` | Child role/scope/tool/read-only/shared-workspace contract at system authority | Required bootstrap; frozen per worker/revalidated on resume |
+| `worker_team` | Retired: per-run identity now ends `worker_policy`; registered only for carriers in checkpoints written while the identity followed the objective | Never appended; checkpoint rebuild drops such carriers and refreshes `worker_policy` from the current binding |
 | `worker_artifacts` | Optional shared-artifact discovery; names only, not bodies | At most 20 short keys; 1,600-character key hint |
 | `worker_dependencies` | Completed explicit prerequisite evidence, separate from delegated user context | Required; scheduler-owned evidence bound |
 | `worker_wrapup` | One tool-less honest partial report after halt without final answer | Required; one wrap-up attempt |
@@ -153,9 +169,12 @@ The toolbar measures last prompt usage / **full** model window, falling back to 
 
 ## Conversation visibility invariant
 
-Every addition to the model-visible message stream leaves a display-only
-`system_note` segment in the Turn Blocks timeline, so nothing is injected
-silently. Emission is **note-after-commit**: the composer append boundaries
+Every runtime context addition to a task with a Turn projection has a declared
+display destination: a display-only `system_note` by default, or an explicitly
+registered dedicated sidecar owner. Bootstrap-only policy belongs to Request
+Inspector; protocol-owned assistant/tool messages and compaction retain their
+existing owners rather than being copied into notes. Emission is
+**note-after-commit**: the composer append boundaries
 (`append_context_blocks` for round-scoped blocks, `compose_context` for the
 session prefix) read the render manifest and record a note only for rows whose
 bytes were physically appended (`appended=True`). Content-addressed reuse
@@ -201,6 +220,56 @@ docs/RENDER_CONTRACT.md §System interventions → Context-note grouping.
 
 `tests/context/test_context_composer_notes.py` enforces the emission,
 reuse-suppression, disabled-block, and fire-once semantics above.
+
+### Runtime input visibility ownership
+
+**Problem:** sharing the `inbox_delivery` carrier did not imply sharing its
+presentation. Completion reports wrote `_inboxInjects`, but team/project messages
+only entered model messages; a carrier-wide no-note assumption hid them. A
+publication before sidecar mutation also froze an incomplete live projection.
+
+**Decision:** `append_injection` defaults every event/inbox writer with a task to
+`system_note`, including a generic `context-injection` fallback when the registry
+has no specialized kind. `inbox_delivery` presents as an ungrouped incoming
+message, not as a user request or a consumed-message acknowledgement. Dedicated
+inbox/peer drain owners opt out explicitly with a validated `display_owner`;
+`record_note=False` alone is rejected. The content-free append manifest records
+`displaySurface`, `displayOwner`, `displayReason`, and the generic note's `blockId`.
+These are bounded diagnostic receipts, not a second mailbox or durable ACK store.
+A sidecar declaration is the producer's contract, not proof of provider consumption.
+
+Carrier, generic note and append manifest form one synchronous transaction: any
+recorder failure restores all three, including evicted manifest history/counters.
+A retry therefore cannot leave an invisible carrier or duplicate the failed input.
+Task-local path-overlap advice has no dedicated lane: it uses a separate generic
+note carrier, even alongside completion receipts. Its queue stays ephemeral and
+it creates no durable inbox/feed entry; the note records only the actual append.
+A failed advice recorder retains that advice for retry without discarding other
+lanes' already-appended payloads, sidecars, or deferred confirmation handles.
+At event capture, `INJECTED_NOTES_FIELD` is frozen along with the other projection
+inputs. The Turn producer passes it into the existing segment normalizer, which
+uses the same note assembly owner as checkpoint/settlement. Stable block identity
+makes repeated captures idempotent and grouped-note updates replace the same
+block. Private injection buffers are not exposed in the public projection and
+snapshot reads never synthesize changes to a live revision. Dedicated drains
+populate **all** affected sidecars before publishing their first structural event;
+a failed observer cannot erase already-recorded display evidence. This adds no
+transport, queue, timer, or per-user authority shortcut.
+
+**Alternatives rejected:** another swarm-only card leaves the next producer
+silent; treating every carrier as already visualized conflates distinct sources;
+waiting for checkpoint makes live truth lag; copying backend Messages directly to
+the browser leaks protocol/private material and creates a second history owner.
+Not every internal field is user-visible: omission must belong to an explicit
+policy, not an absent renderer. Existing note text limits still apply; a timeline
+receipt is not a claim of lossless full-context export or model consumption.
+
+Regression boundaries: registry fallback/explicit ownership, actual team/project
+writer → captured Turn projection, first completion event and observer failure,
+repeated projection/retry identity, mixed completion + independent message,
+unknown-kind fallback, and real application HTTP/browser reload. New injection
+producers join the shared writer's bypass guard and these behavior tests; adding
+only a source-specific stylesheet is insufficient.
 
 ### Attribution: who a turn is *from* vs. what is *injected*
 
@@ -285,15 +354,16 @@ execution authority. This guidance never grants tools or bypasses child approval
 Programmatic guidance reuses action-schema details and stays within its 128-token
 contract; avoid duplicating operation descriptions or increasing the budget.
 
-Workspace environment projects the admitted root policy with stable labels, execution paths, canonical paths and access per root. Isolation is repository-specific; an unbound non-Git primary root remains independent of an isolated additional root. Bare relative file paths use primary; command cwd retains its valid sticky directory. History must not relocate paths between roots.
+Workspace environment projects the admitted root policy with stable labels, execution paths, canonical paths and access per root. Isolation is repository-specific; an unbound non-Git primary root remains independent of an isolated additional root. Bare relative file paths use primary; command cwd retains the last explicit `working_dir` (a `cd` inside a command never persists). History must not relocate paths between roots.
 
 ## Accessed-path project guidance
 
 **Problem:** root-only rules miss nested `AGENTS.md`, and command/background
 CWD changes can execute against rules for another directory. **Decision:**
 `lib/project_mod/instructions.py` acquires only declared-root/target ancestors;
-`lib/tasks_pkg/project_guidance.py` holds the task-owned required snapshot and
-exact-version delivery fence. Nested sources carry their own subtree label.
+`lib/tasks_pkg/project_guidance.py` holds the task-owned acquired rules and
+delivers each file as its own content-addressed block. Nested sources carry their
+own subtree label.
 Read acquisition is descriptor-relative/no-follow on POSIX and stops at remaining
 aggregate file/byte budgets, without clipping or publishing a partial snapshot.
 Verified removals are pruned before validating replacement bounds.
@@ -315,13 +385,91 @@ context refresh-failure tests and the workspace/browser acceptance ladder.
 context and scoped guidance, inflating required, non-compacting input.
 **Decision.** Ordinary task preparation obtains project topology/journal
 locators without rule bodies and delivers complete raw-file-witness guidance
-through `project_scoped_rules` before admission, including native preparation.
-Later path reads reuse the same guidance owner for changes and removals.
+through `project_scoped_rules` blocks before admission, including native
+preparation. Later path reads reuse the same guidance owner for changes and removals.
 Standalone context callers and remote projects retain their existing complete
 context. No required file is clipped or silently omitted.
 **Alternative rejected.** Inferring delivery from prose cannot preserve raw
 file hashes or distinguish changed instructions. Verify
 `tests/tasks_pkg/test_project_guidance_bootstrap.py`.
+
+### Per-rule guidance delivery (owner decision 4, 2026-10-28)
+
+**Problem.** Guidance (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `COPILOT.md`,
+nested `AGENTS.md`) travelled as ONE `project_scoped_rules` snapshot of every
+rule file the task had acquired. The composer reuses a block only when its hash
+equals the latest copy in history, so every newly touched directory with a
+nested `AGENTS.md`, every new turn (a fresh task starts from the root-only set)
+and every linked worktree (`<root>/.tofu/worktrees/<name>`: identical bytes at
+new paths) appended the whole acquired set again, and each copy stayed in the
+prompt and was re-read on every later round. Logs of 2026-10-27/28 show 79
+re-sends across 30 tasks appending 4.2 MB (one task: 6 appends, 716 KB). The
+block was also re-rendered and re-tokenized every round (16-158 KB) when nothing
+changed. The repository owner decided (2026-10-28) that guidance must never be
+re-sent and must cost context only for genuinely new rules.
+
+**Decision.** `lib/tasks_pkg/project_guidance.py` delivers each rule file as its
+own required block `project_scoped_rules_<instance>` (`context_block(...,
+instance=...)`; the instance is a path digest prefixed by path depth so root
+rules precede the nested rules that specialize them). Presence is
+content-addressed in the actual messages (`verified_block_hashes`,
+`block_content_hash`), so the composer appends only blocks that are missing or
+changed:
+
+- an unchanged file is delivered at most once while its block stays in
+  model-visible history, across rounds and turns;
+- identical bytes at another path render as one line, `Source: <path> — same
+  bytes as <delivered path>; that text applies within <scope> too and is not
+  repeated here.`; the full text is held by a copy already in history when one
+  exists, otherwise by the first acquired path;
+- a changed file appends one new version, which the composer prefixes with its
+  supersede notice; a deleted file appends one line `Source: <path> — deleted;
+  its earlier text no longer applies within <scope>.`; an emptied file a similar
+  line;
+- when compaction or a history rebuild dropped a block, exactly that block is
+  re-delivered; snapshot compaction (`compact_context_snapshots`, now resolving
+  instance ids through `block_spec`) retires superseded per-file versions, and
+  memory-only head truncation protects the newest version of each required one;
+- a new task re-reads, once, the rule files whose blocks its inherited history
+  carries: unchanged ones cost nothing, changed or deleted ones (or files now
+  outside the declared roots, or unreadable) get a superseding version or a
+  retraction. These inherited paths do not count toward the task's own 128-file
+  / 1 MiB acquisition bound, because they add no new bytes; a path the task
+  touches again counts again;
+- a combined snapshot written by the earlier code (bare `project_scoped_rules`
+  id) is retired once with a one-line note, its sources are adopted and
+  delivered per file, a one-time migration cost per conversation;
+- with nothing changed, round preparation checks only the identity of the
+  carrier messages that held the delivered blocks (strong references; a dropped,
+  copied or edited carrier forces content-addressed verification) and renders,
+  hashes or tokenizes no guidance.
+
+The registry entry stays `required=True`; its stability and lifecycle become
+`conversation` because a block now stays valid across turns until its file
+changes. `Applies only within: <scope>` stays on every full block and every
+one-line note names its own scope.
+
+**Measurement.** Replay of task `9c90d9a7` (Request Inspector tool sequence, its
+12 delivered rule files rebuilt in a temporary tree) plus a third turn that
+revisits the second turn's paths: 1,133,260 appended characters before, 114,918
+after (the distinct rule text is 111,705). Synthetic walk root ->
+`lib/tasks_pkg/...` -> `.tofu/worktrees/x/...` -> second and third turn with the
+real rule files: 539,828 before, 47,255 after (distinct text 43,258); the later
+turns append nothing. An unchanged round's guidance refresh took 9.9-32.8 ms
+before and 0.02-0.2 ms after.
+
+**Alternatives rejected.** Keeping one snapshot and appending a diff of it keeps
+a growing aggregate identity, so any compaction or turn boundary re-sends it
+whole. A content-hash-only block id cannot express a changed file at the same
+path as superseding, so stale text would stay current. A durable "already
+delivered" ledger outside the messages cannot see compaction or a rebuilt
+history and would suppress rules the model no longer has. Re-sending inherited
+rules at each new task (the old behaviour) is exactly the cost being removed;
+trusting inherited blocks without re-reading their files would keep deleted or
+changed rules current. Counting inherited rules toward the acquisition bound
+would refuse long conversations that merely accumulated history.
+Executable specifications: `tests/tasks_pkg/test_project_guidance_delta.py`
+(one per requirement plus the end-to-end replay).
 
 ### Shared agent startup context
 

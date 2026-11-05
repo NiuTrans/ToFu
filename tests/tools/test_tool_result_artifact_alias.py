@@ -27,6 +27,7 @@ import json
 import pytest
 
 import lib.tool_results.tool_result_artifacts as tra
+from tests.support.artifact_record_store import ArtifactRecordStore
 
 
 pytestmark = pytest.mark.unit
@@ -39,29 +40,9 @@ REF_C1 = 'tool-result:' + 'deadbeef' + 'cafe' + '1' * 52
 REF_C2 = 'tool-result:' + 'deadbeef' + 'cafe' + '2' * 52
 
 
-class _FakeStorageClient:
-    """Minimal in-memory stand-in for the record.* semantic operations."""
-
-    def __init__(self):
-        self.records = {}
-
-    def command(self, op, payload, command_id, deadline=None):
-        assert op == 'record.put'
-        ns, key = payload['namespace'], payload['key']
-        current = self.records.get((ns, key))
-        version = (current['version'] + 1) if current else 1
-        self.records[(ns, key)] = {'value': payload['value'],
-                                   'version': version}
-        return {'key': key, 'version': version}
-
-    def query(self, op, payload, deadline=None):
-        assert op == 'record.get'
-        return self.records.get((payload['namespace'], payload['key']))
-
-
 @pytest.fixture
 def store(monkeypatch):
-    client = _FakeStorageClient()
+    client = ArtifactRecordStore()
     monkeypatch.setattr(tra, 'get_storage_client', lambda write=False: client)
     return client
 
@@ -156,6 +137,51 @@ def test_mint_may_recycle_expired_row(store):
         {}, REF_A, tool_name='web_search', display='', user_id=7, now_ms=1000)
     assert alias == 'tr:web-search:' + 'a' * 8
     assert tra.resolve_artifact_ref({}, alias, user_id=7, now_ms=1001) == REF_A
+
+
+def test_fresh_mint_is_one_versioned_create(store):
+    alias = tra.mint_artifact_alias(
+        {}, REF_A, tool_name='web_search', display='', user_id=7, now_ms=1000)
+    assert alias == 'tr:web-search:' + 'a' * 8
+    # Settle-path cost: one atomic create-if-absent, no read-before/after.
+    assert store.calls == [('record.put', 0)]
+
+
+def test_same_turn_remint_reuses_its_own_fresh_claim(store):
+    task = {}
+    first = tra.mint_artifact_alias(
+        task, REF_A, tool_name='web_search', display='', user_id=7, now_ms=1000)
+    store.calls.clear()
+    # The round-aggregate budget re-projects the same spill in the same turn.
+    again = tra.mint_artifact_alias(
+        task, REF_A, tool_name='web_search', display='', user_id=7, now_ms=2000)
+    assert again == first and store.calls == []
+    # Past half its TTL the claim is refreshed through storage again.
+    late = 1000 + tra.DEFAULT_TTL_MS // 2 + 1
+    assert tra.mint_artifact_alias(
+        task, REF_A, tool_name='web_search', display='', user_id=7, now_ms=late) == first
+    assert store.records[(tra._ALIAS_NAMESPACE, first)]['value']['expiresAtMs'] == \
+        late + tra.DEFAULT_TTL_MS
+
+
+def test_mint_never_overwrites_a_row_that_moved_after_its_read(store):
+    alias = 'tr:web-search:' + 'a' * 8
+    _seed(store, alias, user_id=8, digest=REF_B, expires_at_ms=500)
+
+    def concurrent_claim(payload):
+        # Another mint recycles the same expired row between our read and
+        # our replacement of the version we observed.
+        if payload.get('expected_version') != 0 and store.before_put:
+            store.before_put = None
+            _seed(store, alias, user_id=9, digest=REF_B)
+            store.records[(tra._ALIAS_NAMESPACE, alias)]['version'] = 2
+
+    store.before_put = concurrent_claim
+    minted = tra.mint_artifact_alias(
+        {}, REF_A, tool_name='web_search', display='', user_id=7, now_ms=1000)
+    assert minted == 'tr:web-search:' + 'a' * 16
+    assert store.records[(tra._ALIAS_NAMESPACE, alias)]['value']['user_id'] == 9
+    assert tra.resolve_artifact_ref({}, minted, user_id=7, now_ms=1001) == REF_A
 
 
 def test_mint_requires_digest_and_owner(store):

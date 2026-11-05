@@ -156,7 +156,7 @@ pub(crate) fn record(
         document.insert("updatedAt".to_owned(), Value::from(request.now_ms));
         document.insert("status".to_owned(), Value::String(request.status.clone()));
         document.insert("settlement".to_owned(), Value::Object(Map::new()));
-        validate_settleable_turn_size(&document, &projection, witness.total, &attempt.document, false)?;
+        validate_settleable_turn_size(&document, &projection, witness.total, false)?;
         current_head = store_event_projection(database, transaction, request,
             &attempt.conversation_id, document["turnId"].as_str().unwrap(), revision, next,
             current_head.as_ref(), &previous, &projection, witness.total, patch)?;
@@ -187,12 +187,12 @@ pub(crate) fn record(
         document.insert("projection".to_owned(), Value::Object(projection));
         document.remove("_projectionHead");
     }
-    crate::versioned_document::put_with_blob_owner_bounded(database, transaction,
+    metadata_summary::put_document(database, transaction,
         crate::versioned_document::PutRequest { key: key.clone(), namespace: DOCUMENT_IDENTITY.to_owned(),
             logical_key: turn_logical_key(&attempt.conversation_id, &turn_id),
             value_json: serde_json::to_vec(&document).map_err(|_| invalid_data("Turn cannot be encoded"))?,
             expected_version: Some(physical_version), updated_at_ms: last.now_ms },
-        transaction.owner_user_id(), crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES)?;
+        crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES)?;
     let stored = database.entity_get(transaction, &key)?.ok_or_else(|| invalid_data("staged Turn disappeared"))?;
     store_changed_lane_turn(database, transaction, &attempt.conversation_id, &lane_id, ordinal, stored)?;
     put_lane_compaction_index(database, transaction, &document)?;

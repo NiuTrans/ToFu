@@ -39,6 +39,7 @@ from lib.tasks_pkg.context_composer._provider_executor import (
     ContextProviderLease,
     create_context_provider_lease as _PrefetchPool,
 )
+from lib.tasks_pkg.memory_listing import release_early_memory_listing
 
 logger = get_logger(__name__)
 
@@ -124,9 +125,11 @@ def stop_prefetches(
     Python cannot stop a callable that has already entered, but
     ``cancel_futures`` prevents an unconsumed queued read from starting. The
     compatibility fallback keeps lightweight test doubles usable without
-    weakening normal cleanup.
+    weakening normal cleanup. An early memory listing the task never consumed
+    (Stop or failure before ``startup_memory``) is released here as well.
     """
     task.pop('_prefetch_project', None)
+    release_early_memory_listing(task)
     if prefetch_executor is None:
         return
     try:

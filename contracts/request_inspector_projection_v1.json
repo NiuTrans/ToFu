@@ -1,0 +1,20 @@
+{
+  "contract": "request-inspector/v1",
+  "operation": "event.list",
+  "selector": "payload_projection",
+  "default": "full",
+  "values": ["full", "request-inspector/v1"],
+  "snapshotFields": [
+    "type", "roundNum", "kind", "turn", "model", "params", "label",
+    "agentId", "agentRole", "degraded", "degradedReason",
+    "messageCount", "toolsCount", "prefixLen"
+  ],
+  "semantics": {
+    "scope": "Owner, ordering, sequence, timestamp, filtering and pagination are unchanged.",
+    "deltaSnapshots": "When prefixLen and integer counts are present, retain snapshotFields and only tool name declarations from newMessages. Full payloads remain durable and readable through full.",
+    "legacySnapshots": "Return full snapshots unchanged: the existing positional prefix comparison still requires their complete messages.",
+    "otherEvents": "Return unchanged.",
+    "malformedSnapshots": "Return unchanged when the optimized representation cannot preserve the existing fold behavior. Do not repair data or turn failures into empty results.",
+    "composition": "payload_types selects payload presence first; this projection applies only to included payloads."
+  }
+}

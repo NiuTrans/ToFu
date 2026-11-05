@@ -19,7 +19,7 @@ import json
 import threading
 from datetime import datetime
 
-from flask import Response, jsonify, request
+from quart import Response, jsonify, request
 
 from tofu_trading.storage import (
     DOMAIN_TRADING,

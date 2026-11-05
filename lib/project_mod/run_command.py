@@ -8,6 +8,8 @@ dispatch facade.  This module owns the entire shell-execution subsystem:
   - project-file snapshot/diff + change recording
   - ``tool_run_command`` and its simple + interactive runners
   - process-tree kill, grep hardening, stdin-reader detection
+  - exact-value redaction of the vault credentials injected into a child
+    (``_CommandRedaction``: results, progress, captures, background results)
 
 ``tools.py`` re-exports the dispatch-facing symbols from here for backward
 compat, so external callers (``from lib.project_mod.tools import
@@ -15,6 +17,7 @@ tool_run_command``) are unaffected.  There is no dependency back on
 ``tools.py`` — the dispatch layer depends on this module, not the reverse.
 """
 
+import contextvars
 import os
 from pathlib import Path
 import re as _re  # alias used by the retained _maybe_wrap_rm_with_trash
@@ -22,19 +25,27 @@ import shlex
 import stat
 import subprocess
 import time
-
-from contextvars import ContextVar
-
-# A synchronous outer dispatcher and nested runner share one worker-owned
-# receipt. Background adapters install it on their actual executing thread.
-_owned_command_write = ContextVar('owned_command_write', default=None)
+from lib.git_runtime import without_automatic_git_maintenance
+from lib.project_mod.workspace_lease import WorkspaceLeaseCancelled
 
 
-def _owned_command_quiesced():
-    """Runner-only proof: a spawned body and supervised descendants retired."""
-    state = _owned_command_write.get()
-    if state is not None:
-        state['quiesced'] = True
+class CommandAdmissionRefusal(ValueError):
+    """A pre-execution admission refusal: the command never started.
+
+    Raised while acquiring workspace dependency setup admission
+    (``workspace_delivery._prepare_repository_runtime``) and when Git read
+    preparation (``prepare_git_inspections``) refuses the command, before the
+    command or setup body runs. It subclasses ``ValueError`` so existing callers
+    and tests that catch/assert ``ValueError`` keep working, while the tool
+    effect boundary can distinguish a provably-never-executed refusal (settle
+    ``not_started``) from an ordinary handler failure whose effect is unknown.
+    The message text is the model-facing refusal and is unchanged.
+    """
+
+
+class CommandAdmissionCancelled(CommandAdmissionRefusal, WorkspaceLeaseCancelled):
+    """Owner Stop during dependency setup admission, before setup or command entry."""
+
 
 from lib.log import get_logger
 from lib.project_mod.config import (
@@ -43,6 +54,10 @@ from lib.project_mod.config import (
     MAX_COMMAND_TIMEOUT,
     SHELL_PREFIX,
 )
+from lib.project_mod.foreground_command_records import (
+    record_foreground_command, release_foreground_command,
+)
+from lib.project_mod.foreground_command_slots import command_task_view
 from lib.project_mod.modifications import _record_modification
 from lib.project_mod.snapshot_content import (
     UNDO_BATCH_CONTENT_BYTES, anchored_directory, anchored_parent, file_fingerprint,
@@ -54,8 +69,6 @@ from lib.project_mod.snapshot_content import (
 # `lib.project_mod.command_analysis` directly by its consumers.
 from lib.project_mod.command_analysis import (  # noqa: F401
     _bound_scan_segments,
-
-    command_segment_formatter_writes,
     _clean_command_output,
     _extract_device_ids,
     _extract_progress_label,
@@ -68,8 +81,6 @@ from lib.project_mod.command_analysis import (  # noqa: F401
     _is_catastrophic_delete,
     _is_dangerous_command,
     _is_destructive_command,
-    _lease_free_git_command,
-    _lease_free_git_segment,
     harden_git_inspections,
     _line_fingerprint,
     _mask_quoted_literals,
@@ -77,17 +88,12 @@ from lib.project_mod.command_analysis import (  # noqa: F401
     _split_pipeline_spans,
     _unbounded_recursive_scan_target,
 )
-from lib.project_mod.command_heredoc import (
-    _without_descriptor_duplications, command_admission_view,
-)
-from lib.project_mod.command_setup import command_setup_view, command_cwd_setup_refusal
 from lib.project_mod.tool_admission import recorded_command_source
 from lib.project_mod.grep_redirect import plan_grep_redirect
 
 logger = get_logger(__name__)
 
 
-from lib.project_mod.workspace_lease import workspace_lease_fds
 _TIMEOUT_SCAN_ARGS = {}
 
 
@@ -435,11 +441,22 @@ _SENSITIVE_ENV_EXACT = frozenset({
     'REDIS_URL',
     'SSH_AUTH_SOCK',
 })
+# Handles to the running server's own storage instance. With one inherited, a
+# script that imports lib.storage attaches to (or republishes) live storage
+# instead of selecting its own. Storage configuration stays inherited.
+_SERVER_PRIVATE_STORAGE_ENV = frozenset({
+    'TOFU_STORAGE_CONNECTION_FILE',
+    'TOFU_STORAGE_PARENT_PID',
+    'TOFU_STORAGE_SERVICE_ID',
+    'TOFU_STORAGE_SERVICE_STATE',
+    'TOFU_STORAGE_TOKEN',
+})
 
 
 def _is_sensitive_inherited_env(name):
     upper = str(name or '').upper()
     return (upper in _SENSITIVE_ENV_EXACT
+            or upper in _SERVER_PRIVATE_STORAGE_ENV
             or bool(_SENSITIVE_ENV_SUFFIX_RE.search(upper)))
 
 
@@ -1052,14 +1069,204 @@ def _display_command(command):
     return display
 
 
+# ═══════════════════════════════════════════════════════
+#  Credential redaction
+# ═══════════════════════════════════════════════════════
+
+# The vault values injected into the current command's child. Captures
+# (``_BoundedCommandStream``) and the one result formatter every run_command
+# and background-command result passes through (``_format_run_output``) read
+# it; only ``_CommandRedaction`` sets it.
+_injected_credentials = contextvars.ContextVar(
+    'tofu_run_command_injected_credentials', default=None)
+
+
+class _CredentialValues:
+    """Exact values of injected vault credentials and their redaction markers."""
+
+    def __init__(self, markers):
+        self.markers = dict(markers)
+        # Longest first, so a value that contains another is replaced whole.
+        self.text_pairs = sorted(self.markers.items(), key=lambda pair: -len(pair[0]))
+        self.byte_pairs = [(value.encode('utf-8'), marker.encode('utf-8'))
+                           for value, marker in self.text_pairs]
+
+    @classmethod
+    def from_env(cls, credential_env):
+        markers = {}
+        for name in sorted(credential_env or {}):
+            value = credential_env[name]
+            if isinstance(value, str) and value and value not in markers:
+                markers[value] = f'[redacted credential: {name}]'
+        return cls(markers)
+
+    def __bool__(self):
+        return bool(self.markers)
+
+    def merged(self, other):
+        return _CredentialValues({**other.markers, **self.markers})
+
+    def redact(self, text):
+        for value, marker in self.text_pairs:
+            text = text.replace(value, marker)
+        return text
+
+    def stream(self, *, text):
+        return _RedactingStream(self.text_pairs if text else self.byte_pairs,
+                                '' if text else b'')
+
+    def redact_bytes(self, data):
+        stream = self.stream(text=False)
+        return stream.feed(data) + stream.flush()
+
+    def redact_cut(self, head, tail):
+        """Redact the bytes kept on both sides of one omitted middle.
+
+        A value split by either cut survives only as fragments no exact match
+        finds, so a fragment touching a cut that could belong to a value is
+        dropped with the middle.
+        """
+        head = self.stream(text=False).feed(head)
+        tail = self.redact_bytes(tail)
+        return head, tail[self._leading_fragment(tail):]
+
+    def _leading_fragment(self, data):
+        """Length of the longest start of ``data`` that can end a value."""
+        keep = 0
+        if not data:
+            return keep
+        for value, _ in self.byte_pairs:
+            position = value.find(data[:1], 1)
+            while position != -1:
+                rest = value[position:]
+                if data.startswith(rest) or rest.startswith(data):
+                    keep = max(keep, min(len(rest), len(data)))
+                    break
+                position = value.find(data[:1], position + 1)
+        return keep
+
+
+def credential_redactor(credential_env):
+    """Exact-value redactor for ``{ENV_VAR: value}``; None when it holds none."""
+    values = _CredentialValues.from_env(credential_env)
+    return values if values else None
+
+
+def injected_credential_redactor():
+    """Redactor for the vault values this context's command received, if any."""
+    return _injected_credentials.get()
+
+
+class _RedactingStream:
+    """Exact-value redaction across the chunks of one output stream.
+
+    Only a trailing piece that could still begin a value is held back, so a
+    value split across reads is replaced whole and other output is not delayed.
+    """
+
+    def __init__(self, pairs, empty):
+        self._pairs = pairs
+        self.pending = empty
+
+    def feed(self, chunk):
+        data = self.pending + chunk
+        for value, marker in self._pairs:
+            data = data.replace(value, marker)
+        size, keep = len(data), 0
+        for value, _ in self._pairs:
+            position = data.find(value[:1], max(0, size - len(value) + 1))
+            while position != -1:
+                if value.startswith(data[position:]):
+                    keep = max(keep, size - position)
+                    break
+                position = data.find(value[:1], position + 1)
+        self.pending = data[size - keep:]
+        return data[:size - keep]
+
+    def flush(self):
+        rest, self.pending = self.pending, self.pending[:0]
+        return rest
+
+
+class _RedactedProgress:
+    """``on_chunk`` adapter whose streamed progress carries no injected value."""
+
+    def __init__(self, on_chunk, values):
+        self._on_chunk = on_chunk
+        self._values = values
+        self._streams = {}
+
+    def __call__(self, stream, text):
+        redactor = self._streams.get(stream)
+        if redactor is None:
+            redactor = self._streams[stream] = self._values.stream(text=True)
+        text = redactor.feed(text)
+        if text:
+            self._on_chunk(stream, text)
+
+    def flush(self):
+        for stream, redactor in self._streams.items():
+            _safe_on_chunk(self._on_chunk, stream, redactor.flush())
+
+
+class _CommandRedaction:
+    """One run_command call's redaction of the vault values it injects.
+
+    Activated at the injection seam with the exact resolved ``credential_env``:
+    captures, formatted results, streamed progress and the returned text
+    replace each value with ``[redacted credential: NAME]``. A recorded
+    background wrapper keeps the values active in its worker's private
+    context, because that worker rebuilds the result from the record files
+    after this call returns.
+    """
+
+    def __init__(self):
+        self.values = None
+        self._token = None
+        self._progress = None
+        self._keep_for_record = False
+
+    def activate(self, credential_env, command, on_chunk):
+        values = _CredentialValues.from_env(credential_env)
+        if not values:
+            return on_chunk
+        current = _injected_credentials.get()
+        self.values = values if current is None else current.merged(values)
+        self._token = _injected_credentials.set(self.values)
+        try:
+            self._keep_for_record = recorded_command_source(command) is not None
+        except ValueError:
+            self._keep_for_record = False  # execution refuses a changed wrapper
+        if on_chunk is None:
+            return None
+        self._progress = _RedactedProgress(on_chunk, self.values)
+        return self._progress
+
+    def close(self):
+        if self._progress is not None:
+            self._progress.flush()
+        if self._token is not None and not self._keep_for_record:
+            _injected_credentials.reset(self._token)
+        self._token = None
+
+    def text(self, result):
+        if self.values is None or not isinstance(result, str):
+            return result
+        return self.values.redact(result)
+
+
 def _format_run_output(command, stdout, stderr, exit_code, timed_out=False,
-                       aborted=False, interrupted_by=''):
+                       aborted=False, interrupted_by='', notices=()):
     """Format command output into the standard result text.
 
     ``interrupted_by`` marks a PER-COMMAND interrupt (user button / stall
     watchdog) — distinct from ``aborted`` (whole-task Stop): the partial
     output is preserved and the task CONTINUES with this result fed back to
-    the model."""
+    the model. ``notices`` are bracketed lines placed before the terminal
+    status, such as process-group retirement warnings."""
+    injected = _injected_credentials.get()
+    if injected is not None:
+        stdout, stderr = injected.redact(stdout), injected.redact(stderr)
     output_parts = []
     if stdout.strip():
         output_parts.append(stdout)
@@ -1082,6 +1289,8 @@ def _format_run_output(command, stdout, stderr, exit_code, timed_out=False,
     result_text = f'$ {_display_command(command)}\n'
     if output:
         result_text += f'{output}\n'
+    for notice in notices:
+        result_text += f'\n[{notice}]'
     if interrupted_by:
         result_text += (f'\n[Command interrupted by {interrupted_by}]'
                         f'\n[exit code: -1]')
@@ -1123,383 +1332,8 @@ def validate_command_cwd(base, command, *, roots=None):
     return None
 
 
-def command_background_refusal(command):
-    """Reject unmanaged detach before snapshots, fastpaths, or subprocesses.
-
-    Tool-level backgrounding is supervised: its worker retains admission until
-    execution/history ends. Shell detach can close inherited lease descriptors.
-    The configured prefix is executed shell source, not a readonly exemption.
-    """
-    original = recorded_command_source(command)
-    admitted = command if original is None else original
-    refusal = command_cwd_setup_refusal(admitted or '', inherited_cdpath=os.environ.get('CDPATH', ''))
-    if refusal:
-        return refusal
-    source = command_setup_view(command_admission_view(
-        f'{SHELL_PREFIX} {admitted}' if SHELL_PREFIX else (admitted or '')))
-    shell_shape = _mask_quoted_literals(source)
-    detached = (
-        _re.search(r'(?<![&<>])&(?![&>])', shell_shape)
-        or _re.search(r'(?:^|[;|\s])(?:nohup|disown|setsid)(?:\s|$)', shell_shape)
-    )
-    if not detached:
-        # Quoting or an absolute executable path must not hide the command word.
-        from .command_analysis import (
-            _ENV_ASSIGNMENT_GUARD_RE, _unwrap_command_parts, _shell_words,
-            command_segment_output_targets,
-        )
-        for segment in _split_pipeline(source):
-            try:
-                tokens = _shell_words(segment, strict=True, redirects=True)
-                # Unquoted reserved words introduce commands; quoted/escaped
-                # names are executables instead. Peel before setup/wrappers so
-                # `then X=value "$X"` cannot hide an unproved real head.
-                while tokens and segment[tokens[0].start:tokens[0].end] in {
-                        'do', 'if', 'then', 'elif', 'else', 'while', 'until', '!'}:
-                    tokens = tokens[1:]
-                # Redirections/adjacent IO numbers may precede the executable
-                # or assignments. Retain their writer effects in original-source
-                # admission, but use the shared parser to inspect the real head.
-                core = segment[tokens[0].start:] if tokens else ''
-                words = list(command_segment_output_targets(core).words)
-            except ValueError:
-                continue  # Malformed shell source is still leased, never executed as readonly.
-            while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
-                words = words[1:]
-            words = _unwrap_command_parts(words)
-            # An unparsed heredoc's body is not a sequence of shell command
-            # heads. Keep its conservative writer claim, not a payload-based
-            # dynamic-executable refusal. Proven literal bodies were masked.
-            if '<<' not in source and words and any(character in words[0] for character in '$`'):
-                return ('Error [workspace-lease-background-unsupported]: unresolved dynamic '
-                        'executable cannot retain a verified managed child lifetime. Use a '
-                        'literal executable, a `NAME=value` binding followed by `"$NAME"`, '
-                        'bounded literal loop, or a script file. Path version probes '
-                        'also support directory globs and a quoted $HOME prefix when '
-                        'every candidate has a fixed literal executable filename, '
-                        'the command uses a quoted loop variable with --version/-v/-V, '
-                        'and the optional guard is `[ -x "$NAME" ] && "$NAME" --version` '
-                        'or `if [ -x "$NAME" ]; then "$NAME" --version; fi`. Unquoted '
-                        '$VAR, executable-name globs, rebinding, extra commands/redirects '
-                        'and other if ... fi shapes stay unproved; command was not started.')
-            if words and os.path.basename(words[0]) in {'nohup', 'disown', 'setsid'}:
-                detached = True
-                break
-    if detached:
-        return ('Error [workspace-lease-background-unsupported]: unmanaged shell '
-                'background/detach cannot retain a verified writer lease. '
-                'Use the tool background option with a foreground command; '
-                'command was not started.')
-    return None
-
-
-def _redirect_only_reader(segment, cwd):
-    """Prove a writer signal came only from a discarded output redirect.
-
-    Named output files are never exempt: they are real writes and keep their
-    existing FILE/TREE claim. The split helper is the shared owner, so a
-    heredoc header, ``>&2`` dup or ``2>/dev/null`` cannot fake the exemption.
-    """
-    from .command_analysis import command_segment_discardable_redirect_split
-    split = command_segment_discardable_redirect_split(segment)
-    return split is not None and not _segment_needs_command_writer(split[0], cwd)
-
-
-def _segment_needs_command_writer(segment, cwd):
-    """Separate literal opaque executables from unsafe shell/utility shapes."""
-
-    formatter = command_segment_formatter_writes(segment)
-    if formatter is not None:
-        return formatter[0]
-    from .command_analysis import (
-        _command_checkout_mutation, _ENV_ASSIGNMENT_GUARD_RE, _unwrap_command_parts,
-        is_literal_sed_filter, command_segment_words,
-    )
-    # Quote contents are executable arguments, not shell write syntax. Remove
-    # descriptor duplication only at unquoted positions; it opens no file.
-    shell_source = _without_descriptor_duplications(segment)
-    if (os.name == 'posix' and not SHELL_PREFIX
-            and _lease_free_git_segment(segment) == segment):
-        return False
-    if _command_checkout_mutation(_mask_quoted_literals(shell_source), cwd):
-        return True
-    if _has_dynamic_shell_syntax(shell_source):
-        # ``2>/dev/null`` (or a descriptor dup) opens no file. It must not be
-        # the sole reason a proven reader escalates to a whole-checkout writer:
-        # measured 2026-10-20, ``ls -d x 2>/dev/null`` claimed the entire
-        # repository exclusively and waited 21 minutes behind another writer.
-        return not _redirect_only_reader(segment, cwd)
-    try:
-        words = list(command_segment_words(segment))
-    except ValueError:
-        return True
-    while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
-        words = words[1:]
-    words = _unwrap_command_parts(words)
-    if not words:
-        return False
-    name = os.path.basename(words[0])
-    if name == 'sed' and is_literal_sed_filter(words[1:]):
-        return False
-    # These interpreters/wrappers hide shell effects; Git outside the complete
-    # hardened exemption may refresh indexes or invoke config-driven helpers.
-    if name in {
-            'git', 'sh', 'bash', 'dash', 'zsh', 'ksh', 'fish', 'csh', 'tcsh',
-            'env', 'eval', 'exec', 'source', '.', 'sudo', 'doas', 'xargs',
-            'if', 'for', 'while', 'until', 'case', 'function',
-            'sed', 'awk', 'gawk', 'mawk', 'nawk', 'goawk',
-            'cp', 'mv', 'rm', 'rmdir', 'unlink', 'mkdir', 'touch', 'install', 'ln',
-            'tee', 'truncate', 'chmod', 'chown', 'chgrp', 'patch', 'rsync',
-            'dd', 'tar', 'unzip', 'zip', 'curl', 'wget',
-    }:
-        return True
-    if name == 'sort':
-        from .command_analysis import command_segment_targets
-        parsed = command_segment_targets(segment)
-        return bool(parsed.targets) or not parsed.complete
-    if name == 'find':
-        from .command_analysis import command_segment_targets
-        parsed = command_segment_targets(segment)
-        return bool(parsed.targets) or not parsed.complete
-    if name == 'uniq' and len([word for word in words[1:] if not word.startswith('-')]) >= 2:
-        return True
-    return False
-
-
-def _regular_command_file(path, cwd, *, must_exist=False, allow_missing_parents=False):
-    """Resolve a regular leaf without aliases/tree/metadata side effects.
-
-    Output redirects may have missing ancestors; existing ones must be real
-    directories. Metadata is admission evidence, not a filesystem sandbox.
-    Hard links and any symlink component widen to ROOT rather than pretending
-    path-keyed FILE claims cover every alias.
-    """
-    if (not path or path == '-' or path.startswith('~') or path.endswith('/')
-            or any(part in {'..', '.git'} for part in Path(path).parts)):
-        return None
-    absolute = os.path.abspath(os.path.join(cwd, path))
-    if '.git' in Path(absolute).parts:
-        return None
-    from .workspace_lease import WorkspaceBusyError, _checkout_identity
-    try:
-        identity = _checkout_identity(cwd)
-        if identity is not None:
-            common = os.fspath(identity[1])
-            if os.path.commonpath((absolute, common)) == common:
-                return None  # includes --separate-git-dir metadata outside cwd
-        for parent in Path(absolute).parents:
-            try:
-                info = parent.lstat()
-            except FileNotFoundError:
-                if must_exist or not allow_missing_parents:
-                    return None
-                continue  # mkdir earlier in a chain may create missing ancestors
-            if not stat.S_ISDIR(info.st_mode):
-                return None
-        try:
-            info = os.lstat(absolute)
-        except FileNotFoundError:
-            return None if must_exist else absolute
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            return None
-        return absolute
-    except (OSError, UnicodeError, ValueError, WorkspaceBusyError):
-        return None
-
-
-def _literal_file_writer_targets(segment, cwd):
-    """Narrow declared writers to verified FILE claims, else keep ROOT authority.
-
-    Do not reuse the lossy snapshot target heuristic for this decision. Only
-    static supported argv/flags and verified regular leaves qualify.
-    Opaque runtime + a simple output redirect retains the existing opaque
-    scheduling policy; the redirect is not proof of its program's write set.
-    """
-    from .command_analysis import (
-        command_segment_targets, command_segment_words, _static_writer_operands,
-        _ENV_ASSIGNMENT_GUARD_RE,
-    )
-    parsed_targets = command_segment_targets(segment)
-    try:
-        original_words = list(command_segment_words(segment))
-    except ValueError:
-        return None
-    while original_words and _ENV_ASSIGNMENT_GUARD_RE.match(original_words[0]):
-        original_words.pop(0)
-    if original_words and os.path.basename(original_words[0]) in {'sudo', 'doas', 'env', 'command', 'exec'}:
-        return None
-    if '\n' in segment or '\r' in segment:
-        return None
-    shape = _mask_quoted_literals(segment)
-    redirects = tuple(_re.finditer(r'>+', shape))
-    if redirects:
-        if '<' in shape or len(redirects) != 1 or redirects[0].group() not in {'>', '>>'}:
-            return None
-        redirect = redirects[0]
-        before = segment[:redirect.start()]
-        descriptor = _re.search(r'(?<!\S)([0-9]+)$', before)
-        if descriptor:
-            if descriptor.group(1) not in {'1', '2'}:
-                return None
-            before = before[:descriptor.start()]
-        after = segment[redirect.end():].strip()
-        if (_has_dynamic_shell_syntax(before) or _has_dynamic_shell_syntax(after)
-                or _segment_needs_command_writer(before, cwd)):
-            return None
-        targets = parsed_targets.targets
-        target = (_regular_command_file(targets[0], cwd, allow_missing_parents=True)
-                  if len(targets) == 1 else None)
-        return (target,) if target is not None else None
-    if _has_dynamic_shell_syntax(segment):
-        return None
-    words = parsed_targets.words
-    if not words:
-        return None
-    name, args = os.path.basename(words[0]), list(words[1:])
-    if name == 'cp':
-        operands = _static_writer_operands(args, {
-            '-f', '-i', '-n', '-v', '-T', '--force', '--interactive',
-            '--no-clobber', '--verbose', '--no-target-directory',
-        })
-        if (operands is None or len(operands) != 2
-                or _regular_command_file(operands[0], cwd, must_exist=True) is None):
-            return None
-    elif name not in {'touch', 'tee', 'truncate', 'sort', 'sed'}:
-        return None  # moves/deletes/backups/opaque editors/trees retain ROOT
-    if (not parsed_targets.complete or not parsed_targets.targets
-            or (name != 'sed' and len(parsed_targets.targets) != 1)):
-        return None
-    targets = tuple(_regular_command_file(target, cwd, must_exist=name == 'sed')
-                    for target in parsed_targets.targets)
-    return targets if all(target is not None for target in targets) else None
-
-
-def _git_shell_output_claims(segment, cwd):
-    """Union shell-opened files with Git effects, including failed Git invocations."""
-    from .command_analysis import command_segment_output_targets
-    outputs = command_segment_output_targets(segment)
-    if not outputs.complete:
-        raise ValueError('Unresolved Git shell output target; use a literal output filename')
-    claims = set()
-    for target in outputs.targets:
-        path = _regular_command_file(target, cwd, allow_missing_parents=True)
-        claims.add(('file', path) if path is not None else
-                   ('tree', os.path.realpath(os.path.join(cwd, target))))
-    return claims
-
-
-def _literal_directory_writer_targets(segment, cwd):
-    """Exact mkdir operands own their trees, never the unrelated starting cwd.
-
-    These are ROOT claims on actual targets (not directory/file aliases). Unknown
-    flags, expansions, modes and redirects retain the existing cwd fallback.
-    """
-    from .command_analysis import command_segment_targets, command_segment_words
-    if _has_dynamic_shell_syntax(segment):
-        return None
-    try:
-        original_words = command_segment_words(segment)
-    except ValueError:
-        return None
-    if original_words and os.path.basename(original_words[0]) in {'sudo', 'doas', 'env', 'command', 'exec'}:
-        return None
-    parsed = command_segment_targets(segment)
-    words = parsed.words
-    if not words or os.path.basename(words[0]) != 'mkdir':
-        return None
-    operands = parsed.targets
-    if not parsed.complete or not operands or any(not path or path.startswith('~') for path in operands):
-        return None
-    target_paths = set()
-    for operand in operands:
-        if '..' in Path(operand).parts:
-            # mkdir -p creates each component before processing parent traversal.
-            # Final realpath alone loses writes in the cwd or a peer checkout.
-            target_paths.add(os.path.realpath(cwd))
-            prefix = cwd
-            for part in Path(operand).parts:
-                prefix = os.path.join(prefix, part)
-                target_paths.add(os.path.realpath(prefix))
-        else:
-            target_paths.add(os.path.realpath(os.path.join(cwd, operand)))
-    targets = tuple(sorted(target_paths))
-    from .workspace_lease import WorkspaceBusyError, _checkout_identity
-    try:
-        identity = _checkout_identity(cwd)
-        if identity is not None:
-            common = os.fspath(identity[1])
-            if any(os.path.commonpath((target, common)) == common for target in targets):
-                targets = tuple(sorted(set(targets) | {os.path.realpath(cwd)}))
-                # External metadata owns its source; preserve peer prefix claims too.
-    except (OSError, UnicodeError, ValueError, WorkspaceBusyError):
-        return None
-    return targets
-
-
-def _literal_filesystem_claims(segment, cwd):
-    """Exact plain utility operands; unsupported flags retain tree fallback."""
-    from .command_analysis import command_segment_words, _static_writer_operands
-    if _has_dynamic_shell_syntax(segment):
-        return None
-    try:
-        words = command_segment_words(segment)
-    except ValueError:
-        return None
-    if not words:
-        return None
-    name = os.path.basename(words[0])
-    flags = {
-        'rm': {'-f', '-r', '-R', '-rf', '-fr', '--force', '--recursive'},
-        'unlink': set(), 'rmdir': {'--ignore-fail-on-non-empty'},
-        'mv': {'-f', '-i', '-n', '-v', '-T', '--force', '--no-clobber', '--no-target-directory'},
-        'cp': {'-f', '-i', '-n', '-v', '-T', '-r', '-R', '-a', '--recursive', '--no-target-directory'},
-        'touch': set(), 'tee': {'-a', '--append'},
-    }
-    if name not in flags:
-        return None
-    if any(value in {'-T', '--no-target-directory'} for value in words[1:]):
-        return None
-    operands = _static_writer_operands(list(words[1:]), flags[name])
-    if not operands or any(value.startswith('~') for value in operands):
-        return None
-    def claim(value):
-        file = _regular_command_file(value, cwd)
-        if file:
-            return {('file', file)}
-        lexical = os.path.abspath(os.path.join(cwd, value))
-        return {('tree', lexical), ('tree', os.path.realpath(lexical))}
-    if name not in {'mv', 'cp'}:
-        return set().union(*(claim(value) for value in operands))
-    if len(operands) < 2:
-        return None
-    sources, destination = operands[:-1], operands[-1]
-    destination_path = os.path.join(cwd, destination)
-    into_directory = os.path.isdir(destination_path)
-    if len(sources) > 1 and not into_directory:
-        return None
-    claims = set()
-    for source in sources:
-        target = (os.path.join(destination, os.path.basename(source.rstrip('/')))
-                  if into_directory else destination)
-        if name == 'mv':
-            claims.update(claim(source))
-        if os.path.isdir(os.path.join(cwd, source)):
-            lexical = os.path.abspath(os.path.join(cwd, target))
-            claims.update({('tree', lexical), ('tree', os.path.realpath(lexical))})
-        else:
-            claims.update(claim(target))
-    return claims
-
-
-def _command_claim_order(claim):
-    """One global checkout order, then ROOT before FILE within that checkout."""
-
-    from .workspace_lease import lease_claim_order
-    return lease_claim_order(claim)
-
-
 def _network_probe_execution_source(command):
-    """Bind lease exemption to the exact source hardened at execution."""
+    """The complete HTTP-probe plan for the exact source this call executes."""
     if os.name != 'posix' or SHELL_PREFIX:
         return None
     from .command_network_probe import prepare_network_probe
@@ -1511,310 +1345,65 @@ def _network_probe_execution_source(command):
     if original is None:
         return planned
     # The trusted adapter already verified its exact wrapper. Only replace
-    # one verbatim original body; drift/ambiguous embedding keeps exclusion.
+    # one verbatim original body; drift/ambiguous embedding runs unchanged.
     if command.count(original) != 1:
         return None
     return command.replace(original, planned, 1)
 
 
-# Unparsed operands of these only create or replace members inside the cwd (or
-# write a named output), never the cwd directory itself. Their fallback cwd
-# claim is scheduling—not evidence that internal lease storage is a target.
-_CWD_CONTENT_COMMANDS = frozenset({
-    'curl', 'wget', 'tar', 'zip', 'unzip',
-})
+# Log forensics join a command to its later log lines (file history, process
+# records) through this line; a 120-char cut usually ended inside the
+# redundant `cd <cwd> && ` prefix, so the command could not be identified.
+_LOGGED_COMMAND_CHARS = 600
 
 
-def command_write_lease_claims(base, command, *, _owned_formatter_paths=None,
-                               _approximated_tree_paths=None):
-    """Resolve typed (scope, path) writes for both runner and outer dispatch.
+def _logged_command(command, base):
+    """One-line, bounded command text; the line's cwd= already records base."""
+    shown = command
+    redundant_cd = f'cd {base} && '
+    if base and shown.startswith(redundant_cd):
+        shown = shown[len(redundant_cd):]
+    shown = shown.replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '\\r')
+    if len(shown) > _LOGGED_COMMAND_CHARS:
+        shown = f'{shown[:_LOGGED_COMMAND_CHARS]}…[+{len(shown) - _LOGGED_COMMAND_CHARS} chars]'
+    return shown
 
-    Verified literal regular-file target sets claim FILE, not their cwd.
-    Git metadata uses its own domain; destructive directories and ambiguous
-    shell writes use TREE. Known Git checkout transformations retain ROOT.
 
-    Opaque test/build/interpreter commands request no lifetime read lease. The
-    snapshot heuristic remains separate. Only a literal, non-pipeline ``cd``
-    followed by ``&&`` can drop its old cwd: failure then prevents the mutation.
-    Other shell control shapes retain fallback cwd claims, and earlier writes
-    never disappear when a later cd changes the execution directory.
+def command_execution_source(command):
+    """The text the runner executes for *command*: literal Git reads hardened.
 
-    A TREE claim invented for an unclassified writer approximates its cwd; it is
-    not a proven recursive replacement. Those paths are reported through
-    ``_approximated_tree_paths`` so admission does not read an ancestor of
-    internal lease storage as a requested deletion.
+    A recorded background wrapper is bound to exact bytes and never rewritten
+    after binding, so the background adapter binds this text instead of the
+    model's original. Both lanes then run identically.
     """
-    from .command_analysis import (
-        _ENV_ASSIGNMENT_GUARD_RE, _unwrap_command_parts, command_segment_words,
-        command_segment_discardable_redirect_split,
-        command_segment_literal_targets, command_segment_write_scope_refusal,
-    )
-    from .git_command_scope import git_command_scopes
-    if not command or not command.strip():
-        return ()
-    original = recorded_command_source(command)
-    if original is None and os.name == 'posix' and not SHELL_PREFIX and _lease_free_git_command(command) is not None:
-        return ()
-
-    if _network_probe_execution_source(command) is not None:
-        return ()
-    admitted = command if original is None else original
-    refusal = command_cwd_setup_refusal(admitted, inherited_cdpath=os.environ.get('CDPATH', ''))
-    if refusal:
-        raise ValueError(refusal)
-    root = os.path.realpath(base or os.getcwd())
-    analysis_source = (harden_git_inspections(admitted)
-                       if original is None and os.name == 'posix' and not SHELL_PREFIX else admitted)
-    source = command_setup_view(command_admission_view(
-        f'{SHELL_PREFIX} {analysis_source}' if SHELL_PREFIX else analysis_source))
-    if not SHELL_PREFIX and not any(
-            _segment_needs_command_writer(segment, root) for segment in _split_pipeline(source)):
-        return ()
-
-    claims = {('tree', root)} if SHELL_PREFIX else set()
-
-    def approximated(path):
-        if _approximated_tree_paths is not None:
-            _approximated_tree_paths.add(os.path.realpath(path))
-    cwds = {root}
-    fallback_cwds = set()
-    spans = _split_pipeline_spans(source)
-    try:
-        git_scopes = {scope.start: scope for scope in git_command_scopes(
-            source, root, environment=os.environ, strict=False)}
-    except ValueError as error:
-        if 'lifecycle' in str(error):
-            raise
-        git_scopes = {}  # Nonliteral targets retain tree-wide admission.
-    previous_separator = ''
-    for index, (start, end) in enumerate(spans):
-        segment = source[start:end].strip()
-
-        try:
-            scope_refusal = command_segment_write_scope_refusal(segment)
-        except ValueError:
-            scope_refusal = None  # Malformed syntax retains the existing ROOT fallback.
-        if scope_refusal:
-            raise ValueError(scope_refusal)
-        next_separator = (source[end:spans[index + 1][0]].strip()
-                          if index + 1 < len(spans) else '')
-        if previous_separator in {';', '||'}:
-            cwds.update(fallback_cwds)
-        try:
-            words = list(command_segment_words(segment))
-        except ValueError:
-            words = []  # Unknown syntax retains every possible execution cwd below.
-        bare_words = list(words)
-        while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
-            words = words[1:]
-        words = _unwrap_command_parts(words)
-
-        cd_path = None
-        if (bare_words and bare_words[0] == 'cd'
-                and not _has_dynamic_shell_syntax(segment)):
-            cd_args = bare_words[1:]
-            if cd_args[:1] == ['--']:
-                cd_args = cd_args[1:]
-            if (len(cd_args) == 1 and not cd_args[0].startswith(('-', '~'))
-                    and (not os.environ.get('CDPATH') or os.path.isabs(cd_args[0])
-                         or cd_args[0].startswith(('./', '../')))):
-                cd_path = cd_args[0]
-        if cd_path is not None:
-            targets = {os.path.realpath(os.path.join(cwd, cd_path)) for cwd in cwds}
-            fallback_cwds.update(cwds)
-            if previous_separator == '|' or next_separator == '|':
-                pass  # Pipeline cd runs in a subshell; it cannot change a peer's cwd.
-            elif next_separator == '&&':
-                cwds = targets
-            else:
-                cwds.update(targets)  # Failed cd followed by ;/|| still permits writes.
-            previous_separator = next_separator
-            continue
-
-        for cwd in cwds:
-            # Read segments are hardened at execution; neighbouring writes
-            # retain their own admission instead of upgrading the query.
-            is_git = start in git_scopes or bool(words and os.path.basename(words[0]) == 'git')
-
-            if is_git:
-                claims.update(_git_shell_output_claims(segment, cwd))
-            if (is_git and original is None and not SHELL_PREFIX and os.name == 'posix'
-                    and _lease_free_git_segment(segment) == segment):
-                continue
-            if is_git and original is None and not SHELL_PREFIX and os.name == 'posix':
-                # ``git grep -n x 2>/dev/null``: the only unproven token is the
-                # discarded redirect, so the inspection keeps its exemption.
-                split = command_segment_discardable_redirect_split(segment)
-                if split is not None and _lease_free_git_segment(split[0]) == split[0]:
-                    continue
-            if not is_git and not _segment_needs_command_writer(segment, cwd):
-                continue
-            formatter = command_segment_formatter_writes(segment)
-            if formatter is not None:
-                writes, targets, complete, owned = formatter
-                paths = tuple(os.path.realpath(os.path.join(cwd, target)) for target in targets)
-                regular = complete and all(
-                    _regular_command_file(target, cwd, must_exist=True) == path
-                    for target, path in zip(targets, paths))
-                if writes and regular:
-                    claims.update(('file', path) for path in paths)
-                    if owned and _owned_formatter_paths is not None:
-                        _owned_formatter_paths.update(paths)
-                elif writes:
-                    claims.add(('tree', cwd))
-                    claims.update(('tree', path) for path in paths)
-                continue
-            directory_targets = _literal_directory_writer_targets(segment, cwd)
-            if directory_targets is not None:
-                # Plain additive mkdir does not replace source content.
-                if (any('.git' in Path(path).parts for path in directory_targets)
-                        or '..' in segment or os.path.realpath(cwd) in directory_targets):
-                    claims.update(('tree', path) for path in directory_targets)
-                continue
-            filesystem_claims = _literal_filesystem_claims(segment, cwd)
-            if filesystem_claims is not None:
-                claims.update(filesystem_claims)
-                continue
-            file_targets = _literal_file_writer_targets(segment, cwd)
-            if file_targets is not None:
-                claims.update(('file', target) for target in file_targets)
-                continue
-            if is_git:
-                scope = git_scopes.get(start)
-                if scope is None:
-                    claims.add(('tree', cwd))
-                else:
-                    claims.update(scope.writer_claims())
-                continue
-            claims.add(('tree', cwd))
-            if words and os.path.basename(words[0]) in _CWD_CONTENT_COMMANDS:
-                approximated(cwd)
-            for target in command_segment_literal_targets(segment):
-                claims.add(('tree', os.path.realpath(os.path.join(cwd, target))))
-        previous_separator = next_separator
-    # Full-source ambiguity (e.g. an unterminated quote) must fail closed even
-    # when the segment parser cannot identify a particular mutating command.
-    plain_data = not _has_dynamic_shell_syntax(source)
-    for segment in _split_pipeline(source):
-        try:
-            words = list(command_segment_words(segment))
-        except ValueError:
-            plain_data = False
-            break
-        while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
-            words = words[1:]
-        words = _unwrap_command_parts(words)
-        if not words or os.path.basename(words[0]) not in {
-                'cp', 'mv', 'rm', 'mkdir', 'touch', 'echo', 'printf', 'tee', 'truncate', 'install'}:
-            plain_data = False
-    if not plain_data and not claims and not git_scopes:
-        claims = {('tree', cwd) for cwd in cwds}
-    # Canonical effect order is independent of linked checkout aliases. Both
-    # wrappers pre-admit the complete physical barriers with workspace_claims_lease.
-    return tuple(sorted(claims, key=_command_claim_order))
+    if os.name == 'posix' and not SHELL_PREFIX:
+        from .command_network_probe import prepare_file_transfers
+        return prepare_file_transfers(harden_git_inspections(command))
+    return command
 
 
-def command_write_lease_paths(base, command):
-    """Legacy path-only export derived from the typed admission authority."""
-    return tuple(sorted({path for _scope, path in command_write_lease_claims(base, command)}))
+def _with_command_execution_source(function):
+    """Run the prepared execution text instead of the model's original command.
 
-
-def _with_command_writer(function):
-    """Keep write admission through the supervised worker's entire lifetime."""
+    Literal Git reads are hardened and curl/wget transfers prepared
+    (``command_execution_source``) before the dispatcher's file-history
+    snapshot and the runner see the command. A recorded background wrapper is
+    already bound to prepared bytes and is never rewritten. Tool calls take no
+    workspace lease (docs/runbooks/GIT_WORKSPACE_GUARD.md, "Tool calls take
+    no workspace leases").
+    """
     import functools
-    import inspect
-    from contextlib import ExitStack
-    from lib.project_mod.tool_admission import Cancellation, admission_timeout
-    from lib.project_mod.workspace_lease import (
-        WorkspaceBusyError, WorkspaceLeaseCancelled, WorkspaceLeaseNamespaceError,
-        workspace_claims_lease,
-    )
-    signature = inspect.signature(function)
 
     @functools.wraps(function)
     def wrapped(base, command, *args, **kwargs):
-        if not command or not command.strip():
-            return function(base, command, *args, **kwargs)
-        refusal = command_background_refusal(command)
-        if refusal:
-            return refusal
-        if (os.name == 'posix' and not SHELL_PREFIX
-                and recorded_command_source(command) is None):
-            command = harden_git_inspections(command)
-        owned_paths = set()
-        approximated_tree_paths = set()
-        claims = command_write_lease_claims(base, command, _owned_formatter_paths=owned_paths,
-                                          _approximated_tree_paths=approximated_tree_paths)
-        # Mixed/opaque writers never inherit a formatter's observation authority.
-        if any(scope != 'file' or path not in owned_paths for scope, path in claims):
-            owned_paths.clear()
-        if not claims:
-            return function(base, command, *args, **kwargs)
-        bound = signature.bind(base, command, *args, **kwargs).arguments
-        # The outer dispatch body carries execution callbacks/control in its
-        # explicit kwargs payload; runner callers have ordinary/positional args.
-        control = bound.get('kwargs') or {}
-        cancel = Cancellation(bound.get('task', control.get('task')),
-                              bound.get('runtime_context', control.get('runtime_context')))
-        wait_timeout = admission_timeout()
-        with ExitStack() as stack:
-            # The lease owner publishes the wait marker (it covers every
-            # acquisition path) and drops it before the command body: once
-            # admitted, the command owns a real process clock and ordinary
-            # handoff rules apply again.
-            try:
-                stack.enter_context(workspace_claims_lease(claims,
-                    timeout=wait_timeout, cancel_event=cancel,
-                    approximated_tree_paths=approximated_tree_paths))
-                if cancel.is_set():
-                    raise WorkspaceLeaseCancelled('Workspace lease admission cancelled')
-                if command_write_lease_claims(base, command) != claims:
-                    return ('Error [workspace-target-changed]: Command targets changed during writer admission. '
-                            'Re-read the workspace and reconcile; command was not started.')
-            except WorkspaceLeaseCancelled:
-                # This type means the OWNER cancelled admission; it is never
-                # lease contention. Report the same shape as the pre-start
-                # guard above, so a stopped turn does not advertise a lock
-                # conflict the model could try to work around.
-                return _format_run_output(command, '', '', -1,
-                                          timed_out=False, aborted=True)
-            except WorkspaceLeaseNamespaceError as error:
-                return (f'Error [workspace-protected-namespace]: {error}. Command was not started. '
-                        'The write scope overlaps internal lease storage; waiting will not resolve it. '
-                        'Use supported explicit file targets or a narrower working directory.')
-            except WorkspaceBusyError as error:
-                return (f'Error [workspace-busy]: {error}. Command was not started; '
-                        'retry after the conflicting lease finishes.')
-            if _owned_command_write.get() is not None or not owned_paths:
-                return function(base, command, *args, **kwargs)
-            from lib.tasks_pkg.workspace_delivery import execution_root_key
-            from lib.write_freshness import (
-                advance_project_read_cache_generation,
-                capture_owned_write, reconcile_owned_write,
-            )
-            task = bound.get('task', control.get('task'))
-            # Direct dispatch has an explicit conversation fallback; runner-only
-            # calls without a task have no observation identity and create none.
-            identity = execution_root_key(task) if task else bound.get('conv_id')
-            evidence = tuple(item for path in sorted(owned_paths)
-                             if (item := capture_owned_write(identity, path)) is not None)
-            token = _owned_command_write.set({'quiesced': False})
-            try:
-                result = function(base, command, *args, **kwargs)
-                if _owned_command_write.get()['quiesced']:
-                    # Fence cached bytes even with no eligible observation or
-                    # a failed CAS; completion, not token advancement, owns this.
-                    advance_project_read_cache_generation()
-                    for item in evidence:
-                        reconcile_owned_write(item)
-                return result
-            finally:
-                _owned_command_write.reset(token)
+        if command and command.strip() and recorded_command_source(command) is None:
+            command = command_execution_source(command)
+        return function(base, command, *args, **kwargs)
 
     return wrapped
 
 
-@_with_command_writer
+@_with_command_execution_source
 def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None,
                      on_chunk=None, cwd_sink=None, on_spawn=None,
                      credentials=None, on_grep_intercept=None,
@@ -1826,10 +1415,13 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
         command: Shell command string to execute.
         timeout: Timeout in seconds (0 = unlimited, None = auto-detect).
         cwd_sink: Optional callback ``fn(abs_cwd)`` invoked once with the
-            shell's FINAL working directory after the command completes, so a
-            trailing ``cd`` inside the command can update the caller's sticky
-            per-conversation cwd. Captured via a dedicated temp file (never
-            stdout, so it cannot be spoofed by output); the command's real exit
+            shell's FINAL working directory after the command completes.
+            Captured via a dedicated temp file (never stdout, so it cannot be
+            spoofed by output); the command's real exit code is preserved.
+            The project layer passes no sink: an in-command ``cd`` is a local
+            idiom and must never move the sticky per-conversation anchor
+            (conv mvl6adj1bcd1r1, 2026-10-24). The parameter stays for the
+            runner's own supervision seams; the command's real exit
             code is preserved. Any failure simply skips the callback.
         stdin_callback: Optional callback ``fn(prompt_text) -> str`` that is
             called when the subprocess appears to be waiting for stdin input.
@@ -1860,9 +1452,31 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
             swallowed — telemetry must never abort the command.
         on_grep_intercept: Internal display-only callback
             ``fn(number_of_segments)`` invoked after filesystem grep segments
-            have been rewritten to the runtime ``grep_search`` helper. It is
+            have been rewritten to the runtime ``search_files`` engine. It is
             never written to stdout/stderr or the model-visible tool result.
+
+    Vault values injected through ``credentials`` never reach the returned
+    text, ``on_chunk`` progress or a background-command result
+    (``_CommandRedaction``).
     """
+    redaction = _CommandRedaction()
+    try:
+        result = _run_command_tool(
+            base, command, timeout=timeout, stdin_callback=stdin_callback, task=task,
+            on_chunk=on_chunk, cwd_sink=cwd_sink, on_spawn=on_spawn,
+            credentials=credentials, on_grep_intercept=on_grep_intercept,
+            runtime_context=runtime_context, environment_root=environment_root,
+            frozen_input_paths=frozen_input_paths, redaction=redaction)
+    finally:
+        redaction.close()
+    return redaction.text(result)
+
+
+def _run_command_tool(base, command, *, timeout, stdin_callback, task, on_chunk,
+                      cwd_sink, on_spawn, credentials, on_grep_intercept,
+                      runtime_context, environment_root, frozen_input_paths,
+                      redaction):
+    """``tool_run_command`` body; ``redaction`` activates at the credential seam."""
     if not command or not command.strip():
         return 'Error: Empty command.'
 
@@ -1898,6 +1512,7 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     except Exception as e:
         logger.error('[run_command] credential resolution failed: %s', e)
         return 'Error: Credential request rejected: vault unavailable.'
+    on_chunk = redaction.activate(credential_env, command, on_chunk)
 
     # Resolve timeout — NO DEFAULT CEILING.
     #   A build / test suite / pip install / big grep is a WAIT, not a crash,
@@ -1935,14 +1550,14 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     #   exact failure mode that wiped shared paths during a benchmark run.
     #   Checked before the trash rewrite so a shallow target is never even
     #   moved to trash — it is rejected.
-    _cat = _is_catastrophic_delete(command, base)
+    from lib.project_mod.command_analysis import (
+        _catastrophic_delete_detail, delete_refusal_message)
+    _cat = _catastrophic_delete_detail(command, cwd=base)
     if _cat is not None:
-        logger.error('[run_command] BLOCKED catastrophic delete of %r (cwd=%s): %.200s',
-                     _cat, base, command)
-        return (f"Error: Command blocked for safety: refusing to delete "
-                f"top-level path '{_cat}'. Deleting filesystem roots or "
-                f"first-level directories (e.g. /mnt, /home, /data) is not "
-                f"permitted. Delete only specific paths inside your workspace.")
+        logger.error('[run_command] BLOCKED catastrophic delete of %r '
+                     '(reason=%s, cwd=%s): %.200s',
+                     _cat[0], _cat[1], base, command)
+        return 'Error: ' + delete_refusal_message(_cat)
 
     # Plan the direct-find budget before classifying an ancestor scan.  The
     # guard must judge the command that will actually execute: previously it
@@ -1954,8 +1569,8 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     if (timeout is None
             and os.name == 'posix'
             and os.environ.get('TOFU_RUN_SCAN_SEGMENT_TIMEOUT', '1') != '0'):
-        import shutil
-        _timeout_binary = shutil.which('timeout')
+        from lib.project_mod.grep_redirect import resolve_timeout_binary
+        _timeout_binary = resolve_timeout_binary()
         if _timeout_binary:
             try:
                 _scan_seconds = int(os.environ.get(
@@ -1967,12 +1582,17 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
             # Detect a direct find with pure parsing first.  Host-option
             # probing launches ``timeout --help`` and must not happen on a
             # command the outer resource guard will refuse before any spawn.
+            # The verdict also counts find-shaped lines inside literal heredoc
+            # bodies as bounded: they never run as shell, and the execution
+            # splice below leaves those bytes untouched.
             _, _find_segments = _bound_scan_segments(
-                command, _timeout_binary, _scan_seconds, ())
+                command, _timeout_binary, _scan_seconds, (),
+                include_literal_heredoc_bodies=True)
             if _find_segments:
                 _timeout_args = _timeout_scan_wrapper_args(_timeout_binary)
                 _scan_guard_source, _planned_bounded_scans = _bound_scan_segments(
-                    command, _timeout_binary, _scan_seconds, _timeout_args)
+                    command, _timeout_binary, _scan_seconds, _timeout_args,
+                    include_literal_heredoc_bodies=True)
                 _scan_timeout_plan = (
                     _timeout_binary, _scan_seconds, _timeout_args)
 
@@ -2056,16 +1676,16 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                             f'possible here: {_plan.refusal_reason}.')
                 return (
                     'Error: Command intercepted: this `grep` reads the '
-                    'filesystem, which belongs to the dedicated `grep_search` '
+                    'filesystem, which belongs to the dedicated `search_files` '
                     f'tool, not run_command. Refused segment: `{_gseg[:150]}`'
                     + _why + '\n'
                     'Translate:\n'
-                    "  - `grep -rn 'X' lib/`   -> grep_search(pattern='X', path='lib')\n"
-                    "  - `grep -n 'X' f.py`    -> grep_search(pattern='X', path='f.py')\n"
-                    "  - `grep -c 'X' dir/`    -> grep_search(pattern='X', path='dir', count_only=True)\n"
-                    "  - `... | head -20`      -> grep_search(..., max_results=20) "
+                    "  - `grep -rn 'X' lib/`   -> search_files(pattern='X', path='lib')\n"
+                    "  - `grep -n 'X' f.py`    -> search_files(pattern='X', path='f.py')\n"
+                    "  - `grep -c 'X' dir/`    -> search_files(pattern='X', path='dir', count_only=True)\n"
+                    "  - `... | head -20`      -> search_files(..., max_results=20) "
                     '(never pipe to head)\n'
-                    'grep_search is 5x+ faster on this network filesystem '
+                    'search_files is 5x+ faster on this network filesystem '
                     '(ripgrep; .gitignore- and junk-dir-aware), caps runaway '
                     "output via max_results, and won't wedge for minutes in a "
                     'FUSE bad window (measured: a `grep -rn ... | head` pipeline '
@@ -2114,7 +1734,7 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
 
     _probe_source = _network_probe_execution_source(command)
     if _probe_source is not None:
-        # Same complete plan as admission; no replay or approval/display rewrite.
+        # The complete probe plan; no replay or approval/display rewrite.
         # First-option -q prevents implicit curlrc from adding hidden writes.
         _exec_source = _probe_source
     if _scan_timeout_plan is not None:
@@ -2190,7 +1810,7 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
             prepare_network_command,
         )
         network_prepared = prepare_network_command(
-            command, child_env, task=task)
+            command, child_env, task=task, cwd=base)
         if network_prepared is not None and network_prepared.error:
             logger.warning(
                 '[CommandNet] route unavailable target=%s routes=%s '
@@ -2287,7 +1907,7 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
 
     timeout_str = f'{timeout}s' if timeout else 'unlimited'
     logger.info('run_command: $ %s  (timeout=%s, cwd=%s, interactive=%s)',
-                command[:120], timeout_str, base, bool(stdin_callback))
+                _logged_command(command, base), timeout_str, base, bool(stdin_callback))
 
     def _flush_cwd_capture():
         """Read the capture file (if any) and feed the sink. Best-effort."""
@@ -2324,33 +1944,32 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                 _network_e, exc_info=True)
             return result_text
 
-    if input_plan is not None:
-        try:
-            from lib.project_mod.file_read_probe import run_observed_process
-            from lib.compat import get_shell_args
-            report = run_observed_process(input_plan.project_path,
-                list(input_plan.expected_input_sha256), get_shell_args(full_command),
-                timeout_seconds=timeout, task=task, on_chunk=on_chunk, on_spawn=on_spawn,
-                runtime_context=runtime_context, child_env=child_env,
-                expected_input_sha256=input_plan.expected_input_sha256,
-                admission_check=lambda: input_plan.check_current(task),
-                working_dir=base, display_command=command)
-            return _finalize_network_output(report['evidence_result'])
-        except Exception as exc:
-            logger.debug('tool_run_command failure handled: %s', type(exc).__name__)
-            return f'Error: Frozen-input observation refused or failed; inspect before retrying: {str(exc)[:300]}'
-        finally:
-            _finalize_command()
-
     from lib.project_mod.git_inspection_execution import (
         GitInspectionPreparationError, prepare_git_inspections,
     )
     preparation_finished = False
     try:
-        # Source transformation is internal to execution. Approval, writer
-        # claims, snapshots and display stay bound to the admitted command.
-        with prepare_git_inspections(full_command, base, environment=child_env) as execution_full_command:
+        # Source transformation is internal to execution. Approval, snapshots
+        # and display stay bound to the command as written.
+        with prepare_git_inspections(full_command, base,
+                                     environment=child_env) as execution_full_command:
             preparation_finished = True
+            if input_plan is not None:
+                try:
+                    from lib.project_mod.file_read_probe import run_observed_process
+                    from lib.compat import get_shell_args
+                    report = run_observed_process(input_plan.project_path,
+                        list(input_plan.expected_input_sha256), get_shell_args(execution_full_command),
+                        timeout_seconds=timeout, task=task, on_chunk=on_chunk, on_spawn=on_spawn,
+                        runtime_context=runtime_context, child_env=child_env,
+                        expected_input_sha256=input_plan.expected_input_sha256,
+                        admission_check=lambda: input_plan.check_current(task),
+                        working_dir=base, display_command=command)
+                    return _finalize_network_output(report['evidence_result'])
+                except Exception as exc:
+                    logger.debug('tool_run_command failure handled: %s', type(exc).__name__)
+                    return f'Error: Frozen-input observation refused or failed; inspect before retrying: {str(exc)[:300]}'
+
             if not stdin_callback:
                 result_text = _run_command_simple(
                     command, execution_full_command, timeout, base, task=task,
@@ -2366,10 +1985,13 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                     credential_env=credential_env,
                     strip_credential_vars=strip_credential_vars)
             return _finalize_network_output(result_text)
-    except GitInspectionPreparationError as error:
+    except (GitInspectionPreparationError, ValueError) as error:
         if preparation_finished:
-            raise  # Exceptions in the executed body are never admission refusals.
-        return f'Error [git-inspection-preparation]: {error}. Command was not started.'
+            raise  # Exceptions in the executed body are never preparation refusals.
+        # Git scope resolution signals ValueError. Nothing has run yet, so this
+        # is a known no-effect refusal, never a possible side effect.
+        raise CommandAdmissionRefusal(
+            f'Error [git-inspection-preparation]: {error}. Command was not started.') from error
     finally:
         _finalize_command()
 
@@ -2483,9 +2105,14 @@ class _BoundedCommandStream:
         self.head = bytearray()
         self.tail = bytearray()
         self.total = 0
+        # Redacted before capture, so the head/tail cut never splits a value.
+        injected = _injected_credentials.get()
+        self._redaction = injected.stream(text=False) if injected is not None else None
 
     def append(self, chunk):
         data = bytes(chunk or b'')
+        if self._redaction is not None:
+            data = self._redaction.feed(data)
         if not data:
             return
         self.total += len(data)
@@ -2499,12 +2126,14 @@ class _BoundedCommandStream:
                 del self.tail[:-self.tail_limit]
 
     def render(self):
+        # A held-back tail is no complete value; it ends the capture so far.
+        pending = self._redaction.pending if self._redaction is not None else b''
         if self.total <= self.limit:
-            return bytes(self.head + self.tail)
+            return bytes(self.head + self.tail) + pending
         marker = (
             f'\n\n… [stream capture truncated: {self.total:,} bytes total] …\n\n'
         ).encode('utf-8')
-        return bytes(self.head) + marker + bytes(self.tail)
+        return bytes(self.head) + marker + bytes(self.tail) + pending
 
 
 def run_command_process(argv, *, command, timeout, base, task=None,
@@ -2548,19 +2177,29 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
     callers can stream output to the frontend as it arrives instead of
     waiting for the command to finish.
 
-    When *task* is provided, the subprocess PID is stored on the task dict
-    so the abort handler can kill it directly.  The loop checks
+    When *task* is provided, the subprocess PID is published through this
+    command's view of the task (``foreground_command_slots``) so Stop, the
+    interrupt route and the stall watchdog reach exactly this command while
+    sibling commands of the same round run.  The loop checks
     ``task['aborted']`` on every tick (~0.2s) and terminates if set.
     """
     from lib.compat import get_shell_args, safe_select_pipes, set_pipe_nonblocking
     from lib.tools.process_environment import validate_environment
+    task = command_task_view(task)
     if ((task is not None and task.get('aborted')) or (runtime_context is not None
             and runtime_context.cancellation_requested)):
         return _format_run_output(command, '', '', -1, aborted=True)
     if deadline_epoch is not None and time.time() >= deadline_epoch:
         return _format_run_output(command, '', '', -1, timed_out=True)
+    from .workspace_lease import workspace_lease_fds
+    # Tool calls hold no workspace lease. An internal lease holder's child
+    # inherits the descriptors, so its exclusion lasts until the group exits.
     inherited_lease_fds = workspace_lease_fds()
+    has_workspace_leases = bool(inherited_lease_fds)
     try:
+        command_environment = without_automatic_git_maintenance(validate_environment(
+            child_env if child_env is not None else _get_cmd_env(
+                base, credential_env, strip_credential_vars)))
         proc = subprocess.Popen(
             process_argv if process_argv is not None else get_shell_args(full_command),
             **({'pass_fds': tuple(dict.fromkeys((*inherited_lease_fds, *extra_pass_fds)))} if os.name == 'posix' else {}),
@@ -2570,8 +2209,7 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
             stdin=subprocess.DEVNULL,
             text=False,  # binary mode for non-blocking I/O
             cwd=base,
-            env=validate_environment(child_env if child_env is not None else _get_cmd_env(
-                base, credential_env, strip_credential_vars)),
+            env=command_environment,
             start_new_session=True,  # own process group for clean kill
         )
     except (FileNotFoundError, NotADirectoryError) as e:
@@ -2590,7 +2228,11 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
         # exits before cancellation reaches cleanup; descendants retain it.
         proc._tofu_owned_pgid = proc.pid
 
-        proc._tofu_inherited_workspace_lease = bool(inherited_lease_fds)
+        proc._tofu_inherited_workspace_lease = has_workspace_leases
+        # Released only after retirement/exit; boot retires what a dead
+        # server left behind (crash, hard deadline, execv restart).
+        proc._tofu_foreground_record = record_foreground_command(
+            proc, task=task, runtime_context=runtime_context, command=command)
     # Register the process before invoking callbacks. A callback may publish or
     # persist live state; during that work Stop must already have a PID/PGID it
     # can signal.
@@ -2602,13 +2244,15 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
         try:
             process_guard(proc)
         except Exception as exc:
-            _kill_process_tree(proc, namespace_supervisor=namespace_supervisor)
+            guard_notices = _retire_command_group(proc, namespace_supervisor=namespace_supervisor)
+            release_foreground_command(getattr(proc, '_tofu_foreground_record', None))
             for stream in (proc.stdout, proc.stderr):
                 if stream is not None: stream.close()
             if task is not None and task.get('_subprocess_pid') == proc.pid:
                 task.pop('_subprocess_pid', None);task.pop('_subprocess_pgid', None)
             return _format_run_output(command, '',
-                f'Process guard failed after allocation: {type(exc).__name__}', -1)
+                f'Process guard failed after allocation: {type(exc).__name__}', -1,
+                notices=guard_notices)
 
     # Spawn clock — the subprocess now EXISTS and `timeout` already holds the
     # effective budget, so this is the earliest and only point at which a
@@ -2631,6 +2275,7 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
     timed_out = False
     aborted = False
     interrupted_by = ''
+    group_notices = []
 
     def _drain_after_kill():
         """Best-effort tail drain after a kill — grab whatever was already
@@ -2661,7 +2306,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                     or (deadline_epoch is not None and time.time() >= deadline_epoch)):
                 logger.info('run_command timed out after %ss — killing PID %d',
                             timeout, proc.pid)
-                _kill_process_tree(proc, namespace_supervisor=namespace_supervisor)
+                group_notices += _retire_command_group(
+                    proc, namespace_supervisor=namespace_supervisor)
                 _drain_after_kill()
                 timed_out = True
                 break
@@ -2671,7 +2317,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                     and runtime_context.cancellation_requested)):
                 logger.info('[run_command] Task aborted — killing subprocess PID %d: %s',
                             proc.pid, command[:80])
-                _kill_process_tree(proc, namespace_supervisor=namespace_supervisor)
+                group_notices += _retire_command_group(
+                    proc, namespace_supervisor=namespace_supervisor)
                 _drain_after_kill()
                 aborted = True
                 break
@@ -2684,7 +2331,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                 logger.info('[run_command] Command interrupted (%s) — killing '
                             'subprocess PID %d: %s',
                             _intr_by[:60], proc.pid, command[:80])
-                _kill_process_tree(proc, namespace_supervisor=namespace_supervisor)
+                group_notices += _retire_command_group(
+                    proc, namespace_supervisor=namespace_supervisor)
                 _drain_after_kill()
                 interrupted_by = _intr_by
                 break
@@ -2709,6 +2357,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                     chunk = None
                 if chunk:
                     got_output = True
+                    if task is not None:
+                        task.note_output()
                     if fd is proc.stdout:
                         stdout_chunks.append(chunk)
                         _safe_on_chunk(on_chunk, 'stdout',
@@ -2723,8 +2373,11 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                 from lib.project_mod.process_group import group_has_live_members
                 if group_has_live_members(proc._tofu_owned_pgid):
                     time.sleep(0.02)  # Pipes may already be EOF; avoid a hot observation loop.
-                    continue  # The admitted writer still owns live inheriting descendants.
+                    continue  # The lease holder's child group still inherits its descriptors.
             if retcode is not None and not got_output:
+                # Retire leftovers before the final drain, which then also
+                # keeps whatever they wrote while handling SIGTERM.
+                group_notices += _retire_lingering_group(proc)
                 for fd, bucket, sname in (
                     (proc.stdout, stdout_chunks, 'stdout'),
                     (proc.stderr, stderr_chunks, 'stderr'),
@@ -2742,16 +2395,20 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
     except Exception as e:
         logger.error('run_command loop error: %s', e, exc_info=True)
         try:
-            _kill_process_tree(proc, namespace_supervisor=namespace_supervisor)
+            group_notices += _retire_command_group(
+                proc, namespace_supervisor=namespace_supervisor)
         except Exception as ke:
             logger.debug('run_command: _kill_process_tree during cleanup failed: %s', ke)
+        else:
+            release_foreground_command(getattr(proc, '_tofu_foreground_record', None))
         # Clean up task ref
         if task is not None:
             task.pop('_subprocess_pid', None)
             task.pop('_subprocess_pgid', None)
         return (f'$ {command}\n\n'
                 f'Error executing command: {e}\n'
-                f'[exit code: -1]')
+                + ''.join(f'[{notice}]\n' for notice in group_notices)
+                + '[exit code: -1]')
     finally:
         for fd in (proc.stdout, proc.stderr):
             try:
@@ -2767,22 +2424,24 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
         task.pop('_subprocess_pid', None)
         task.pop('_subprocess_pgid', None)
 
-    _owned_command_quiesced()
+    release_foreground_command(getattr(proc, '_tofu_foreground_record', None))
     stdout = stdout_chunks.render().decode('utf-8', errors='replace')
     stderr = stderr_chunks.render().decode('utf-8', errors='replace')
 
     if interrupted_by:
         return _format_run_output(command, stdout, stderr, -1,
-                                  interrupted_by=interrupted_by)
+                                  interrupted_by=interrupted_by, notices=group_notices)
     if timed_out:
-        return _format_run_output(command, stdout, stderr, -1, timed_out=True)
+        return _format_run_output(command, stdout, stderr, -1, timed_out=True,
+                                  notices=group_notices)
     if aborted:
         return _format_run_output(command, stdout, stderr, -1,
-                                  timed_out=False, aborted=True)
+                                  timed_out=False, aborted=True, notices=group_notices)
 
     logger.info('run_command done: exit=%d, stdout=%dch, stderr=%dch',
                 proc.returncode, len(stdout), len(stderr))
-    return _format_run_output(command, stdout, stderr, proc.returncode)
+    return _format_run_output(command, stdout, stderr, proc.returncode,
+                              notices=group_notices)
 
 
 def _signal_namespace_child(proc):
@@ -2876,13 +2535,93 @@ def _kill_process_tree(proc, *, namespace_supervisor=False):
     proc.wait(timeout=2)
 
 
+# A command's result carries typed warnings about its own process group. They
+# sit before the terminal status lines, which every result parser end-anchors.
+GROUP_LINGERING_STOPPED = 'process-group-lingering-stopped'
+GROUP_RETIREMENT_INCOMPLETE = 'process-group-retirement-incomplete'
+_GROUP_WARNING_LINE = _re.compile(r'\n\[(warning process-group-[a-z-]+: [^\n]*)\]$')
+_TERMINAL_TRAILER = _re.compile(
+    r'(?:\n\[Command (?:timed out|aborted by user|interrupted by [^\n]+)\])?'
+    r'\n\[exit code: -?[0-9]{1,10}\]\s*$')
+
+
+def split_group_warnings(result: str) -> tuple[str, list[str]]:
+    """Detach the process-group warnings that precede a result's terminal trailer."""
+    trailer = _TERMINAL_TRAILER.search(result or '')
+    if trailer is None:
+        return result, []
+    body, warnings = result[:trailer.start()], []
+    while (match := _GROUP_WARNING_LINE.search(body)):
+        warnings.insert(0, match.group(1))
+        body = body[:match.start()]
+    return body + result[trailer.start():], warnings
+
+
+def _retirement_incomplete(proc, pgid, error) -> str:
+    """Keep the group's record for the boot sweep and say what is still alive."""
+    # The record file stays on disk: this call no longer releases it.
+    proc._tofu_foreground_record = None
+    logger.warning('[run_command] process group pgid=%s not quiescent after '
+                   'SIGTERM/SIGKILL; result kept, record retained: %s', pgid, error)
+    return (f'warning {GROUP_RETIREMENT_INCOMPLETE}: processes of this command\'s '
+            f'process group {pgid} were still running after SIGTERM and SIGKILL, '
+            'for example blocked in uninterruptible I/O on a network filesystem. '
+            'The result above is unchanged. They exit when that wait ends and stay '
+            f'recorded for retirement; list them with `pgrep -a -g {pgid}` before '
+            'relying on files they hold.')
+
+
+def _retire_command_group(proc, *, namespace_supervisor=False) -> list[str]:
+    """Kill and retire the command's group without replacing its decided outcome.
+
+    Output, exit status, timeout, interrupt and Stop are settled before this
+    runs. A group that is not yet quiescent (a member in an uninterruptible
+    wait outlives SIGKILL) becomes a typed warning on that result.
+    """
+    from lib.project_mod.process_group import ProcessGroupRetirementError
+    try:
+        _kill_process_tree(proc, namespace_supervisor=namespace_supervisor)
+    except (ProcessGroupRetirementError, subprocess.TimeoutExpired, OSError) as error:
+        return [_retirement_incomplete(
+            proc, getattr(proc, '_tofu_owned_pgid', None) or proc.pid, error)]
+    return []
+
+
+def _retire_lingering_group(proc) -> list[str]:
+    """Stop what an exited command left running in its own process group.
+
+    The reaped leader cannot be waited on, so members get the TERM grace
+    period by group observation before KILL. Detached work has its own
+    owners (``background=true``, ``setsid``); a group member left behind
+    would otherwise run unrecorded once this call settles.
+    """
+    pgid = getattr(proc, '_tofu_owned_pgid', None)
+    if pgid is None:
+        return []
+    from lib.project_mod.process_group import (
+        ProcessGroupRetirementError, group_has_live_members, retire_process_group,
+    )
+    try:
+        if not group_has_live_members(pgid):
+            return []
+        retire_process_group(pgid)
+    except (ProcessGroupRetirementError, OSError) as error:
+        return [_retirement_incomplete(proc, pgid, error)]
+    logger.warning('[run_command] stopped processes left running in pgid=%d '
+                   'after its leader exited', pgid)
+    return [f'warning {GROUP_LINGERING_STOPPED}: the command exited but left '
+            'processes running in its process group; they were stopped '
+            '(SIGTERM, then SIGKILL). Start long-lived processes with '
+            'run_command background=true.']
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Non-silent `grep -r` hardening for run_command
 # ─────────────────────────────────────────────────────────────────────────
 # Real grep is kept (no rewrite to rg).  We only inject flags the user did
 # not already pass:
 #   -I                       — skip binary files
-#   --exclude-dir=<name>     — one per IGNORE_DIRS entry (mirrors grep_search)
+#   --exclude-dir=<name>     — one per IGNORE_DIRS entry (mirrors search_files)
 #   --color=never            — keeps output stable for downstream pipes
 # Activated only when:
 #   - the command's first token is a bare grep family binary (grep / egrep /
@@ -3102,39 +2841,20 @@ def _is_any_child_reading_stdin(parent_pid, stdin_pipe_ino, *, stop_event=None):
 
 
 def _collect_descendants(parent_pid):
-    """Return list of all descendant PIDs (children, grandchildren, …) including parent.
+    """Return *parent_pid* followed by its descendants (children, grandchildren, …).
+
+    Discovery reads only the command's own subtree through the kernel's
+    per-thread child lists (``process_group.descendant_pids``), so a probe
+    tick costs in proportion to the command's processes, not the host's.
 
     **Linux-only**: requires /proc filesystem. On macOS/Windows, returns
     only the parent PID (no descendant walking).
     """
     from lib.compat import HAS_PROCFS
-    # Build a quick pid→children map from /proc
-    children_map = {}  # ppid → [pid, …]
     if not HAS_PROCFS:
         return [parent_pid]
-    for entry in os.scandir('/proc'):
-        if not entry.name.isdigit():
-            continue
-        pid = int(entry.name)
-        try:
-            with open(f'/proc/{pid}/stat') as f:
-                stat_line = f.read()
-            # PPID is field 4 (after the comm field which is in parens)
-            ppid = int(stat_line.split(')')[-1].split()[1])
-            children_map.setdefault(ppid, []).append(pid)
-        except (OSError, ValueError, IndexError) as _e_audit:
-            logger.debug('[tools] _collect_descendants caught %s: %s', type(_e_audit).__name__, _e_audit)
-            pass  # Expected: process may exit between readdir and stat
-
-    # BFS from parent_pid
-    result = [parent_pid]
-    queue = [parent_pid]
-    while queue:
-        p = queue.pop()
-        for child in children_map.get(p, []):
-            result.append(child)
-            queue.append(child)
-    return result
+    from lib.project_mod.process_group import descendant_pids
+    return [parent_pid, *descendant_pids(parent_pid)]
 
 
 def _run_command_interactive(command, full_command, timeout, base, stdin_callback,
@@ -3159,8 +2879,16 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     """
     from lib.compat import get_shell_args, set_pipe_nonblocking
     from lib.tools.process_environment import validate_environment
+    from .workspace_lease import workspace_lease_fds
+    task = command_task_view(task)
+    # Tool calls hold no workspace lease. An internal lease holder's child
+    # inherits the descriptors, so its exclusion lasts until the group exits.
     inherited_lease_fds = workspace_lease_fds()
+    has_workspace_leases = bool(inherited_lease_fds)
     try:
+        command_environment = without_automatic_git_maintenance(validate_environment(
+            child_env if child_env is not None else _get_cmd_env(
+                base, credential_env, strip_credential_vars)))
         proc = subprocess.Popen(
             get_shell_args(full_command),
             **({'pass_fds': inherited_lease_fds} if os.name == 'posix' else {}),
@@ -3168,8 +2896,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=base,
-            env=validate_environment(child_env if child_env is not None else _get_cmd_env(
-                base, credential_env, strip_credential_vars)),
+            env=command_environment,
             text=False,  # binary mode for non-blocking I/O
             start_new_session=True,  # own process group for clean kill
         )
@@ -3190,7 +2917,9 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     if os.name == 'posix':
         proc._tofu_owned_pgid = proc.pid  # This Popen also owns a new session.
 
-        proc._tofu_inherited_workspace_lease = bool(inherited_lease_fds)
+        proc._tofu_inherited_workspace_lease = has_workspace_leases
+        proc._tofu_foreground_record = record_foreground_command(
+            proc, task=task, runtime_context=runtime_context, command=command)
     # Register before callbacks/setup so Stop can signal the process throughout
     # every post-Popen operation, including live-state persistence.
     if task is not None:
@@ -3230,6 +2959,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     aborted = False
     interrupted_by = ''
     stdin_probe = None
+    group_notices = []
 
     try:
         from lib.compat import HAS_PROCFS
@@ -3244,7 +2974,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
             if task and task.get('aborted'):
                 logger.info('[run_command] Task aborted — killing interactive subprocess '
                             'PID %d: %s', proc.pid, command[:80])
-                _kill_process_tree(proc)
+                group_notices += _retire_command_group(proc)
                 aborted = True
                 break
 
@@ -3254,7 +2984,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                 logger.info('[run_command] Interactive command interrupted (%s) — '
                             'killing subprocess PID %d: %s',
                             _intr_by[:60], proc.pid, command[:80])
-                _kill_process_tree(proc)
+                group_notices += _retire_command_group(proc)
                 interrupted_by = _intr_by
                 break
 
@@ -3265,7 +2995,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                 # caller already surfaces [TIMEOUT] in stdout.
                 logger.info('run_command timed out after %ss (interactive)', timeout)
                 timed_out = True
-                _kill_process_tree(proc)
+                group_notices += _retire_command_group(proc)
                 break
 
             # Check if process has finished
@@ -3288,6 +3018,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                     chunk = fd.read(65536)
                     if chunk:
                         got_output = True
+                        if task is not None:
+                            task.note_output()
                         if fd is proc.stdout:
                             stdout_chunks.append(chunk)
                             _safe_on_chunk(on_chunk, 'stdout',
@@ -3304,9 +3036,11 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                 from lib.project_mod.process_group import group_has_live_members
                 if group_has_live_members(proc._tofu_owned_pgid):
                     time.sleep(0.02)
-                    continue  # The same owned writer lifetime applies to interactive I/O.
+                    continue  # The same inherited lease lifetime applies to interactive I/O.
             if retcode is not None and not got_output:
-                # Process exited and no more data — drain remaining
+                # Process exited and no more data — retire leftovers, then
+                # drain remaining (including what they wrote on SIGTERM).
+                group_notices += _retire_lingering_group(proc)
                 try:
                     rest_out = proc.stdout.read()
                     if rest_out:
@@ -3419,13 +3153,15 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     except Exception as e:
         logger.error('run_command interactive loop error: %s', e, exc_info=True)
         try:
-            _kill_process_tree(proc)
+            group_notices += _retire_command_group(proc)
         except OSError as _e_audit:
             logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
-            pass
+        else:
+            release_foreground_command(getattr(proc, '_tofu_foreground_record', None))
         return (f'$ {command}\n\n'
                 f'Error during interactive execution: {e}\n'
-                f'[exit code: -1]')
+                + ''.join(f'[{notice}]\n' for notice in group_notices)
+                + '[exit code: -1]')
     finally:
         if stdin_probe is not None:
             stdin_probe.close()
@@ -3439,24 +3175,25 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            _kill_process_tree(proc)
+            group_notices += _retire_command_group(proc)
         if unregister_cancel is not None:
             unregister_cancel()
         if task is not None:
             task.pop('_subprocess_pid', None)
             task.pop('_subprocess_pgid', None)
 
-    _owned_command_quiesced()
+    release_foreground_command(getattr(proc, '_tofu_foreground_record', None))
     stdout = stdout_chunks.render().decode('utf-8', errors='replace')
     stderr = stderr_chunks.render().decode('utf-8', errors='replace')
 
     if interrupted_by:
         return _format_run_output(command, stdout, stderr, -1,
-                                  interrupted_by=interrupted_by)
+                                  interrupted_by=interrupted_by, notices=group_notices)
     if aborted:
         return _format_run_output(command, stdout, stderr, -1,
-                                  timed_out=False, aborted=True)
+                                  timed_out=False, aborted=True, notices=group_notices)
     exit_code = proc.returncode if not timed_out else -1
     logger.info('run_command done (interactive): exit=%d, stdout=%dch, stderr=%dch',
                 exit_code, len(stdout), len(stderr))
-    return _format_run_output(command, stdout, stderr, exit_code, timed_out=timed_out)
+    return _format_run_output(command, stdout, stderr, exit_code, timed_out=timed_out,
+                              notices=group_notices)

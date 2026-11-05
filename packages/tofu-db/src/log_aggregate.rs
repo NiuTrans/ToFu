@@ -33,10 +33,6 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn resource_exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
-
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct FlushRow {
     pub fingerprint: String,
@@ -232,7 +228,7 @@ fn encode_document(document: &AggregateDocument) -> io::Result<Vec<u8>> {
     }))
     .map_err(|_| invalid_input("log-aggregate document cannot be encoded"))?;
     if value_json.len() > MAX_LOG_AGGREGATE_DOCUMENT_BYTES {
-        return Err(resource_exhausted(
+        return Err(crate::resource_exhaustion::domain_bound(
             "log-aggregate document exceeds its bound",
         ));
     }
@@ -304,7 +300,7 @@ pub(crate) fn flush(
                         .checked_add(row.count)
                         .filter(|count| *count <= MAX_LOG_AGGREGATE_ROW_COUNT)
                         .ok_or_else(|| {
-                            resource_exhausted("log-aggregate counter exceeds its bound")
+                            crate::resource_exhaustion::domain_bound("log-aggregate counter exceeds its bound")
                         })?,
                     last_seen: row.last_seen,
                     sample: row.sample.clone(),
@@ -314,7 +310,7 @@ pub(crate) fn flush(
             None => {
                 let next = read_sequence(database, transaction)?
                     .checked_add(1)
-                    .ok_or_else(|| resource_exhausted("log-aggregate sequence overflow"))?;
+                    .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("log-aggregate sequence overflow"))?;
                 write_sequence(database, transaction, next)?;
                 AggregateDocument {
                     fingerprint: row.fingerprint.clone(),
@@ -409,7 +405,7 @@ pub(crate) fn query(
         for (key, _) in &page {
             scanned += 1;
             if scanned > MAX_LOG_AGGREGATE_SCAN_ROWS {
-                return Err(resource_exhausted("log-aggregate scan exceeds its bound"));
+                return Err(crate::resource_exhaustion::domain_bound("log-aggregate scan exceeds its bound"));
             }
             let fingerprint = std::str::from_utf8(key.key_bytes())
                 .map_err(|_| invalid_data("log-aggregate fingerprint key is malformed"))?;
@@ -473,7 +469,7 @@ pub(crate) fn query(
                     + 1,
             )
             .filter(|bytes| *bytes <= MAX_LEGACY_DOCUMENT_BYTES)
-            .ok_or_else(|| resource_exhausted("log-aggregate response exceeds 8 MiB"))?;
+            .ok_or_else(|| crate::resource_exhaustion::domain_bound("log-aggregate response exceeds 8 MiB"))?;
         items.push(item);
     }
     serde_json::to_vec(&json!({

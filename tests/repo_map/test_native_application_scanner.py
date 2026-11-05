@@ -136,7 +136,7 @@ def test_real_handler_uses_task_selection_and_retains_error_publication_on_abort
         assert not cancel_task(task['id'], user_id=OWNER+1).get('signalled')
         assert cancel_task(task['id'], user_id=OWNER).get('signalled')
         thread.join(timeout=5)
-        assert not thread.is_alive() and result and result[0][2]
+        assert not thread.is_alive() and result and result[0][2] is False
         assert entry['status'] == 'error'
     finally:
         work.close(True); runtime.close(); thread.join(timeout=5)
@@ -217,7 +217,7 @@ def test_selected_artifact_failure_is_published_without_reference_fallback(strea
     entry = {'query':'map project','toolName':'repo_map','toolCallId':'admission-refusal'}
     try:
         result = project._handle_project_tool(task,{},'repo_map','admission-refusal',{},1,entry,{},str(root),True)
-        assert result[2] and entry['status'] == 'error'
+        assert result[2] is False and entry['status'] == 'error'
         assert 'installed stream admission refused' in result[1]
         assert runtime.retained_image_bytes() == 0
     finally:

@@ -1,4 +1,4 @@
-"""Shared-cgroup memory-pressure defenses (self-check + relief + request guard).
+"""Shared-cgroup memory-pressure defenses (startup self-check + best-effort relief).
 
 Context (2026-07-20): Tofu often runs in a container whose cgroup memory limit
 is the WHOLE machine (e.g. 200 GiB) and is SHARED with sibling processes + a
@@ -8,21 +8,28 @@ usually tofu — with a bare "Killed" and no traceback.
 
 We cannot fix the root cause in code: the cgroup is shared, we lack
 ``CAP_SYS_RESOURCE`` (so we cannot lower our own ``oom_score_adj`` — the kernel
-floors it at 0, verified live), and there is no swap. What we CAN do is stop
-being the fattest, most-killable process and turn "mystery Killed" into a
-logged, controlled degradation. Three defenses, all env-tunable:
+floors it at 0, verified live), and there is no swap. What we CAN do is hand
+back memory this process owns and turn "mystery Killed" into logged evidence.
+Two defenses, both env-tunable and neither ever blocking work:
 
   ① startup_self_check()  — at boot, if the cgroup is already near-full AND
      there is no swap, emit a CRITICAL log + audit record so the operator has
-     durable evidence this is an environment squeeze, not a tofu bug.
+     durable evidence this is an environment squeeze, not a tofu bug. Log only.
   ② start_monitor()       — a low-frequency (>=30s) daemon thread that, when
-     usage crosses the relief threshold, drops our own reclaimable caches and
-     calls malloc_trim(0) to hand free heap back to the OS, shrinking our RSS.
-  ③ check_request_headroom() — before serialising a LARGE LLM request body,
-     use the reclaim-aware pressure percentage only as a trigger, then compare
-     effective free bytes (free + immediately-reclaimable page cache) with a
-     request-sized peak-allocation envelope. Trim once only when that
-     concrete envelope does not fit; refuse only if it still does not fit.
+     reclaim-aware AGGREGATE pressure crosses the relief threshold, drops our
+     own reclaimable caches and calls malloc_trim(0) to hand free heap back to
+     the OS, shrinking our RSS. Best-effort: passes that reclaim ~nothing back
+     off, and no pass refuses, shrinks, recycles or throttles user work.
+
+Evidence (③, on every monitor tick): a rolling pressure journal and a watch of
+the cgroup OOM-kill counter, so the next "Killed" is not a mystery.
+
+Hardware never limits work (owner decision 2026-10-24, a fixed policy rather
+than a tuning choice): CPU count, memory capacity/headroom, process RSS and
+cgroup pressure never refuse, shrink, recycle or throttle user work; memory
+exhaustion is left to the OS. That decision removed the large-request
+memory-headroom refusal, process-RSS relief and the in-process worker recycle.
+They must not return.
 
 Everything degrades to a NO-OP when the cgroup / /proc is unreadable (bare
 metal, macOS, restricted sandbox): a reader that cannot see ``memory.current``
@@ -30,37 +37,26 @@ returns ``None`` and every defense treats "unknown" as "proceed, do nothing".
 
 Env vars (all optional):
   TOFU_CGROUP_WARN_PCT           default 90  — ① self-check trigger
-  TOFU_CGROUP_RELIEF_PCT         default 92  — ② monitor relief trigger
-  TOFU_CGROUP_REQUEST_PCT        default 95  — ③ request fail-fast trigger
+  TOFU_CGROUP_RELIEF_PCT         default 92  — ② monitor relief trigger on
+                                               effective (reclaim-aware) %;
+                                               an episode ends 2 points below
   TOFU_CGROUP_POLL_SEC           default 30  — ② poll interval (clamped >=30)
-  TOFU_CGROUP_REQUEST_MIN_BYTES  default 2_000_000 — ③ only guards bodies >= this
-  TOFU_CGROUP_REQUEST_GUARD      default 1   — ③ set 0 to log-only (never raise)
   TOFU_CGROUP_DROP_LOGS          default 1   — relief also fadvise-drops logs/*.log*
   TOFU_CGROUP_LOGDROP_MIN_BYTES  default 1 MiB — size floor for the log drop
   TOFU_CGROUP_MATERIAL_PCT       default 0.1 — % of the cgroup limit a reclaim
                                                must reach to count as effective
-                                               relief (below it, the streak
-                                               towards the ineffective-relief
-                                               CRITICAL keeps counting)
-  TOFU_CGROUP_RELIEF_COOLDOWN_SEC default 600 — after repeated ineffective
-                                               shared-cgroup relief, keep
-                                               journaling but stop cache churn;
-                                               later probes back off 2x to 1h
-  TOFU_CGROUP_JOURNAL            default 1   — rolling pressure journal to
+                                               relief (below it, the pass defers
+                                               the next one and counts towards
+                                               the ineffective-relief CRITICAL);
+                                               Tofu RSS growth this large
+                                               reopens a deferred relief
+  TOFU_CGROUP_RELIEF_COOLDOWN_SEC default 600 — deferral after the pass that
+                                               escalates repeated no-progress
+                                               relief; earlier no-progress
+                                               passes defer 1/16..1/2 of it,
+                                               later ones double to 1h
+  TOFU_CGROUP_JOURNAL            default 1   — ③ rolling pressure journal to
                                                logs/cgroup_pressure.log
-  TOFU_PROCESS_RSS_RELIEF_MB     personal default min(2048, 50% of cgroup MiB)
-                                               (distributed: 4096) — also
-                                               trim when this process's RSS
-                                               alone crosses the ceiling;
-                                               0 disables
-  TOFU_PROCESS_RSS_COOLDOWN_SEC  default 300 — minimum delay between RSS-only
-                                               relief passes
-  TOFU_PROCESS_RSS_RECYCLE_MB    personal default min(3072, 70% of cgroup MiB)
-                                               (distributed: 8192) — after
-                                               relief, request one
-                                               graceful worker recycle if RSS
-                                               is still above this ceiling;
-                                               0 disables
 
 What relief can and cannot do (measured 2026-07-31, do not re-litigate)
 ----------------------------------------------------------------------
@@ -77,11 +73,21 @@ immaterial reclaims escalates once to CRITICAL saying the squeeze is external.
 The old line printed the summed apparent size of the files advised, which
 overstated the reclaim by 234x and made 341 consecutive near-OOM ticks read as
 though they were being handled.
+
+Measured again 2026-10-23: the shared 220 GiB cgroup read raw 92-96% while
+~97 GiB of it was other tenants' inactive page cache (effective ~50%). A raw
+trigger ran relief 118 times an hour all day; each pass flushed Tofu's caches
+and re-trimmed the same few hundred MB of Tofu heap while usage never moved.
+Relief therefore triggers on effective pressure, an episode ends only
+``_RELIEF_REARM_HYSTERESIS_PCT`` below the trigger, every no-progress pass
+doubles the deferral (Tofu RSS growth past the material floor reopens it), and
+repeated no-progress lines are INFO.
 """
 
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import sys
 import threading
@@ -89,36 +95,8 @@ import time
 from typing import Optional
 
 from lib.log import audit_log, get_logger
-from runtime_guards import deployment_resource_default
 
 logger = get_logger(__name__)
-
-
-class MemoryPressureError(RuntimeError):
-    """A large request cannot fit its bounded peak-allocation envelope."""
-
-
-# Serialising/translating an outbound body creates temporary copies in JSON,
-# provider adapters and the HTTP stack. Eight times the cheap body estimate is
-# intentionally conservative; 64 MiB covers fixed interpreter/transport
-# overhead for a body near the 2 MB guard floor. Crucially, neither value
-# scales with a *shared* 220 GiB cgroup: a percentage-only rule made a 2.3 MB
-# request fail while 1.4 GiB was still free and Tofu itself used <40 MiB.
-_REQUEST_HEADROOM_FLOOR_BYTES = 64 * 1024 * 1024
-_REQUEST_PEAK_ALLOCATION_MULTIPLIER = 8
-
-
-def _required_request_headroom(approx_bytes: int) -> int:
-    """Return the absolute free-byte envelope needed for one request."""
-    return max(
-        _REQUEST_HEADROOM_FLOOR_BYTES,
-        max(0, int(approx_bytes)) * _REQUEST_PEAK_ALLOCATION_MULTIPLIER,
-    )
-
-
-def _available_headroom(snapshot: dict) -> int:
-    """Return non-negative cgroup bytes available in ``snapshot``."""
-    return max(0, int(snapshot['limit']) - int(snapshot['usage']))
 
 
 def _observed_reclaim_bytes(before: Optional[int],
@@ -208,9 +186,11 @@ def pressure() -> Optional[dict]:
     ``effective_pct``.  Raw ``pct`` counts page cache as used; on a shared
     host whose cgroup fills with OTHER tenants' FUSE/browser cache it reads
     as permanently near-full while real allocations still succeed by
-    reclaiming cache.  Refusal decisions (admission, request headroom) must
-    use ``effective_pct``; raw ``pct`` remains the right trigger for relief
-    work, whose whole purpose is to shrink cache/RSS.
+    reclaiming cache.  The self-check alarm and the relief trigger use
+    ``effective_pct``: relief can only return Tofu's own heap, caches and
+    log pages, so a percentage made of other tenants' reclaimable cache is
+    not work it can do.  Raw ``pct`` is reported alongside and is the
+    conservative fallback when memory.stat is unreadable.
     """
     limit = mem_limit_bytes()
     usage = mem_usage_bytes()
@@ -232,18 +212,11 @@ def pressure() -> Optional[dict]:
 
 
 def _effective_pct(snap: dict) -> float:
-    """Pressure percentage for refusal decisions (reclaim-aware when known)."""
+    """Pressure percentage for alarm/relief decisions (reclaim-aware when known)."""
     try:
         return float(snap.get('effective_pct', snap.get('pct', 0)) or 0)
     except (TypeError, ValueError):
         return float(snap.get('pct', 0) or 0)
-
-
-def _effective_headroom(snap: dict) -> int:
-    """Bytes an allocation can actually get: free + immediately reclaimable."""
-    if 'effective_usage' in snap:
-        return max(0, int(snap['limit']) - int(snap['effective_usage']))
-    return _available_headroom(snap)
 
 
 def _env_pct(name: str, default: float) -> float:
@@ -395,10 +368,17 @@ def malloc_trim() -> bool:
 _ineffective_reliefs = 0
 _ineffective_escalated = False
 _relief_suppressed_until = 0.0
-_ineffective_backoff_exponent = 0
+# Process RSS right after the latest relief pass. Growth past the material
+# floor since then is Tofu-owned memory a new pass may return, so it reopens a
+# deferred relief instead of waiting out the back-off.
+_relief_rss_baseline: Optional[int] = None
 _INEFFECTIVE_LIMIT = 5
 _MAX_RELIEF_COOLDOWN_SECONDS = 3600.0
 _MAX_RELIEF_BACKOFF_EXPONENT = 7  # 30s minimum base reaches the 1h cap.
+# Percentage points of the cgroup limit below the trigger that end an episode.
+# Live 2026-10-24 the percentage moved up to 0.4 points per 5 s; without a
+# band, dips to 91.1-91.9% under a 92% trigger re-armed per-tick relief.
+_RELIEF_REARM_HYSTERESIS_PCT = 2.0
 
 
 def _material_reclaim_bytes(limit: Optional[int]) -> float:
@@ -417,12 +397,15 @@ def _material_reclaim_bytes(limit: Optional[int]) -> float:
     return limit * pct / 100.0
 
 
-def _relief_cooldown_seconds(backoff_exponent: int = 0) -> float:
-    """Return bounded adaptive delay for the next ineffective probe.
+def _no_progress_deferral_seconds(streak: int) -> float:
+    """Delay before the next aggregate relief after *streak* no-progress passes.
 
-    The configured value remains the first cooldown. Each later probe in the
-    same uninterrupted high-pressure episode doubles the delay until the
-    one-hour hard ceiling. With the default this is 600, 1200, 2400, 3600s.
+    One doubling series anchored at the configured cooldown: the pass that
+    escalates (``streak == _INEFFECTIVE_LIMIT``) waits exactly that value,
+    earlier passes wait 1/16..1/2 of it and later probes double to the
+    one-hour ceiling. With the default this is 37.5, 75, 150, 300, 600, 1200,
+    2400, 3600s, so a pass that reclaimed ~nothing never repeats on the next
+    30-second monitor tick.
     """
     try:
         value = float(os.environ.get(
@@ -431,27 +414,30 @@ def _relief_cooldown_seconds(backoff_exponent: int = 0) -> float:
         logger.debug('relief cooldown: unparseable (%s)', exc)
         value = 600.0
     base_seconds = max(30.0, min(_MAX_RELIEF_COOLDOWN_SECONDS, value))
-    try:
-        exponent = max(0, int(backoff_exponent))
-    except (TypeError, ValueError, OverflowError):
-        exponent = 0
-    exponent = min(_MAX_RELIEF_BACKOFF_EXPONENT, exponent)
-    return min(_MAX_RELIEF_COOLDOWN_SECONDS,
-               base_seconds * (2 ** exponent))
+    exponent = min(_MAX_RELIEF_BACKOFF_EXPONENT,
+                   max(1, int(streak)) - _INEFFECTIVE_LIMIT)
+    return min(_MAX_RELIEF_COOLDOWN_SECONDS, base_seconds * (2.0 ** exponent))
 
 
 def _reset_aggregate_relief_backoff() -> bool:
     """Re-arm aggregate relief after effective reclaim or pressure recovery."""
     global _ineffective_reliefs, _ineffective_escalated
-    global _relief_suppressed_until, _ineffective_backoff_exponent
+    global _relief_suppressed_until
     had_backoff = bool(
         _ineffective_reliefs or _ineffective_escalated
-        or _relief_suppressed_until or _ineffective_backoff_exponent)
+        or _relief_suppressed_until)
     _ineffective_reliefs = 0
     _ineffective_escalated = False
     _relief_suppressed_until = 0.0
-    _ineffective_backoff_exponent = 0
     return had_backoff
+
+
+def _tofu_rss_growth_since_relief() -> Optional[int]:
+    """Bytes this process's RSS grew since the latest relief pass, or None."""
+    rss_bytes = _self_rss_bytes()
+    if rss_bytes is None or _relief_rss_baseline is None:
+        return None
+    return rss_bytes - _relief_rss_baseline
 
 
 def relieve_memory(reason: str) -> dict:
@@ -466,10 +452,15 @@ def relieve_memory(reason: str) -> dict:
     nothing is worse than no instrument: it made 341 consecutive near-OOM
     ticks look like they were being handled.
 
+    A pass below the material-reclaim floor defers the next aggregate relief
+    (see :func:`_no_progress_deferral_seconds`); only the first no-progress
+    pass in a row logs at WARNING, repeats log at INFO, and the escalation is
+    one CRITICAL per episode.
+
     Returns a small stats dict. Safe to call anywhere; never raises.
     """
     global _ineffective_reliefs, _ineffective_escalated
-    global _relief_suppressed_until, _ineffective_backoff_exponent
+    global _relief_suppressed_until, _relief_rss_baseline
     started_at = time.monotonic()
     before = pressure()
     before_pct = before['pct'] if before else None
@@ -544,20 +535,46 @@ def relieve_memory(reason: str) -> dict:
         process_rss_before, process_rss_after)
     cgroup_cache_reclaimed_bytes = _observed_reclaim_bytes(
         memory_stat_before.get('cache'), memory_stat_after.get('cache'))
-    logger.warning('[cgroup] relief (%s): dropped %d cache entries, malloc_trim=%s, '
-                   'advised %d files (%d unchanged/skipped), '
-                   'RECLAIMED %s, usage %.1f%% -> %.1f%%; self-RSS %s, '
-                   'cgroup-cache %s, observed heap/log windows %s/%s, %.1fms',
-                   reason, dropped, trimmed,
-                   logs_dropped.get('files', 0), logs_dropped.get('skipped', 0),
-                   _measured_mb(reclaimed_bytes),
-                   before_pct if before_pct is not None else -1.0,
-                   after_pct if after_pct is not None else -1.0,
-                   _measured_mb(process_rss_reclaimed_bytes),
-                   _measured_mb(cgroup_cache_reclaimed_bytes),
-                   _measured_mb(heap_window_reclaimed_bytes),
-                   _measured_mb(log_window_reclaimed_bytes),
-                   duration_seconds * 1000.0)
+
+    material_bytes = _material_reclaim_bytes((before or {}).get('limit'))
+    no_progress = (reclaimed_bytes is not None
+                   and reclaimed_bytes < material_bytes)
+    repeated_no_progress = no_progress and _ineffective_reliefs > 0
+    deferral_seconds = None
+    escalate = False
+    if no_progress:
+        _ineffective_reliefs += 1
+        deferral_seconds = _no_progress_deferral_seconds(_ineffective_reliefs)
+        _relief_suppressed_until = time.monotonic() + deferral_seconds
+        if (_ineffective_reliefs >= _INEFFECTIVE_LIMIT
+                and not _ineffective_escalated):
+            _ineffective_escalated = True
+            escalate = True
+    elif reclaimed_bytes is not None:
+        _reset_aggregate_relief_backoff()
+    _relief_rss_baseline = process_rss_after
+    progress_note = ''
+    if deferral_seconds is not None:
+        progress_note = (
+            '; below the %.1f MiB material floor (%d in a row), next '
+            'aggregate relief deferred %.0fs'
+            % (material_bytes / (1 << 20), _ineffective_reliefs,
+               deferral_seconds))
+    logger.log(logging.INFO if repeated_no_progress else logging.WARNING,
+               '[cgroup] relief (%s): dropped %d cache entries, malloc_trim=%s, '
+               'advised %d files (%d unchanged/skipped), '
+               'RECLAIMED %s, usage %.1f%% -> %.1f%%; self-RSS %s, '
+               'cgroup-cache %s, observed heap/log windows %s/%s, %.1fms%s',
+               reason, dropped, trimmed,
+               logs_dropped.get('files', 0), logs_dropped.get('skipped', 0),
+               _measured_mb(reclaimed_bytes),
+               before_pct if before_pct is not None else -1.0,
+               after_pct if after_pct is not None else -1.0,
+               _measured_mb(process_rss_reclaimed_bytes),
+               _measured_mb(cgroup_cache_reclaimed_bytes),
+               _measured_mb(heap_window_reclaimed_bytes),
+               _measured_mb(log_window_reclaimed_bytes),
+               duration_seconds * 1000.0, progress_note)
 
     try:
         from lib.observability import record_cgroup_relief
@@ -575,48 +592,36 @@ def relieve_memory(reason: str) -> dict:
     except Exception as exc:
         logger.debug('[cgroup] relief metrics failed: %s', exc)
 
-    # Escalate a structurally-ineffective relief exactly once, then renew the
-    # cooldown after each later probe until a material reclaim resets it.
-    if reclaimed_bytes is not None:
-        _material = _material_reclaim_bytes((before or {}).get('limit'))
-        if reclaimed_bytes < _material:
-            _ineffective_reliefs += 1
-        else:
-            _reset_aggregate_relief_backoff()
-        if _ineffective_reliefs >= _INEFFECTIVE_LIMIT:
-            import time as _time
-            cooldown_seconds = _relief_cooldown_seconds(
-                _ineffective_backoff_exponent)
-            _relief_suppressed_until = (
-                _time.monotonic() + cooldown_seconds)
-            if cooldown_seconds < _MAX_RELIEF_COOLDOWN_SECONDS:
-                _ineffective_backoff_exponent = min(
-                    _MAX_RELIEF_BACKOFF_EXPONENT,
-                    _ineffective_backoff_exponent + 1)
-            if not _ineffective_escalated:
-                _ineffective_escalated = True
-                logger.critical(
-                    '[cgroup] RELIEF IS INEFFECTIVE: %d consecutive reliefs '
-                    'did not reach the %.1f MiB material-reclaim floor while '
-                    'usage sits at %.1f%%. This process '
-                    'cannot relieve this pressure — what we can drop (our heap '
-                    'caches + our own log page cache) is noise against the total. '
-                    'On a SHARED cgroup the usage is dominated by sibling '
-                    'processes and FUSE slab, which we structurally cannot reach. '
-                    'Treat this as an unmitigated environment squeeze: an OOM '
-                    'SIGKILL is possible at any time and no in-process action '
-                    'will prevent it. Aggregate relief is cooling down for %.0fs; '
-                    'pressure journaling and process-RSS limits remain active.',
-                    _ineffective_reliefs,
-                    _material / (1 << 20),
-                    after_pct if after_pct is not None else -1.0,
-                    cooldown_seconds)
-                audit_log(
-                    'cgroup_relief_ineffective',
-                    consecutive=_ineffective_reliefs,
-                    usage_pct=(round(after_pct, 1)
-                               if after_pct is not None else None),
-                    cooldown_seconds=cooldown_seconds)
+    # Escalate a structurally-ineffective relief exactly once per episode; a
+    # material reclaim or a recovery below the hysteresis band re-arms it.
+    if escalate:
+        after_effective_pct = _effective_pct(after) if after else None
+        logger.critical(
+            '[cgroup] RELIEF IS INEFFECTIVE: %d consecutive reliefs '
+            'did not reach the %.1f MiB material-reclaim floor while '
+            'effective pressure sits at %.1f%% (raw %.1f%%). This process '
+            'cannot relieve this pressure — what we can drop (our heap '
+            'caches + our own log page cache) is noise against the total. '
+            'On a SHARED cgroup the usage is dominated by sibling '
+            'processes and FUSE slab, which we structurally cannot reach. '
+            'Treat this as an unmitigated environment squeeze: an OOM '
+            'SIGKILL is possible at any time and no in-process action '
+            'will prevent it. Aggregate relief is deferred for %.0fs and '
+            'keeps doubling to 1h unless Tofu RSS grows; pressure '
+            'journaling remains active.',
+            _ineffective_reliefs,
+            material_bytes / (1 << 20),
+            after_effective_pct if after_effective_pct is not None else -1.0,
+            after_pct if after_pct is not None else -1.0,
+            deferral_seconds)
+        audit_log(
+            'cgroup_relief_ineffective',
+            consecutive=_ineffective_reliefs,
+            usage_pct=(round(after_pct, 1)
+                       if after_pct is not None else None),
+            effective_pct=(round(after_effective_pct, 1)
+                           if after_effective_pct is not None else None),
+            cooldown_seconds=deferral_seconds)
 
     return {'reason': reason, 'dropped': dropped, 'trimmed': trimmed,
             'log_pages_bytes': logs_dropped.get('bytes', 0),
@@ -675,7 +680,7 @@ def startup_self_check() -> Optional[dict]:
     return None
 
 
-# ── ④ rolling pressure journal + OOM-kill witness ──
+# ── ③ rolling pressure journal + OOM-kill witness ──
 #
 # The next "Killed" must not be a mystery again. Every monitor tick appends a
 # one-line JSON snapshot (usage/cache/kmem/tofu-RSS breakdown, plus the top-3
@@ -798,6 +803,8 @@ def write_pressure_journal(snap: dict) -> bool:
         'self_rss_gib': round(_gib(_self_rss_bytes() or 0), 2),
     }
     relief_pct = _env_pct('TOFU_CGROUP_RELIEF_PCT', 92.0)
+    # Raw on purpose, unlike the relief trigger: a burst can turn a cache-heavy
+    # cgroup into an OOM within one tick, and this is the post-mortem evidence.
     if snap['pct'] >= relief_pct:
         rec['top'] = [{'comm': r['comm'], 'rss_gib': round(_gib(r['rss']), 2)}
                       for r in _top_rss_processes()]
@@ -878,178 +885,16 @@ def check_oom_kill_count() -> bool:
 _monitor_thread: Optional[threading.Thread] = None
 _monitor_stop = threading.Event()
 _monitor_lock = threading.Lock()
-_last_process_rss_relief_at = 0.0
-_process_rss_recycle_requested = False
 
 
-def _process_rss_relief_limit_bytes() -> Optional[int]:
-    """Return the process-local RSS relief threshold, or None when disabled.
+def run_monitor_once() -> Optional[dict]:
+    """One monitor tick: relieve memory if effective pressure crosses the trigger.
 
-    The shared cgroup can be roomy while this one process has retained many
-    GiB of thread-arena/history allocations.  That shape is independently
-    dangerous: it raises restart latency and makes Tofu the first OOM victim
-    during the next unrelated cgroup spike.  Clamp tiny values to 256 MiB so
-    a typo cannot turn the 30-second monitor into a permanent cache flusher.
-    """
-    raw = os.environ.get('TOFU_PROCESS_RSS_RELIEF_MB', '')
-    default_mb = float(deployment_resource_default(
-        'TOFU_PROCESS_RSS_RELIEF_MB', os.environ))
-    try:
-        mb = float(raw) if raw else default_mb
-    except (ValueError, TypeError) as e:
-        logger.warning(
-            '[cgroup] invalid TOFU_PROCESS_RSS_RELIEF_MB; using %.0f: %s',
-            default_mb, e)
-        mb = default_mb
-    if mb <= 0:
-        return None
-    if not raw:
-        cgroup_limit = mem_limit_bytes()
-        if cgroup_limit is not None:
-            mb = min(mb, (cgroup_limit / (1 << 20)) * 0.50)
-    return int(max(256.0, mb) * (1 << 20))
-
-
-def _process_rss_recycle_limit_bytes() -> Optional[int]:
-    """Return the post-relief RSS ceiling that requests a graceful recycle."""
-    raw = os.environ.get('TOFU_PROCESS_RSS_RECYCLE_MB', '')
-    default_mb = float(deployment_resource_default(
-        'TOFU_PROCESS_RSS_RECYCLE_MB', os.environ))
-    try:
-        mb = float(raw) if raw else default_mb
-    except (ValueError, TypeError) as e:
-        logger.warning(
-            '[cgroup] invalid TOFU_PROCESS_RSS_RECYCLE_MB; using %.0f: %s',
-            default_mb, e)
-        mb = default_mb
-    if mb <= 0:
-        return None
-    if not raw:
-        cgroup_limit = mem_limit_bytes()
-        if cgroup_limit is not None:
-            mb = min(mb, (cgroup_limit / (1 << 20)) * 0.70)
-    return int(max(384.0, mb) * (1 << 20))
-
-
-def process_rss_admission_snapshot() -> Optional[dict]:
-    """Return whether one more agent memory envelope fits this worker.
-
-    Aggregate cgroup headroom is not a substitute for the worker's own hard
-    RSS ceiling. A large shared host can expose abundant aggregate memory while
-    this process still has a smaller launch-probed recycle envelope. Admission
-    therefore reserves one declared task envelope below that local ceiling.
-    Unknown/disabled limits return ``None`` and fail open.
-    """
-    rss_bytes = _self_rss_bytes()
-    hard_limit_bytes = _process_rss_recycle_limit_bytes()
-    if rss_bytes is None or hard_limit_bytes is None:
-        return None
-    default_mb = deployment_resource_default(
-        'TOFU_TASK_RSS_RESERVE_MB', os.environ)
-    raw = os.environ.get('TOFU_TASK_RSS_RESERVE_MB', '')
-    try:
-        reserve_mb = float(raw) if raw else float(default_mb)
-    except (TypeError, ValueError, OverflowError):
-        reserve_mb = float(default_mb)
-    reserve_bytes = int(max(64.0, reserve_mb) * (1 << 20))
-    return {
-        'allowed': rss_bytes + reserve_bytes <= hard_limit_bytes,
-        'rss_bytes': rss_bytes,
-        'reserve_bytes': reserve_bytes,
-        'hard_limit_bytes': hard_limit_bytes,
-        'headroom_bytes': max(0, hard_limit_bytes - rss_bytes),
-    }
-
-
-def _maybe_relieve_process_rss(now: Optional[float] = None,
-                               recycle_callback=None) -> Optional[dict]:
-    """Relieve oversized RSS and request one graceful recycle at the hard cap.
-
-    ``malloc_trim`` cannot return live/fragmented native allocations.  If RSS
-    remains above the hard ceiling after a relief attempt, letting the process
-    continue growing merely delegates recovery to the untrappable kernel OOM
-    killer.  A caller-supplied callback converts that into a controlled drain;
-    the external lifecycle manager then restores a small fresh worker.
-    """
-    global _last_process_rss_relief_at, _process_rss_recycle_requested
-    relief_limit = _process_rss_relief_limit_bytes()
-    recycle_limit = _process_rss_recycle_limit_bytes()
-    rss_before = _self_rss_bytes()
-    if rss_before is None:
-        return None
-    needs_relief = relief_limit is not None and rss_before >= relief_limit
-    needs_recycle_check = recycle_limit is not None and rss_before >= recycle_limit
-    if not needs_relief and not needs_recycle_check:
-        return None
-
-    stats = None
-    try:
-        cooldown = float(
-            os.environ.get('TOFU_PROCESS_RSS_COOLDOWN_SEC', '') or '300')
-    except (ValueError, TypeError) as e:
-        logger.warning('[cgroup] invalid TOFU_PROCESS_RSS_COOLDOWN_SEC; using 300: %s', e)
-        cooldown = 300.0
-    cooldown = max(30.0, cooldown)
-    if now is None:
-        import time as _time
-        now = _time.monotonic()
-
-    if needs_relief and now - _last_process_rss_relief_at >= cooldown:
-        # Latch before doing work: if a defensive action itself raises, the
-        # monitor must not retry and log-storm every tick.
-        _last_process_rss_relief_at = now
-        stats = relieve_memory(
-            'process RSS %.1fMiB >= %.1fMiB'
-            % (rss_before / (1 << 20), relief_limit / (1 << 20)))
-        if not isinstance(stats, dict):
-            stats = {}
-        rss_after = _self_rss_bytes()
-        stats.update({
-            'process_rss_before': rss_before,
-            'process_rss_after': rss_after,
-            'process_rss_reclaimed_bytes': _observed_reclaim_bytes(
-                rss_before, rss_after),
-            'process_rss_limit': relief_limit,
-        })
-        logger.warning(
-            '[cgroup] process-RSS relief: %.1fMiB -> %s (limit %.1fMiB)',
-            rss_before / (1 << 20),
-            ('%.1fMiB' % (rss_after / (1 << 20))) if rss_after is not None else 'unknown',
-            relief_limit / (1 << 20))
-    else:
-        rss_after = rss_before
-
-    if (recycle_callback is not None and recycle_limit is not None
-            and rss_after is not None and rss_after >= recycle_limit
-            and not _process_rss_recycle_requested):
-        reason = ('process RSS %.1fMiB remains >= %.1fMiB hard ceiling after relief'
-                  % (rss_after / (1 << 20), recycle_limit / (1 << 20)))
-        # One-shot latch before callback: requesting shutdown repeatedly from a
-        # 30-second monitor can turn the second request into a force-quit.
-        _process_rss_recycle_requested = True
-        logger.critical('[cgroup] %s — requesting graceful worker recycle', reason)
-        audit_log('process_rss_recycle_requested',
-                  rss_bytes=rss_after, limit_bytes=recycle_limit)
-        try:
-            recycle_callback(reason)
-        except Exception as e:
-            # The callback did not accept the request; allow a later tick to
-            # retry instead of permanently suppressing the only hard guard.
-            _process_rss_recycle_requested = False
-            logger.error('[cgroup] graceful worker recycle request failed: %s', e)
-        if stats is None:
-            stats = {
-                'process_rss_before': rss_before,
-                'process_rss_after': rss_after,
-                'process_rss_limit': relief_limit,
-            }
-        stats['process_rss_recycle_limit'] = recycle_limit
-        stats['process_rss_recycle_requested'] = _process_rss_recycle_requested
-    return stats
-
-
-def run_monitor_once(recycle_callback=None) -> Optional[dict]:
-    """One monitor tick: relieve memory if usage crosses the relief threshold.
+    The trigger is reclaim-aware (:func:`pressure` ``effective_pct``). A pass
+    that made no progress defers the next one; Tofu RSS growth past the
+    material floor since the latest pass reopens it early, and the episode
+    ends once pressure falls ``_RELIEF_REARM_HYSTERESIS_PCT`` below the
+    trigger. Relief is best-effort and never refuses or delays work.
 
     Returns the relief stats dict when relief ran, else None. Never raises.
     Exposed separately so tests can drive the logic without a thread.
@@ -1063,27 +908,34 @@ def run_monitor_once(recycle_callback=None) -> Optional[dict]:
     except Exception as e:  # journaling must never break the relief path
         logger.debug('[cgroup] journal/oom-watch tick failed: %s', e)
     relief_pct = _env_pct('TOFU_CGROUP_RELIEF_PCT', 92.0)
+    pressure_pct = _effective_pct(snap)
     # A continuous high-pressure interval defines one adaptive-backoff episode.
-    # Once pressure is below the trigger, stale suppression must not hide a
-    # later incident; that later incident starts again at the base cooldown.
-    if snap['pct'] < relief_pct and _reset_aggregate_relief_backoff():
+    # Once pressure clearly recovers, stale suppression must not hide a later
+    # incident; that later incident starts again at the shortest deferral.
+    rearm_pct = relief_pct - _RELIEF_REARM_HYSTERESIS_PCT
+    if pressure_pct < rearm_pct and _reset_aggregate_relief_backoff():
         logger.info(
-            '[cgroup] aggregate relief re-armed after pressure recovered to '
-            '%.1f%% below the %.1f%% trigger', snap['pct'], relief_pct)
-    # Process-local high water is independent of aggregate cgroup pressure.
-    # Run it first and never double-relieve on the same tick.
-    rss_relief = _maybe_relieve_process_rss(recycle_callback=recycle_callback)
-    if rss_relief is not None:
-        return rss_relief
-    if snap['pct'] >= relief_pct:
-        import time as _time
-        if _time.monotonic() < _relief_suppressed_until:
+            '[cgroup] aggregate relief re-armed after effective pressure '
+            'recovered to %.1f%% (below the %.1f%% trigger minus %.1f '
+            'points)', pressure_pct, relief_pct, _RELIEF_REARM_HYSTERESIS_PCT)
+    if pressure_pct < relief_pct:
+        return None
+    if 'effective_pct' in snap:
+        reason = 'monitor effective %.1f%% (raw %.1f%%) >= %.0f%%' % (
+            pressure_pct, snap['pct'], relief_pct)
+    else:
+        reason = 'monitor %.1f%% >= %.0f%%' % (pressure_pct, relief_pct)
+    if time.monotonic() < _relief_suppressed_until:
+        rss_growth = _tofu_rss_growth_since_relief()
+        if (rss_growth is None
+                or rss_growth < _material_reclaim_bytes(snap['limit'])):
             return None
-        return relieve_memory('monitor %.1f%% >= %.0f%%' % (snap['pct'], relief_pct))
-    return None
+        reason += '; Tofu RSS +%.1fMiB since the last pass' % (
+            rss_growth / (1 << 20))
+    return relieve_memory(reason)
 
 
-def start_monitor(recycle_callback=None) -> bool:
+def start_monitor() -> bool:
     """Start the low-frequency background relief monitor (idempotent).
 
     Returns True if a thread was started, False if unnecessary (cgroup
@@ -1104,7 +956,7 @@ def start_monitor(recycle_callback=None) -> bool:
             logger.info('[cgroup] pressure monitor started (interval=%.0fs)', interval)
             while not _monitor_stop.wait(interval):
                 try:
-                    run_monitor_once(recycle_callback=recycle_callback)
+                    run_monitor_once()
                 except Exception as e:
                     logger.warning('[cgroup] monitor tick failed: %s', e)
 
@@ -1137,136 +989,7 @@ def stop_monitor(timeout: float = 2.0) -> bool:
     return True
 
 
-# ── ③ large-request headroom guard ──
-
-def check_request_headroom(ident: str = '', approx_bytes: int = 0) -> tuple[bool, Optional[str]]:
-    """Pre-flight guard for a LARGE outbound request body.
-
-    Returns ``(ok, reason)``:
-      - ``(True, None)``  → proceed (headroom fine, body small, or cgroup
-        unreadable — the safe default everywhere off-cgroup).
-      - ``(False, reason)`` → pressure is above the trigger and the absolute
-        free bytes still cannot cover this request's bounded peak allocation
-        after a trim. The caller should shrink the derived payload before it
-        gives up. A diagnostic with ident, size and headroom is logged here.
-
-    Only bodies >= TOFU_CGROUP_REQUEST_MIN_BYTES are considered; smaller ones
-    always pass (cheap to skip the proc read on the hot path for normal calls).
-    """
-    # Process-local protection is independent of shared-cgroup pressure and is
-    # cheap enough for every model round.  The bounded request-copy envelope
-    # must fit below the soft RSS target; otherwise reactive compaction gets a
-    # chance to shrink live task state before the manager reaches its hard kill.
-    required = _required_request_headroom(approx_bytes)
-    rss_limit = _process_rss_relief_limit_bytes()
-    rss_before = _self_rss_bytes()
-    if (rss_limit is not None and rss_before is not None
-            and rss_before + required > rss_limit):
-        _maybe_relieve_process_rss()
-        rss_after = _self_rss_bytes()
-        measured_rss = rss_before if rss_after is None else rss_after
-        if measured_rss + required > rss_limit:
-            reason = (
-                'process RSS %.1f MiB plus %.1f MiB request envelope exceeds '
-                'the %.1f MiB soft ceiling — refusing ident=%s until the '
-                'derived payload or another active task is released'
-                % (measured_rss / (1 << 20), required / (1 << 20),
-                   rss_limit / (1 << 20), ident or '?'))
-            logger.error('[cgroup] %s', reason)
-            audit_log(
-                'process_rss_request_refused',
-                ident=ident,
-                body_bytes=approx_bytes,
-                rss_bytes=measured_rss,
-                rss_limit_bytes=rss_limit,
-                required_headroom_bytes=required,
-            )
-            return False, reason
-
-    min_bytes = 0
-    try:
-        min_bytes = int(os.environ.get('TOFU_CGROUP_REQUEST_MIN_BYTES', '2000000'))
-    except (ValueError, TypeError) as _e:
-        logger.debug('check request headroom: unparseable/unexpected type (%s)', _e)
-        min_bytes = 2_000_000
-    if approx_bytes < min_bytes:
-        return True, None
-    snap = pressure()
-    if snap is None:
-        return True, None
-    req_pct = _env_pct('TOFU_CGROUP_REQUEST_PCT', 95.0)
-    # The trigger and the fit test both use the reclaim-aware view: raw
-    # usage counts page cache that an allocation can simply take back, so a
-    # cache-dominated shared cgroup is not real pressure for this request.
-    snap_pct = _effective_pct(snap)
-    if snap_pct < req_pct:
-        return True, None
-    if _effective_headroom(snap) >= required:
-        logger.debug(
-            '[cgroup] pressure trigger reached for %s (%.1f%%), but %.1f MiB '
-            'effective headroom covers the %.1f MiB request envelope; allowing',
-            ident or '?', snap_pct, _effective_headroom(snap) / (1 << 20),
-            required / (1 << 20))
-        return True, None
-
-    # The concrete request envelope does not fit: trim once, then re-measure.
-    relieve_memory('pre-request %s %.1f%%' % (ident or '?', snap_pct))
-    snap2 = pressure()
-    measured = snap2 or snap
-    pct2 = _effective_pct(measured)
-    headroom2 = _effective_headroom(measured)
-    if pct2 < req_pct or headroom2 >= required:
-        return True, None
-    reason = ('cgroup %.1f%% full (%.1f/%.1f GiB, effective %.1f%%) after trim; '
-              '%.1f MiB effective headroom < %.1f MiB request envelope — '
-              'refusing ident=%s body=%.1fMB until the derived payload is '
-              'reduced'
-              % (measured['pct'], _gib(measured['usage']), _gib(measured['limit']),
-                 pct2, headroom2 / (1 << 20), required / (1 << 20),
-                 ident or '?', approx_bytes / 1e6))
-    logger.error('[cgroup] %s', reason)
-    audit_log('cgroup_request_refused', ident=ident,
-              body_bytes=approx_bytes, usage_pct=round(measured['pct'], 1),
-              effective_pct=round(pct2, 1),
-              headroom_bytes=headroom2, required_headroom_bytes=required)
-    return False, reason
-
-
-def approx_body_bytes(body_or_messages) -> int:
-    """Cheap upper-ish estimate of a request body's size, in bytes.
-
-    Walks message ``content`` without serialising the whole structure (which
-    would itself allocate the very memory we are trying to protect). Returns 0
-    on anything unexpected — the guard then treats it as a small body.
-    """
-    try:
-        if isinstance(body_or_messages, dict):
-            msgs = body_or_messages.get('messages') or []
-        elif isinstance(body_or_messages, list):
-            msgs = body_or_messages
-        else:
-            return 0
-        total = 0
-        for m in msgs:
-            c = m.get('content') if isinstance(m, dict) else None
-            if isinstance(c, str):
-                total += len(c)
-            elif isinstance(c, list):
-                for part in c:
-                    if isinstance(part, dict):
-                        t = part.get('text')
-                        if isinstance(t, str):
-                            total += len(t)
-                        else:
-                            total += 512  # image/tool part — rough fixed cost
-        return total
-    except Exception as _e:
-        logger.debug('approx body bytes: failed (%s)', _e)
-        return 0
-
-
 __all__ = [
-    'MemoryPressureError',
     'mem_limit_bytes', 'mem_usage_bytes', 'swap_total_bytes', 'pressure',
     'reclaimable_file_bytes',
     'malloc_trim', 'relieve_memory',
@@ -1274,6 +997,4 @@ __all__ = [
     'write_pressure_journal', 'check_oom_kill_count',
     'startup_self_check',
     'run_monitor_once', 'start_monitor', 'stop_monitor',
-    'process_rss_admission_snapshot',
-    'check_request_headroom', 'approx_body_bytes',
 ]

@@ -14,7 +14,7 @@ def test_compaction_drawer_post_stage_and_summary_focus(browser, tmp_path):
     page = context.new_page()
     try:
         page.set_content('<!doctype html><html><body></body></html>')
-        page.add_style_tag(path=str(ROOT / 'frontend/src/styles/application/17-compaction-context-rail.css'))
+        page.add_style_tag(path=str(ROOT / 'frontend/src/styles/application/17-compaction-background-activity.css'))
         locale = json.loads((ROOT / 'frontend/src/i18n/locales/en.json').read_text())
         page.evaluate('(locale) => { window.t = key => locale[key] || key; }', locale)
         page.add_script_tag(content='''

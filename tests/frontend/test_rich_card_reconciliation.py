@@ -104,6 +104,26 @@ assert.equal(node.classList.contains('sw-a-open'),false);
 
 
 @pytest.mark.unit
+def test_rich_card_swarm_failure_reveals_itself_unless_the_reader_chose(round_card_stability_bundle):
+    _run(round_card_stability_bundle, r"""
+const agent=(status,open='')=>`<div class="sw-agent ${open}" data-agent-id="a" data-sw-agent-status="${status}"><p>${status}</p></div>`;
+// The presenter opens running and failed agents. A row mounted while it waited
+// is closed; when it fails without ever running, the failure opens it.
+patch(root,agent('pending')); const node=root.firstChild;
+assert.equal(node.classList.contains('sw-a-open'),false);
+patch(root,agent('failed','sw-a-open')); assert.equal(root.firstChild,node);
+assert.equal(node.classList.contains('sw-a-open'),true);
+// Later failure snapshots keep the reader's own fold.
+node.classList.remove('sw-a-open'); node.setAttribute('data-sw-reader-open','false');
+patch(root,agent('failed','sw-a-open')); assert.equal(node.classList.contains('sw-a-open'),false);
+// A card the reader closed while running stays closed through its failure.
+patch(root,'<p>reset</p>'); patch(root,agent('running','sw-a-open')); const second=root.firstChild;
+second.classList.remove('sw-a-open'); second.setAttribute('data-sw-reader-open','false');
+patch(root,agent('error','sw-a-open')); assert.equal(second.classList.contains('sw-a-open'),false);
+""")
+
+
+@pytest.mark.unit
 def test_rich_card_does_not_restore_selection_over_changed_middle(round_card_stability_bundle):
     _run(round_card_stability_bundle, r"""
 const card=middle=>`<section data-rich-key="first"><p>begin</p><p>${middle}</p><p>end</p></section>`;

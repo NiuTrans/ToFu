@@ -26,7 +26,7 @@ class NonStreamBudgetScope:
         if limit:wire[key]=self.lease.max_output_tokens
         return seal_request(wire,model=body.model,provider_id=body.provider_id,
             protocol=body.protocol,endpoint=body.endpoint,input_tokens=body.input_tokens,
-            semantic_id=body.semantic_id)
+            semantic_id=body.semantic_id,logical_model=body.logical_model)
 
     def send(self, body, send, *args, **kwargs):
         prepare = getattr(self.lease, 'prepare_input', None)

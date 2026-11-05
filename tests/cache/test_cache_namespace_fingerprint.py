@@ -153,6 +153,99 @@ def test_detector_names_namespace_switch_not_server_side():
         f'the verdict must name the key/namespace switch: {r}')
 
 
+def _key_flip_verdict(conv, *, affinity_a, affinity_b):
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+    from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
+
+    _cache_states.clear()
+    msgs, fp, st, wb = _identical_body()
+
+    def usage(read, write, key, affinity):
+        return {'cache_read_tokens': read, 'cache_creation_input_tokens': write,
+                '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
+                '_wire_routing': routing_fingerprint(
+                    key_hash=key, anthropic_beta='prompt-caching-2024',
+                    endpoint='https://gw/claude/messages', affinity=affinity)}
+
+    detect_cache_break(conv, msgs, None, 'claude-opus-4',
+                       usage=usage(90000, 50000, 'keyAAA', affinity_a), user_id=1)
+    return detect_cache_break(conv, msgs, None, 'claude-opus-4',
+                              usage=usage(0, 140000, 'keyBBB', affinity_b), user_id=1)
+
+
+def test_key_flip_under_a_gateway_account_carrier_is_not_a_namespace_switch():
+    """FRIDAY picks the upstream account from Mt-Session-Id, not from the
+    caller's AppId: on 2026-11-03 rounds right after a key rebind read the
+    entry the other AppId wrote. With the carrier unchanged, the key flip did
+    not move the cache domain, so the miss is not a client namespace switch."""
+    affinity = 'Mt-Session-Id@abc123def456'
+    r = _key_flip_verdict('ns-key-gateway', affinity_a=affinity,
+                          affinity_b=affinity)
+    assert r is not None
+    assert 'cache_namespace_switch' not in r, r
+    blob = _json.dumps(r).lower()
+    assert 'upstream cache miss' in blob, r
+    assert 'routing hashes were identical' not in blob, (
+        'the key did differ, so the verdict must not claim identical routing')
+
+
+@pytest.mark.parametrize('affinity_a,affinity_b', [
+    ('prompt_cache_key@abc123def456', 'prompt_cache_key@abc123def456'),
+    ('Mt-Session-Id@abc123def456', 'Mt-Session-Id@fff000fff000'),
+])
+def test_key_flip_without_an_unchanged_gateway_carrier_stays_a_namespace_switch(
+        affinity_a, affinity_b):
+    """A carrier read only by the provider keyed on the credential, or a
+    lineage key that changed too, leaves the key flip as the client switch."""
+    r = _key_flip_verdict('ns-key-other', affinity_a=affinity_a,
+                          affinity_b=affinity_b)
+    assert r is not None and 'cache_namespace_switch' in r, r
+
+
+def test_namespace_switch_warns_only_when_it_costs_a_miss(caplog):
+    """Failover rotation flips the key on purpose; half of the 2026-10-23
+    switches still read the other key's warm prefix. Only a costly switch is a
+    WARNING (the BREAK verdict); the routing change itself is INFO."""
+    import logging
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+    from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
+
+    _cache_states.clear()
+    msgs, fp, st, wb = _identical_body()
+    route = {name: routing_fingerprint(
+        key_hash=name, anthropic_beta='prompt-caching-2024',
+        endpoint='https://gw/claude/messages') for name in ('keyA', 'keyB')}
+
+    def usage(read, write, key):
+        return {'cache_read_tokens': read, 'cache_creation_input_tokens': write,
+                '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
+                '_wire_routing': route[key]}
+
+    def warnings():
+        return [r.getMessage() for r in caplog.records
+                if r.levelno >= logging.WARNING]
+
+    detect_cache_break('ns-warm', msgs, None, 'claude-opus-4',
+                       usage=usage(90000, 50000, 'keyA'), user_id=1)
+    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.cache_tracking'):
+        warm = detect_cache_break('ns-warm', msgs, None, 'claude-opus-4',
+                                  usage=usage(138000, 2000, 'keyB'), user_id=1)
+    assert warm is None
+    assert warnings() == []
+    assert 'cache namespace switch' in caplog.text
+
+    caplog.clear()
+    detect_cache_break('ns-cold', msgs, None, 'claude-opus-4',
+                       usage=usage(90000, 50000, 'keyA'), user_id=1)
+    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.cache_tracking'):
+        cold = detect_cache_break('ns-cold', msgs, None, 'claude-opus-4',
+                                  usage=usage(0, 140000, 'keyB'), user_id=1)
+    assert cold is not None and 'cache_namespace_switch' in cold
+    assert any('NAMESPACE SWITCH BREAK' in m for m in warnings()), warnings()
+
+
 def test_detector_names_beta_ttl_flip_as_namespace_switch():
     """★ MANDATED. Body byte-identical, ONLY the anthropic-beta header flips
     from carrying extended-cache-ttl to not — the one client variable that can

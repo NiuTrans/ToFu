@@ -111,7 +111,7 @@ OUTPUT_PATH = os.path.join(REPO_ROOT, 'docs', 'contracts', 'TOOL_INVENTORY.md')
 
 #: Facet columns, in report order.
 COLUMNS = [
-    'tool', 'category', 'spec', 'state', 'dispatch', 'write', 'idempotent',
+    'tool', 'category', 'spec', 'state', 'exposure', 'dispatch', 'write', 'idempotent',
     'label', 'approval_enricher', 'approval_preview', 'serial', 'read_gate', 'fresh_gate',
     'streamable', 'arg_repair', 'describes_ok',
 ]
@@ -324,6 +324,22 @@ def _confusable_pairs(schemas: dict, rows: list) -> list:
     return pairs
 
 
+def _exposure(spec, name: str) -> str:
+    """Declared default wire exposure of one current tool name."""
+    from lib.tools.gateway import GATEWAY_TOOL_NAMES
+    if name in spec.compatibility_tools or name in spec.contextual_tools:
+        return ''
+    if name in GATEWAY_TOOL_NAMES:
+        return 'gateway'
+    if name in spec.direct_wire_tools:
+        return 'direct'
+    eager = spec.discovery_policy_by_name.get(
+        name, spec.discovery_policy) == 'eager'
+    if spec.pin_on_exposure:
+        return 'pinned' if eager else 'toggle'
+    return 'eager' if eager else 'deferred'
+
+
 def _dispatch_path(registry, name: str) -> str:
     """How ``lookup(name)`` resolves — EXACT / SET / NONE.
 
@@ -360,6 +376,7 @@ def collect() -> dict:
                 'spec': spec.key,
                 'state': ('compatibility' if name in spec.compatibility_tools
                           else 'contextual' if name in spec.contextual_tools else 'current'),
+                'exposure': _exposure(spec, name),
                 'approval_preview': ('specialized' if name in (t.get('enricher') or set())
                                      else 'generic' if name in write_set else ''),
                 'dispatch': _dispatch_path(registry, name),
@@ -418,6 +435,9 @@ def render(inv: dict) -> str:
     out.append('Rows derive from the live registry and per-facet tables; host-specific third-party diagnostics are available with `--json`.')
     out.append(f'Registered built-in tools: **{len(b)}**; compatibility-only: **{sum(r["state"] == "compatibility" for r in b)}**.')
     out[-1] += ' Current means a supported declaration, not that every request enables it.'
+    out.append('Exposure is the declared default: eager stays direct, deferred is found through Tool Search, '
+               'pinned stays direct whenever assembled, toggle is deferred until its composer toggle pins it, '
+               'direct is a protocol-required direct call, and gateway is injected by the discovery backend.')
     out.append('')
 
     gap_write_no_enricher = [r['tool'] for r in b

@@ -19,14 +19,21 @@ export function toolFailureText(raw: unknown, fallback: string): string {
     if (typeof value === 'string') {
       if (value.length > TOOL_FAILURE_PRESENTATION_LIMITS.parseUnits) return '';
       const text = value.trim().replace(/^MCP\s+Error:\s*/i, '');
+      // The executor duplicates its arguments inside message text. Remove only
+      // that exact diagnostic tail before the serialized-evidence safety check.
+      const diagnostic = text
+        .replace(/^Error:\s+tool\s+"[^"]+"\s+execution failed with [A-Za-z_$][\w$]*:\s*/, '')
+        .replace(/^Error\s+\[[a-z][a-z0-9-]*\]:\s*/i, '')
+        .replace(/\s+Arguments received:\s*\{[\s\S]*\}\s*$/, '')
+        .replace(/(Command was not started)\.+$/i, '$1.');
       if (/^[{[\"]/.test(text)) {
         try { return inspect(JSON.parse(text) as unknown, depth + 1); }
         catch { return ''; }
       }
       // Never show a partial/malformed serialized wrapper as prose. Check all
       // supplied prose before clipping so a private suffix cannot leak a prefix.
-      if (/[{[]/.test(text) || PRIVATE_METADATA.test(text)) return '';
-      return clip(text.split(/[\r\n]/, 1)[0].trim());
+      if (/[{[]/.test(diagnostic) || PRIVATE_METADATA.test(diagnostic)) return '';
+      return clip(diagnostic.split(/[\r\n]/, 1)[0].trim());
     }
     if (!value || typeof value !== 'object') return '';
     if (Array.isArray(value)) {

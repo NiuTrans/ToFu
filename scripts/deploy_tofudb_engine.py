@@ -10,7 +10,8 @@ out-of-band upgrade desynchronizes them and the next restart fails closed in
 a crashloop. This tool is the ONE supported upgrade path. In a single
 fail-closed, atomic sequence it:
 
-  * preflights the candidate (executable, size budget, smoke run),
+  * preflights the candidate (executable, size budget, smoke run) and attests
+    a sibling embedded library's compiled source identity and allocator,
   * installs the binary beside the destination via tmp+rename, preserving the
     previous artifact as ``<name>.bak-YYYYMMDD``,
   * writes the ``<binary>.sha256`` sidecar pin the supervisor verifies, so
@@ -41,7 +42,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -58,6 +58,12 @@ ENV_BIN_KEY = 'TOFUDB_BIN'
 # engine larger than this can never launch, so deploying it would be useless.
 MAX_ENGINE_BYTES = 512 * 1024 * 1024
 SMOKE_TIMEOUT_S = 10.0
+# Installed artifact/pin modes. Read-only on purpose: the certified engine
+# and its pin are one unit, and only this tool may change either. The
+# supervisor only ever reads them, and a rename (how this tool installs)
+# needs write permission on the directory, not on the file.
+INSTALLED_ARTIFACT_MODE = 0o555
+INSTALLED_PIN_MODE = 0o444
 HASH_CHUNK_BYTES = 1024 * 1024
 
 
@@ -133,6 +139,14 @@ def _preflight_candidate(candidate: Path, *, smoke: bool) -> str:
             f'candidate {candidate} exceeds the {MAX_ENGINE_BYTES}-byte pin verification budget')
     if smoke:
         _smoke_check(candidate)
+    if candidate.with_name('libtofu_db.so').is_file():
+        from serverctl_pkg.native_engine import (
+            EnginePreparationError, _verify_library_source, build_identity,
+        )
+        try:
+            _verify_library_source(candidate, build_identity(candidate)['source_sha256'])
+        except EnginePreparationError as exc:
+            raise DeployError(f'candidate embedded engine pair is invalid: {exc}') from exc
     return _sha256_file(candidate)
 
 
@@ -181,8 +195,11 @@ def _source_head() -> str | None:
         ).stdout.strip()
         if not head:
             return None
+        # Read-only: without --no-optional-locks status refreshes the index
+        # under index.lock, and a probe killed by its timeout strands that lock.
         dirty = subprocess.run(
-            ['git', 'status', '--porcelain', '--', 'packages/tofu-db'], cwd=REPO_ROOT,
+            ['git', '--no-optional-locks', 'status', '--porcelain', '--', 'packages/tofu-db'],
+            cwd=REPO_ROOT,
             capture_output=True, text=True, timeout=10,
         ).stdout.strip()
         return head + ('-dirty' if dirty else '')
@@ -237,27 +254,18 @@ def _sync_env_file(env_file: Path, digest: str, dest: Path) -> tuple[bool, list[
     would shadow the freshly deployed sidecar and recreate the mismatch
     crashloop on the next restart.
     """
+    from tofu_dotenv import read_dotenv_values, update_dotenv_file
+
     warnings: list[str] = []
-    if not env_file.is_file():
+    values = read_dotenv_values(env_file)
+    pinned = values.get(ENV_BIN_KEY)
+    if pinned and Path(pinned).expanduser() != dest:
+        warnings.append(
+            f'{env_file}: {ENV_BIN_KEY} points at {pinned}, not the deployed {dest}; '
+            'the deployment does not affect the running engine until these agree')
+    if ENV_PIN_KEY not in values:
         return False, warnings
-    lines = env_file.read_text(encoding='utf-8').splitlines(keepends=True)
-    pin_seen = False
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith(ENV_PIN_KEY + '='):
-            newline = '\n' if line.endswith('\n') else ''
-            lines[index] = f'{ENV_PIN_KEY}={digest}{newline}'
-            pin_seen = True
-        elif stripped.startswith(ENV_BIN_KEY + '='):
-            pinned = stripped.split('=', 1)[1].strip().strip('"').strip("'")
-            if pinned and Path(pinned).expanduser() != dest:
-                warnings.append(
-                    f'{env_file}: {ENV_BIN_KEY} points at {pinned}, not the deployed {dest}; '
-                    'the deployment does not affect the running engine until these agree')
-    if not pin_seen:
-        return False, warnings
-    mode = stat.S_IMODE(env_file.stat().st_mode)
-    _atomic_write(env_file, ''.join(lines).encode('utf-8'), mode=mode)
+    update_dotenv_file(env_file, {ENV_PIN_KEY: digest})
     return True, warnings
 
 
@@ -303,7 +311,14 @@ def deploy(arguments: argparse.Namespace) -> dict:
                 shutil.copyfileobj(source, handle, HASH_CHUNK_BYTES)
                 handle.flush()
                 os.fsync(handle.fileno())
-            tmp.chmod(0o755)
+            # Installed read-only: the artifact and its pin must change
+            # together, and only this tool may change them. A stray copy over
+            # a writable artifact desynchronized it from the pin and left the
+            # supervisor refusing to launch the engine (2026-10-22: a 9.5 h
+            # fenced outage). A read-only file makes that copy fail loudly;
+            # this tool still replaces it, because renaming over a file needs
+            # write permission on the DIRECTORY, not on the file.
+            tmp.chmod(INSTALLED_ARTIFACT_MODE)
             os.replace(tmp, dest)
         except BaseException:
             tmp.unlink(missing_ok=True)
@@ -322,7 +337,7 @@ def deploy(arguments: argparse.Namespace) -> dict:
                     shutil.copyfileobj(source, output, HASH_CHUNK_BYTES)
                     output.flush()
                     os.fsync(output.fileno())
-                os.chmod(lib_name, 0o755)
+                os.chmod(lib_name, INSTALLED_ARTIFACT_MODE)
                 os.replace(lib_name, lib_dest)
             finally:
                 Path(lib_name).unlink(missing_ok=True)
@@ -332,7 +347,8 @@ def deploy(arguments: argparse.Namespace) -> dict:
             os.replace(old_library, _backup_path(old_library, now[:10].replace('-', '')))
 
     sidecar = dest.with_name(dest.name + '.sha256')
-    _atomic_write(sidecar, f'{digest}  {dest.name}\n'.encode('ascii'))
+    _atomic_write(sidecar, f'{digest}  {dest.name}\n'.encode('ascii'),
+                  mode=INSTALLED_PIN_MODE)
     record = _update_build_record(
         dest, digest, previous, arguments.evidence, arguments.note, now)
 
@@ -343,14 +359,11 @@ def deploy(arguments: argparse.Namespace) -> dict:
 
     _verify_installed(dest, digest)
     if env_synced:
-        declared = [
-            line.strip().split('=', 1)[1]
-            for line in env_file.read_text(encoding='utf-8').splitlines()
-            if line.strip().startswith(ENV_PIN_KEY + '=')
-        ]
-        if declared != [digest]:
+        from tofu_dotenv import read_dotenv_values
+        declared = read_dotenv_values(env_file).get(ENV_PIN_KEY)
+        if declared != digest:
             raise DeployError(
-                f'postcondition failed: {env_file} declares {declared}, expected [{digest}]')
+                f'postcondition failed: {env_file} declares {declared}, expected {digest}')
 
     plan.update({
         'backup': str(backup) if backup else None,
@@ -385,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
     except DeployError as exc:
         print(f'deploy_tofudb_engine: REFUSED: {exc}', file=sys.stderr)
         return 1
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(f'deploy_tofudb_engine: FAILED: {exc}', file=sys.stderr)
         return 1
     for warning in record.get('warnings', []):

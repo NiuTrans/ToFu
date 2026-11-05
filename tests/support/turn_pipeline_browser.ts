@@ -85,7 +85,7 @@ export async function createTurnPipelineFixture(count: number, receiptCount = 0)
         attemptId, conversationId: conversation.id, turnId, commandId: 'command', taskId: 'task',
         operation: 'submit', status: 'running', baseProjectionRevision: 0, resumeAnchor: {},
         createdAt: 1, startedAt: 1, lastSeq: 0,
-      }]}), eventsUrl: () => 'fixture-stream', recordPerception: async (_c: unknown, _t: unknown, body: unknown) => {receipts.push(body);} } as any,
+      }]}), recordPerception: async (_c: unknown, _t: unknown, body: unknown) => {receipts.push(body);} } as any,
     findConversation: () => conversation, isActive: () => true,
     renderState: (conv, state, context) => controller.render(conv,
       receiptCount ? swarmPresentationOverlay.compose(conv.id, state, state, () => null) : state, context),

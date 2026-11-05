@@ -8,6 +8,7 @@ import subprocess
 import pytest
 
 from lib.conversation_sync.validation import ContractViolation, decode
+from tests._jsdom import require_node_test_runner
 from tests._runtime_sections import runtime_section
 
 
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_turn_command_builder_sends_integer_input_projection_fence():
+    require_node_test_runner('typescript')
     run = subprocess.run(
         ['node', '--test', 'tests/turn_command.test.cjs'],
         cwd=ROOT, capture_output=True, text=True, timeout=30,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+
 import base64
 import re
 import time
@@ -487,7 +489,7 @@ def test_journaled_tex_edit_builds_through_the_real_chat_preview(page, tmp_path,
         && panel.querySelector('[data-page="1"] .paper-reader-text')?.textContent.includes('Original paper');
     }""")
     assert len(build_posts) == 1, 'reload restores selection without recompiling history'
-    prior = llm_call.stream_llm_response
+    prior = _fallback_transport.stream_llm_response
     receipts = []
 
     def write_during_turn(task, body, tag='', on_tool_call_ready=None):
@@ -499,7 +501,7 @@ def test_journaled_tex_edit_builds_through_the_real_chat_preview(page, tmp_path,
                 conv_id=conversation_id, task_id=task['id']))
         return prior(task, body, tag, on_tool_call_ready)
 
-    monkeypatch.setattr(llm_call, 'stream_llm_response', write_during_turn)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', write_during_turn)
     requests = []
     page.on('request', lambda request: requests.append(request.url))
     try:
@@ -551,7 +553,7 @@ def test_journaled_tex_edit_builds_through_the_real_chat_preview(page, tmp_path,
         page.wait_for_function("!document.querySelector('#mobileSheet')?.classList.contains('open')")
         assert not page.locator('#mobileSheet').is_visible()
         assert page.locator('#mobileMoreBtn').evaluate('element => document.activeElement === element')
-        monkeypatch.setattr(llm_call, 'stream_llm_response', prior)
+        monkeypatch.setattr(_fallback_transport, 'stream_llm_response', prior)
         next_reply_count = page.locator('#chatInner').inner_text().count('stubbed model') + 1
         _send_and_wait_done(page, 'Continue reviewing the displayed paper', expected_replies=next_reply_count)
         assert len(build_posts) == posted_builds, 'ordinary chat must not recompile unchanged paper sources'
@@ -615,7 +617,7 @@ def test_remote_tex_write_automatically_builds_in_the_real_reader(
     page.locator(f'.conv-item[data-conv-id="{conversation_id}"]').click(position={'x': 12, 'y': 12})
     page.wait_for_function("""id => document.querySelector('.conv-item.active')?.dataset.convId === id
       && document.querySelector('#chatInner')?.innerText.includes('stubbed model')""", arg=conversation_id)
-    prior = llm_call.stream_llm_response
+    prior = _fallback_transport.stream_llm_response
     source = '\\documentclass{article}\n\\begin{document}\nRemote committed preview.\n\\end{document}\n'
     observed = {}
 
@@ -639,7 +641,7 @@ def test_remote_tex_write_automatically_builds_in_the_real_reader(
                     {'prompt_tokens': 10, 'completion_tokens': 2, 'total_tokens': 12})
         return prior(task, body, tag, on_tool_call_ready)
 
-    monkeypatch.setattr(llm_call, 'stream_llm_response', tool_during_turn)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', tool_during_turn)
     submitted = []
     page.on('request', lambda request: submitted.append(request.url)
             if request.method == 'POST' and '/api/v4/paper/builds' in request.url else None)

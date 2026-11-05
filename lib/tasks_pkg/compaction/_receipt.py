@@ -11,6 +11,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 import math
 
+from lib.tasks_pkg.compaction._summary_failure import (
+    _failure_matches_attempts,
+    validate_summary_attempts,
+    validate_summary_failure,
+)
+
 
 COMPACTION_RECEIPT_SCHEMA_VERSION = "tofu.compaction-receipt/v1"
 MAX_RECEIPT_RECENT_FILES = 8
@@ -111,14 +117,16 @@ def _summary_selection_details(value) -> dict:
     score = value.get('score')
     eligible = value.get('eligibleRoutes')
     if value.get('ranking') in {
-            'subscription_resource_tier_then_cost_aa', 'authorized_resource_cost_then_aa'}:
+            'subscription_resource_tier_then_cost_aa', 'authorized_resource_cost_then_aa',
+            'paid_api_then_resource_cost_aa'}:
         source, metric, match = (value.get(key) for key in ('source', 'metric', 'match'))
         valid_evidence = (source, metric, match) in {
             ('Artificial Analysis', 'intelligence', 'exact'),
             ('maintained_declared_rule', 'declared_capability', 'declared')}
         admission_only = ((source, metric, match) ==
                           ('routing_admission', 'text_capability', 'confirmed')
-                          and value['ranking'] == 'authorized_resource_cost_then_aa'
+                          and value['ranking'] in {
+                              'authorized_resource_cost_then_aa', 'paid_api_then_resource_cost_aa'}
                           and score is None)
         valid_score = (not isinstance(score, bool) and isinstance(score, (int, float))
                        and math.isfinite(score) and score >= 0)
@@ -245,6 +253,14 @@ def build_compaction_receipt(
     from lib.tasks_pkg.compaction._summary_cost import summary_cost_details
     receipt['summary']['cost'] = summary_cost_details(summary_usage)
     if isinstance(summary_usage, Mapping):
+        attempts = validate_summary_attempts(summary_usage.get('_summaryAttempts'))
+        if attempts:
+            receipt['summary']['attempts'] = attempts
+        failure = validate_summary_failure(summary_usage.get('_summaryFailure'))
+        if (failure is not None and not summary_generated
+                and ('_summaryAttempts' not in summary_usage or bool(attempts))
+                and _failure_matches_attempts(failure, attempts)):
+            receipt['summary']['failure'] = failure
         route = summary_usage.get('_summaryRoute') or {}
         if isinstance(route, Mapping):
             receipt['summary']['route'] = {

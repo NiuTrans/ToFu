@@ -82,14 +82,18 @@ def is_synthetic_inbox_round(round_dict) -> bool:
 # ── Continuation-prose durable record ──
 # Task field holding the ordered snapshots of interrupted final answers:
 # prose-only rounds whose stop was vetoed by a continuation enforcer
-# (todo-continuation / intent-stall nudge). The wire keeps those answers (an
-# assistant row is appended before the meta nudge), but the three legacy
-# channels cannot represent them: the round owns no tool batch to stamp
-# ``assistantContent`` onto, and ``task['content']`` / ``task['thinking']``
-# are zeroed by the NEXT tool round's ``_discard_pretool_prose`` — so the
-# interrupted answer silently vanished from the assembled segments (the
-# 2026-09-02 lost-report incident). ``assemble_segments`` interleaves these
-# entries as non-deliverable prose so the durable display record is lossless.
+# (intent-stall nudge / commentary continuation / output contract). The wire
+# keeps those answers (an assistant row is appended before the meta nudge),
+# but the round owns no tool batch to stamp ``assistantContent`` onto, and a
+# later live-text replacement (the NEXT tool round's ``_discard_pretool_prose``,
+# a retry reset) drops them from ``task['content']`` / ``task['thinking']`` —
+# so the interrupted answer once vanished from the assembled segments (the
+# 2026-09-02 lost-report incident). Each entry's bytes have ONE owner: the
+# live text while it still holds them (they are part of the terminal
+# deliverable), the record once a replacement drops them
+# (``release_continuation_prose``); ``assemble_segments`` then interleaves
+# the entry as non-deliverable prose. Rendering a still-held entry as well
+# showed the provisional answer twice (2026-11-02, conv mvyttf2hwfzppy).
 CONTINUATION_PROSE_FIELD = '_continuation_prose'
 
 
@@ -100,18 +104,12 @@ CONTINUATION_PROSE_FIELD = '_continuation_prose'
 INJECTED_NOTES_FIELD = '_injected_notes'
 
 
-# Finish reasons under which the terminal deliverable text is a RESUMABLE
-# prefix (a turn cut off mid-answer), not a settled answer. Continue can feed
-# this tail back as an assistant prefill so a capable provider continues the
-# SAME tokens rather than regenerating from scratch. ``length`` (model hit
-# max_tokens) is the canonical Continue case; the three interrupt reasons cover
-# a dropped transport / server crash / frontend stop. ``aborted`` is the MANUAL
-# Stop case: the frontend stamps it optimistically on Stop click, and the
-# partial answer is a perfectly valid prefill prefix — excluding it made a
-# Stop→Continue on a no-tools turn fall back to a full regeneration that
-# discarded the partial prose (the manual-stop lossless gap, epic
-# ). An empty aborted turn is still correctly declined
-# downstream (resume_prefill_from_segments returns None on empty text).
+# Finish reasons under which the terminal deliverable text is an unfinished
+# prefix (a turn cut off mid-answer), not a settled answer: ``length`` (model
+# hit max_tokens), a dropped transport / server crash / frontend stop, and the
+# MANUAL Stop (``aborted``, stamped optimistically on the Stop click). The
+# segment carries this as a display flag; resume rewinds such a tail rather
+# than continuing it (docs/contracts/TURN_SETTLEMENT.md, resume options).
 RESUMABLE_FINISH_REASONS = frozenset({
     'interrupted', 'server_offline', 'premature_close', 'length', 'aborted',
 })
@@ -125,6 +123,7 @@ RESUMABLE_FINISH_REASONS = frozenset({
 # accumulator prose must render ahead of its tool cards rather than at the
 # tail (the wire order).
 LIVE_ROUND_STATUSES = frozenset({
+    'queued',
     'searching',
     'executing',
     'pending_approval',

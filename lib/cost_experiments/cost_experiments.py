@@ -32,6 +32,7 @@ import time
 from typing import Any
 
 from lib.config_dir import config_path
+from lib.error_envelope import BadRequest
 from lib.experiments.builtin_context_cost import (
     CONTROL_POLICY,
     OPTIMIZED_POLICY,
@@ -72,7 +73,7 @@ def _bounded_number(raw: Any, *, field: str, default: int,
         return default
     if isinstance(raw, bool):
         if strict:
-            raise ValueError(f'{field} must be an integer')
+            raise BadRequest(f'{field} must be an integer', field=field)
         return default
     try:
         value = int(raw)
@@ -80,14 +81,14 @@ def _bounded_number(raw: Any, *, field: str, default: int,
             raise ValueError('fractional value')
     except (TypeError, ValueError, OverflowError) as exc:
         if strict:
-            raise ValueError(f'{field} must be an integer') from exc
+            raise BadRequest(f'{field} must be an integer', field=field) from exc
         logger.warning('[CostExperiment] invalid %s=%r; using %d',
                        field, raw, default)
         return default
     if value < minimum or value > maximum:
         if strict:
-            raise ValueError(
-                f'{field} must be between {minimum} and {maximum}')
+            raise BadRequest(
+                f'{field} must be between {minimum} and {maximum}', field=field)
         logger.warning('[CostExperiment] out-of-range %s=%r; using %d',
                        field, raw, default)
         return default
@@ -103,12 +104,12 @@ def normalize_cost_experiment_config(raw: Any, *, strict: bool = False) -> dict:
     """
     if not isinstance(raw, dict):
         if strict:
-            raise ValueError('cost_experiment must be a JSON object')
+            raise BadRequest('cost_experiment must be a JSON object')
         raw = {}
 
     enabled_raw = raw.get('enabled', False)
     if strict and not isinstance(enabled_raw, bool):
-        raise ValueError('enabled must be a boolean')
+        raise BadRequest('enabled must be a boolean', field='enabled')
     enabled = enabled_raw if isinstance(enabled_raw, bool) else False
 
     lifecycle_raw = raw.get('lifecycle')
@@ -117,7 +118,8 @@ def normalize_cost_experiment_config(raw: Any, *, strict: bool = False) -> dict:
             not isinstance(lifecycle_raw, str)
             or lifecycle_raw not in _LIFECYCLES):
         if strict:
-            raise ValueError('lifecycle must be draft, running, or sealed')
+            raise BadRequest('lifecycle must be draft, running, or sealed',
+                             field='lifecycle')
         logger.error('[CostExperiment] invalid lifecycle=%r; disabling',
                      lifecycle_raw)
         lifecycle_invalid_reason = 'invalid_lifecycle'
@@ -125,8 +127,9 @@ def normalize_cost_experiment_config(raw: Any, *, strict: bool = False) -> dict:
         lifecycle = 'draft'
     elif lifecycle_raw == 'sealed' and enabled:
         if strict:
-            raise ValueError(
-                'a sealed experiment cannot be enabled; choose a new experiment_id')
+            raise BadRequest(
+                'a sealed experiment cannot be enabled; choose a new experiment_id',
+                field='enabled')
         lifecycle_invalid_reason = 'sealed_experiment_reopened'
         enabled = False
         lifecycle = 'sealed'
@@ -143,9 +146,9 @@ def normalize_cost_experiment_config(raw: Any, *, strict: bool = False) -> dict:
         raw.get('experiment_id') or _DEFAULT_EXPERIMENT_ID).strip()
     if not _ID_RE.fullmatch(experiment_id):
         if strict:
-            raise ValueError(
+            raise BadRequest(
                 'experiment_id must contain 1-80 letters, numbers, dot, '
-                'underscore, or hyphen characters')
+                'underscore, or hyphen characters', field='experiment_id')
         logger.warning('[CostExperiment] invalid experiment_id=%r; using %s',
                        experiment_id, _DEFAULT_EXPERIMENT_ID)
         experiment_id = _DEFAULT_EXPERIMENT_ID
@@ -158,8 +161,9 @@ def normalize_cost_experiment_config(raw: Any, *, strict: bool = False) -> dict:
         minimum=0, maximum=100, strict=strict)
     empty_arm = enabled and treatment_percent in (0, 100)
     if empty_arm and strict:
-        raise ValueError(
-            'treatment_percent must be between 1 and 99 when enabled')
+        raise BadRequest(
+            'treatment_percent must be between 1 and 99 when enabled',
+            field='treatment_percent')
     min_sample_size = _bounded_number(
         raw.get('min_sample_size'), field='min_sample_size', default=20,
         minimum=2, maximum=10_000, strict=strict)
@@ -212,7 +216,8 @@ def normalize_cost_experiment_config(raw: Any, *, strict: bool = False) -> dict:
                 persisted_spec = validate_resolved_spec(configured_spec)
             except ExperimentContractError as exc:
                 if strict:
-                    raise ValueError(f'invalid persisted experiment spec: {exc}') from exc
+                    raise BadRequest(f'invalid persisted experiment spec: {exc}',
+                                     field='spec') from exc
                 invalid_reason = 'invalid_persisted_spec'
                 logger.error('[CostExperiment] invalid persisted spec; disabling: %s',
                              exc)
@@ -227,15 +232,17 @@ def normalize_cost_experiment_config(raw: Any, *, strict: bool = False) -> dict:
         persisted_digest = persisted_spec['specDigest']
         if supplied_digest and supplied_digest != persisted_digest:
             if strict:
-                raise ValueError('spec_digest does not match the persisted spec')
+                raise BadRequest('spec_digest does not match the persisted spec',
+                                 field='spec_digest')
             invalid_reason = 'invalid_persisted_spec'
         supplied_digest = persisted_digest
 
     current_digest = current_spec['specDigest']
     if supplied_digest and supplied_digest != current_digest:
         if strict:
-            raise ValueError(
-                'experiment specification changed; choose a new experiment_id')
+            raise BadRequest(
+                'experiment specification changed; choose a new experiment_id',
+                field='experiment_id')
         invalid_reason = invalid_reason or 'strategy_spec_changed'
         logger.error(
             '[CostExperiment] spec drift for experiment=%s; disabling old run',

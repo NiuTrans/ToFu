@@ -39,13 +39,13 @@ def _url_of(msgs):
 
 def test_png_mislabeled_as_jpeg_is_corrected():
     msgs = _img_msg(_data_uri('image/jpeg', _PNG))
-    _validate_image_blocks(msgs)
+    msgs = _validate_image_blocks(msgs)
     assert _url_of(msgs).startswith('data:image/png;base64,')
 
 
 def test_jpeg_mislabeled_as_png_is_corrected():
     msgs = _img_msg(_data_uri('image/png', _JPEG))
-    _validate_image_blocks(msgs)
+    msgs = _validate_image_blocks(msgs)
     assert _url_of(msgs).startswith('data:image/jpeg;base64,')
 
 
@@ -54,7 +54,7 @@ def test_correctly_labeled_image_is_left_byte_identical():
     # cache churn: the wire bytes must stay identical round to round).
     original = _data_uri('image/png', _PNG)
     msgs = _img_msg(original)
-    _validate_image_blocks(msgs)
+    msgs = _validate_image_blocks(msgs)
     assert _url_of(msgs) == original
 
 
@@ -62,7 +62,7 @@ def test_payload_bytes_are_preserved_when_header_is_rewritten():
     # Only the header changes — the base64 payload must be untouched.
     b64 = base64.b64encode(_PNG).decode()
     msgs = _img_msg(f'data:image/jpeg;base64,{b64}')
-    _validate_image_blocks(msgs)
+    msgs = _validate_image_blocks(msgs)
     url = _url_of(msgs)
     assert url == f'data:image/png;base64,{b64}'
 
@@ -72,7 +72,7 @@ def test_NC_reconcile_removed_would_leak_mislabeled_type():
     # header survives — the exact condition that produced the Anthropic 400.
     # (Documents what the fix prevents; the positive tests above assert it.)
     msgs = _img_msg(_data_uri('image/jpeg', _PNG))
-    _validate_image_blocks(msgs)
+    msgs = _validate_image_blocks(msgs)
     # With the fix in place the declared type is NEVER left as jpeg for PNG bytes.
     assert not _url_of(msgs).startswith('data:image/jpeg;base64,')
 
@@ -85,13 +85,13 @@ def test_NC_reconcile_removed_would_leak_mislabeled_type():
 def test_real_webp_correctly_labeled_is_left_byte_identical():
     original = _data_uri('image/webp', _WEBP)
     msgs = _img_msg(original)
-    _validate_image_blocks(msgs)
+    msgs = _validate_image_blocks(msgs)
     assert _url_of(msgs) == original
 
 
 def test_real_webp_mislabeled_as_jpeg_is_corrected_to_webp():
     msgs = _img_msg(_data_uri('image/jpeg', _WEBP))
-    _validate_image_blocks(msgs)
+    msgs = _validate_image_blocks(msgs)
     assert _url_of(msgs).startswith('data:image/webp;base64,')
 
 
@@ -99,7 +99,7 @@ def test_riff_but_not_webp_is_dropped_not_mislabeled_webp():
     # A WAV (RIFF, but 'WAVE' at offset 8) is NOT an image. It must be dropped
     # to a text placeholder — never sniffed/relabeled as image/webp.
     msgs = _img_msg(_data_uri('image/webp', _WAV))
-    _validate_image_blocks(msgs)
+    msgs = _validate_image_blocks(msgs)
     block = msgs[0]['content'][0]
     assert block['type'] == 'text'
     assert 'invalid or corrupted' in block['text']
@@ -112,7 +112,7 @@ def test_swap_path_runs_reconciliation_on_prebuilt_body():
     from types import SimpleNamespace
     from lib.llm_dispatch.api import _adapt_stream_body_for_slot
     slot = SimpleNamespace(model='aws.claude-opus-4.8', thinking_format='',
-                           provider_id='sankuai', protocol='')
+                           provider_id='default', protocol='')
     body = {'model': 'some-other-model', 'max_tokens': 4096,
             'messages': _img_msg(_data_uri('image/jpeg', _PNG))}
     out = _adapt_stream_body_for_slot(

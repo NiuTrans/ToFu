@@ -16,11 +16,11 @@ tests/frontend/test_frontend_markdown_backtick_code.py.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
 
+from tests._jsdom import require_node_modules
 from tests._runtime_sections import native_module_path, runtime_sections_dir
 
 pytestmark = pytest.mark.unit
@@ -38,6 +38,11 @@ const fs = require('fs');
 function load(p){ return fs.readFileSync(p,'utf8'); }
 
 global.marked = require(process.argv[4]);
+// The renderer fails closed to escaped source without a DOM document and a
+// sanitizer; production always has both, so supply real ones from jsdom.
+const __dom = new (require('jsdom').JSDOM)('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
+global.document = __dom.window.document;
+global.DOMPurify = require('dompurify')(__dom.window);
 var BASE_PATH = '';
 var _ensureKatex = function(){};
 
@@ -82,11 +87,9 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
 def test_markdown_escape_raw_html_contract():
     marked_cjs = os.path.join(ROOT, 'node_modules', 'marked', 'lib', 'marked.cjs')
-    if not os.path.isfile(marked_cjs):
-        pytest.skip('marked dev-dep not installed (run `npm install`)')
+    require_node_modules('marked')
     harness = os.path.join(HERE, '_md_escape_raw_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)

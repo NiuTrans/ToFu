@@ -17,6 +17,15 @@ def _isolate_engine_preparation(monkeypatch):
     monkeypatch.setattr(serverctl, 'prepare_native_engine_artifact', lambda *a, **k: '')
 
 
+@pytest.fixture(autouse=True)
+def _assembly_logger(monkeypatch):
+    # Only ``import server`` configures this global; an xdist worker that
+    # never ran that import would otherwise call methods on None.
+    import logging
+    import lib.server.server_assembly as assembly
+    monkeypatch.setattr(assembly, '_server_log', logging.getLogger('test'))
+
+
 def test_init_database_runs_complete_recovery_sequence(monkeypatch):
     import server
     import lib.orchestration.startup_recovery as orchestration_recovery
@@ -71,6 +80,10 @@ def test_init_database_runs_complete_recovery_sequence(monkeypatch):
     monkeypatch.setattr(
         server, '_start_log_aggregate_runtime_after_recovery',
         lambda: calls.append('log-aggregate-flusher'))
+    import lib.message_queue as message_queue
+    monkeypatch.setattr(
+        message_queue, 'drain_idle_background_batches',
+        lambda: calls.append('background-batch-wake') or [])
 
     server._init_database()
 
@@ -88,9 +101,12 @@ def test_init_database_runs_complete_recovery_sequence(monkeypatch):
 
     import lib.server.server_assembly as assembly
     assembly._run_post_ready_deferred()
-    assert calls[-4:] == [
+    # A collective background wake starts a model turn: it waits for
+    # readiness instead of holding the readiness-critical recovery phase.
+    assert calls[-5:] == [
         ('warmup', True),
         'attempt-cleanup',
+        'background-batch-wake',
         'swarm-rehydrate',
         'swarm-output-cleanup',
     ]
@@ -214,6 +230,31 @@ def test_start_storage_does_not_retry_typed_integrity_failure(monkeypatch):
     assert calls == ['start']
 
 
+def test_external_storage_boot_never_rebuilds_its_owner_engine(monkeypatch):
+    import lib.server.server_assembly as assembly
+    import lib.storage as storage_pkg
+    from lib.storage.errors import StorageError
+    import serverctl
+
+    monkeypatch.setenv('TOFU_STORAGE_CONNECTION_FILE', '/private/native-connection.json')
+    monkeypatch.setattr(serverctl, 'prepare_native_engine_artifact',
+                        lambda *a, **k: pytest.fail('attaching application must not replace the owner engine'))
+    monkeypatch.setattr(assembly, '_boot', lambda *a, **k: None)
+    calls = []
+    monkeypatch.setattr(storage_pkg, 'start_storage', lambda: calls.append('handshake'))
+    monkeypatch.setattr(storage_pkg, 'storage_status', lambda: {'ready': True, 'backend': 'tofudb'})
+    assembly._start_storage_authority_sql()
+    assert calls == ['handshake']
+
+    failure = StorageError('database_integrity', 'engine identity mismatch', retryable=False)
+    def refuse():
+        raise failure
+    monkeypatch.setattr(storage_pkg, 'start_storage', refuse)
+    with pytest.raises(StorageError) as raised:
+        assembly._start_storage_authority_sql()
+    assert raised.value is failure
+
+
 def test_distributed_preview_skips_all_task_recovery(monkeypatch):
     import lib.server.server_assembly as assembly
 
@@ -258,6 +299,36 @@ def test_best_effort_recovery_does_not_sleep_on_permanent_errors(monkeypatch, er
     assert assembly._run_boot_recovery_step('test', broken, attempts=6) is None
     assert len(calls) == 1
     assert sleeps == []
+
+
+def test_swarm_rehydration_rides_the_boot_recovery_retry_schedule(monkeypatch):
+    """A transient storage failure retries swarm resume instead of dropping it."""
+    import lib.server.server_assembly as assembly
+    import lib.swarm.integration as swarm_integration
+    import lib.turn_lifecycle as turns
+    from lib.storage import warmup
+
+    monkeypatch.setattr(assembly, '_DEPLOYMENT_CONFIGURATION', SimpleNamespace(
+        process_role='worker', distributed_preview_read_only=True))
+    monkeypatch.setattr(assembly, '_server_log', __import__('logging').getLogger('test'))
+    monkeypatch.setattr(warmup, 'start_keep_warm', lambda **_kwargs: None)
+    monkeypatch.setattr(turns, 'cleanup_superseded_attempts', lambda: None)
+    monkeypatch.setattr(swarm_integration, 'start_swarm_output_cleanup', lambda: None)
+    calls, sleeps = [], []
+    monkeypatch.setattr(assembly.time, 'sleep', sleeps.append)
+
+    def rehydrate():
+        calls.append(1)
+        if len(calls) < 3:
+            raise _retryable_storage_error('database_resource_exhausted')
+        return 2
+
+    monkeypatch.setattr(swarm_integration, 'rehydrate_swarms_on_startup', rehydrate)
+
+    assembly._run_post_ready_deferred()
+
+    assert len(calls) == 3
+    assert sleeps == [2.0, 5.0]
 
 
 def test_best_effort_recovery_preserves_transient_storage_retries(monkeypatch):

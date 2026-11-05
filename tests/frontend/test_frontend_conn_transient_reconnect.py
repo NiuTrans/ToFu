@@ -99,4 +99,4 @@ process.stdout.write(JSON.stringify({
     assert payload['frozen'] is True
     assert payload['direct'] == ['live', 'offline']
     assert payload['finalAggregate'] == {'degraded': True, 'count': 1}
-    assert payload['duplicateSuppressed'] >= 3
+    assert payload['duplicateSuppressed'] == 2

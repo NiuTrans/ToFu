@@ -10,6 +10,52 @@ def parallel_tool_names(task, names):
     writes, _ = _task_partitions(task)
     return frozenset(names) - writes - ORDERED_STATE_TOOLS
 
+def plan_concurrent_round(task, parsed_calls, project_path):
+    """Order exceptions for a caller that starts every call of a round at once.
+
+    Owner decision 2026-10-28 (docs/contracts/TOOL_EXECUTION_POLICY.md): the
+    same ``_ordering`` authority as ``execute_tool_pipeline``. Returns
+    ``({call_id: [earlier call ids]}, CommandDirectoryPlan)``: only calls
+    with predecessors are listed, and every run_command ``working_dir`` is
+    frozen into its occurrence's arguments in call order; the caller settles
+    inherited directories through the plan's ``resolve``/``settle``.
+    """
+    from lib.tasks_pkg.tool_dispatch._flags import _task_partitions
+    from lib.tasks_pkg.tool_dispatch._ordering import call_predecessors, plan_command_working_dirs
+    writes, _ = _task_partitions(task)
+    calls = [item for item in parsed_calls if not item[6]]
+    command_dirs = plan_command_working_dirs(task, calls)
+    predecessors = call_predecessors(task, project_path, calls, writes)
+    return ({call_id: list(earlier) for call_id, earlier in predecessors.items() if earlier},
+            command_dirs)
+
+def repair_prepared_call_ids(task, parsed_calls, round_num, project_path):
+    """Give recycled or repeated model call IDs their admission identity early.
+
+    ``execute_tool_pipeline`` remints an ID that history already used (a
+    positional-ID provider repeats ``{tool}_{index}`` every response) or that
+    repeats within one response. A caller that decides approval before the
+    pipeline admits the occurrence binds the receipt to the call ID, so the
+    remint would orphan it; applying the same rule first keeps one identity
+    from decision to execution. Replaces changed items in ``parsed_calls``.
+    """
+    from lib.tasks_pkg.tool_dispatch._flags import _ensure_tool_call_id_receipts
+    from lib.tasks_pkg.tool_dispatch._pipeline import (
+        _collect_used_tool_call_ids, _repair_current_tool_call_identity)
+    from lib.tasks_pkg.tool_dispatch._prefetch import remap_prefetch
+    rows = tuple(item[5] for item in parsed_calls if isinstance(item[5], dict))
+    historical = _collect_used_tool_call_ids(task, [], current_round_entries=rows)
+    used, claimed = set(historical), set()
+    receipts = _ensure_tool_call_id_receipts(task)
+    for index, item in enumerate(parsed_calls):
+        original = item[2]
+        item = _repair_current_tool_call_identity(
+            task, [], parsed_calls, index, item, round_num=round_num, tid=task['id'][:8],
+            receipts=receipts, historical_used_ids=historical, used_ids=used,
+            claimed_ids=claimed, settled_results={}, pending_envelopes={})
+        if item[2] != original:
+            remap_prefetch(task, item[1], original, item[2], item[3], item[5], project_path)
+
 def publish_prepared_response_siblings(task, parsed_calls, round_num):
     """Publish one response's direct occurrences for qualified gateway reuse."""
     from lib.tools.gateway import EXECUTE_TOOLS_NAME, EXECUTE_PROGRAM_NAME, SEARCH_TOOLS_NAME
@@ -21,6 +67,7 @@ def publish_prepared_response_siblings(task, parsed_calls, round_num):
 
 from lib.tasks_pkg.tool_dispatch._parse import parse_tool_calls, publish_tool_call_entry
 from lib.tasks_pkg.tool_dispatch._pipeline import execute_tool_pipeline
+from lib.tasks_pkg.tool_dispatch._ordering import restore_command_sticky_cwd
 
 
 def authorize_prepared_tool_call(task, parsed_call, *, configuration, project_path, round_num, model):
@@ -38,7 +85,9 @@ def authorize_prepared_tool_call(task, parsed_call, *, configuration, project_pa
     _, name, call_id, arguments, number, row, parse_error = parsed_call
 
     from lib.tasks_pkg.coordinator_policy import coordinator_call_rejection
-    if coordinator_call_rejection(task, name, arguments, project_path):
+    from lib.tasks_pkg.delegate_mode import delegate_call_rejection
+    if (coordinator_call_rejection(task, name, arguments, project_path)
+            or delegate_call_rejection(task, name, arguments)):
         return 'denied'
     write, idempotent = _task_partitions(task)
     confirmation = _task_confirmation_tools(task)
@@ -74,7 +123,8 @@ def withdraw_prepared_tool_call(task, parsed_call, *, status='aborted'):
     _, name, call_id, arguments, number, row, _ = parsed_call
     receipts = task.get('_tool_approval_receipts') or {}
     receipts.pop(call_id, None)
-    if row.get('status') in {'done', 'error', 'aborted', 'rejected', 'skipped', 'unknown'}:
+    from lib.tool_results.tool_round_status import TERMINAL_TOOL_ROUND_STATUSES
+    if row.get('status') in TERMINAL_TOOL_ROUND_STATUSES | {'skipped', 'unknown'}:
         return
     from lib.tasks_pkg.executor import _finalize_tool_round
     from lib.tools.registry import build_tool_result_meta
@@ -83,4 +133,4 @@ def withdraw_prepared_tool_call(task, parsed_call, *, status='aborted'):
     _finalize_tool_round(task, number, row, [meta], status=status)
 
 
-__all__ = ['execute_tool_pipeline', 'parse_tool_calls', 'authorize_prepared_tool_call', 'withdraw_prepared_tool_call', 'publish_prepared_response_siblings', 'publish_tool_call_entry', 'parallel_tool_names']
+__all__ = ['execute_tool_pipeline', 'parse_tool_calls', 'authorize_prepared_tool_call', 'withdraw_prepared_tool_call', 'publish_prepared_response_siblings', 'publish_tool_call_entry', 'parallel_tool_names', 'plan_concurrent_round', 'repair_prepared_call_ids', 'restore_command_sticky_cwd']

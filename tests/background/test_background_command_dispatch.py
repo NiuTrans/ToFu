@@ -1,5 +1,6 @@
 """Background controls use their execution owner, not the project schema group."""
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -20,6 +21,13 @@ def dispatch(request, monkeypatch, tmp_path):
     finalized = Mock()
     monkeypatch.setattr(code_exec, '_finalize_tool_round', finalized)
     monkeypatch.setattr(project, '_finalize_tool_round', finalized)
+    # Project-scoped admission reads the owner's Coordinator binding first
+    # (failing closed without one); this is an ordinary unbound conversation.
+    from lib.conversations import project_coordination
+    monkeypatch.setattr(project_coordination, 'ProjectCoordinationRepository',
+                        lambda owner: SimpleNamespace(read=lambda path: {
+                            'projectPath': path, 'conversationId': '', 'revision': 0,
+                            'availability': 'unbound'}))
     mode = request.param
     cfg = ({'project_remote': {'agent_id': 'remote-device', 'root': '/repo'}}
            if mode == 'remote' else {})
@@ -81,6 +89,31 @@ def test_missing_command_id_dispatch(dispatch, monkeypatch, name):
     service.assert_not_called()
 
 
+def test_standalone_explicit_background_runs_under_the_worker_call_shape(monkeypatch):
+    """The detached worker calls execute(bg_task, exec_ctx), as in project mode."""
+    captured = {}
+    standalone = Mock(return_value='standalone result')
+
+    def start(**kwargs):
+        captured.update(kwargs)
+        return 'bg-standalone'
+
+    monkeypatch.setattr(background_commands, 'start_background_command', start)
+    monkeypatch.setattr(code_exec, '_finalize_tool_round', Mock())
+    monkeypatch.setattr('lib.project_mod.execute_standalone_command', standalone)
+    task = {'id': 'task-bg-standalone', 'convId': 'conv', '_userId': 7}
+    result = code_exec._handle_code_exec(
+        task, {}, 'run_command', 'tc', {'command': 'echo hi', 'background': True},
+        1, {}, {}, None, False)
+    assert 'bg-standalone' in result[1]
+    proxy = {'id': 'task-bg-standalone'}
+    exec_ctx = {'command_id': 'bg-standalone', 'wrapped_command': None,
+                'note_spawn': lambda *a: None,
+                'build_result': lambda aborted=False: 'record result'}
+    assert captured['execute'](proxy, exec_ctx) == 'standalone result'
+    assert standalone.call_args.kwargs['task'] is proxy
+
+
 def test_project_explicit_background_preserves_domain_execution(monkeypatch, tmp_path):
     runtime_roots = [str(tmp_path / 'runtime')]
     task = {'id': 'task-bg-project', 'convId': 'conv-bg-project', '_userId': 7,
@@ -112,9 +145,11 @@ def test_project_explicit_background_preserves_domain_execution(monkeypatch, tmp
     proxy = {'id': 'task-bg-project', 'convId': 'conv-bg-project', '_userId': 7}
 
     runtime_roots.append(str(tmp_path / 'later-root'))
+    runner_results = []
     exec_ctx = {'command_id': 'bg-project', 'wrapped_command': None,
                 'note_spawn': lambda *a: None,
-                'build_result': lambda aborted=False: 'record result'}
+                'build_result': lambda aborted=False, runner_result='': (
+                    runner_results.append(runner_result) or 'record result')}
     assert captured['execute'](proxy, exec_ctx) == 'domain result'
     assert domain.call_args.kwargs['task'] is proxy
 
@@ -128,6 +163,9 @@ def test_project_explicit_background_preserves_domain_execution(monkeypatch, tmp
     # rebuilt from the record files instead of the wrapper's (empty) output.
     wrapped_ctx = dict(exec_ctx, wrapped_command='( echo test\n) > /r/out')
     assert captured['execute'](proxy, wrapped_ctx) == 'record result'
+    # The runner's own result travels with it: when the wrapper never recorded
+    # an exit status, it is the only evidence of what the shell reported.
+    assert runner_results == ['domain result']
     assert domain.call_args.args[1]['command'] == '( echo test\n) > /r/out'
     from lib.project_mod.tool_admission import RecordedCommandSource
     assert domain.call_args.kwargs['recorded_command_source'] == RecordedCommandSource(
@@ -138,6 +176,38 @@ def test_project_explicit_background_preserves_domain_execution(monkeypatch, tmp
     closure_values = [cell.cell_contents for cell in captured['execute'].__closure__]
     assert all(value is not task and value is not entry for value in closure_values)
     assert finalized.call_args.args[3][0]['exitCode'] == 'background'
+
+
+def test_project_explicit_background_binds_the_execution_source(monkeypatch, tmp_path):
+    from lib.project_mod.run_command import command_execution_source
+    from lib.project_mod.tool_admission import RecordedCommandSource
+
+    captured = {}
+    domain = Mock(return_value='domain result')
+
+    def start(**kwargs):
+        captured.update(kwargs)
+        return 'bg-project'
+
+    monkeypatch.setattr(background_commands, 'start_background_command', start)
+    monkeypatch.setattr(project, '_finalize_tool_round', Mock())
+    monkeypatch.setattr('lib.project_mod.execute_tool', domain)
+    original = 'git log --oneline -3 && python3 -m pytest -q'
+    task = {'id': 'task-bg-git', 'convId': 'conv', '_userId': 7, 'config': {}}
+    result = project._handle_project_tool(
+        task, {}, 'run_command', 'tc', {'command': original, 'background': True},
+        1, {'toolName': 'run_command', 'toolCallId': 'tc'}, {}, str(tmp_path), True)
+    executed = command_execution_source(original)
+    assert executed != original
+    assert captured['command'] == executed  # the durable wrapper is built from it
+    assert f'$ {original}' in result[1]  # the model still sees its own command
+    wrapped = f'( {executed}\n) > /r/out'
+    captured['execute']({'id': 'task-bg-git'}, {
+        'command_id': 'bg-project', 'wrapped_command': wrapped,
+        'note_spawn': lambda *a: None, 'build_result': lambda aborted=False: 'record'})
+    assert domain.call_args.args[1]['command'] == wrapped
+    assert domain.call_args.kwargs['recorded_command_source'] == RecordedCommandSource(
+        executed, wrapped)
 
 
 def test_remote_explicit_background_is_not_silently_ignored(monkeypatch):

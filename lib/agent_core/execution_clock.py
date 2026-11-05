@@ -31,6 +31,12 @@ class ExecutionClock:
         return self.origin_at_ms + max(
             0, (time.monotonic_ns() - self.origin_monotonic_ns) // 1_000_000)
 
+    def at_monotonic(self, monotonic_seconds):
+        """Project an instant captured earlier with ``time.monotonic()``."""
+        return self.origin_at_ms + max(
+            0, (int(monotonic_seconds * 1_000_000_000) - self.origin_monotonic_ns)
+            // 1_000_000)
+
 
 def task_execution_time_ms(task):
     clock = (task or {}).get('_executionClock')

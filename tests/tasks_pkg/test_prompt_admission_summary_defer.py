@@ -53,7 +53,8 @@ def _patch_common(monkeypatch, admission, context_limit):
     monkeypatch.setattr(
         admission, '_measure',
         lambda messages, tools, task, **kw: {
-            'totalTokens': 128_000, 'toolSchemaTokens': 0})
+            'totalTokens': 128_000, 'messageTokens': 128_000,
+            'toolSchemaTokens': 0})
     import lib.tasks_pkg.compaction._tokens as tokens_mod
     monkeypatch.setattr(
         tokens_mod, '_get_context_limit', lambda task: context_limit)

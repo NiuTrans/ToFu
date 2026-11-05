@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -44,12 +43,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 _PEERS_SRC = os.path.join(JS_DIR, 'project-brain-peers.js')
-
-
-def _node_deps_available():
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -161,8 +154,6 @@ def _run(src):
     raise AssertionError(f'no result line: {proc.stdout}\n{proc.stderr}')
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_nudge_composer_send_and_no_nav():
     out = _run(_PEERS_SRC)
     # Affordance present on a conv card, absent on a sub-agent card.
@@ -190,8 +181,6 @@ def test_nudge_composer_send_and_no_nav():
     assert out['navTotal'] == 0, out
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_card_click_guard_is_load_bearing(tmp_path):
     """NC: revert the card-click composer guard to always-navigate → a click
     inside the composer now fires loadConversation (yanking the operator away

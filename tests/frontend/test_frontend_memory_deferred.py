@@ -13,7 +13,7 @@ pytestmark = pytest.mark.unit
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 INDEX_HTML = ROOT / 'index.html'
-MAIN_ENTRY = ROOT / 'frontend/src/main.ts'
+MAIN_ENTRY = ROOT / 'frontend/src/application.ts'
 MEMORY_ENTRY = ROOT / 'frontend/src/features/memory.ts'
 MEMORY_PANEL = ROOT / 'frontend/src/features/memory/panel.ts'
 MEMORY_PREFS = ROOT / 'frontend/src/features/memory/preferences.ts'

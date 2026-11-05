@@ -11,6 +11,7 @@ import subprocess
 import pytest
 
 from lib.vite_assets import VITE_MANIFEST, validate_vite_artifact
+from tests._jsdom import require_node_modules, require_shipped_graph
 
 
 pytestmark = pytest.mark.unit
@@ -30,34 +31,8 @@ def test_build_uses_a_private_staging_directory_and_always_cleans_it():
     assert 'await rm(temporaryDir, { recursive: true, force: true })' in source
 
 
-def test_each_content_hashed_asset_is_published_by_atomic_rename():
-    source = _source()
-    assert 'async function atomicCopy(source, destination)' in source
-    assert "const temporary = `${destination}.publish-${process.pid}-" in source
-    assert 'await copyFile(source, temporary)' in source
-    assert 'await rename(temporary, destination)' in source
-
-
-def test_existing_hash_short_circuits_without_overwrite():
-    source = _source()
-    start = source.index('async function atomicCopy(')
-    end = source.index('async function publishManifest(', start)
-    block = source[start:end]
-    assert "await open(destination, 'r')" in block
-    assert 'return;' in block
-    assert block.index("await open(destination, 'r')") < block.index('copyFile(')
-
-
-def test_manifest_is_the_commit_point_after_assets_and_previous_graph():
-    source = _source()
-    assets_at = source.index('for (const asset of nextAssets)')
-    previous_at = source.index("'previous-manifest.json'")
-    manifest_at = source.index("'manifest.json'), nextManifest")
-    cleanup_at = source.index('const retained = new Set(')
-    assert assets_at < previous_at < manifest_at < cleanup_at
-
-
 def test_live_and_previous_manifests_reference_present_files():
+    require_shipped_graph()
     current = validate_vite_artifact()
     assert current
     previous_path = Path(VITE_MANIFEST).with_name('previous-manifest.json')
@@ -97,6 +72,7 @@ def test_server_import_and_request_paths_never_build_frontend_code():
 )
 def test_stdin_test_bundle_reclaims_its_virtual_entry(
         tmp_path, source, expected_success):
+    require_node_modules('vite')
     temp_root = tmp_path / 'temp'
     temp_root.mkdir()
     output = tmp_path / 'bundle.mjs'

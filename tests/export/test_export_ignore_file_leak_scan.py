@@ -42,7 +42,7 @@ pytest.importorskip('export', reason='export.py is not shipped in opensource bui
 pytestmark = pytest.mark.unit
 
 # Fragment-assembled internal markers (never contiguous literals in-file).
-_INTERNAL_HOST = 'secret-host.' + 'sankuai' + '.com'
+_INTERNAL_HOST = 'secret-host.' + 'example-corp' + '.com'
 _MNT = '/mnt/' + 'dolphin' + 'fs'
 
 
@@ -71,7 +71,7 @@ class IgnoreFileLeakScanTest(unittest.TestCase):
         import re as _re
         with tempfile.TemporaryDirectory() as tmp:
             root = self._make_tree(tmp)
-            pat = _re.escape('.' + 'sankuai' + '.com')
+            pat = _re.escape('.' + 'example-corp' + '.com')
             hits = _rg_files_with_matches(root, [pat])
         self.assertIn('section_source.js', hits,
                       'control: ordinary sources are scanned')
@@ -94,31 +94,32 @@ class IgnoreFileLeakScanTest(unittest.TestCase):
 
 
 class InternalListsRedactionTest(unittest.TestCase):
-    """Internal exports ship export_pkg/ (colleagues re-export), but
-    _lists.py carries the exporter's own personal keys in
-    _INTERNAL_EXCLUDED_API_KEYS — the very literals that list exists to
-    keep OUT of shared trees.  The dest copy must be redacted; personal
-    mode (self-use backup) keeps everything."""
+    """Internal exports ship export_pkg/ (colleagues re-export), and the
+    sanitizer's own scrub patterns hold the operator's personal key
+    literals so the opensource pass can recognise them. Those literals must
+    be redacted from the DEST copy of the toolchain; personal mode (self-use
+    backup) keeps everything. Provider keys themselves are all carried —
+    owner decision 2026-11-01."""
 
     def _make_tree(self, tmp: str) -> Path:
-        from export_pkg._lists import _INTERNAL_EXCLUDED_API_KEYS
+        from export_pkg._sanitize import _personal_api_key_literals
         root = Path(tmp)
         pkg = root / 'export_pkg'
         pkg.mkdir()
-        key = sorted(_INTERNAL_EXCLUDED_API_KEYS)[0]
+        key = sorted(_personal_api_key_literals())[0]
         (pkg / '_lists.py').write_text(
-            "_INTERNAL_EXCLUDED_API_KEYS = frozenset({\n    '" + key + "',\n})\n",
+            "_PERSONAL_SCRUB_LITERALS = frozenset({\n    '" + key + "',\n})\n",
             encoding='utf-8')
         return root
 
     def test_internal_redacts_key_literals(self):
         from export import _post_copy_sanitize
-        from export_pkg._lists import _INTERNAL_EXCLUDED_API_KEYS
+        from export_pkg._sanitize import _personal_api_key_literals
         with tempfile.TemporaryDirectory() as tmp:
             root = self._make_tree(tmp)
             result = _post_copy_sanitize(root, 'internal')
             out = (root / 'export_pkg' / '_lists.py').read_text(encoding='utf-8')
-            for key in _INTERNAL_EXCLUDED_API_KEYS:
+            for key in _personal_api_key_literals():
                 self.assertNotIn(key, out)
             self.assertIn('<redacted-personal-key>', out)
             self.assertGreaterEqual(result['sanitized'], 1)
@@ -129,12 +130,12 @@ class InternalListsRedactionTest(unittest.TestCase):
 
     def test_personal_keeps_literals(self):
         from export import _post_copy_sanitize
-        from export_pkg._lists import _INTERNAL_EXCLUDED_API_KEYS
+        from export_pkg._sanitize import _personal_api_key_literals
         with tempfile.TemporaryDirectory() as tmp:
             root = self._make_tree(tmp)
             _post_copy_sanitize(root, 'personal')
             out = (root / 'export_pkg' / '_lists.py').read_text(encoding='utf-8')
-            self.assertIn(sorted(_INTERNAL_EXCLUDED_API_KEYS)[0], out)
+            self.assertIn(sorted(_personal_api_key_literals())[0], out)
 
 
 if __name__ == '__main__':

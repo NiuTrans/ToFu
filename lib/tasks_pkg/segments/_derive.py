@@ -68,9 +68,10 @@ def _rounds_view_from_segments(segments: list[dict[str, Any]]) -> list[dict[str,
     than a `derive_tool_rounds` tautology: it reads `tool_use.id/name/input/
     result`, pairs each batch's `deliverable:false` text segment as
     `assistantContent` and its `thinking` segment (+signature) — exactly the
-    fields `_reconstruct_tool_call_messages` / `inject_tool_history` need. The
-    ONLY field not present in a thin (persisted) segment is Gemini's
-    `extraContent`; it is pulled from the rehydrated `_round` mirror when
+    fields `_reconstruct_tool_call_messages` / `inject_tool_history` need.
+    Native replay sidecars (`extraContent`, `_responsesItems`, and
+    `_anthropicContentBlocks`) are not present in a thin (persisted) segment;
+    they come from its occurrence-owning rehydrated `_round` mirror when
     present (so callers rehydrate first).
 
     Batch prose is attached to the FIRST tool_use of each llmRound, matching
@@ -154,6 +155,8 @@ def _rounds_view_from_segments(segments: list[dict[str, Any]]) -> list[dict[str,
             raw_caller = origin.get('caller')
             r['caller'] = (dict(raw_caller)
                            if isinstance(raw_caller, Mapping) else raw_caller)
+        if isinstance(origin.get('_responsesItems'), (list, tuple)):
+            r['_responsesItems'] = origin['_responsesItems']
         if isinstance(origin.get('_anthropicContentBlocks'), list):
             r['_anthropicContentBlocks'] = origin['_anthropicContentBlocks']
         rounds.append(r)

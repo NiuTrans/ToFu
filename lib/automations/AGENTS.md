@@ -14,7 +14,10 @@ step transitions. Start at `docs/modules/scheduling_ops.md` and the executable
   proves the existing queue's live lease rather than adding a timer authority.
   `clock.py` selects UTC slots and returns canonical suspension. `runtime.py`
   installs clock/event/run handlers for worker/all roles; `worker_service.py`
-  owns lazy launch-probed concurrency and shutdown before storage closure.
+  owns demand-driven claims (the worker count is an idle hint, never a cap)
+  and shutdown before storage closure. Claims are event-driven: a read-only
+  `worker_job.claim_horizon` precedes every exclusive claim, and a new producer
+  of claimable jobs must be listed in `claimWakeOperations`; never add an idle poll.
   `contracts/automation_runtime_v1.json` owns timings; no per-rule resident timer.
   Publication deletes obsolete pure clock transport, retaining accepted runs and
   the latest bounded failure. Generic enqueue rejects reserved automation kinds.

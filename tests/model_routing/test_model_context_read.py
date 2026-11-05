@@ -180,6 +180,64 @@ def test_edit_invalidates_prefix_before_any_cached_text_is_returned(context_driv
     assert read['turns'][0]['projection']['content'] == 'edited request'
 
 
+def test_deferred_input_verdict_rebinds_the_replay_proof(context_driver, monkeypatch):
+    """The worker records the input's translation verdict after the command pinned
+    the proof. Publishing that pinned proof names a history that never existed, so
+    the next turn rebuilds cold; the re-pinned proof lets it restore the prefix."""
+    from lib.storage.model_continuation import ModelContinuationStore
+    from lib.tasks_pkg import model_replay
+    from lib.tasks_pkg.input_translation import SettledInput
+
+    base, _ = seed(context_driver)
+    conv = base['conversation_id']
+
+    class Client:
+        def query(self, operation, payload, **kwargs):
+            return invoke(context_driver, operation, payload)
+
+    store = ModelContinuationStore(client=Client())
+    monkeypatch.setattr(model_replay, 'ModelContinuationStore', lambda: store)
+
+    def append(key, actor, content):
+        invoke(context_driver, 'turn.append_settled', base | {
+            'turn_id': f'{conv}-{key}', 'command_id': uuid.uuid4().hex, 'actor': actor,
+            'projection': {'content': content}}, command=True)
+        return f'{conv}-{key}'
+
+    input_id, target_id = append('u3', 'human', '原文'), append('a3', 'assistant', 'third')
+    command_read = store.read_context(user_id=11, conversation_id=conv, turn_id=target_id)
+    assert command_read['covered'] == 2
+    config = {}
+    model_replay.restore_prefix(command_read['turns'], config, conversation_id=conv,
+                                user_id=11, validated_context=command_read)
+    pinned = config['_modelReplayHistoryProof']
+
+    authored = invoke(context_driver, 'turn.get', base | {'turn_id': input_id})
+    invoke(context_driver, 'turn.projection.update', base | {
+        'turn_id': input_id, 'expected_projection_revision': authored['projectionRevision'],
+        'projection': {'content': 'Translated', 'originalContent': '原文'}}, command=True)
+    settled = invoke(context_driver, 'turn.get', base | {'turn_id': input_id})['projectionRevision']
+    task = {'config': config, 'convId': conv, '_userId': 11, '_turnId': target_id,
+            'messages': [{'role': 'user', 'content': 'Translated'}]}
+
+    model_replay.rebind_history_proof(task, SettledInput(input_id, settled))
+
+    after_verdict = store.read_context(user_id=11, conversation_id=conv, turn_id=target_id)
+    assert config['_modelReplayHistoryProof'] == after_verdict['historyProof'] != pinned
+    terminal = after_verdict['turns'][-1]
+    next_target = (append('u4', 'human', 'next'), append('a4', 'assistant', 'next answer'))[1]
+    covered = {}
+    for name, proof in (('pinned', pinned), ('rebound', config['_modelReplayHistoryProof'])):
+        invoke(context_driver, 'model_continuation.delete', base | {'lane_id': 'main'}, command=True)
+        assert invoke(context_driver, 'model_continuation.put', base | {
+            'lane_id': 'main', 'projection': {
+                'turns': [settled_witness(terminal)], 'historyProof': proof, 'policy': 'test',
+                'messages': [{'role': 'assistant', 'content': 'retained'}]}}, command=True)
+        read = invoke(context_driver, 'turn.context.read', base | {'turn_id': next_target})
+        covered[name] = (read['covered'], read['continuationStatus'])
+    assert covered == {'pinned': (0, 'history_changed'), 'rebound': (6, 'available')}
+
+
 def test_owner_and_malformed_replay_do_not_return_history(context_driver):
     base, _ = seed(context_driver)
     foreign = context_driver.execute('turn.context.read', base | {'turn_id': base['conversation_id'] + '-a2', 'user_id': 12}, None)
@@ -251,7 +309,7 @@ def test_application_restores_prefix_and_reloads_full_history_on_policy_change(c
 
 @pytest.mark.parametrize('proof', [None, [], 'bad', {'version': True, 'count': 0, 'digest': '0' * 64},
     {'version': 1, 'count': True, 'digest': '0' * 64},
-    {'version': 1, 'count': 10000, 'digest': '0' * 64},
+    {'version': 1, 'count': 2**53, 'digest': '0' * 64},
     {'version': 1, 'count': 1, 'digest': 'invalid'}])
 def test_malformed_proof_cannot_replace_a_valid_checkpoint(context_driver, proof):
     base, cached = seed(context_driver)

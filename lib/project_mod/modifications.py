@@ -21,7 +21,9 @@ roots cannot interfere with each other, and concurrent tasks on the
 *read-only* projection of the currently-active primary root for the
 sake of ``get_state()`` / UI badges; nothing writes through them.
 """
+from array import array
 import base64
+import binascii
 from collections import OrderedDict
 import hashlib
 from functools import wraps
@@ -51,6 +53,24 @@ from lib.project_mod.session_lock import locked_session, session_state, after_se
 logger = get_logger(__name__)
 
 
+class FileHistoryFault(RuntimeError):
+    """Undo/redo stopped by a server fault, not by the user's files or history.
+
+    Refusals are the user's answer and are returned as data marked
+    ``refused: True`` (whole results and ``details.failed`` rows). A fault's
+    message is fixed text that is safe to record and display; the cause chain
+    and the server log keep the detail. Not a ``ValueError``, so no boundary
+    can mistake it for a client fault.
+    """
+
+    @staticmethod
+    def reason(error: BaseException) -> str:
+        """Disclosable text for ``error``: a fault's own message, else its type."""
+        if isinstance(error, FileHistoryFault):
+            return str(error)
+        return f'internal error ({type(error).__name__})'
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  Per-session-dir in-memory cache
 # ═══════════════════════════════════════════════════════════════════
@@ -67,18 +87,26 @@ _MODS_CACHE_MAX_SESSION_BYTES = _MODS_CACHE_MAX_BYTES
 _mods_cache: OrderedDict[str, list] = OrderedDict()
 _mods_cache_identity = {}
 _mods_cache_bytes = {}
+# session_dir -> count of publications, extensions and invalidations of its
+# entry. A reader that parsed without journal admission publishes only while
+# the count is unchanged, so its snapshot never replaces a newer writer's entry.
+_mods_cache_generation = {}
+# session_dir -> (journal identity, budget) whose snapshot outweighed the cache
+# budget. Appends only add rows, so a later snapshot of the same index and fold
+# artifact with a longer log outweighs it too and is refused without a walk.
+_mods_cache_oversized = {}
 
 
-def _mods_cache_weight(session_dir, mods, identity):
-    """Conservative resident weight, stopping as soon as admission is impossible.
+def _cache_value_weight(value, limit):
+    """Count a detached value conservatively, stopping above the cache budget.
 
-    Count shared objects repeatedly rather than allocating an unbounded seen-set.
-    Only recursion depth is transient; a shallow primary-view list is reserved
-    even for inactive entries so switching the active project cannot grow memory.
-    This traversal runs under session admission, never the global cache lock.
+    Values are charged at every occurrence. Dict keys are charged once per key
+    object: decoded index rows share their key strings, so charging them per
+    row overstated a 41 MB history as 63 MB. Distinct key objects are bounded
+    by the record schema plus the rows of the bounded append log.
     """
-    limit = min(_MODS_CACHE_MAX_SESSION_BYTES, _MODS_CACHE_MAX_BYTES)
-    size = 512 + sys.getsizeof(mods)  # mapping metadata and primary list slots
+    size = 0
+    charged_keys = set()
 
     def visit(value):
         nonlocal size
@@ -87,7 +115,9 @@ def _mods_cache_weight(session_dir, mods, identity):
             return
         if isinstance(value, dict):
             for key, child in value.items():
-                visit(key)
+                if id(key) not in charged_keys:
+                    charged_keys.add(id(key))
+                    size += sys.getsizeof(key)
                 visit(child)
                 if size > limit:
                     break
@@ -98,13 +128,25 @@ def _mods_cache_weight(session_dir, mods, identity):
                     break
 
     try:
-        for value in (session_dir, identity, mods):
-            visit(value)
-            if size > limit:
-                break
+        visit(value)
     except RecursionError:
         # Cyclic/deep data cannot be a useful bounded reconstructible cache.
         return limit + 1
+    return size
+
+
+def _mods_cache_weight(session_dir, mods, identity):
+    """Weigh a cold snapshot outside the global lock, including its primary view.
+
+    Shared values are charged repeatedly, without an unbounded seen-set.
+    Appends charge only their new record and list growth after durable commit.
+    """
+    limit = min(_MODS_CACHE_MAX_SESSION_BYTES, _MODS_CACHE_MAX_BYTES)
+    size = 512 + sys.getsizeof(mods)
+    for value in (session_dir, identity, mods):
+        size += _cache_value_weight(value, limit - size)
+        if size > limit:
+            break
     return size
 
 
@@ -129,6 +171,8 @@ _JOURNAL_INDEX_COMPACT = {}
 _JOURNAL_CHANGE_IDS = {}
 # session_dir -> identity that a full structural validation confirmed.
 _JOURNAL_VALIDATED = {}
+# Session dirs whose payload directory this process swept for crash artifacts.
+_PAYLOADS_SWEPT = set()
 
 
 def _journal_file(session_dir, name):
@@ -456,6 +500,18 @@ def _load_from_disk(session_dir):
     populate the cache, so later mutations cannot overwrite it with [] plus
     a newly appended record.
     """
+    index_records, records = _read_history(session_dir)
+    _remember_index_state(session_dir, index_records, records)
+    return records
+
+
+def _read_history(session_dir, *, tail_bytes=None):
+    """Replay index, fold artifact and log; writes nothing and updates no memo.
+
+    Returns ``(index_records, records)``. ``tail_bytes`` bounds the log read to
+    the length a reader without admission sealed: later bytes are newer
+    appends, never a rewrite of earlier ones.
+    """
     session_file = os.path.join(session_dir, _JOURNAL_INDEX_NAME)
     try:
         size = os.stat(session_file).st_size
@@ -471,9 +527,8 @@ def _load_from_disk(session_dir):
     absorbed = data.get('absorbedFold')
     if absorbed is None or list(absorbed) != list(_fold_identity(session_dir) or ()):
         records = records + _read_tail(session_dir, _JOURNAL_FOLD_NAME)
-    records = records + _read_tail(session_dir, _JOURNAL_TAIL_NAME)
-    _remember_index_state(session_dir, data['modifications'], records)
-    return records
+    records = records + _read_tail(session_dir, _JOURNAL_TAIL_NAME, limit=tail_bytes)
+    return data['modifications'], records
 
 
 def _validate_records(records):
@@ -495,33 +550,39 @@ def _tail_names():
     return (_JOURNAL_FOLD_NAME, _JOURNAL_TAIL_NAME)
 
 
-def _read_tail(session_dir, name):
+def _read_tail(session_dir, name, *, limit=None):
     """Parse one append log; a torn final line is an unacknowledged append.
 
     A commit fsyncs a complete newline-terminated line before acknowledging, so
     only a line WITHOUT its newline can be a crash mid-append: it is dropped
-    here and its prepared intent is reconciled by write recovery.
+    here and its prepared intent is reconciled by write recovery. ``limit``
+    parses only that many leading bytes.
     """
     path = _journal_file(session_dir, name)
     try:
         with open(path, 'rb') as handle:
-            data = handle.read()
+            data = handle.read(limit)
     except FileNotFoundError:
         return []
+    with timing_phase('undo_journal_tail', bytes_read=len(data)):
+        return _log_records(data)
+
+
+def _log_records(data):
+    """Validated records of log bytes; bytes after the last newline are torn."""
     complete = data.rfind(b'\n')
     if complete < 0:
         return []
     records = []
-    with timing_phase('undo_journal_tail', bytes_read=len(data)):
-        for line in data[:complete].split(b'\n'):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except ValueError as error:
-                raise ValueError('Invalid modification journal tail record') from error
-            _validate_records([record])
-            records.append(record)
+    for line in data[:complete].split(b'\n'):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError as error:
+            raise ValueError('Invalid modification journal tail record') from error
+        _validate_records([record])
+        records.append(record)
     return records
 
 
@@ -635,28 +696,139 @@ def _journal_bytes(session_dir):
             total += identity[2]
     return total
 
-def _publish_cache(session_dir, mods, identity):
-    """Admit a confirmed snapshot by bytes/count; never truncate durable history."""
-    weight = _mods_cache_weight(session_dir, mods, identity)
+def _publish_cache(session_dir, mods, identity, *, generation=None):
+    """Admit a confirmed snapshot by bytes/count; never truncate durable history.
+
+    A reader without journal admission passes the entry ``generation`` it
+    sampled before reading; its snapshot is dropped when a writer published,
+    extended or invalidated the entry meanwhile.
+    """
+    limit = min(_MODS_CACHE_MAX_SESSION_BYTES, _MODS_CACHE_MAX_BYTES)
     with _lock:
+        oversized = _extends_oversized(session_dir, identity, limit)
+    weight = limit + 1 if oversized else _mods_cache_weight(session_dir, mods, identity)
+    with _lock:
+        if weight > limit:
+            _mods_cache_oversized[session_dir] = (identity, limit)
+        if generation is not None and _mods_cache_generation.get(session_dir, 0) != generation:
+            return
         _invalidate_cache(session_dir)
-        if weight > min(_MODS_CACHE_MAX_SESSION_BYTES, _MODS_CACHE_MAX_BYTES):
+        if weight > limit:
             return
         _mods_cache[session_dir] = mods
         _mods_cache_identity[session_dir] = identity
         _mods_cache_bytes[session_dir] = weight
         _mods_cache.move_to_end(session_dir)
-        total = sum(_mods_cache_bytes[key] for key in _mods_cache)
-        while len(_mods_cache) > _MODS_CACHE_CAPACITY or total > _MODS_CACHE_MAX_BYTES:
-            evicted_dir = next(iter(_mods_cache))
-            total -= _mods_cache_bytes[evicted_dir]
-            _invalidate_cache(evicted_dir)
+        _evict_cache_over_budget()
         if _state.get('sessionId') == session_dir:
             _state['modifications'] = list(mods)
 
 
+def _extends_oversized(session_dir, identity, limit):
+    """Whether ``identity`` only appended to a snapshot already over ``limit``.
+
+    Caller holds ``_lock``. The same index and fold artifact plus a log with the
+    same inode and at least the remembered length hold every remembered row.
+    """
+    memo = _mods_cache_oversized.get(session_dir)
+    if memo is None or memo[1] != limit:
+        return False
+    (index, tail, fold), (index_now, tail_now, fold_now) = memo[0], identity
+    return index == index_now and fold == fold_now and (
+        tail is None or (tail_now is not None and tail_now[:2] == tail[:2]
+                         and tail_now[2] >= tail[2]))
+
+
+def _evict_cache_over_budget():
+    """Apply the existing shared LRU budget; caller holds the cache lock."""
+    total = sum(_mods_cache_bytes[key] for key in _mods_cache)
+    while len(_mods_cache) > _MODS_CACHE_CAPACITY or total > _MODS_CACHE_MAX_BYTES:
+        evicted_dir = next(iter(_mods_cache))
+        total -= _mods_cache_bytes[evicted_dir]
+        _invalidate_cache(evicted_dir)
+
+
+def _extend_cache_after_append(session_dir, record, previous_identity, written_bytes):
+    """Extend a still-admitted prefix only after its append is durable.
+
+    Session admission excludes same-project writers; readers without it never
+    publish over the generation this advances. A prefix older than this commit
+    (appends by another process, or a reader's earlier snapshot) catches up by
+    parsing only the log lines after its own offset instead of being dropped.
+    Another project's LRU eviction may still win while the append or its small
+    weight walk runs; such an entry stays evicted. Neither the historical rows
+    nor their payloads are traversed here, and the shared cache lock never
+    covers filesystem I/O.
+    """
+    identity = _journal_identity(session_dir)
+    previous_tail, current_tail = previous_identity[1], identity[1]
+    prefix_unchanged = (identity[0] == previous_identity[0]
+                        and identity[2] == previous_identity[2])
+    own_append_only = (current_tail is not None
+                       and current_tail[2] - (previous_tail[2] if previous_tail else 0) == written_bytes
+                       and (previous_tail is None or current_tail[:2] == previous_tail[:2]))
+    if not prefix_unchanged or not own_append_only:
+        # A non-cooperating replacement or repaired torn tail is not proof of
+        # this cached prefix. Leave durable history intact and force validation.
+        _invalidate_cache(session_dir)
+        _JOURNAL_VALIDATED.pop(session_dir, None)
+        return
+    with _lock:
+        cached = _mods_cache.get(session_dir)
+        cached_identity = _mods_cache_identity.get(session_dir)
+    if cached is None:
+        _invalidate_cache(session_dir)
+        return
+    if cached_identity == identity:
+        return  # A reader already published the history including this record.
+    appended = [record]
+    if cached_identity != previous_identity:
+        # A prefix older than this commit (another process's appends, or a
+        # reader's earlier snapshot) catches up from its own log offset.
+        appended = _rows_appended_since(session_dir, cached_identity, identity)
+        if appended is None:
+            _invalidate_cache(session_dir)
+            return
+    limit = min(_MODS_CACHE_MAX_SESSION_BYTES, _MODS_CACHE_MAX_BYTES)
+    increment = sum(_cache_value_weight(row, limit) for row in appended)
+    increment += max(0, _cache_value_weight(identity, limit)
+                     - _cache_value_weight(cached_identity, limit))
+    with _lock:
+        if (_mods_cache.get(session_dir) is not cached
+                or _mods_cache_identity.get(session_dir) != cached_identity):
+            _invalidate_cache(session_dir)
+            return
+        previous_length = len(cached)
+        previous_size = sys.getsizeof(cached)
+        cached.extend(appended)
+        increment += sys.getsizeof(cached) - previous_size
+        # Reserve a standalone list of the new records per append even while
+        # inactive. This conservatively covers future primary-view slots without
+        # walking the prefix; a currently active view also charges its growth.
+        view_growth = sys.getsizeof(list(appended))
+        if _state.get('sessionId') == session_dir:
+            primary = _state['modifications']
+            previous_view_size = sys.getsizeof(primary)
+            if len(primary) == previous_length:
+                primary.extend(appended)
+            else:
+                primary = list(cached)
+                _state['modifications'] = primary
+            view_growth = max(view_growth, sys.getsizeof(primary) - previous_view_size)
+        weight = _mods_cache_bytes[session_dir] + increment + view_growth
+        if weight > limit:
+            _invalidate_cache(session_dir)
+            return
+        _mods_cache_identity[session_dir] = identity
+        _mods_cache_bytes[session_dir] = weight
+        _mods_cache_generation[session_dir] = _mods_cache_generation.get(session_dir, 0) + 1
+        _mods_cache.move_to_end(session_dir)
+        _evict_cache_over_budget()
+
+
 def _invalidate_cache(session_dir):
     with _lock:
+        _mods_cache_generation[session_dir] = _mods_cache_generation.get(session_dir, 0) + 1
         _mods_cache.pop(session_dir, None)
         _mods_cache_identity.pop(session_dir, None)
         _mods_cache_bytes.pop(session_dir, None)
@@ -683,13 +855,351 @@ def _cache_get(session_dir):
         if _journal_identity(session_dir) != identity:
             raise OSError('Modification journal changed while reading')
         _publish_cache(session_dir, mods, identity)
-        try:
-            with timing_phase('undo_orphan_cleanup'):
-                undo_payloads.reclaim_orphans(session_dir, mods,
-                    max_entries=_MODS_CACHE_CAPACITY * 8)
-        except OSError:
-            logger.warning('Undo crash-artifact cleanup deferred; journal remains authoritative')
+        _sweep_crash_artifacts(session_dir, mods)
         return mods
+
+
+def _sweep_crash_artifacts(session_dir, rows, *, crash_evidence=False):
+    """Reclaim payload crash artifacts once per process, or after crash evidence.
+
+    Caller holds admission and passes the complete committed ``rows`` it read
+    under it. Only a commit that crashed or failed leaves an unreferenced pack
+    or stage, so the first admitted complete load in a process sweeps, and
+    write recovery sweeps again whenever it reconciles a crashed writer's
+    intents; later loads and writes never rescan the payload directory.
+    """
+    if session_dir in _PAYLOADS_SWEPT and not crash_evidence:
+        return
+    try:
+        with timing_phase('undo_orphan_cleanup'):
+            undo_payloads.reclaim_orphans(session_dir, rows)
+    except OSError:
+        logger.warning('Undo crash-artifact cleanup deferred; journal remains authoritative')
+        return
+    _PAYLOADS_SWEPT.add(session_dir)
+
+
+def _seal_extended(before, after):
+    """Whether only the append log grew between two journal seals."""
+    if before[:2] != after[:2]:
+        return False
+    tail_before, tail_after = before[2], after[2]
+    return tail_before is None or (
+        tail_after is not None and tail_after[:2] == tail_before[:2]
+        and tail_after[2] >= tail_before[2])
+
+
+def _committed_rows(session_dir):
+    """Committed history read without session admission; it writes nothing.
+
+    Writers only append to the log or replace the index and fold artifact by
+    rename, so reading the index, the artifact and the sealed log prefix while
+    those files keep their identities yields one consistent prefix of history.
+    A read that overlapped a fold, undo or external replacement is repeated;
+    it never waits for or delays a writer. Recovery and crash-artifact cleanup
+    stay with admitted callers. The result may be the shared cache entry, which
+    only grows by appends: callers iterate it and never mutate it.
+    """
+    while True:
+        with _lock:
+            generation = _mods_cache_generation.get(session_dir, 0)
+        identity = _journal_identity(session_dir)
+        with _lock:
+            cached = _mods_cache.get(session_dir)
+            cached_identity = _mods_cache_identity.get(session_dir)
+            if cached is not None and cached_identity == identity:
+                _mods_cache.move_to_end(session_dir)
+                return cached
+            # An entry only grows by appends, so this prefix stays exact.
+            cached_rows = None if cached is None else len(cached)
+        if cached is not None:
+            appended = _rows_appended_since(session_dir, cached_identity, identity)
+            if appended is not None:
+                return cached[:cached_rows] + appended
+        seal = _journal_seal(session_dir)
+        rows = _read_history(session_dir, tail_bytes=seal[2][2] if seal[2] else 0)[1]
+        current = _journal_seal(session_dir)
+        if current == seal and _journal_identity(session_dir) == identity:
+            _publish_cache(session_dir, rows, identity, generation=generation)
+            return rows
+        if _seal_extended(seal, current):
+            return rows
+
+
+def _rows_appended_since(session_dir, before, after):
+    """Records the log gained between journal identities ``before`` and ``after``.
+
+    ``None`` unless that is a pure append: the same index, no fold artifact, and
+    the same log inode grown from a length that ended on a complete line. Log
+    bytes before that length are never rewritten (a torn suffix is only ever cut
+    back to its last newline), so the lines after it are exactly the records
+    committed since; a torn final line is left out as in ``_read_tail``. The
+    result describes the history at ``after`` without parsing the index.
+    """
+    if before[0] != after[0] or before[2] or after[2]:
+        return None
+    previous, current = before[1], after[1]
+    if current is None:
+        return None
+    offset = 0
+    if previous is not None:
+        if current[:2] != previous[:2] or current[2] < previous[2]:
+            return None
+        offset = previous[2]
+    try:
+        handle = open(_journal_file(session_dir, _JOURNAL_TAIL_NAME), 'rb')
+    except FileNotFoundError:
+        return None
+    with handle:
+        metadata = os.fstat(handle.fileno())
+        if (metadata.st_dev, metadata.st_ino) != current[:2]:
+            return None
+        if offset:
+            handle.seek(offset - 1)
+            if handle.read(1) != b'\n':
+                return None
+        data = handle.read(current[2] - offset)
+    with timing_phase('undo_journal_tail', bytes_read=len(data)):
+        return _log_records(data)
+
+
+# session_dir -> _IndexLocator of the exact index file it scanned.
+_INDEX_LOCATORS = {}
+# session_dir -> (index identity, log (dev, ino), complete-line offset, rows):
+# that index's parsed append log, advanced by appended bytes only.
+_LOG_ROWS = {}
+
+
+class _IndexLocator:
+    """Byte ranges of each conversation's rows within one exact index file.
+
+    Two integers per row, so a history that outweighs the cache budget still
+    answers one conversation by decoding only that conversation's rows.
+    """
+
+    __slots__ = ('identity', 'ranges')
+
+    def __init__(self, identity, ranges):
+        self.identity = identity
+        self.ranges = ranges
+
+
+def _stat_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _json_space(text, index):
+    while index < len(text) and text[index] in ' \t\n\r':
+        index += 1
+    return index
+
+
+def _index_row_spans(text):
+    """``(rows, spans)`` of the index envelope's ``modifications`` array."""
+    decoder = json.JSONDecoder()
+    rows = spans = None
+    try:
+        index = _json_space(text, 0)
+        if text[index] != '{':
+            raise ValueError('Invalid modification journal envelope')
+        index = _json_space(text, index + 1)
+        while text[index] != '}':
+            key, index = decoder.raw_decode(text, index)
+            index = _json_space(text, index)
+            if text[index] != ':':
+                raise ValueError('Invalid modification journal envelope')
+            index = _json_space(text, index + 1)
+            if key != 'modifications':
+                _, index = decoder.raw_decode(text, index)
+            elif text[index] != '[':
+                raise ValueError('Invalid modification journal envelope')
+            else:
+                rows, spans = [], []
+                index = _json_space(text, index + 1)
+                while text[index] != ']':
+                    start = index
+                    row, index = decoder.raw_decode(text, index)
+                    rows.append(row)
+                    spans.append((start, index))
+                    index = _json_space(text, index)
+                    if text[index] == ',':
+                        index = _json_space(text, index + 1)
+                        if text[index] == ']':
+                            raise ValueError('Invalid modification journal envelope')
+                    elif text[index] != ']':
+                        raise ValueError('Invalid modification journal envelope')
+                index += 1
+            index = _json_space(text, index)
+            if text[index] == ',':
+                index = _json_space(text, index + 1)
+            elif text[index] != '}':
+                raise ValueError('Invalid modification journal envelope')
+        if rows is None or _json_space(text, index + 1) != len(text):
+            raise ValueError('Invalid modification journal envelope')
+    except IndexError as error:
+        raise ValueError('Invalid modification journal envelope') from error
+    return rows, spans
+
+
+def _locate_index(session_dir):
+    """Scan the index once, validating every row; ``None`` without an ASCII index.
+
+    The compact writer emits ASCII, so character and byte offsets agree; an
+    older non-ASCII index keeps being read whole until its next fold.
+    """
+    try:
+        with open(_journal_file(session_dir, _JOURNAL_INDEX_NAME), 'rb') as handle:
+            info = os.fstat(handle.fileno())
+            data = handle.read()
+    except FileNotFoundError:
+        return None
+    if not data.isascii():
+        return None
+    with timing_phase('undo_index_read', bytes_read=len(data)):
+        rows, spans = _index_row_spans(data.decode('ascii'))
+        _validate_records(rows)
+    ranges = {}
+    for (start, end), row in zip(spans, rows):
+        ranges.setdefault(row.get('convId'), array('q')).extend((start, end))
+    return _IndexLocator(_stat_identity(info), ranges)
+
+
+def _located_rows(session_dir, locator, conv_id):
+    """One conversation's index rows, or ``None`` once that index was replaced.
+
+    Rows that sit next to each other are read with one ``pread``.
+    """
+    ranges = locator.ranges.get(conv_id, ())
+    try:
+        descriptor = os.open(_journal_file(session_dir, _JOURNAL_INDEX_NAME), os.O_RDONLY)
+    except FileNotFoundError:
+        return None
+    rows = []
+    try:
+        if _stat_identity(os.fstat(descriptor)) != locator.identity:
+            return None
+        position = 0
+        while position < len(ranges):
+            run_start, run_end, last = ranges[position], ranges[position + 1], position + 2
+            while last < len(ranges) and ranges[last] - run_end <= 1:
+                run_end, last = ranges[last + 1], last + 2
+            data = os.pread(descriptor, run_end - run_start, run_start)
+            if len(data) != run_end - run_start:
+                raise OSError('Short modification journal index read')
+            for item in range(position, last, 2):
+                rows.append(json.loads(data[ranges[item] - run_start:ranges[item + 1] - run_start]))
+            position = last
+    finally:
+        os.close(descriptor)
+    return rows
+
+
+def _current_log_rows(session_dir, index_identity, log_identity):
+    """Parsed rows of the index's append log up to ``log_identity``'s length.
+
+    Only appended bytes are parsed: the retained offset always ends on a
+    complete line, and a torn suffix is only ever cut back to its last newline.
+    ``None`` when the log at the path is no longer that inode.
+    """
+    if log_identity is None:
+        return []
+    with _lock:
+        entry = _LOG_ROWS.get(session_dir)
+    if (entry is None or entry[0] != index_identity or entry[1] != log_identity[:2]
+            or entry[2] > log_identity[2]):
+        entry = (index_identity, log_identity[:2], 0, [])
+    offset, rows = entry[2], entry[3]
+    try:
+        handle = open(_journal_file(session_dir, _JOURNAL_TAIL_NAME), 'rb')
+    except FileNotFoundError:
+        return None
+    with handle:
+        if tuple(_stat_identity(os.fstat(handle.fileno()))[:2]) != log_identity[:2]:
+            return None
+        handle.seek(offset)
+        data = handle.read(log_identity[2] - offset)
+    complete = data.rfind(b'\n') + 1
+    if complete:
+        with timing_phase('undo_journal_tail', bytes_read=len(data)):
+            rows = rows + _log_records(data[:complete])
+        with _lock:
+            _LOG_ROWS[session_dir] = (index_identity, log_identity[:2], offset + complete, rows)
+    return rows
+
+
+def _conversation_rows(session_dir, conv_id):
+    """One conversation's committed rows without decoding the rest of the history.
+
+    The index is scanned once per exact index identity into an
+    ``_IndexLocator``; later reads decode that conversation's index rows plus
+    the log's appended lines. ``None`` while a fold artifact or a non-ASCII
+    index requires the whole-history read.
+    """
+    while True:
+        identity = _journal_identity(session_dir)
+        if identity[0] is None or identity[2]:
+            return None
+        with _lock:
+            locator = _INDEX_LOCATORS.get(session_dir)
+        if locator is None or locator.identity != identity[0]:
+            locator = _locate_index(session_dir)
+            if locator is None:
+                return None
+            with _lock:
+                _INDEX_LOCATORS[session_dir] = locator
+            if locator.identity != identity[0]:
+                continue
+        log_rows = _current_log_rows(session_dir, identity[0], identity[1])
+        if log_rows is None:
+            continue
+        index_rows = _located_rows(session_dir, locator, conv_id)
+        if index_rows is None:
+            continue
+        return index_rows + [row for row in log_rows if row.get('convId') == conv_id]
+
+
+def _metadata_session(base_path):
+    """``base_path``'s session dir after pending intents are reconciled, or None.
+
+    Pending write intents are reconciled first, as for every history read;
+    only that reconciliation, and only while intent evidence exists, takes the
+    journal admission. Reading the history itself never does, so a projection
+    of a large history cannot hold up the project's writers.
+    """
+    from lib.project_mod.write_recovery import recover_pending_writes
+    session_dir = _get_session_dir(base_path, create=False)
+    if not session_dir:
+        return None
+    recover_pending_writes(base_path)
+    return session_dir if os.path.isdir(session_dir) else None
+
+
+def _metadata_history(base_path):
+    """Committed rows of ``base_path``'s journal for read-only projections."""
+    session_dir = _metadata_session(base_path)
+    return _committed_rows(session_dir) if session_dir else []
+
+
+def _conversation_history(base_path, conv_id):
+    """Committed rows of one conversation for read-only projections.
+
+    A history the cache holds is filtered in memory. One already known to
+    outweigh the cache budget is answered from its located index rows and
+    appended log lines, so its size never makes each read a full decode.
+    """
+    session_dir = _metadata_session(base_path)
+    if not session_dir:
+        return []
+    identity = _journal_identity(session_dir)
+    limit = min(_MODS_CACHE_MAX_SESSION_BYTES, _MODS_CACHE_MAX_BYTES)
+    with _lock:
+        oversized = (session_dir not in _mods_cache
+                     and _extends_oversized(session_dir, identity, limit))
+    if oversized:
+        rows = _conversation_rows(session_dir, conv_id)
+        if rows is not None:
+            return rows
+    return [row for row in _committed_rows(session_dir) if row.get('convId') == conv_id]
 
 
 def modification_cache_snapshot() -> dict[str, int]:
@@ -702,7 +1212,7 @@ def modification_cache_snapshot() -> dict[str, int]:
         }
 
 
-def _flush_to_disk(session_dir, mods):
+def _flush_to_disk(session_dir, mods, *, loaded=()):
     """Fold ``mods`` into the index and retire the append log.
 
     This is the only path that rewrites the whole journal: it runs for a large
@@ -713,7 +1223,8 @@ def _flush_to_disk(session_dir, mods):
     before publication replays the artifact; a crash after it replays nothing.
 
     Removes every component when the list is empty. Caller holds session
-    admission.
+    admission. ``loaded`` is the history the caller read before mutating it,
+    so records it removed are not taken back from a leftover fold artifact.
     """
     session_file = _journal_file(session_dir, _JOURNAL_INDEX_NAME)
     tail = _journal_file(session_dir, _JOURNAL_TAIL_NAME)
@@ -723,7 +1234,8 @@ def _flush_to_disk(session_dir, mods):
             if os.path.exists(fold):
                 # An earlier fold left an artifact behind: keep any record this
                 # caller's snapshot does not already carry.
-                known = {row.get('changeId') for row in mods if row.get('changeId')}
+                known = {row.get('changeId') for row in (*mods, *loaded)
+                         if row.get('changeId')}
                 mods.extend(row for row in _read_tail(session_dir, _JOURNAL_FOLD_NAME)
                             if row.get('changeId') not in known)
             with timing_phase('undo_content_compaction', records=len(mods)):
@@ -819,7 +1331,7 @@ def _locked_rmw(session_dir, mutator):
         ret = mutator(mods)
         if isinstance(ret, list):
             mods = ret
-        _flush_to_disk(session_dir, mods)
+        _flush_to_disk(session_dir, mods, loaded=previous)
         _publish_cache(session_dir, mods, _journal_identity(session_dir))
         try:
             undo_payloads.reclaim_removed(session_dir, previous, mods)
@@ -868,6 +1380,7 @@ def _assert_journal_ready(session_dir):
     _JOURNAL_CHANGE_IDS[session_dir] = (
         index_identity, {row.get('changeId') for row in mods if row.get('changeId')})
     _JOURNAL_VALIDATED[session_dir] = (index_identity, fold_identity, tail[2] if tail else 0)
+    _sweep_crash_artifacts(session_dir, mods)
     return mods
 
 
@@ -943,6 +1456,10 @@ def _commit_record(session_dir, record, change_id=None):
                 buffer_budget=_MODS_CACHE_MAX_SESSION_BYTES)[0]
         payload = _tail_line(compact)
         if _index_is_compact(session_dir) and _tail_appendable(session_dir, compact, payload):
+            with _lock:
+                has_cached_prefix = session_dir in _mods_cache
+            previous_identity = (_journal_identity(session_dir)
+                                 if validated is None and has_cached_prefix else None)
             with timing_phase('undo_index_write', records=0) as measurement:
                 written = _append_to_tail(session_dir, compact)
                 if measurement is not None:
@@ -958,6 +1475,8 @@ def _commit_record(session_dir, record, change_id=None):
                 # A caller that already materialized the projection keeps it warm.
                 validated.append(compact)
                 _publish_cache(session_dir, validated, _journal_identity(session_dir))
+            elif previous_identity is not None:
+                _extend_cache_after_append(session_dir, compact, previous_identity, written)
             else:
                 _invalidate_cache(session_dir)
         else:
@@ -1026,7 +1545,10 @@ def _decode_original(mod):
     """
     original = mod.get('originalContent')
     if mod.get('originalContentB64') and isinstance(original, str):
-        return base64.b64decode(original)
+        try:
+            return base64.b64decode(original)
+        except binascii.Error as error:
+            raise FileHistoryFault('Recorded original content is corrupt') from error
     return original
 
 
@@ -1227,9 +1749,21 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
     return True
 
 
-@_with_recovered_session
 def get_modifications(base_path, conv_id=None, *, include_content=True):
-    """Get list of pending modifications for undo, optionally filtered by conv_id."""
+    """Get list of pending modifications for undo, optionally filtered by conv_id.
+
+    Metadata rows (``include_content=False``) never take the journal admission;
+    hydrated contents keep it from selection through their exact byte reads.
+    """
+    if not include_content:
+        rows = (_conversation_history(base_path, conv_id) if conv_id
+                else _metadata_history(base_path))
+        return [dict(mod) for mod in rows]
+    return _hydrated_modifications(base_path, conv_id)
+
+
+@_with_recovered_session
+def _hydrated_modifications(base_path, conv_id):
     session_dir = _get_session_dir(base_path)
     if not session_dir:
         return []
@@ -1239,57 +1773,48 @@ def get_modifications(base_path, conv_id=None, *, include_content=True):
         mods = list(_cache_get(session_dir))
         if conv_id:
             mods = [m for m in mods if m.get('convId') == conv_id]
-        if not include_content:
-            return [dict(mod) for mod in mods]
         return [undo_payloads.hydrate_record(session_dir, mod) for mod in mods]
 
 
-@_with_recovered_session
 def get_task_modification_paths(base_path, task_id, *, conv_id=None, limit,
                                 exclude=()):
     """Project at most ``limit`` distinct exact-task file addresses.
 
-    Recovery and journal identity validation are the same as ordinary history
-    reads. Borrow the validated cache under session admission, without copying
-    historical rows or hydrating undo contents. A cold cache still loads the
-    complete authoritative index; this is a bounded projection, not a new index.
-    Returned dictionaries contain only immutable string values, never cache rows.
+    Pending write intents are reconciled before selection, as for every history
+    read; the history itself is read without journal admission. A warm cache is
+    borrowed without copying historical rows or hydrating undo contents. A cold
+    cache still loads the complete authoritative index; this is a bounded
+    projection, not a new index. Returned dictionaries contain only immutable
+    string values, never cache rows.
     """
     if type(limit) is not int or limit < 0:
         raise ValueError('Modification path limit must be a nonnegative integer')
     if not task_id or not limit:
         return []
-    session_dir = _get_session_dir(base_path)
-    if not session_dir:
-        return []
     seen = set(exclude)
     result = []
-    with locked_session(session_dir):
-        for row in _cache_get(session_dir):
-            if row.get('taskId') != task_id or (conv_id and row.get('convId') != conv_id):
-                continue
-            path = row.get('path')
-            root = row.get('basePath') or base_path
-            if not isinstance(path, str) or not path or str(root).startswith('remote:'):
-                continue
-            address = (path, str(root))
-            if address in seen:
-                continue
-            seen.add(address)
-            result.append({'path': path, 'rootPath': str(root)})
-            if len(result) >= limit:
-                break
+    rows = (_conversation_history(base_path, conv_id) if conv_id
+            else _metadata_history(base_path))
+    for row in rows:
+        if row.get('taskId') != task_id:
+            continue
+        path = row.get('path')
+        root = row.get('basePath') or base_path
+        if not isinstance(path, str) or not path or str(root).startswith('remote:'):
+            continue
+        address = (path, str(root))
+        if address in seen:
+            continue
+        seen.add(address)
+        result.append({'path': path, 'rootPath': str(root)})
+        if len(result) >= limit:
+            break
     return result
 
 
-@_with_recovered_session
 def get_conv_ids_with_modifications(base_path):
     """Get list of conversation IDs that have pending modifications."""
-    session_dir = _get_session_dir(base_path)
-    if not session_dir:
-        return []
-    mods = list(_cache_get(session_dir))
-    return list({m.get('convId') for m in mods if m.get('convId')})
+    return list({m.get('convId') for m in _metadata_history(base_path) if m.get('convId')})
 
 
 def _resolve_undo_target(base_path, modification):
@@ -1328,7 +1853,13 @@ def _resolve_undo_target(base_path, modification):
 
 
 def _undo_modifications_list(base_path, modifications, *, completed_change_ids=None):
-    """Internal: undo a list of modifications in reverse order. Returns (undone, failed)."""
+    """Internal: undo a list of modifications in reverse order. Returns (undone, failed).
+
+    Each failed row is ``{path, reason, refused}``. ``refused: True`` is the
+    engine's authored answer: missing or stale evidence, or a target that the
+    path validator or the anchored undo filesystem (``ValueError``) refuses.
+    Any other exception is a fault whose reason discloses only its type.
+    """
     from lib.project_mod import undo_filesystem
     undone = []
     failed = []
@@ -1346,6 +1877,9 @@ def _undo_modifications_list(base_path, modifications, *, completed_change_ids=N
         failed.append(entry)
         blocked_paths.add(os.path.abspath(target))
 
+    def refuse(reason):
+        mark_failed({'path': path, 'reason': reason, 'refused': True})
+
     # Optional file-history short-circuit: if the mod carries a backup
     # version we can restore deterministically from the backup blob.
     try:
@@ -1360,28 +1894,34 @@ def _undo_modifications_list(base_path, modifications, *, completed_change_ids=N
         path = mod['path']
         try:
             target = _resolve_undo_target(base_path, mod)
-        except (OSError, TypeError, ValueError) as exc:
-            failed.append({'path': path, 'reason': str(exc)})
+        except ValueError as exc:
+            failed.append({'path': path, 'reason': str(exc), 'refused': True})
+            continue
+        except (OSError, TypeError) as exc:
+            logger.error('Undo target check failed for %s: %s', path, exc, exc_info=True)
+            failed.append({'path': path, 'reason': FileHistoryFault.reason(exc), 'refused': False})
             continue
         if os.path.abspath(target) in blocked_paths:
-            mark_failed({'path': path, 'reason': 'A later change to this path could not be undone'})
+            refuse('A later change to this path could not be undone')
             continue
         try:
             mod = undo_payloads.hydrate_record(_get_session_dir(base_path), mod)
-        except (OSError, ValueError, TypeError):
-            mark_failed({'path': path, 'reason': 'Undo payload is unavailable or corrupt'})
+        except (OSError, ValueError, TypeError) as exc:
+            logger.error('Undo payload for %s is unavailable: %s', path, exc, exc_info=True)
+            mark_failed({'path': path, 'reason': 'Undo payload is unavailable or corrupt',
+                         'refused': False})
             continue
         post_image = mod.get('postImage')
         legacy_patch = post_image is None and mod_type == 'apply_diff' and 'reversePatch' in mod
         if not legacy_patch:
             if (not isinstance(post_image, dict) or post_image.get('kind') not in ('content', 'absent')
                     or not undo_filesystem.valid_postimage(post_image)):
-                mark_failed({'path': path, 'reason': 'Undo has no verified post-image evidence'})
+                refuse('Undo has no verified post-image evidence')
                 continue
             current_image = undo_filesystem.fingerprint_file(
                 base_path, target, byte_budget=fingerprint_byte_budget)
             if current_image != post_image:
-                mark_failed({'path': path, 'reason': 'File changed after the recorded modification'})
+                refuse('File changed after the recorded modification')
                 continue
         # Legacy reverse patches may match their exact replacement against a
         # bounded live read, but must never bypass that check via a full blob.
@@ -1414,7 +1954,7 @@ def _undo_modifications_list(base_path, modifications, *, completed_change_ids=N
                         mark_undone({'type': 'restore', 'path': path})
                         logger.info('Undo: restored original content for %s', path)
                     else:
-                        mark_failed({'path': path, 'reason': 'No original content available'})
+                        refuse('No original content available')
             elif mod_type == 'apply_diff':
                 if 'reversePatch' in mod and os.path.exists(target):
                     content = undo_filesystem.read_text(base_path, target)
@@ -1422,10 +1962,7 @@ def _undo_modifications_list(base_path, modifications, *, completed_change_ids=N
                     # rev['search'] = the text currently in file (the replacement)
                     # rev['replace'] = the original text we want to restore
                     if rev['search'] not in content:
-                        mark_failed({
-                            'path': path,
-                            'reason': 'Reverse patch target no longer matches',
-                        })
+                        refuse('Reverse patch target no longer matches')
                         continue
                     new_content = content.replace(rev['search'], rev['replace'], 1)
                     undo_filesystem.write_file(base_path, target, new_content,
@@ -1434,10 +1971,10 @@ def _undo_modifications_list(base_path, modifications, *, completed_change_ids=N
                     mark_undone({'type': 'reverse_patch', 'path': path})
                     logger.info('Undo: reversed patch for %s', path)
                 else:
-                    mark_failed({'path': path, 'reason': 'No reverse patch available'})
+                    refuse('No reverse patch available')
             elif mod_type == 'run_command':
                 if not mod.get('existed', True) and mod.get('action') != 'created':
-                    mark_failed({'path': path, 'reason': 'Legacy command record does not prove file creation'})
+                    refuse('Legacy command record does not prove file creation')
                     continue
                 if not mod.get('existed', True):
                     # File was CREATED by the command → delete it
@@ -1456,9 +1993,14 @@ def _undo_modifications_list(base_path, modifications, *, completed_change_ids=N
                         mark_undone({'type': 'restore', 'path': path})
                         logger.info('Undo run_command: restored %s', path)
                     else:
-                        mark_failed({'path': path, 'reason': 'No original content saved for run_command change'})
+                        refuse('No original content saved for run_command change')
+        except ValueError as e:
+            # The anchored undo filesystem refuses a target that changed or
+            # became unsafe after the evidence check, with an authored reason.
+            refuse(str(e))
+            logger.info('Undo refused for %s: %s', path, e)
         except Exception as e:
-            mark_failed({'path': path, 'reason': str(e)})
+            mark_failed({'path': path, 'reason': FileHistoryFault.reason(e), 'refused': False})
             logger.error('Undo failed for %s: %s', path, e, exc_info=True)
     return undone, failed
 
@@ -1468,7 +2010,7 @@ def undo_conv_modifications(base_path, conv_id):
     """Undo modifications for a specific conversation (对话粒度回撤)."""
     session_dir = _get_session_dir(base_path)
     if not session_dir:
-        return {'ok': False, 'error': 'No session found'}
+        return {'ok': False, 'refused': True, 'error': 'No session found'}
 
     conv_mods = [m for m in _cache_get(session_dir) if m.get('convId') == conv_id]
 
@@ -1503,7 +2045,7 @@ def undo_task_modifications(base_path, task_id):
     """
     session_dir = _get_session_dir(base_path)
     if not session_dir:
-        return {'ok': False, 'error': 'No session found'}
+        return {'ok': False, 'refused': True, 'error': 'No session found'}
 
     task_mods = [m for m in _cache_get(session_dir) if m.get('taskId') == task_id]
 
@@ -1534,30 +2076,40 @@ def redo_task_modifications(base_path, task_id):
 
     Unlike undo_*, this does NOT replay individual modification records —
     instead it locates the snapshot tagged with ``task_id`` and calls
-    :func:`lib.file_history.restore_from` to re-apply the full set of
-    file versions with per-file anchored mutations. Returns the same shape as
+    :func:`lib.file_history.restore_from` to re-apply the file versions that
+    round changed with per-file anchored mutations. Returns the same shape as
     :func:`undo_task_modifications` so the frontend can reuse display code.
+
+    A refusal is ``ok: False`` with ``refused: True``; per-file failures keep
+    their typed ``details.failed`` rows. A fault that leaves no per-file row
+    raises :class:`FileHistoryFault`.
     """
     try:
         from lib import file_history as fh
     except Exception as e:
         logger.warning('[Modifications] redo requires file_history: %s', e)
-        return {'ok': False, 'error': f'file_history unavailable: {e}'}
+        raise FileHistoryFault('Redo is unavailable: file history could not be loaded') from e
     if not fh.is_enabled():
-        return {'ok': False, 'error': 'File-history disabled (TOFU_FILE_HISTORY=0)'}
+        return {'ok': False, 'refused': True,
+                'error': 'File-history disabled (TOFU_FILE_HISTORY=0)'}
     if not task_id:
-        return {'ok': False, 'error': 'taskId is required'}
+        return {'ok': False, 'refused': True, 'error': 'taskId is required'}
     snap_id = fh.find_latest_snapshot_id(base_path, task_id=task_id)
     if not snap_id:
-        return {'ok': False, 'taskId': task_id,
+        return {'ok': False, 'refused': True, 'taskId': task_id,
                 'error': 'No snapshot found for this task (was it ever committed?)'}
     result = fh.restore_from(base_path, snap_id)
     if not result.get('ok'):
+        failed = result.get('failed', [])
+        if not failed and result.get('refused') is not True:
+            # restore_from logged the cause; its error envelope is not user text.
+            raise FileHistoryFault('Redo failed because of an internal file-history error')
         files = [f['path'] for f in result.get('files', [])]
         return {'ok': False, 'taskId': task_id,
+                'refused': all(row.get('refused') is True for row in failed),
                 'error': result.get('error') or 'restore failed',
                 'redone': len(files), 'files': files,
-                'details': {'failed': result.get('failed', [])}}
+                'details': {'failed': failed}}
     files = [f.get('path') for f in result.get('files', []) if f.get('path')]
     logger.info('[Modifications] redo task=%s files=%d snap=%s',
                 task_id, len(files), snap_id[:8])
@@ -1576,7 +2128,7 @@ def undo_all_modifications(base_path):
     """Undo all recorded modifications in reverse order."""
     session_dir = _get_session_dir(base_path)
     if not session_dir:
-        return {'ok': False, 'error': 'No session found'}
+        return {'ok': False, 'refused': True, 'error': 'No session found'}
 
     modifications = list(_cache_get(session_dir))
 

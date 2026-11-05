@@ -326,39 +326,7 @@ def write_text_atomic(path: str, text: str, *, fsync: bool = True,
         Octal file mode to chmod the temp file to before rename. The
         default 0o644 matches typical Unix expectations.
     """
-    parent = os.path.dirname(path) or '.'
-    if parent != '.' and not os.path.isdir(parent):
-        os.makedirs(parent, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix='.jsonstore-', suffix='.tmp', dir=parent)
-    try:
-        try:
-            os.chmod(tmp, mode)
-        except OSError as _e_audit:
-            logger.debug('[json_store] write_text_atomic caught %s: %s', type(_e_audit).__name__, _e_audit)
-            pass
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            f.write(text)
-            f.flush()
-            if fsync:
-                try:
-                    os.fsync(f.fileno())
-                except OSError as _e_audit:
-                    logger.debug('[json_store] write_text_atomic caught %s: %s', type(_e_audit).__name__, _e_audit)
-                    pass
-            # Big one-shot JSON (server_config, history, manifests) is
-            # write-once/read-rarely — drop its just-written pages from the
-            # page cache so they stop counting against a shared cgroup limit
-            # (lib/cgroup_guard context, 2026-07-27). Pure hint, no-op off-Linux.
-            if len(text) >= 262144:
-                try:
-                    os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
-                except (OSError, AttributeError) as e:
-                    logger.debug('[json_store] fadvise DONTNEED skipped: %s', e)
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+    _write_payload_atomic(path, text, binary=False, fsync=fsync, mode=mode)
 
 
 def write_bytes_atomic(path: str, data: bytes, *, fsync: bool = True,
@@ -373,33 +341,46 @@ def write_bytes_atomic(path: str, data: bytes, *, fsync: bool = True,
     """
     if not isinstance(data, (bytes, bytearray, memoryview)):
         raise TypeError('write_bytes_atomic data must be bytes-like')
-    payload = bytes(data)
+    _write_payload_atomic(path, bytes(data), binary=True, fsync=fsync, mode=mode)
+
+
+def _write_payload_atomic(path: str, payload: str | bytes, *, binary: bool,
+                          fsync: bool, mode: int) -> None:
+    """Own the staging descriptor, stream and publication for both payload types."""
     parent = os.path.dirname(path) or '.'
     if parent != '.' and not os.path.isdir(parent):
         os.makedirs(parent, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix='.binstore-', suffix='.tmp', dir=parent)
+    prefix = '.binstore-' if binary else '.jsonstore-'
+    fd, tmp = tempfile.mkstemp(prefix=prefix, suffix='.tmp', dir=parent)
     try:
         try:
-            os.chmod(tmp, mode)
-        except OSError as error:
-            logger.debug('[json_store] binary chmod skipped for %s: %s',
-                         tmp, error)
-        with os.fdopen(fd, 'wb') as handle:
-            handle.write(payload)
-            handle.flush()
-            if fsync:
-                try:
-                    os.fsync(handle.fileno())
-                except OSError as error:
-                    logger.debug('[json_store] binary fsync skipped for %s: %s',
-                                 tmp, error)
-            if len(payload) >= 262144:
-                try:
-                    os.posix_fadvise(
-                        handle.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
-                except (OSError, AttributeError) as error:
-                    logger.debug('[json_store] binary fadvise skipped: %s',
-                                 error)
+            try:
+                os.chmod(tmp, mode)
+            except OSError as error:
+                logger.debug('[json_store] chmod skipped for %s: %s', tmp, error)
+            # Retain sole descriptor ownership even if cancellation lands
+            # between fdopen returning and entering the stream context.
+            if binary:
+                stream = os.fdopen(fd, 'wb', closefd=False)
+            else:
+                stream = os.fdopen(fd, 'w', encoding='utf-8', closefd=False)
+            with stream as handle:
+                handle.write(payload)
+                handle.flush()
+                if fsync:
+                    try:
+                        os.fsync(fd)
+                    except OSError as error:
+                        logger.debug('[json_store] fsync skipped for %s: %s', tmp, error)
+                # Existing cache-relief policy counts text characters or binary
+                # bytes; do not encode/copy text just to choose this optional hint.
+                if len(payload) >= 262144:
+                    try:
+                        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                    except (OSError, AttributeError) as error:
+                        logger.debug('[json_store] fadvise DONTNEED skipped: %s', error)
+        finally:
+            os.close(fd)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):

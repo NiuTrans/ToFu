@@ -22,12 +22,12 @@ def _text(message):
 
 def test_changed_snapshot_has_visible_precedence_and_stable_reuse():
     messages = [{'role': 'user', 'content': 'request'}]
-    render_context(messages, [context_block('parallel_execution', 'OLD')], ComposeRequest())
+    render_context(messages, [context_block('programmatic_execution', 'OLD')], ComposeRequest())
     frozen = copy.deepcopy(messages)
-    block = context_block('parallel_execution', 'CURRENT')
+    block = context_block('programmatic_execution', 'CURRENT')
     render_context(messages, [block], ComposeRequest())
     assert messages[:len(frozen)] == frozen
-    assert 'replaces all earlier `parallel_execution` snapshots' in _text(messages[-1])
+    assert 'replaces all earlier `programmatic_execution` snapshots' in _text(messages[-1])
     assert 'historical only' in _text(messages[-1])
     after = copy.deepcopy(messages)
     result = render_context(messages, [block], ComposeRequest())

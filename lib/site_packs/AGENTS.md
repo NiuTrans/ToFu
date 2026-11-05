@@ -8,6 +8,16 @@ Read `docs/SITE_PACKS.md` and `contracts/site_pack_v1.schema.json` first.
 Auth catalog, tool descriptions, and Settings rows are projections of this
 registry — never hand-maintain a copy elsewhere.
 
+- `_contract.py` owns cached schema access. `_inputs.py` derives numeric input
+  constraints/defaults and traverses nested steps; `_templates.py` owns the
+  parameter grammar shared by admission and rendering.
+- `_manifest.py` admits a copied document and builds operation schemas;
+  `_interpreter.py` captures executable steps for already-admitted adapter calls.
+  `_projection.py` keeps the public and executed input schemas identical.
+- JSON payload source/status/byte-budget admission lives in
+  `lib/browser/read_pipeline.py`; the interpreter carries the observed page URL
+  from the capture envelope and does not duplicate acceptance or invent sources.
+
 ## Editing rules
 
 - The step set is closed: new step types start in the contract, then the
@@ -25,7 +35,7 @@ registry — never hand-maintain a copy elsewhere.
 
 ## Verification
 
-Run `tests/site_packs/test_site_packs.py`, `tests/site_packs/test_site_pack_contract.py`, and the
+Run `tests/site_packs/`, adapter schema ownership, and the
 adapter/auth suites (`tests/browser/test_browser_native_runtime.py`,
 `tests/auth/test_auth_sources_*.py`); bundle behavior lives in
 `bundles/*/tests/` (`make test-bundles`).

@@ -73,3 +73,6 @@
 .timer-kind-badge { flex: 0 0 auto; }
 .timer-kind-code { color: var(--success-text); border-color: var(--success-border); }
 .timer-kind-hybrid { color: var(--info-text); border-color: var(--info-border); }
+/* Delivery receipt: how a fired timer's continuation reached the conversation. */
+.timer-panel-item .tpi-decision.steered { background: var(--info-text); }
+.timer-panel-item .tpi-decision.queued { background: var(--warning-text); }

@@ -343,6 +343,9 @@ def test_auto_oversized_eight_round_tail_is_not_clipped_for_unpriced_summary(
     """
     priced_summary_route['projectedCostUsd'] = None
     import lib.tasks_pkg.compaction._layer2._compact as layer2
+    diagnostics = []
+    monkeypatch.setattr(layer2.logger, 'info',
+                        lambda message, *args: diagnostics.append(message % args))
     from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
     from lib.tasks_pkg.compaction.api import force_compact_if_needed
     from lib.tasks_pkg.compaction._constants import _summary_cooldowns
@@ -387,6 +390,7 @@ def test_auto_oversized_eight_round_tail_is_not_clipped_for_unpriced_summary(
     assert summary_calls == []
     assert archive_calls == []
     assert conv_id not in _summary_cooldowns
+    assert any('summary_cost_known=False' in line for line in diagnostics)
     remaining_rounds = sum(
         1 for message in msgs
         if message.get('role') == 'assistant' and message.get('tool_calls')
@@ -470,6 +474,7 @@ def test_cache_negative_retry_floor_uses_optimistic_break_even_bound():
         reason='cache_negative',
         economics={
             'cache_read_tokens': 120_000,
+            'warm_prefix_tokens': 120_000,
             'dropped_tokens': 100_000,
             'cache_read_mul': 1.0,
             'rewrite_cost_tokens': 190_000,
@@ -482,7 +487,7 @@ def test_cache_negative_retry_floor_uses_optimistic_break_even_bound():
     assert floor == 250_000
     assert task['_autoCompactRetryWitness'] == {
         'reason': 'cache_negative',
-        'cacheReadTokens': 120_000,
+        'warmPrefixTokens': 120_000,
         'paybackLimitRounds': 1.0,
     }
 
@@ -522,7 +527,7 @@ def test_cache_negative_retry_floor_yields_when_cache_witness_cools(
         '_autoCompactRetryAfterTokens': 250_000,
         '_autoCompactRetryWitness': {
             'reason': 'cache_negative',
-            'cacheReadTokens': 120_000,
+            'warmPrefixTokens': 120_000,
         },
     }
 
@@ -536,7 +541,7 @@ def test_cache_negative_retry_floor_yields_when_cache_witness_cools(
         return 130_000, 'test'
 
     monkeypatch.setattr(tokens, '_count_tokens_authoritative', count)
-    monkeypatch.setattr(cache_state, 'current_cache_read',
+    monkeypatch.setattr(cache_state, 'current_warm_prefix_tokens',
                         lambda *args, **kwargs: 0)
 
     measurement = {}
@@ -562,7 +567,7 @@ def test_cache_negative_retry_floor_holds_while_cache_witness_is_warm(
         '_autoCompactRetryAfterTokens': 250_000,
         '_autoCompactRetryWitness': {
             'reason': 'cache_negative',
-            'cacheReadTokens': 120_000,
+            'warmPrefixTokens': 120_000,
         },
     }
 
@@ -576,14 +581,14 @@ def test_cache_negative_retry_floor_holds_while_cache_witness_is_warm(
         return 130_000, 'test'
 
     monkeypatch.setattr(tokens, '_count_tokens_authoritative', count)
-    monkeypatch.setattr(cache_state, 'current_cache_read',
+    monkeypatch.setattr(cache_state, 'current_warm_prefix_tokens',
                         lambda *args, **kwargs: 120_000)
 
     measurement = {}
     assert tokens._should_force_compact(
         messages, task, measurement_out=measurement) is False
     assert task['_autoCompactRetryAfterTokens'] == 250_000
-    assert task['_autoCompactRetryWitness']['cacheReadTokens'] == 120_000
+    assert task['_autoCompactRetryWitness']['warmPrefixTokens'] == 120_000
 
 
 @pytest.mark.unit
@@ -1009,6 +1014,7 @@ def test_adaptive_expected_horizon_survives_fixed_one_round_gate(
         dropped = max(1, tokens_before - candidate_tokens)
         return {
             'cache_read_tokens': 100_000,
+            'warm_prefix_tokens': 100_000,
             'cache_rewrite_tokens': candidate_tokens,
             'dropped_tokens': dropped,
             'cache_write_mul': 1.0,

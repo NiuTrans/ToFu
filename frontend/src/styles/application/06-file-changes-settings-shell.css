@@ -409,12 +409,17 @@ input.settings-mono {
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
+/* Field geometry sets only the background color and the leading padding of a
+   select: its background image and trailing gutter are the shared chevron
+   (07-settings-providers-onboarding.css). The `background` and `padding`
+   shorthands here erased that chevron from every field select. */
 .settings-panel .settings-field input,
 .settings-panel .settings-field select {
   width: 100%;
   height: 36px;
-  padding: 0 var(--space-3);
-  background: #fff;
+  padding-block: 0;
+  padding-left: var(--space-3);
+  background-color: #fff;
   border: 1px solid var(--s-line-strong);
   border-radius: 8px;
   box-shadow: 0 1px 2px rgba(26, 24, 20, 0.05);
@@ -425,11 +430,12 @@ input.settings-mono {
   margin-bottom: 10px;
   transition: border-color 0.12s, box-shadow 0.12s, background 0.12s;
 }
+.settings-panel .settings-field input { padding-right: var(--space-3); }
 .settings-panel .settings-field input:focus,
 .settings-panel .settings-field select:focus {
   border-color: var(--s-gold);
   box-shadow: 0 0 0 3px var(--s-gold-glow);
-  background: #fff;
+  background-color: #fff;
 }
 
 /* ── Toggle rows — quiet white cards (hairline border, soft lift) ── */

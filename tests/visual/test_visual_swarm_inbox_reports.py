@@ -25,7 +25,7 @@ def test_swarm_completion_report_is_visible_after_disclosure_and_reload(
     locale = json.loads((ROOT / 'frontend/src/i18n/locales/zh.json').read_text())
     report = '**报告结论**\n\n' + ('已验证报告正文。\n\n' * 180) + 'REPORT TAIL\n\n<script>window.reportExecuted=true</script>'
     payload = format_swarm_update(
-        agent_id='friday-reconcile', role='general', status='completed',
+        agent_id='friday-reconcile', swarm_run_id='run-1', role='general', status='completed',
         elapsed_seconds=2285.2, tokens=2051923, result=report,
         output_file='/synthetic/friday-reconcile.log')
     page.evaluate(r"""({locale,payload}) => {

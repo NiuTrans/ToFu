@@ -531,7 +531,13 @@ def test_daemon_supervisor_pins_spawn_argument_and_active_snapshot(tmp_path, mon
     from tofu_db.wire import PROTOCOL_VERSION
 
     monkeypatch.setenv('TOFU_STORAGE_TRANSPORT', 'daemon')
-    monkeypatch.setattr('lib.storage.supervisor._resolve_tofudb_binary', lambda: '/test/tofu-db')
+    monkeypatch.delenv('TOFUDB_EXPECTED_SHA256', raising=False)
+    # Launch admission hashes the resolved executable, so it must exist.
+    engine = tmp_path / 'engine' / 'tofu-db'
+    engine.parent.mkdir()
+    engine.write_bytes(b'test-engine')
+    engine.chmod(0o755)
+    monkeypatch.setattr('lib.storage.supervisor._resolve_tofudb_binary', lambda: str(engine))
     monkeypatch.setattr('lib.storage.supervisor._tofudb_scope_ids', lambda: (1, None))
     child = Mock(pid=123)
     child.poll.return_value = None

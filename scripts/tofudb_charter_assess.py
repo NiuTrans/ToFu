@@ -193,11 +193,17 @@ def metric_cell(reports, quality, workload, metric, baseline, maximum_ratio):
     for report in reports:
         rows = report.get('workloads', {}).get(workload, {})
         native, control = rows.get('tofudb', {}), rows.get(baseline, {})
-        if native.get('scope') != control.get('scope'):
-            return cell('INCOMPARABLE', [f'{workload}: measurement scopes differ'])
         if native.get('error') or control.get('error'):
             return cell('FAIL' if quality['status'] == 'PASS' else quality['status'],
                         [*quality['reasons'], f'{workload}: execution error'], observed_status='FAIL')
+        if native.get('scope') != control.get('scope'):
+            return cell('INCOMPARABLE', [f'{workload}: measurement scopes differ'])
+        if workload == 'maintenance_reopen' and (
+                native.get('cold_read_unsupported') or control.get('cold_read_unsupported')):
+            # Older receipts could mislabel failed recovery reads as missing
+            # capabilities. Either kind of gap cannot establish a lifecycle win.
+            return cell('INSUFFICIENT' if quality['status'] == 'PASS' else quality['status'],
+                        [*quality['reasons'], f'{workload}: incomplete cold-read evidence'])
         left, right = metric_value(native, metric['name']), metric_value(control, metric['name'])
         if not number(left) or not number(right) or (not metric.get('allow_zero') and (left == 0 or right == 0)):
             missing.append(f"{workload}.{metric['name']}: finite native/{baseline} measurements required")

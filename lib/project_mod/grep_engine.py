@@ -1,4 +1,4 @@
-"""Shared, streaming search execution for ``grep_search`` and run-command grep.
+"""Shared, streaming search execution for ``search_files`` and run-command grep.
 
 The public project search tool supplies an rg and a GNU-grep argv and lets this
 module pick the fastest available backend.  The run-command redirect supplies
@@ -126,28 +126,30 @@ _REMAINDER_FILE_CEILING = 512
 _REMAINDER_DRAIN_S = max(0.05, float(os.environ.get(
     'TOFU_GREP_REMAINDER_DRAIN_S', '1.5') or 1.5))
 
-# Output line shapes (see read_tools._RG_MATCH_LINE): matches carry
-# "path:lineno:content" or the bare "lineno:content" single-file shape;
-# context lines use '-' separators and group separators are literal "--".
-_RE_MATCH_PATH_LINE = re.compile(rb'^(?P<path>.+):(?P<line>\d+):')
-_RE_MATCH_BARE_LINE = re.compile(rb'^(?P<line>\d+):')
-_RE_CONTEXT_LINE = re.compile(rb'^(?:.+-)?(?P<line>\d+)-')
+# Output record shapes (see read_tools._RG_MATCH_LINE). Path-printing
+# searches run with ``--null``, so a path always ends at a NUL byte:
+# "path\0lineno:content" (match) / "path\0lineno-content" (context). A
+# single-file operand prints the bare "lineno:content" / "lineno-content"
+# shape, and group separators are literal "--". The line number therefore
+# starts at a known offset: a ':' or '-' run inside a path or the content
+# (log timestamps such as 15:09:55, dated names such as app.log.2026-10-24)
+# can never be mistaken for it.
+_RE_RECORD_LINE_NUMBER = re.compile(rb'(?P<line>\d+)[:-]')
 
 
-def _parse_match_line(line: bytes) -> tuple[Optional[str], Optional[int]]:
-    """Split one classified match line into ``(path, lineno)``.
+def _parse_record_line(line: bytes) -> tuple[Optional[str], Optional[int]]:
+    """Split one match or context record into ``(path, lineno)``.
 
-    ``path`` is '' for the bare single-file operand shape; ``(None, None)``
-    means the line carries no parseable line number (e.g. ``-o`` output).
+    ``path`` is '' for the bare single-file shape; ``(None, None)`` means the
+    line carries no parseable line number (e.g. ``-o`` output).
     """
-    match = _RE_MATCH_PATH_LINE.match(line)
-    if match:
-        return (match.group('path').decode('utf-8', errors='replace'),
-                int(match.group('line')))
-    match = _RE_MATCH_BARE_LINE.match(line)
-    if match:
-        return '', int(match.group('line'))
-    return None, None
+    path, nul, rest = line.partition(b'\0')
+    if not nul:
+        path, rest = b'', line
+    match = _RE_RECORD_LINE_NUMBER.match(rest)
+    if not match:
+        return None, None
+    return path.decode('utf-8', errors='replace'), int(match.group('line'))
 
 
 def _which_argv(argv: Sequence[str]) -> Optional[list[str]]:
@@ -308,7 +310,7 @@ def run_search(
                 is_match = (request.match_line(line)
                             if request.match_line else True)
                 if is_match and (counting or from_line is not None):
-                    path, lineno = _parse_match_line(line)
+                    path, lineno = _parse_record_line(line)
                     if from_line is not None and lineno is not None \
                             and lineno < from_line:
                         return True  # excluded by the caller's line floor
@@ -339,9 +341,9 @@ def run_search(
                     # (they carry no information for a paged reader).
                     if line.rstrip(b'\r\n') == b'--':
                         return True
-                    ctx = _RE_CONTEXT_LINE.match(line)
-                    if from_line is not None and ctx \
-                            and int(ctx.group('line')) < from_line:
+                    _ctx_path, ctx_lineno = _parse_record_line(line)
+                    if from_line is not None and ctx_lineno is not None \
+                            and ctx_lineno < from_line:
                         return True
                     if counting:
                         return True
@@ -513,7 +515,7 @@ def _fd_sink(fd: int) -> Callable[[bytes], bool]:
 
 def _inject_safe_excludes(program: str, argv: Sequence[str],
                           exclude_dirs: Sequence[str] = ()) -> list[str]:
-    # These are the same descent guards used by grep_search. They are GNU
+    # These are the same descent guards used by search_files. They are GNU
     # options, inserted before the user's argv so later user flags and ``--``
     # continue to be interpreted exactly by GNU grep.
     command = [program]
@@ -670,12 +672,13 @@ def _raw_grep_rg_argv(program: str, argv: Sequence[str], cwd: str,
         if not os.path.isdir(resolved):
             return ()
 
-    # Match grep_search's safe traversal contract: ripgrep honors .gitignore
-    # and skips hidden trees by default, while explicit IGNORE_DIRS globs cover
-    # non-git workspaces. This is the reason the fast path stays bounded on
-    # FUSE projects where native grep may reach a useful subtree only after
-    # walking caches and generated artifacts for minutes.
-    command = ['rg', '--no-heading', '--color=never']
+    # Match search_files' safe traversal contract: ripgrep honors ignore
+    # rules, searches hidden files like GNU grep (--hidden), and explicit
+    # IGNORE_DIRS globs (including .git) cover non-git workspaces. This is the
+    # reason the fast path stays bounded on FUSE projects where native grep
+    # may reach a useful subtree only after walking caches and generated
+    # artifacts for minutes.
+    command = ['rg', '--no-heading', '--color=never', '--hidden']
     command.extend(rg_flags)
     if follow:
         command.append('--follow')
@@ -726,13 +729,13 @@ def helper_main(argv: Optional[Sequence[str]] = None) -> int:
     )
     if result.unavailable:
         os.write(sys.stderr.fileno(), (
-            b'grep_search helper: GNU grep is unavailable; full GNU option '
+            b'search_files helper: GNU grep is unavailable; full GNU option '
             b'compatibility cannot be provided on this host.\n'))
         return 2
     if result.timed_out:
         seconds = f'{timeout:g}'.encode('ascii', errors='replace')
         os.write(sys.stderr.fileno(),
-                 b'grep_search: timed out after ' + seconds
+                 b'search_files: timed out after ' + seconds
                  + b's; partial results above. Narrow the path or add an '
                    b'--include glob.\n')
         return 124

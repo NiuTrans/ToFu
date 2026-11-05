@@ -716,7 +716,8 @@ def test_unstarted_route_failure_does_not_suppress_siblings(monkeypatch):
         nonlocal starts
         if thread.name.startswith('subscription-probe'):
             starts += 1
-            if starts == 2:
+            # Route 1's start and its one startup recovery both fail.
+            if starts in (2, 3):
                 raise RuntimeError('unstarted probe')
         return original(thread)
 

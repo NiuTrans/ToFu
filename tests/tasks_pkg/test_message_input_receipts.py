@@ -1,4 +1,7 @@
 """Receipt identity follows actual immutable body text, not pre-compaction IDs."""
+
+import lib.tasks_pkg.llm_fallback._retry as _fallback_retry
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
 import pytest
 from lib.tasks_pkg.message_input_receipts import remember, matched_ids, stream_with_receipts
 from lib.llm.stream_result import ProviderStreamResult
@@ -74,7 +77,12 @@ def test_restored_carrier_without_fresh_acquisition_cannot_dispatch(family):
     assert '_verifiedMessageInputIds' not in task
 
 
-def test_scope_denial_records_prior_paid_usage_without_fallback(monkeypatch):
+@pytest.mark.parametrize('path', ['primary', 'reactive', 'configured', 'rescue',
+                                  'configured-reactive'])
+def test_scope_denial_records_prior_paid_usage_without_fallback(monkeypatch, path):
+    from types import SimpleNamespace
+    from lib import llm
+    from lib.tasks_pkg.llm_fallback import _state
     from lib.tasks_pkg.llm_fallback import _call as calls
     from lib.tasks_pkg.message_input_receipts import MessageInputScopeError
     from lib.cost import normalize_usage
@@ -83,23 +91,45 @@ def test_scope_denial_records_prior_paid_usage_without_fallback(monkeypatch):
                      '_extra_billing_rounds': [
                          {'tag': 'R1-FLOOR-DISCARDED-primary',
                           'usage': {'prompt_tokens': 5, 'completion_tokens': 1}}]}
+    failures = {
+        'primary': [failure],
+        'reactive': [llm.PromptTooLongError('overflow'), failure],
+        'configured': [llm.PermissionError_('primary unavailable'), failure],
+        'rescue': [llm.PermissionError_('primary unavailable'), failure],
+        'configured-reactive': [llm.PermissionError_('primary unavailable'),
+                               llm.PromptTooLongError('overflow'), failure],
+    }[path]
+    expected_attempts = len(failures)
     dispatched = []
     def provider(*a, **kw):
         dispatched.append(1)
-        raise failure
-    monkeypatch.setattr(calls, 'stream_llm_response', provider)
-    monkeypatch.setattr(calls, '_get_fallback_model', lambda task: 'must-not-fallback')
+        raise failures.pop(0)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', provider)
+    monkeypatch.setattr(_fallback_retry, '_get_fallback_model',
+                        lambda task: '' if path == 'rescue' else 'fallback-model')
+    monkeypatch.setattr(_fallback_retry, '_get_pool_rescue_model', lambda failed: 'rescue-model')
+    monkeypatch.setattr(llm, 'build_body',
+                        lambda model, messages, **_kwargs: {'model': model, 'messages': messages})
+    monkeypatch.setattr('lib.tasks_pkg.manager._events.append_event', lambda *a: None)
+    monkeypatch.setattr('lib.tasks_pkg.compaction.api.reactive_compact', lambda *a, **kw: False)
+    monkeypatch.setattr('lib.llm_dispatch.factory.get_dispatcher', lambda: SimpleNamespace(
+        has_capable_slots=lambda *a, **kw: True))
     totals, rounds = {}, []
-    task = {'id': 'scope-usage', 'config': {}}
-    with pytest.raises(MessageInputScopeError) as caught:
-        calls._llm_call_with_fallback(task, {'messages': []}, 'primary', 0, 32,
-                                     False, [], [], 'low', False, totals, rounds)
+    task = {'id': f'scope-usage-{path}', 'config': {}}
+    try:
+        with pytest.raises(MessageInputScopeError) as caught:
+            calls._llm_call_with_fallback(
+                task, {'model': 'primary', 'messages': []}, 'primary', 0, 32,
+                False, [], [], 'low', False, totals, rounds)
+    finally:
+        _state.cleanup_reactive_compact_state(task['id'])
     assert caught.value is failure
-    assert dispatched == [1]
+    assert dispatched == [1] * expected_attempts
     assert len(rounds) == 2 and all(row['responseAuthoring'] is False for row in rounds)
     usage = normalize_usage(totals)
     assert usage['input'] == 16 and usage['output'] == 3
     assert '_verifiedMessageInputIds' not in task
+    assert '_fallback_model' not in task
 
 
 @pytest.mark.parametrize('failure_kind', ['missing-binding', 'repository-denial', 'cancel'])
@@ -119,8 +149,8 @@ def test_logical_scope_failure_never_reaches_provider_or_fallback(monkeypatch, f
             raise ValueError('ended or superseded')
         monkeypatch.setattr('lib.tasks_pkg.message_input_receipts.validate_matches', deny)
     provider, fallback = Mock(), Mock(return_value='must-not-fallback')
-    monkeypatch.setattr(calls, 'stream_llm_response', provider)
-    monkeypatch.setattr(calls, '_get_fallback_model', fallback)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', provider)
+    monkeypatch.setattr(_fallback_retry, '_get_fallback_model', fallback)
     expected = AbortedError if failure_kind == 'cancel' else MessageInputScopeError
     with pytest.raises(expected) as caught:
         calls._llm_call_with_fallback(task, {'messages': messages}, 'primary', 0, 32,

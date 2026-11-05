@@ -56,6 +56,15 @@ function appendTurnModelNotice(
   node.appendChild(notice);
 }
 
+/** Selection keeps the outgoing notice's box, not its facts, until the incoming
+ * conversation's first commit renders its own. Clearing it on selection
+ * collapsed the composer for the whole load and grew it back at first paint. */
+export function holdComposerModelNotice(node: HTMLElement | null): void {
+  if (!node || node.hidden) return;
+  node.dataset.modelNoticeHeld = 'true';
+  node.setAttribute('aria-hidden', 'true');
+}
+
 /** Latest main-lane turn only: a new human turn must never inherit old routing. */
 export function renderComposerModelNotice(
   node: HTMLElement | null,
@@ -63,6 +72,10 @@ export function renderComposerModelNotice(
   ports: Pick<ClassicConversationRendererPorts, 'localizedText'> = {},
 ): void {
   if (!node) return;
+  if (node.dataset.modelNoticeHeld) {
+    delete node.dataset.modelNoticeHeld;
+    node.removeAttribute('aria-hidden');
+  }
   const turn = viewModel?.mainLane.turns.at(-1);
   const content = node.ownerDocument.createElement('div');
   if (turn) appendTurnModelNotice(content, turn, ports);

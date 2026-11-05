@@ -86,6 +86,11 @@ def task_start_failure_cause(error: BaseException) -> dict:
             'hint': _STORAGE_HINT,
         }
 
+    # A typed startup refusal may carry its own bilingual recovery.
+    explicit_hint = getattr(error, 'user_hint', None)
+    if isinstance(explicit_hint, str) and explicit_hint:
+        return {'detail': message, 'hint': explicit_hint}
+
     lowered = message.lower()
     if ('shutdown' in lowered or 'shutting down' in lowered
             or 'cannot schedule new futures' in lowered):

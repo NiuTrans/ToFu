@@ -398,6 +398,51 @@ export interface ErrorEvent {
   autopilotRunId?: string;
 }
 
+/** Terminal event of a task its owner aborted. TaskRuntime.finish stamps it from the terminal status (task_terminal_event_type), so it cannot disagree with task state; capability workers (paper, research action, podcast, translation) add the partial output a client may keep. */
+export interface AbortedEvent {
+  type: 'aborted';
+  /** terminal task status (aborted) */
+  status?: string;
+  /** (optional) error envelope */
+  error?: Record<string, unknown>;
+  /** (optional) output produced before the abort */
+  partial?: string;
+  /** (optional) terminal finish reason */
+  finishReason?: string;
+  /** (optional) whether a worker callback was still running at settlement */
+  workerActive?: boolean;
+  /** (optional) capability agent usage snapshot */
+  agentUsageV1?: Record<string, unknown>;
+  /** (optional) research action name */
+  action?: string;
+  /** Server monotonic execution timestamp anchored at acceptance; captured before observers. */
+  executionAtMs?: number;
+  /** Epoch anchor for the producing task execution clock. */
+  executionOriginAtMs?: number;
+  /** Identity of the producing task monotonic clock; never a client clock. */
+  executionClockId?: string;
+  /** Owning executor task id, stamped by delivery. */
+  taskId?: string;
+  /** Owning conversation identity, stamped by task delivery and preserved by push mirrors. */
+  conversationId?: string;
+  /** Producing execution attempt identity; preserves scope through tool dispatch and replay. */
+  attemptId?: string;
+  /** Optional request correlation id, stamped by delivery. */
+  requestId?: string;
+  /** Task-local event sequence, assigned by the runtime. */
+  seq?: number;
+  /** Optional scheduler presentation policy; not execution authority. */
+  flowProjection?: string;
+  /** Optional role of the invocation producing this visible Turn. */
+  turnRole?: string;
+  /** Optional declared presentation side of the invocation. */
+  emits?: string;
+  /** Optional virtual-user presentation identity. */
+  vuMsgId?: string;
+  /** Optional owning Goal run identity. */
+  autopilotRunId?: string;
+}
+
 /** A transient-error turn is being auto-re-run from scratch. The client MUST clear the live bubble's accumulated content / thinking (and tool rounds) so the about-to-be-re-streamed deltas do not stack on top of the failed attempt's partial output. Non-terminal: the task stays `running`; a `phase:retrying` frame carrying the attempt/backoff detail accompanies it. */
 export interface RetryResetEvent {
   type: 'retry_reset';
@@ -519,6 +564,8 @@ export interface ModelRequestCompleteEvent {
   durationMs: number;
   /** (failure only) typed exception/error kind */
   errorKind?: string;
+  /** (status=failed only) closed error-envelope kind classified from the live failure; unlike errorKind it names the user-facing cause (a gateway 503 raised as RateLimitError is upstream_error) */
+  envelopeKind?: string;
   /** (failure only) bounded safe detail */
   errorDetail?: string;
   /** (failure only) bounded, redacted request URL bound to the error (abort/endpoint diagnostics) */
@@ -746,7 +793,7 @@ export interface ToolStartEvent {
   parentToolCallId?: string;
   /** (optional) stable routine, important, or interactive semantic importance */
   attentionKind?: string;
-  /** (optional) 'rejected' when the tool was a hallucination and never ran */
+  /** (optional) 'rejected' when the tool was a hallucination and never ran; 'queued' when the call was announced while the model streams but is not executing yet (a status='searching' tool_progress marks its handler entry) */
   status?: string;
   /** (optional, swarm emissions) provider LLM round index when it differs from the task roundNum */
   llmRound?: number;
@@ -875,8 +922,10 @@ export interface ToolProgressEvent {
   truncated?: boolean;
   /** (optional) why the stream group closed (final frame only) */
   terminalReason?: string;
-  /** (optional) true on the display-only frame published when run_command delegates a file grep to the runtime grep_search engine */
+  /** (optional) true on the display-only frame published when run_command delegates a file grep to the runtime search_files engine */
   grepSearchIntercepted?: boolean;
+  /** (optional) 'searching' on the one frame the dispatcher publishes when a call announced as 'queued' enters its handler; the client sets the row status. A status-bearing frame is a structural projection update, never coalesced */
+  status?: string;
   /** epoch ms when the tool actually began executing — present on EVERY tool frame so a still-running row can render a truthful elapsed time instead of a client stopwatch that re-mints on each paint */
   tStart?: number;
   /** epoch ms when the backend handed this frame to the event chokepoint. Transport latency = receivedAt - emittedAt */
@@ -893,6 +942,73 @@ export interface ToolProgressEvent {
   attemptId?: string;
   /** Optional request correlation id, stamped by delivery. */
   requestId?: string;
+  /** Optional scheduler presentation policy; not execution authority. */
+  flowProjection?: string;
+  /** Optional role of the invocation producing this visible Turn. */
+  turnRole?: string;
+  /** Optional declared presentation side of the invocation. */
+  emits?: string;
+  /** Optional virtual-user presentation identity. */
+  vuMsgId?: string;
+  /** Optional owning Goal run identity. */
+  autopilotRunId?: string;
+}
+
+/** A workspace lease acquisition could not be admitted on its first probe and waited; emitted once when the wait ends. Timing evidence folded into the Turn Trace admission_wait span. */
+export interface WorkspaceAdmissionWaitEvent {
+  type: 'workspace_admission_wait';
+  /** (optional) round index of the waiting tool call */
+  roundNum?: number;
+  /** (optional) waiting tool-call id; absent when no tool occurrence owns the admission */
+  toolCallId?: string;
+  /** (optional) waiting tool name */
+  toolName?: string;
+  /** first blocked probe, on the task execution clock (executionAtMs domain) */
+  waitStartedAtMs: number;
+  /** admission, cancellation or refusal, on the task execution clock */
+  waitEndedAtMs: number;
+  /** waitEndedAtMs - waitStartedAtMs */
+  waitedMs: number;
+  /** requested lease mode: 'write' | 'file-write' | 'read' */
+  mode: string;
+  /** lock namespace: 'workspace' | 'tree' | 'git-metadata' | 'runtime-setup' */
+  lockDomain: string;
+  /** basename of the lock root path (never a full path) */
+  lockRoot: string;
+  /** 'admitted' | 'cancelled' | 'refused' | 'error' */
+  outcome: string;
+  /** (optional) tool of the holder observed blocking this wait longest */
+  holderTool?: string;
+  /** (optional) task id of that holder */
+  holderTask?: string;
+  /** (optional) conversation id of that holder */
+  holderConversation?: string;
+  /** (optional) how long that holder had held the lease (or, for a queued request, had been queued) when last observed blocking */
+  holderHeldMs?: number;
+  /** (optional) claims the waiting request named, as 'scope:basename[rule]' labels */
+  waiterClaims?: string;
+  /** (optional) the holder's mode on the contested lock; 'queued-<mode>' for an earlier queued request the waiter may not overtake */
+  holderMode?: string;
+  /** (optional) claims the holder named, as 'scope:basename[rule]' labels */
+  holderClaims?: string;
+  /** (optional) bounded one-line summary of the holder's command; only when the holder's task has the waiter's owner */
+  holderCommand?: string;
+  /** Server monotonic execution timestamp anchored at acceptance; captured before observers. */
+  executionAtMs?: number;
+  /** Epoch anchor for the producing task execution clock. */
+  executionOriginAtMs?: number;
+  /** Identity of the producing task monotonic clock; never a client clock. */
+  executionClockId?: string;
+  /** Owning executor task id, stamped by delivery. */
+  taskId?: string;
+  /** Owning conversation identity, stamped by task delivery and preserved by push mirrors. */
+  conversationId?: string;
+  /** Producing execution attempt identity; preserves scope through tool dispatch and replay. */
+  attemptId?: string;
+  /** Optional request correlation id, stamped by delivery. */
+  requestId?: string;
+  /** Task-local event sequence, assigned by the runtime. */
+  seq?: number;
   /** Optional scheduler presentation policy; not execution authority. */
   flowProjection?: string;
   /** Optional role of the invocation producing this visible Turn. */
@@ -1135,6 +1251,10 @@ export interface ToolWireProjectionEvent {
   budgetDroppedNames: unknown[];
   /** names annotation-compacted by budget */
   compactedNames: unknown[];
+  /** (optional) sum(len(name)+1) over sent names */
+  toolNameBytes?: number;
+  /** (optional) route name budget, zero=none */
+  toolNameBudgetBytes?: number;
   /** server-authorized catalog size */
   executableToolCount: number;
   /** owning model request span */
@@ -2084,6 +2204,47 @@ export interface StdinResolvedEvent {
   toolCallId: string;
   /** correlation id */
   stdinId: string;
+  /** Server monotonic execution timestamp anchored at acceptance; captured before observers. */
+  executionAtMs?: number;
+  /** Epoch anchor for the producing task execution clock. */
+  executionOriginAtMs?: number;
+  /** Identity of the producing task monotonic clock; never a client clock. */
+  executionClockId?: string;
+  /** Owning executor task id, stamped by delivery. */
+  taskId?: string;
+  /** Owning conversation identity, stamped by task delivery and preserved by push mirrors. */
+  conversationId?: string;
+  /** Producing execution attempt identity; preserves scope through tool dispatch and replay. */
+  attemptId?: string;
+  /** Optional request correlation id, stamped by delivery. */
+  requestId?: string;
+  /** Task-local event sequence, assigned by the runtime. */
+  seq?: number;
+  /** Optional scheduler presentation policy; not execution authority. */
+  flowProjection?: string;
+  /** Optional role of the invocation producing this visible Turn. */
+  turnRole?: string;
+  /** Optional declared presentation side of the invocation. */
+  emits?: string;
+  /** Optional virtual-user presentation identity. */
+  vuMsgId?: string;
+  /** Optional owning Goal run identity. */
+  autopilotRunId?: string;
+}
+
+/** A client-mode custom tool call waits for the request owner to POST its result to /api/v4/tasks/{id}/tool_result. */
+export interface CustomToolCallEvent {
+  type: 'custom_tool_call';
+  /** round index */
+  roundNum: number;
+  /** model tool-call id of the waiting call */
+  toolCallId: string;
+  /** reply correlation id (echoed as call_id) */
+  callId: string;
+  /** custom__<ident> tool name */
+  toolName: string;
+  /** tool arguments the model supplied */
+  arguments: Record<string, unknown>;
   /** Server monotonic execution timestamp anchored at acceptance; captured before observers. */
   executionAtMs?: number;
   /** Epoch anchor for the producing task execution clock. */
@@ -3224,6 +3385,7 @@ export type ContractedWireEvent =
   RoundEndEvent |
   DoneEvent |
   ErrorEvent |
+  AbortedEvent |
   RetryResetEvent |
   ModelRequestStartEvent |
   ModelRequestCompleteEvent |
@@ -3233,6 +3395,7 @@ export type ContractedWireEvent =
   ToolEffectEvent |
   ToolStartEvent |
   ToolProgressEvent |
+  WorkspaceAdmissionWaitEvent |
   ToolResultEvent |
   ToolCompleteEvent |
   ToolSchemaRejectedEvent |
@@ -3258,6 +3421,7 @@ export type ContractedWireEvent =
   ApprovalRequiredEvent |
   StdinRequestEvent |
   StdinResolvedEvent |
+  CustomToolCallEvent |
   FlowIterationEvent |
   FlowPlannerDoneEvent |
   FlowCriticMsgEvent |

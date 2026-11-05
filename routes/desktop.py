@@ -6,6 +6,7 @@ Mirrors the architecture of routes/browser.py:
   - Desktop Agent polls /api/desktop/poll → picks up commands, returns results
 """
 
+import asyncio
 import time
 
 from quart import Blueprint, jsonify
@@ -66,7 +67,7 @@ async def desktop_poll():
                 or any(not isinstance(cid, str) or not cid or len(cid) > 256 for cid in active)):
             return jsonify({'error': 'desktop_admission_frame_invalid'}), 400
     agent_id = str(agent_frame['agent_id'])
-    register_agent(
+    connection = register_agent(
         agent_id,
         agent_frame,
         user_id=_bridge_user,
@@ -84,6 +85,12 @@ async def desktop_poll():
         body.get('streams', []), agent_id=agent_id, user_id=_bridge_user)
     if stream_frames:
         logger.debug('[Desktop] ingested %d stream chunks', stream_frames)
+
+    # Once per connection epoch: wake the conversations waiting for this device
+    # (docs/modules/remote_execution.md, "Waiting for an offline device").
+    if connection is not None:
+        from lib.desktop.device_waits import deliver_device_waits
+        await asyncio.to_thread(deliver_device_waits, connection)
 
     # 2) Long-poll for pending commands. Async-native wait releases the worker
     #    thread for the window (see lib.desktop.bridge.take_pending_commands_async)

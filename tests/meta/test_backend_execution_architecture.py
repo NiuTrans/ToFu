@@ -28,6 +28,22 @@ def test_routes_cannot_import_model_execution_or_reserve_provider_slots(tmp_path
     assert "reserve provider slots directly" in violations[1]
 
 
+def test_routes_may_request_only_the_explicit_listing_import(tmp_path):
+    """An owner's "load all models" is a provider-discovery call; the
+    background sweep and every other catalog-sync name stay dispatcher-owned."""
+    from scripts.check_architecture import route_llm_bypass_violations
+
+    route = tmp_path / "catalog_route.py"
+    route.write_text(
+        "from lib.llm_dispatch.provider_catalog_sync import import_listed_models\n"
+        "from lib.llm_dispatch.provider_catalog_sync import sweep_once\n",
+        encoding="utf-8",
+    )
+    violations = route_llm_bypass_violations([route.resolve()], routes_root=tmp_path)
+    assert len(violations) == 1
+    assert violations[0].startswith("catalog_route.py:2:")
+
+
 def test_current_routes_have_no_model_execution_bypass():
     from scripts.check_architecture import ROOT, route_llm_bypass_violations
 

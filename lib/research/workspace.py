@@ -19,6 +19,7 @@ from typing import Any
 from lib.identity import require_user_id
 from lib.storage.errors import StorageError
 from lib.storage.retry import is_transient_storage_error
+from lib.error_envelope import BadRequest
 
 from .history import ResearchHistoryRepository, compact_observations
 from .persistence import _direction_read_candidates, research_direction_hash
@@ -154,10 +155,10 @@ def save_workspace(
     if receipt_publication is not None and paginate_pending_run_id is not None:
         raise ValueError('Research receipt publication accepts one preparation port')
     if isinstance(expected_revision, bool) or int(expected_revision) < 0:
-        raise ValueError('expected_revision must be a non-negative integer')
+        raise BadRequest('expected_revision must be a non-negative integer', field='expected_revision')
     paper_hash = research_direction_hash(direction)
     if not paper_hash:
-        raise ValueError('direction is required')
+        raise BadRequest('direction is required', field='direction')
     owner = require_user_id(user_id, context='research workspace owner')
     prior = load_workspace(direction, lang, user_id=owner)
     if prior['revision'] != expected_revision:
@@ -175,15 +176,15 @@ def save_workspace(
     for observation in normalize_run_evidence(prior.get('runs')):
         if (observation['execution_status'] == 'completed'
                 and incoming_runs.get(observation['id']) != observation):
-            raise ValueError('Completed research observations cannot be removed or rewritten; retain the original and add a new result')
+            raise BadRequest('Completed research observations cannot be removed or rewritten; retain the original and add a new result', field='runs')
     from .receipt_pages import empty_reference, ReceiptPagePublication
     previous_runs = {row['id']: row for row in normalize_run_evidence(prior.get('runs'))}
     for run in incoming_runs.values():
         old = previous_runs.get(run['id'])
         if run.get('receipt_progress') != (old.get('receipt_progress') if old else None):
-            raise ValueError('Research receipt progress is server-owned')
+            raise BadRequest('Research receipt progress is server-owned', field='receipt_progress')
         if run.get('receipt_evidence') != (old.get('receipt_evidence') if old else None):
-            raise ValueError('Research complete receipt evidence is server-owned')
+            raise BadRequest('Research complete receipt evidence is server-owned', field='receipt_evidence')
     settled_success = None
     if success_settlement is not None:
         from .receipt_settlement import ReceiptSuccessSettlement
@@ -443,7 +444,7 @@ def load_workspace_response(direction: str, lang: str = 'en', *, user_id: int,
     from .history import empty_history
     from .program import readiness
     if history_cursor is not None and (type(history_cursor) is not int or history_cursor < 0):
-        raise ValueError('Invalid research history cursor')
+        raise BadRequest('Invalid research history cursor', field='history_cursor')
     workspace = load_workspace(direction, lang, user_id=user_id)
     result = {'workspace': workspace, 'readiness': readiness(workspace)}
     if history_cursor is not None:
@@ -458,7 +459,7 @@ def load_workspace_response(direction: str, lang: str = 'en', *, user_id: int,
 def load_history_page(direction: str, lang: str = 'en', *, user_id: int, cursor=None) -> dict:
     """Read one bounded page reachable from the acknowledged workspace head."""
     if cursor is not None and (type(cursor) is not int or cursor <= 0):
-        raise ValueError('Invalid research history cursor')
+        raise BadRequest('Invalid research history cursor', field='history_cursor')
     return load_workspace_response(direction, lang, user_id=user_id,
                                    history_cursor=0 if cursor is None else cursor)['history_page']
 

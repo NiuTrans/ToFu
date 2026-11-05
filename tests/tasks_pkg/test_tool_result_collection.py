@@ -135,7 +135,7 @@ def test_unrecoverable_collection_gap_has_truthful_policy_scoped_feedback(
         _pipeline._settle_tool_result, settled_results={},
         internal_result_sink=SimpleNamespace(capture=lambda _id, value: captured.append(value)))
     _pipeline._append_ordered_tool_replay(
-        [], {}, frozenset(), [], [], settle, [], messages, 'test-model',
+        [], {}, frozenset(), [], [], settle, messages, 'test-model',
         [(call, 'fetch_url', 'missing', arguments, 1, row, None)],
         0, task, task['id'], {}, {},
     )
@@ -150,3 +150,23 @@ def test_unrecoverable_collection_gap_has_truthful_policy_scoped_feedback(
     assert row['executionEffect'] == effect
     assert row['status'] == 'error' and captured[0].execution_status == 'error'
     assert len(observations[1]) == 1
+
+
+def test_cache_generation_failure_settles_without_dispatching(observations, monkeypatch):
+    """A failed pre-submit dependency keeps its original error and occurrence."""
+    calls = []
+
+    def handler(*args):
+        calls.append(True)
+        pytest.fail('The handler must not run without its cache generation fence')
+
+    def unavailable():
+        raise RuntimeError('generation fence unavailable')
+
+    monkeypatch.setattr('lib.write_freshness.project_read_cache_generation', unavailable)
+    row, messages, captured = dispatch(task_for(handler))
+    assert calls == []
+    assert row['status'] == 'error'
+    assert captured[0].execution_status == 'error'
+    assert 'generation fence unavailable' in messages[0]['content']
+    assert [message['tool_call_id'] for message in messages] == ['occurrence-1']

@@ -33,7 +33,7 @@ Run:  python -B -m pytest tests/export/test_export_head_snapshot.py
 
 from __future__ import annotations
 
-_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/core.py', 'lib/wip_module.py'}
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/core.py', 'lib/side.py', 'lib/wip_module.py'}
 
 import subprocess
 from pathlib import Path
@@ -145,6 +145,61 @@ def test_invalid_explicit_export_ref_fails_closed(repo, monkeypatch):
     )
     with pytest.raises(exp.ExportIntegrityError,
                        match='source-ref configuration is unsafe'):
+        exp._stage_head_snapshot(repo)
+
+
+def test_orphaned_linear_baseline_exports_current_head_not_frozen_stable(repo):
+    """A history rewrite strands baseline+stable outside HEAD's lineage.
+
+    Promotion can never advance such a stable again, so exporting it would
+    ship the same frozen tree forever while every capability added since
+    silently disappears from the export (2026-10: 0.17.0 shipped from a
+    0.18.3 checkout). The stale baseline no longer owns publication.
+    """
+    import export as exp
+
+    abandoned = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    _git(repo, 'update-ref', 'refs/tofu/stable', abandoned)
+    _git(repo, 'update-ref', 'refs/tofu/workspace-checkpoint-baseline', abandoned)
+    _git(repo, 'config', 'tofu.linearCheckpoint', 'true')
+    _git(repo, 'checkout', '-q', '--orphan', 'rebuilt')
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-qm', 'rebuilt history')
+    rebuilt = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+
+    snap = exp._stage_head_snapshot(repo)
+    assert snap is not None
+    try:
+        assert exp._state._EXPORT_SOURCE_SHA == rebuilt
+        assert (snap / 'lib' / 'wip_module.py').exists()
+    finally:
+        import shutil
+        shutil.rmtree(snap, ignore_errors=True)
+
+
+def test_owned_stable_diverged_from_head_fails_closed(repo, monkeypatch):
+    """Baseline still owns HEAD's history but stable left it: needs a human."""
+    import export as exp
+
+    # Refusal must happen before any snapshot is allocated (and a regression
+    # must not leak one into the host temp directory).
+    monkeypatch.setattr(
+        exp.tempfile, 'mkdtemp',
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError('a refused export must not allocate a temp tree')),
+    )
+
+    base = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    _git(repo, 'update-ref', 'refs/tofu/workspace-checkpoint-baseline', base)
+    _git(repo, 'checkout', '-q', '-b', 'side')
+    (repo / 'lib' / 'side.py').write_text('X = 2\n', encoding='utf-8')
+    _git(repo, 'add', 'lib/side.py')
+    _git(repo, 'commit', '-qm', 'side')
+    _git(repo, 'update-ref', 'refs/tofu/stable', 'HEAD')
+    _git(repo, 'checkout', '-q', '-')
+    _git(repo, 'config', 'tofu.linearCheckpoint', 'true')
+
+    with pytest.raises(exp.ExportIntegrityError, match='not in the history of HEAD'):
         exp._stage_head_snapshot(repo)
 
 

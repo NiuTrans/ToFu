@@ -1,0 +1,225 @@
+/* ══════════════════════════════════════════
+   Branch Conversations — 分支对话 (Neural Dendrite)
+   ══════════════════════════════════════════ */
+
+/* ── Branch container underneath an assistant message ── */
+.branch-zone{margin-top:var(--space-3);position:relative;padding-left:0}
+
+/* ── "Add branch" (分支) — now a unified `.msg-action-btn` in the bottom
+      action bar (see chat_render.js). Its hover accent matches the branch
+      theme colour. ── */
+.msg-branch-btn:hover{color:var(--accent);background:var(--accent-subtle)}
+
+/* ── Branch node pills ── */
+.branch-nodes{display:flex;flex-wrap:wrap;gap:6px;margin-top:var(--space-2)}
+.branch-node{
+  position:relative;display:inline-flex;align-items:center;gap:6px;
+  padding:6px 14px 6px 10px;
+  background:var(--bg-tertiary);border:1px solid var(--border);border-radius:20px;
+  font-size:var(--font-size-sm);color:var(--text-secondary);cursor:pointer;
+  transition:background-color .3s cubic-bezier(.4,0,.2,1),border-color .3s cubic-bezier(.4,0,.2,1),color .3s cubic-bezier(.4,0,.2,1),transform .3s cubic-bezier(.4,0,.2,1),box-shadow .3s cubic-bezier(.4,0,.2,1);
+  max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.branch-node:hover{background:var(--bg-hover);border-color:var(--accent);color:var(--text-primary);transform:translateY(-1px);box-shadow:0 2px 8px rgba(110,86,207,0.15)}
+.branch-node.active{background:var(--accent-subtle);border-color:var(--accent);color:var(--accent)}
+.branch-node-icon{font-size:var(--font-size-md);flex-shrink:0}
+.branch-node-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.branch-node-count{font-size:10px;opacity:0.6;margin-left:2px}
+.branch-node-close{
+  margin-left:var(--space-1);padding:0 2px;font-size:var(--font-size-lg);line-height:1;
+  color:var(--text-tertiary);cursor:pointer;opacity:0;transition:opacity .2s;
+  border:none;background:none;
+}
+.branch-node:hover .branch-node-close{opacity:0.7}
+.branch-node-close:hover{opacity:1;color:var(--error-border)}
+
+/* Pulse dot for active streaming branch */
+.branch-node-pulse{
+  width:6px;height:6px;border-radius:50%;background:var(--accent);
+  animation:branchPulse 1.5s ease-in-out infinite;margin-right:2px;flex-shrink:0;
+}
+.branch-node.streaming{border-color:var(--accent);box-shadow:0 0 8px rgba(110,86,207,0.3)}
+@keyframes branchPulse{0%,100%{opacity:.4;transform:scale(.8)}50%{opacity:1;transform:scale(1.2)}}
+
+/* ── Expanded branch conversation panel ── */
+.branch-panel{
+  margin-top:var(--space-2);
+  border:1px solid var(--border);border-radius:var(--radius-sm);
+  background:var(--bg-secondary);overflow:hidden;
+  animation:branchSlideIn .3s cubic-bezier(.4,0,.2,1);
+  box-shadow:0 2px 12px rgba(0,0,0,0.15);
+}
+@keyframes branchSlideIn{from{opacity:0;max-height:0;transform:translateY(-8px)}to{opacity:1;max-height:2000px;transform:translateY(0)}}
+
+.branch-panel-header{
+  display:flex;align-items:center;gap:var(--space-2);
+  padding:var(--space-2) 14px;
+  background:linear-gradient(135deg,var(--accent-subtle),transparent);
+  border-bottom:1px solid var(--border);
+  font-size:var(--font-size-sm);color:var(--text-secondary);
+}
+.branch-panel-icon{font-size:var(--font-size-lg);flex-shrink:0}
+.branch-panel-title{font-weight:600;color:var(--text-primary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.branch-panel-back{
+  background:none;border:none;color:var(--text-tertiary);cursor:pointer;
+  font-size:var(--font-size-xs);padding:2px var(--space-2);border-radius:12px;transition:color .2s,background-color .2s;
+  display:flex;align-items:center;gap:3px;
+}
+.branch-panel-back:hover{color:var(--text-primary);background:var(--bg-hover)}
+.branch-panel-count{font-size:var(--font-size-xs);color:var(--text-tertiary);margin-left:auto;margin-right:var(--space-1)}
+.branch-panel-close{
+  background:none;border:none;color:var(--text-tertiary);cursor:pointer;
+  font-size:var(--font-size-lg);padding:2px 6px;border-radius:var(--radius-xs);transition:color .2s,background-color .2s;line-height:1;
+}
+.branch-panel-close:hover{color:var(--text-primary);background:var(--bg-hover)}
+
+/* Collapse button (replaces close) */
+.branch-panel-collapse{
+  background:none;border:1px solid var(--border);color:var(--text-secondary);cursor:pointer;
+  font-size:var(--font-size-xs);padding:2px 10px;border-radius:12px;transition:color .2s,background-color .2s,border-color .2s;line-height:1.4;
+  margin-left:auto;
+}
+.branch-panel-collapse:hover{color:var(--text-primary);background:var(--bg-hover);border-color:var(--text-tertiary)}
+
+/* Stop button in panel header (during streaming) */
+.branch-panel-stop{
+  background:none;border:1px solid var(--error-border,#ff5050);color:var(--error,#ff5050);cursor:pointer;
+  font-size:var(--font-size-xs);padding:2px 10px;border-radius:12px;transition:background-color .2s,border-color .2s;line-height:1.4;
+  animation:branchStopPulse 2s ease-in-out infinite;
+}
+.branch-panel-stop:hover{background:rgba(255,80,80,0.15);border-color:var(--error,#ff5050)}
+@keyframes branchStopPulse{0%,100%{opacity:1}50%{opacity:0.7}}
+
+/* Delete button in panel header */
+.branch-panel-delete{
+  background:none;border:none;color:var(--text-tertiary);cursor:pointer;
+  font-size:var(--font-size-md);padding:2px 6px;border-radius:var(--radius-xs);transition:color .2s,opacity .2s,background-color .2s;line-height:1;
+  opacity:0.5;
+}
+.branch-panel-delete:hover{color:var(--error);opacity:1;background:rgba(255,80,80,0.1)}
+
+/* ── Messages inside branch ── */
+.branch-messages{max-height:500px;overflow-y:auto;padding:var(--space-2) var(--space-3);scroll-behavior:smooth}
+.conversation-lane--branch .conversation-turn.message>.message-avatar,
+.conversation-lane--branch .conversation-turn.message>.turn-ctx{display:none!important}
+.conversation-lane--branch .conversation-turn.message>.message-content{
+  max-width:none;overflow:visible;contain:none;background:transparent;
+  border:0;border-radius:0;padding:0;box-shadow:none
+}
+.branch-messages::-webkit-scrollbar{width:4px}
+.branch-messages::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+.branch-msg{margin-bottom:var(--space-2);padding:6px 10px;border-radius:var(--radius-xs);font-size:var(--font-size-md);line-height:1.6}
+.branch-msg.user{background:var(--bg-tertiary);border-left:2px solid var(--user-bubble);color:var(--text-primary)}
+.branch-msg.assistant{background:transparent;color:var(--text-primary)}
+.branch-msg .branch-msg-header{margin-bottom:2px}
+.branch-msg .branch-msg-role{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-tertiary);margin-bottom:2px}
+.branch-msg .branch-msg-body{font-size:var(--font-size-md);line-height:1.6}
+.branch-msg .md-content{font-size:var(--font-size-md)}
+.branch-msg .md-content p{margin:var(--space-1) 0}
+.branch-msg .md-content pre{font-size:var(--font-size-sm)}
+
+/* Thinking inside branch */
+.branch-thinking{
+  margin:var(--space-1) 0 6px;padding:6px 10px;
+  border-left:2px solid var(--thinking-border);
+  background:var(--thinking-bg);border-radius:0 var(--radius-xs) var(--radius-xs) 0;
+  font-size:11.5px;color:var(--thinking-text);
+  max-height:120px;overflow-y:auto;
+}
+.branch-thinking summary{cursor:pointer;font-size:var(--font-size-xs);opacity:0.8}
+
+/* ── Branch message content ── */
+.branch-empty{
+  padding:var(--space-6) var(--space-4);text-align:center;
+  color:var(--text-tertiary);font-size:var(--font-size-sm);font-style:italic;
+}
+.branch-selection-ctx{
+  margin-bottom:var(--space-2);padding:var(--space-2) var(--space-3);
+  background:var(--bg-tertiary);border-radius:6px;
+  color:var(--text-secondary);font-size:11.5px;font-style:normal;
+  text-align:left;line-height:1.5;word-break:break-word;
+}
+
+/* ── Branch typing indicator ── */
+@keyframes branchTyping{0%,100%{opacity:.3}50%{opacity:1}}
+
+/* ── Branch streaming message ── */
+.branch-streaming-msg{opacity:0.9}
+
+/* ── Branch mode banner above main input ── */
+.branch-mode-banner{
+  display:flex;align-items:center;gap:var(--space-2);
+  padding:6px var(--space-4);
+  background:linear-gradient(135deg,var(--accent-subtle),rgba(110,86,207,0.05));
+  border-top:1px solid var(--accent);
+  font-size:var(--font-size-sm);color:var(--accent);
+  animation:branchBannerIn .3s ease;
+}
+@keyframes branchBannerIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.branch-mode-banner-icon{font-size:var(--font-size-xl)}
+.branch-mode-banner-text{font-weight:500;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.branch-mode-banner-text strong{font-weight:700}
+.branch-mode-banner-exit{
+  background:none;border:1px solid var(--border);color:var(--text-secondary);
+  padding:3px 10px;border-radius:4px;cursor:pointer;font-size:var(--font-size-xs);
+  transition:background-color .2s,color .2s,border-color .2s;white-space:nowrap;font-family:inherit;
+}
+.branch-mode-banner-exit:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+/* streaming dot on branch node pill */
+
+/* branch streaming body inside panel */
+.branch-streaming-body{padding:var(--space-2) 0}
+
+/* ── Branch input hint (shown in panel) ── */
+.branch-input-hint{
+  padding:var(--space-2) 14px;text-align:center;
+  color:var(--text-tertiary);font-size:var(--font-size-xs);
+  border-top:1px solid var(--border);
+  background:var(--bg-tertiary);
+}
+.branch-input-hint span{opacity:0.7}
+
+/* ── Streaming zones inside branch panel ── */
+
+/* ── Search/tool rounds inside branch ── */
+
+/* ── Branch tool approval buttons ── */
+.branch-approve-btn,.branch-reject-btn{
+  padding:2px 10px;border-radius:10px;font-size:10px;
+  cursor:pointer;border:1px solid;transition:background-color .2s,color .2s;
+}
+.branch-approve-btn{border-color:var(--success-border);color:var(--success-border);background:transparent}
+.branch-approve-btn:hover{background:var(--success-border);color:#fff}
+.branch-reject-btn{border-color:var(--error-border);color:var(--error-border);background:transparent}
+.branch-reject-btn:hover{background:var(--error-border);color:#fff}
+.branch-approval{display:flex;gap:var(--space-2);margin-top:6px;padding:var(--space-1) 0}
+.branch-approval button{padding:var(--space-1) var(--space-3);border-radius:12px;font-size:var(--font-size-xs);cursor:pointer;border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text-secondary);transition:background-color .15s,color .15s,border-color .15s}
+.branch-approval button:hover{background:var(--accent-subtle);color:var(--accent);border-color:var(--accent)}
+
+/* ── Branch input area (legacy — kept for compat) ── */
+.branch-input{
+  flex:1;padding:6px var(--space-3);
+  background:var(--bg-primary);border:1px solid var(--border);border-radius:16px;
+  color:var(--text-primary);font-size:12.5px;font-family:inherit;
+  outline:none;resize:none;min-height:32px;max-height:80px;line-height:1.4;
+}
+.branch-input:focus{border-color:var(--accent)}
+.branch-input::placeholder{color:var(--text-tertiary)}
+
+/* ── Streaming indicator inside branch ── */
+.branch-streaming{
+  padding:var(--space-2) var(--space-3);display:flex;align-items:center;gap:var(--space-2);
+  font-size:11.5px;color:var(--text-tertiary);
+}
+.branch-streaming .pulse{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:branchPulse 1.5s ease-in-out infinite}
+
+/* ── Connection line from node to panel (visual dendrite) ── */
+
+/* ── Light theme overrides ── */
+[data-theme="light"] .branch-node{background:rgba(0,0,0,0.03);border-color:rgba(0,0,0,0.08)}
+[data-theme="light"] .branch-node:hover{background:rgba(110,86,207,0.06);border-color:var(--accent)}
+[data-theme="light"] .branch-panel{background:#fff;box-shadow:0 2px 12px rgba(0,0,0,0.08)}
+[data-theme="light"] .branch-msg.user{background:rgba(0,0,0,0.03);border-left-color:var(--user-bubble)}
+[data-theme="light"] .branch-input{background:#fff}

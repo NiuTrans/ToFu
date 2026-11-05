@@ -161,9 +161,12 @@ def test_result_event_archive_and_economics_count_all_messages_with_restore_rese
         economics.append({'candidate_tokens': candidate_tokens,
                           'summary_cost': summary_cost,
                           'summary_usage': summary_usage})
-        return {'cache_read_tokens': 0, 'dropped_tokens': tokens_before-candidate_tokens,
+        return {'cache_read_tokens': 0, 'warm_prefix_tokens': 0,
+                'dropped_tokens': tokens_before-candidate_tokens,
                 'payback_rounds': 0}
     monkeypatch.setattr(l2, '_proactive_cache_economics', econ)
+    # The stubbed economics prices this route; keep the pricing probe consistent.
+    monkeypatch.setattr(l2, '_main_route_pricing_verified', lambda *a, **k: True)
     runtime = {'role': 'user', '_isMeta': True, '_contextComposer': True,
                'content': 'Runtime block ' * 500}
     policy = {'role': 'system', 'content': 'Native policy ' * 200}

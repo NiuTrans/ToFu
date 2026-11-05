@@ -43,12 +43,15 @@ def build_assistant_tool_call_message(
         thinking block is dropped identically downstream by ``_assistant_blocks``
         / ``_inject_claude_reasoning_details``, so no HTTP 400; DeepSeek's
         ``model_requires_reasoning_content_replay`` is preserved.
-      * ``thinking_signature`` — carried only when present AND thinking present
-        (a signature without reasoning text is meaningless).
+      * ``thinking_signature`` — carried only when present AND thinking present.
+        A signature-only thinking block (Anthropic ``display: "omitted"``) is
+        replayed through ``_anthropic_content_blocks`` instead, which keeps the
+        empty-text block, every interleaved block and their order intact.
       * ``_responses_items`` — opaque OpenAI Responses reasoning/compaction
         state, carried without interpretation for stateless replay.
-      * ``_anthropic_content_blocks`` — opaque Anthropic hosted-tool blocks,
-        carried unchanged so server_tool_use continuity survives replay.
+      * ``_anthropic_content_blocks`` — the ordered native Anthropic assistant
+        content (signed thinking, hosted-tool, compaction blocks), carried
+        unchanged so the Messages API receives the turn exactly as returned.
       * key order is FIXED (role, content, reasoning_content, thinking_signature,
         tool_calls) so the serialized wire bytes are deterministic regardless of
         which caller populated the fields.

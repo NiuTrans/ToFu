@@ -40,9 +40,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 @pytest.mark.unit
 class TestSlotInflightRelease:
-    def _slot(self):
+    def _slot(self, key='k0'):
         from lib.llm_dispatch.slot import Slot
-        return Slot(key_name='k0', api_key='', model='qwen-plus',
+        return Slot(key_name=key, api_key='', model='qwen-plus',
                     capabilities={'text'})
 
     def test_release_decrements_inflight(self):
@@ -75,18 +75,60 @@ class TestSlotInflightRelease:
             slot.release()
         assert slot.inflight == 0
 
-    def test_dispatch_handlers_call_release(self):
-        """Guard against the original leak: the payload-reject except blocks
-        in the dispatch shards must call slot.release() before re-raising."""
-        import inspect
-        import lib.llm_dispatch._api_chat as chat_shard
-        import lib.llm_dispatch._api_stream as stream_shard
-        src = inspect.getsource(chat_shard) + '\n' + inspect.getsource(stream_shard)
-        # Every payload-level reject handler raises; each must release first.
-        assert src.count('slot.release()') >= 6, (
-            'expected slot.release() in both dispatch_chat and dispatch_stream '
-            'payload-reject handlers (content filter / prompt-too-long / '
-            'invalid-image / abort)')
+    @pytest.mark.parametrize('lane', ['chat', 'stream', 'async_stream'])
+    @pytest.mark.parametrize('error_name', [
+        'ContentFilterError', 'PromptTooLongError', 'InvalidImageError',
+        'AbortedError'])
+    def test_dispatch_payload_reject_releases_without_health_error(
+            self, monkeypatch, lane, error_name):
+        """Guard against the original leak through the public dispatch lanes:
+        a payload-level reject (same payload = same rejection on every slot)
+        returns its reservation exactly once, re-raises unchanged, tries no
+        other slot, and neither damages nor credits the slot's health."""
+        import asyncio
+        import lib.llm as llm_mod
+        import lib.llm.llm_errors as llm_errors
+        from lib.llm_dispatch import api
+        from tests.llm_dispatch.test_dispatch_stream import _FakeDispatcher
+
+        slot, spare = self._slot(), self._slot(key='k1')
+        dispatcher = _FakeDispatcher([slot, spare])
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: dispatcher)
+        error = getattr(llm_errors, error_name)(f'rejected payload: {error_name}')
+        releases, release = [], slot.release
+
+        def tracked_release():
+            releases.append(True)
+            release()
+
+        def reject(*_args, **_kwargs):
+            raise error
+
+        async def reject_async(*_args, **_kwargs):
+            raise error
+
+        monkeypatch.setattr(slot, 'release', tracked_release)
+        messages = [{'role': 'user', 'content': 'hi'}]
+        with pytest.raises(type(error)) as caught:
+            if lane == 'chat':
+                monkeypatch.setattr(llm_mod, 'chat', reject)
+                api.dispatch_chat(messages, log_prefix='[t]')
+            elif lane == 'stream':
+                monkeypatch.setattr(llm_mod, 'stream_chat', reject)
+                api.dispatch_stream(messages, log_prefix='[t]')
+            else:
+                monkeypatch.setattr(
+                    'lib.llm.astream.async_stream_chat', reject_async)
+                asyncio.run(api.async_dispatch_stream(
+                    messages, log_prefix='[t]'))
+
+        assert caught.value is error
+        assert releases == [True]
+        assert slot.inflight == 0
+        assert slot.consecutive_errors == slot.total_errors == 0
+        assert slot.last_error_time == 0 and slot.cooldown_until == 0
+        assert slot.last_success_time == 0.0
+        assert dispatcher.picks == 1 and spare.total_requests == 0
 
 
 # ═══════════════════════════════════════════════════════════

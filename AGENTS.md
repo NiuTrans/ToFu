@@ -1,33 +1,46 @@
-# Codex repository guidance
+# Repository guidance
 
-Keep task quality as the primary objective, then minimize model turns and raw
-context growth without weakening verification.
+This file is the single source of repository-wide rules for every coding agent;
+read it completely before changing code. Keep task quality as the primary
+objective, then minimize model turns and raw context growth without weakening
+verification.
 
 - Use isolated worktrees for sustained changes in a shared checkout. Never
   reset, clean, or replace the shared tree to prepare a task. When other
   (uncommitted or in-flight) work exists in the workspace, NEVER run
   workspace-destroying commands such as `git checkout --`, `git checkout
   <branch>`, `git switch`, `git restore`, `git stash`, `git reset --hard`,
-  or `git clean`: they can silently discard concurrent edits. Commits made
-  in an isolated worktree never reach the current branch by themselves: the
-  executing agent (the model — never the human user) must merge them back
-  itself, and must do so immediately once the worktree work is finished and
-  verified, not later and never as a hand-off — `git merge`/`git cherry-pick`
-  of the worktree branch (both refuse to overwrite uncommitted concurrent
-  edits, so they are safe by construction) — or integrate only reviewed
-  paths after checking their current content, then remove the worktree with
-  `git worktree remove`. A task is not complete until its worktree commits
-  are merged into the current branch. Preserve concurrent edits and keep an
-  isolated commit plus a pre-integration backup.
-- Start unfamiliar work with one bounded discovery batch: use `rg`/`rg --files`
-  and targeted ranges instead of repeatedly reading one file at a time. Do not
+  or `git clean`: they can silently discard concurrent edits. Create each worktree
+  with `git -C <shared-checkout> worktree add <path> -b <branch>
+  <shared-current-branch>`, never from the platform task workspace's `HEAD`,
+  which may be a task-input snapshot. Commits made in an isolated worktree
+  never reach the current branch by themselves: the
+  executing agent (the model — never the human user) must land them itself,
+  immediately once the worktree work is finished and verified, not later and
+  never as a hand-off: run `python3 scripts/git_land.py <branch>` from the
+  shared checkout. Unlike `git merge`, it does not refuse when other writers
+  have uncommitted edits in the same files; it carries those edits forward
+  with a three-way merge, then removes the worktree and deletes the branch.
+  If it refuses, nothing was changed; follow its printed instruction (merge
+  the current branch into the worktree branch to resolve a real conflict, or
+  rerun after another writer's overlapping lines are committed). A task is
+  not complete until its worktree commits are merged into the current
+  branch. The merge commit's first parent is the pre-integration backup; the
+  tool prints it, so record that SHA in the final answer instead of creating
+  `backup/*` branches.
+- Start unfamiliar work with one bounded discovery batch over the owning
+  modules, contracts, tests, and current changes: use `rg`/`rg --files` and
+  targeted ranges instead of repeatedly reading one file at a time. Do not
   dump the whole dirty worktree, full diffs, generated bundles, or large logs.
   On this host's FUSE mount, prefer `git ls-files` and `git grep` over `find`/
   `grep -r`: deep `find` walks intermittently return empty.
-- Use `docs/README.md` as the first-hop map. Edit retained browser code in
-  `frontend/src/runtime/sections/`, never the generated `app-runtime.js`. Edit
-  styles in `frontend/src/styles/{application,settings}/`, never generated
-  files under `static/`.
+- Use `docs/README.md` as the first-hop map to the owning module and contract;
+  `docs/catalog.json` is the machine-readable documentation inventory. Change
+  the authority first, then derive generated clients and bundles. Edit
+  retained browser code in `frontend/src/runtime/sections/`, never the
+  generated `app-runtime.js`. Edit styles in
+  `frontend/src/styles/{application,settings}/`, never generated files under
+  `static/`.
 - Repo-root local trees that are untracked on purpose (gitignored): `promo/`
   (marketing HTML/PNGs) and `codex/` (a local vendored Codex CLI checkout used
   for comparison/evaluation). Neither is a runtime dependency of tracked code:
@@ -41,18 +54,38 @@ context growth without weakening verification.
   define the available names, arguments, and execution semantics. Return only
   evidence needed for the next judgment.
 - Background long commands with `run_command(background=true)` when useful.
-  Completion is delivered automatically; use `poll` with the returned handle
-  and a bounded wait only when no useful work remains. Never busy-poll or infer
-  success from an absent session. Keep user progress updates within 60 seconds.
-- Use a test ladder: smallest relevant tests first, then neighboring contracts,
+  The receipt and the tool description say whether the completion reaches you
+  automatically: only a task that owns its conversation turn is woken with it.
+  A swarm worker or other delegated run collects its handle with `poll` before
+  it finishes; a leaf worker's `poll` and `kill` reach only the `bg_*` commands
+  it started. A headless API request runs every command in the foreground. Use
+  `poll` with a bounded wait only when no useful work remains. Never busy-poll
+  or infer success from an absent session. Keep user progress updates within
+  60 seconds.
+- Add or update the smallest executable specification for the behavior, then
+  use a test ladder: smallest relevant tests first, then neighboring contracts,
   then broad gates once the worktree is stable. Do not rerun an unchanged suite.
   With concurrent writers, report that a full-suite result is a moving target.
+- Update the owning current-state document with the change; delete superseded
+  plans instead of leaving an archive beside authoritative documentation.
 - Batch mechanical edits, but inspect and test semantic boundaries separately.
   Preserve fault injection, rollback, authority, and user-visible error behavior.
 - Before finishing a tool-heavy task, run
   `python3 audit_codex_session.py <rollout.jsonl>` when a session path is
   available. Treat fewer calls as a win only when the same correctness checks
   and required evidence still pass.
+
+# High-value entry points
+
+- Application assembly: `lib/app/app_assembly.py`
+- HTTP blueprints: `routes/__init__.py`
+- Conversation protocol: `contracts/conversation_sync_v3.yaml`
+- API and event contracts: `docs/contracts/API_CONTRACT.md`,
+  `docs/contracts/EVENTS.md`
+- Durable state: `lib/storage/` and `lib/storage_authority_sql/`
+- Task execution: `lib/tasks_pkg/` and `lib/agent_core/`
+- Browser source: `frontend/src/`
+- Architecture: `docs/ARCHITECTURE.md`
 
 # Registering models
 
@@ -76,9 +109,9 @@ Do NOT hand-query sqlite or guess table names. The script is read-only and
 reports in one pass the stores referencing the ID, full metadata, the
 transcript (projected exactly like the server renders it), compaction
 summaries/receipts, and matching `logs/app.log` / `logs/access.log` lines.
-Flags: `--full`, `--raw`, `--logs N` / `--no-logs`, `--db PATH`, `--user-id N`,
-`--api-url ORIGIN` / `--api-token-env NAME`, `--logs-dir PATH`,
-`--tools`, `--no-anomalies`.
+Flags: `--full`, `--raw`, `--json`, `--context`, `--logs N` / `--no-logs`,
+`--log-match REGEX`, `--db PATH`, `--user-id N`, `--api-url ORIGIN` /
+`--api-token-env NAME`, `--logs-dir PATH`, `--tools`, `--no-anomalies`.
 
 Storage has one selected authority: native TofuDB or the SQL Sidecar;
 `TOFU_STORAGE_MODE` is retired. Preserve the configured native backend; never
@@ -127,7 +160,7 @@ about that harness, and fixing it is part of the job. Same principle as
 
 # Design principles (standing constraints)
 
-Four long-term product constraints govern every change in this repo.
+Five long-term product constraints govern every change in this repo.
 
 1. **Single-user performance now, enterprise multi-user later.** Do not build
    multi-tenancy features yet, but never hardcode single-user assumptions into
@@ -160,25 +193,31 @@ Four long-term product constraints govern every change in this repo.
      `docs/DEFENSIVE_PATTERNS.md`.
    - Small, verifiable increments following the test ladder above.
 
-3. **Performance scales to the user's machine.** Zero-configuration Tofu
-   uses the resources the user actually has; it never assumes a fixed low-end
-   host, and it never caps performance below what the machine can deliver.
-   Given the same resources, squeeze out the maximum performance.
-   - Defaults derive from one observable launch-time probe of affinity/cgroup
-     CPU, physical/cgroup memory capacity and headroom, and volume free space,
-     and scale with what is probed — up as well as down. Probe failure falls
-     back lean; explicit overrides remain.
-   - Pools, queues, caches, logs, replay streams and temporary artifacts are
-     sized from the probed capacity and have lifecycles tied to user-visible
-     value; bounds exist to prevent leaks and runaway growth, not to starve
-     performance.
+3. **Hardware never limits work.** Owner decision 2026-10-24; a fixed policy,
+   not a tuning opportunity (`docs/RESOURCE_CONTROL.md`, "Hardware never
+   limits work"). CPU count, affinity/cgroup CPU quota, memory capacity or
+   headroom, process RSS and cgroup pressure never size, cap, queue, refuse,
+   shrink, recycle or kill user work. Do not reintroduce probe-derived worker
+   or task ceilings, memory-headroom or RSS refusals, worker recycling,
+   memory-driven capacity shrinking, per-profile worker formulas, or "server
+   busy / at capacity" errors for local capacity, however well-intentioned.
+   - Every launch setting declares a class in
+     `contracts/resource_policy_v1.json`: `unlimited` (admission, concurrency
+     and fan-out; always `runtime_guards.UNLIMITED`); `fixed` (idle-reuse
+     hints of demand-driven pools, retry budgets, deadlines), a
+     hardware-independent constant; only evict-only `retention` (caches, TTLs,
+     logs, replay windows, disk budgets) may follow the launch probe.
+   - Executors start every accepted job. Memory exhaustion is left to the
+     operating system; best-effort cache relief never blocks work.
    - Durable user state is distinct from reconstructible transport/cache data;
      reclaim the latter, never weaken durability or silently delete the former.
    - Heavy optional capabilities load lazily or run behind a worker boundary
-     so they never tax startup or idle; their concurrency scales with the
-     probed capacity, not a hardcoded single-user assumption.
-   - A change that affects resident concurrency or persistent growth includes
-     a measurement and updates the owning operations contract.
+     so they never tax startup or idle.
+   - A change that affects persistent growth or retention includes a
+     measurement and updates the owning operations contract.
+   - `tests/meta/test_hardware_never_limits_work.py` is the executable form of
+     this rule. Changing it requires a new explicit owner decision recorded in
+     the authority doc, never an agent's judgment.
 
 4. **Find commonality before adding machinery.** Chat, Goal, Evolution and
    specialized deliverables reuse the existing invocation, coordination, Turn
@@ -188,6 +227,23 @@ Four long-term product constraints govern every change in this repo.
    needed, and remove redundant paths with behavioral parity tests. Synthetic
    users never inherit human authorization, and domain-specific verification,
    learning and durable settlement remain explicit rather than flattened away.
+
+5. **Optimizations add no tuning hyperparameters.** Owner decision
+   2026-10-28. An optimization wins by doing less or smarter work: a better
+   algorithm or data structure, batching, exact caching with explicit
+   invalidation, lazy loading, or deleting redundant paths. It never adds a
+   knob that constrains what the product does or how well it does it: no
+   magic thresholds, caps, quotas, top-k or result counts, truncation sizes,
+   sampling rates, heuristic cutoffs, batch/window/debounce intervals, extra
+   timeouts or retry counts, and no new env var, setting or feature flag
+   introduced to tune, gate or "safely" limit the change.
+   - A constant is acceptable only when something outside the optimization
+     defines it: an external protocol, provider or API limit, or a
+     correctness/liveness contract (deadline, retry budget) recorded in its
+     owning contract. Define it once, named after that source.
+   - If the gain exists only at a tuned value, it is not an optimization:
+     find the structural fix or leave the code unchanged.
+   - Removing an existing arbitrary knob is itself a valid optimization.
 
 Keep this file short and stable; detailed rationale and audit results live in
 docs/ (see docs/ENTERPRISE_EVOLUTION.md).
@@ -200,7 +256,8 @@ docs/ (see docs/ENTERPRISE_EVOLUTION.md).
 - Add or revise a child guide when a directory gains a distinct owner,
   source-of-truth, generated boundary, or verification path. Keep durable
   product behavior in the referenced contract or domain document, not here.
-- The canonical filename is uppercase `AGENTS.md`.
+- The canonical filename is uppercase `AGENTS.md`; do not add per-agent copies
+  such as `CLAUDE.md`.
 - Generated, vendored, runtime, and user-data trees do not receive local
   guidance. In particular, do not add guides under `static/`, `dist/`,
   `build/`, `uploads/`, `data/`, `logs/`, dependency caches, `.tofu*`, or

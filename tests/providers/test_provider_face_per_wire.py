@@ -148,6 +148,30 @@ def test_the_shipped_recipe_governs_every_alias_it_lists():
     assert public_conn['extra_headers'] == {}, public_conn['extra_headers']
 
 
+def test_the_shipped_recipe_keeps_the_claude_alias_on_the_anthropic_face():
+    """Measured 200 on /v1/anthropic and 400 on /v1/responses.
+
+    ``kunlunbedrock.claude-opus-5.5-m17`` names a kunlun deployment but answers
+    the Anthropic Messages wire, so its face must come from the Claude family
+    rule rather than from the ``kunlunbedrock.`` prefix — no
+    ``x-context-provider`` selector, no Responses Connection. The alias leads
+    ``request_ids`` because the ``aws.`` spelling is already over its per-App
+    envelope while this one answers.
+    """
+    from lib.provider.provider_template_recipes import (
+        compile_provider_template_bundle)
+
+    bundle = compile_provider_template_bundle(
+        'yourprovider', selected_model_ids=['claude-opus-5.5'])
+    connections = {c['connection_id']: c for c in bundle['connections']}
+    by_wire = {d['wire_model_id']: connections[d['connection_id']]
+               for d in bundle['deployments']}
+    conn = by_wire['kunlunbedrock.claude-opus-5.5-m17']
+    assert conn['base_url'] == 'https://api.openai.com/v1/anthropic'
+    assert conn['protocol'] == 'anthropic'
+    assert conn['extra_headers'] == {}, conn['extra_headers']
+
+
 def test_probe_work_probes_each_wire_on_its_own_face():
     from lib.provider.provider_probe import build_probe_work
 

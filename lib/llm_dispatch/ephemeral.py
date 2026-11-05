@@ -14,17 +14,29 @@ Lifecycle::
                                  model_id='deepseek-v4-pro',
                                  owner='task_abc123')
     try:
-        # dispatch_chat(prefer_model='deepseek-v4-pro', strict_model=True)
-        # picks the ephemeral slot because no other deepseek-v4-pro slot
-        # exists in this process — or, if one does, the random jitter +
-        # cold latency_ema steers traffic toward whichever slot is best.
-        ...
+        with provider_pin(handle.slot.provider_id):
+            # Only a context pinned to the slot's provider_id selects it;
+            # an unpinned dispatch sees configured slots only.
+            dispatch_chat(..., prefer_model='deepseek-v4-pro', strict_model=True)
     finally:
         dispose_ephemeral_slot(handle)
 
 The handle returned by :func:`mint_ephemeral_slot` is opaque; callers
 hand it to :func:`dispose_ephemeral_slot` exactly once. Disposal is
 idempotent — a double-dispose returns False.
+
+Route groups
+------------
+A model-routing v2 group mints one slot per eligible Deployment. Its owner
+calls :func:`prepare_ephemeral_slot` per candidate (no lock; a shared
+``endpoint_verdicts`` map checks each distinct base URL once), then
+:func:`publish_ephemeral_slots` once: the whole group is registered and
+published in one dispatcher-lock critical section, in rank order.
+:func:`dispose_ephemeral_slots` withdraws it again in one pass by identity.
+A task's group holds every authorized failover candidate (often dozens of
+slots), so mint/dispose write one audit record and INFO line per group
+(owner + provider pin, primary candidate, slot count); per-slot detail is
+DEBUG only.
 
 Security
 --------
@@ -36,12 +48,12 @@ without exposing the key.
 
 Proxy bypass
 ------------
-If ``base_url`` resolves to a private / pseudo-private IP (per
-:func:`lib.llm_dispatch.discovery.is_local_endpoint`) we register the
-host with :func:`lib.proxy.register_no_proxy_url` so the very first
-request bypasses any corporate ``https_proxy`` — same treatment given
-to ``brand=='local'`` providers in
-``dispatcher._build_slots_from_providers``.
+If ``base_url`` is self-hosted (private / pseudo-private IP or bare IP, per
+:func:`lib.llm_dispatch.discovery.should_bypass_proxy`) the handle leases
+the host's proxy exemption with :func:`lib.proxy.lease_no_proxy_url`, so
+the very first request bypasses any corporate ``https_proxy``. Disposal
+returns the lease: like the slot itself, the exemption never outlives the
+request, and a mint the pre-flight probe rejects takes none.
 """
 
 from __future__ import annotations
@@ -69,7 +81,10 @@ logger = get_logger(__name__)
 
 __all__ = [
     'EphemeralSlotHandle',
+    'prepare_ephemeral_slot',
+    'publish_ephemeral_slots',
     'mint_ephemeral_slot',
+    'dispose_ephemeral_slots',
     'dispose_ephemeral_slot',
     'count_ephemeral_slots',
 ]
@@ -178,6 +193,7 @@ class EphemeralSlotHandle:
     owner: str           # opaque tag (task_id / request_id) for audit
     minted_at: float
     disposed: bool = False
+    proxy_bypass_host: str = ''  # leased exemption, returned on disposal
 
 
 def _normalise_base_url(url: str) -> str:
@@ -208,6 +224,13 @@ def _normalise_base_url(url: str) -> str:
     return url
 
 
+def _release_proxy_bypass(handle: EphemeralSlotHandle) -> None:
+    host, handle.proxy_bypass_host = handle.proxy_bypass_host, ''
+    if host:
+        from lib.proxy import release_no_proxy_host
+        release_no_proxy_host(host)
+
+
 def _seed_caps_and_pricing(model_id: str) -> tuple[set, float, float, float]:
     """Resolve (capabilities, rpm, latency_ms, cost_per_1k) for an ephemeral slot.
 
@@ -224,22 +247,92 @@ def _seed_caps_and_pricing(model_id: str) -> tuple[set, float, float, float]:
     return caps, rpm, latency, cost
 
 
-def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
-                        owner: str = '',
-                        extra_headers: Optional[dict] = None,
-                        thinking_format: str = '',
-                        inference_profile: Optional[dict] = None,
-                        context_window: int = 0,
-                        capabilities: Optional[set] = None,
-                        wire_model_id: str = '',
-                        protocol: str = '',
-                        responses_profile: str = '',
-                        oauth: str = '',
-                        adapter: Optional[dict] = None,
-                        routing_owner_user_id: int = 0,
-                        provider_pin_id: str = '',
-                        ) -> EphemeralSlotHandle:
-    """Inject a request-scoped Slot into the dispatcher.
+@dataclass(frozen=True)
+class _EndpointVerdict:
+    """One endpoint checked for use now: normalized URL and proxy class."""
+
+    base_url: str
+    self_hosted: bool
+
+
+def _check_endpoint(base_url) -> _EndpointVerdict:
+    """Validate one endpoint for use now; ValueError when it must not be used."""
+    base_url = _normalise_base_url(base_url)
+    # Self-hosted hosts bypass the corporate proxy (the local-endpoints
+    # memory documents why this is critical for hosts like 33.x.x.x). We use
+    # should_bypass_proxy (not just is_local_endpoint) so bare-IP endpoints
+    # on internal-but-publicly-routable corp ranges (33.x) are covered
+    # without TOFU_LOCAL_CIDRS. The exemption is leased after the probe.
+    self_hosted = False
+    try:
+        from lib.llm_dispatch.discovery import should_bypass_proxy
+        self_hosted = should_bypass_proxy(base_url)
+    except Exception as e:
+        logger.debug('[Ephemeral] self-hosted classification failed: %s', e)
+
+    # Pre-flight reachability probe. Only for self-hosted / raw-IP
+    #   endpoints — those are the boxes that go down without an SLA and
+    #   whose first request would otherwise stall on the connect timeout.
+    #   Cloud BYO endpoints (addressed by domain) are assumed reachable;
+    #   probing them just adds a round-trip. A failed probe raises
+    #   ValueError → the HTTP callers (byo_resolve / api_v1.chat) already
+    #   map mint ValueError to a clean 400, so the user sees "endpoint
+    #   unreachable" instead of a 60s hang.
+    if self_hosted and _preflight_enabled():
+        ok, detail = _probe_reachable(base_url)
+        if not ok:
+            logger.warning('[Ephemeral] pre-flight probe FAILED for %s: %s',
+                           base_url, detail)
+            raise ValueError(
+                'endpoint unreachable at %s (%s); the model server may be '
+                'down or the port not listening' % (base_url, detail))
+        logger.debug('[Ephemeral] pre-flight probe ok for %s', base_url)
+    elif self_hosted and _benchmark_mode():
+        # Skipped on purpose — see _preflight_enabled. The dispatch retry
+        # loop is the safety net for a genuinely-down endpoint here.
+        logger.debug('[Ephemeral] pre-flight probe skipped for %s '
+                     '(benchmark mode: TOFU_DISABLE_CONFIGURED_SLOTS)', base_url)
+    return _EndpointVerdict(base_url, self_hosted)
+
+
+def _endpoint_verdict(base_url, endpoint_verdicts) -> _EndpointVerdict:
+    """Check *base_url* at most once per caller-owned verdict map."""
+    if endpoint_verdicts is None:
+        return _check_endpoint(base_url)
+    verdict = endpoint_verdicts.get(base_url)
+    if verdict is None:
+        try:
+            verdict = _check_endpoint(base_url)
+        except ValueError as exc:
+            verdict = exc
+        endpoint_verdicts[base_url] = verdict
+    if isinstance(verdict, ValueError):
+        raise ValueError(*verdict.args)
+    return verdict
+
+
+def prepare_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
+                           owner: str = '',
+                           extra_headers: Optional[dict] = None,
+                           thinking_format: str = '',
+                           inference_profile: Optional[dict] = None,
+                           context_window: int = 0,
+                           capabilities: Optional[set] = None,
+                           wire_model_id: str = '',
+                           protocol: str = '',
+                           responses_profile: str = '',
+                           oauth: str = '',
+                           adapter: Optional[dict] = None,
+                           routing_owner_user_id: int = 0,
+                           routing_tenant_id: str = '',
+                           provider_pin_id: str = '',
+                           endpoint_verdicts: Optional[dict] = None,
+                           ) -> EphemeralSlotHandle:
+    """Validate and build one request-scoped Slot without publishing it.
+
+    Takes no lock. Publish the handle with :func:`publish_ephemeral_slots`
+    (a route group publishes all its handles together) or retire it with
+    :func:`dispose_ephemeral_slots`.
 
     Args:
         base_url: Provider base URL (must include scheme).
@@ -261,15 +354,19 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
             Connection. Empty means the endpoint is reached normally.
         routing_owner_user_id: Explicit v2 owner used only to namespace
             credential-health state; zero retains legacy transient behavior.
-
-    Returns:
-        :class:`EphemeralSlotHandle` — pass to
-        :func:`dispose_ephemeral_slot` when done.
+        routing_tenant_id: The same owner boundary's tenant; it scopes
+            learned credential health together with the owner.
+        endpoint_verdicts: Caller-owned map memoizing the endpoint check
+            (normalization, egress validation, proxy classification and
+            reachability probe) per raw ``base_url``: one route group checks
+            each distinct endpoint once.
 
     Raises:
-        ValueError: ``base_url`` malformed or ``model_id`` empty.
+        ValueError: ``base_url`` malformed, denied or unreachable, or
+            ``model_id`` empty.
     """
-    base_url = _normalise_base_url(base_url)
+    endpoint = _endpoint_verdict(base_url, endpoint_verdicts)
+    base_url = endpoint.base_url
     if not isinstance(model_id, str) or not model_id.strip():
         raise ValueError('model_id is required')
     model_id = model_id.strip()
@@ -277,47 +374,6 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
     if not wire_model_id:
         raise ValueError('wire_model_id is required')
     api_key = (api_key or '').strip()
-
-    from lib.resource_control.adapters import bind_ephemeral
-    bind_ephemeral()
-    # Pre-register no_proxy for self-hosted hosts. Mirrors the treatment
-    # given to brand=='local' providers in _build_slots_from_providers
-    # (the local-endpoints memory documents why this is critical for
-    # hosts like 33.x.x.x). We use should_bypass_proxy (not just
-    # is_local_endpoint) so bare-IP endpoints on internal-but-publicly-
-    # routable corp ranges (33.x) are covered without TOFU_LOCAL_CIDRS.
-    _is_self_hosted = False
-    try:
-        from lib.llm_dispatch.discovery import should_bypass_proxy
-        from lib.proxy import register_no_proxy_url
-        _is_self_hosted = should_bypass_proxy(base_url)
-        if _is_self_hosted:
-            register_no_proxy_url(base_url)
-    except Exception as e:
-        logger.debug('[Ephemeral] no_proxy registration probe failed: %s', e)
-
-    # Pre-flight reachability probe. Only for self-hosted / raw-IP
-    #   endpoints — those are the boxes that go down without an SLA and
-    #   whose first request would otherwise stall on the connect timeout.
-    #   Cloud BYO endpoints (addressed by domain) are assumed reachable;
-    #   probing them just adds a round-trip. A failed probe raises
-    #   ValueError → the HTTP callers (byo_resolve / api_v1.chat) already
-    #   map mint ValueError to a clean 400, so the user sees "endpoint
-    #   unreachable" instead of a 60s hang.
-    if _is_self_hosted and _preflight_enabled():
-        ok, detail = _probe_reachable(base_url)
-        if not ok:
-            logger.warning('[Ephemeral] pre-flight probe FAILED for %s: %s',
-                           base_url, detail)
-            raise ValueError(
-                'endpoint unreachable at %s (%s); the model server may be '
-                'down or the port not listening' % (base_url, detail))
-        logger.debug('[Ephemeral] pre-flight probe ok for %s', base_url)
-    elif _is_self_hosted and _benchmark_mode():
-        # Skipped on purpose — see _preflight_enabled. The dispatch retry
-        # loop is the safety net for a genuinely-down endpoint here.
-        logger.debug('[Ephemeral] pre-flight probe skipped for %s '
-                     '(benchmark mode: TOFU_DISABLE_CONFIGURED_SLOTS)', base_url)
 
     caps, rpm, latency, cost = _seed_caps_and_pricing(model_id)
     if capabilities is not None:
@@ -340,6 +396,7 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
             f'ephemeral:{owner}:{handle_id}' if owner
             else f'ephemeral:{handle_id}')),
         routing_owner_user_id=int(routing_owner_user_id or 0),
+        routing_tenant_id=str(routing_tenant_id or ''),
         request_scoped=True,
         extra_headers=dict(extra_headers or {}),
         thinking_format=thinking_format or '',
@@ -354,80 +411,172 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
         cost_per_1k_tokens=cost,
         stream_only=False,
     )
-
-    from .factory import get_dispatcher
-
-    dispatcher = get_dispatcher()
-    # Request authority is already supplied by the caller. Loading the unrelated
-    # configured pool here couples standalone/native routes to application storage.
-    # A later configured dispatch still initializes normally and retains these slots.
     handle = EphemeralSlotHandle(
         handle_id=handle_id, slot=slot, owner=str(owner or ''),
         minted_at=time.time(),
     )
-    # Probe outside the locks. Registration has no count ceiling.
-    # Both owners publish together, with one lock order also used by disposal.
-    with _lock, dispatcher._lock:
-        try:
-            dispatcher.slots.append(slot)
-            _handles[handle_id] = handle
-        except BaseException:
-            _handles.pop(handle_id, None)
-            if slot in dispatcher.slots:
-                dispatcher.slots.remove(slot)
-            raise
-
-    # Record credential presence, never credential characters. Even a short
-    # prefix can disclose most of a private gateway token and handle/provider
-    # identifiers already provide the correlation needed for diagnostics.
-    api_key_hint = '<configured>' if api_key else '<empty>'
-    try:
-        _audit_slot('ephemeral_slot_mint', handle=handle_id, owner=str(owner or ''),
-                    model=wire_model_id, base_url=base_url, api_key_hint=api_key_hint)
-        logger.info('[Ephemeral] mint handle=%s owner=%s model=%s url=%s key=%s caps=%s',
-                    handle_id, owner or '?', wire_model_id, base_url, api_key_hint,
-                    ','.join(sorted(caps)))
-    except BaseException:
-        dispose_ephemeral_slot(handle)
-        raise
+    if endpoint.self_hosted:
+        from lib.proxy import lease_no_proxy_url
+        handle.proxy_bypass_host = lease_no_proxy_url(base_url)
     return handle
 
 
-def dispose_ephemeral_slot(handle: EphemeralSlotHandle) -> bool:
-    """Remove an ephemeral slot from the dispatcher pool.
+def publish_ephemeral_slots(handles) -> None:
+    """Register prepared handles and publish their slots in one critical section.
 
-    Idempotent: calling twice on the same handle returns False the
-    second time. Returns True on the first successful removal.
+    One dispatcher-lock acquisition publishes a whole route group in rank
+    order, so a concurrent pick sees none or all of it. On failure nothing
+    stays registered or published and every proxy exemption is returned.
     """
-    if handle is None:
-        return False
-    if not isinstance(handle, EphemeralSlotHandle):
-        logger.debug('[Ephemeral] dispose called with non-handle: %r', handle)
-        return False
+    handles = list(handles)
+    if not handles:
+        return
+    from lib.resource_control.adapters import bind_ephemeral
+    bind_ephemeral()
+    from .factory import get_dispatcher
+
+    # Request authority is already supplied by the caller. Loading the unrelated
+    # configured pool here couples standalone/native routes to application storage.
+    # A later configured dispatch still initializes normally and retains these slots.
+    dispatcher = get_dispatcher()
+    slots = [handle.slot for handle in handles]
+    # Validation and probes ran outside the locks. Registration has no count
+    # ceiling. Both owners publish together, with one lock order also used by
+    # disposal.
+    try:
+        with _lock, dispatcher._lock:
+            registered = []
+            try:
+                for handle in handles:
+                    _handles[handle.handle_id] = handle
+                    registered.append(handle)
+                dispatcher.slots.publish(slots)
+            except BaseException:
+                for handle in registered:
+                    _handles.pop(handle.handle_id, None)
+                dispatcher.slots.withdraw(slots)
+                raise
+    except BaseException:
+        for handle in handles:
+            handle.disposed = True
+            _release_proxy_bypass(handle)
+        raise
+
+    try:
+        for (owner, provider_id), group in _route_groups(handles).items():
+            primary = group[0].slot
+            # Record credential presence, never credential characters. Even a
+            # short prefix can disclose most of a private gateway token and
+            # handle/provider identifiers already provide the correlation
+            # needed for diagnostics.
+            api_key_hint = '<configured>' if primary.api_key else '<empty>'
+            _audit_slot('ephemeral_slot_mint', handle=group[0].handle_id,
+                        owner=owner, provider_id=provider_id, slots=len(group),
+                        model=primary.model, base_url=primary.base_url,
+                        api_key_hint=api_key_hint)
+            logger.info('[Ephemeral] mint provider=%s owner=%s slots=%d primary=%s url=%s key=%s',
+                        provider_id, owner or '?', len(group), primary.model,
+                        primary.base_url, api_key_hint)
+            for handle in group:
+                logger.debug('[Ephemeral] slot handle=%s model=%s url=%s caps=%s',
+                             handle.handle_id, handle.slot.model, handle.slot.base_url,
+                             ','.join(sorted(handle.slot.capabilities)))
+    except BaseException:
+        dispose_ephemeral_slots(handles)
+        raise
+
+
+def _route_groups(handles) -> dict[tuple[str, str], list[EphemeralSlotHandle]]:
+    """Handles keyed by (owner, provider pin), in rank order.
+
+    A route group shares one pin, so it is audited as one record rather than
+    one per failover candidate.
+    """
+    groups: dict[tuple[str, str], list[EphemeralSlotHandle]] = {}
+    for handle in handles:
+        groups.setdefault((handle.owner, handle.slot.provider_id), []).append(handle)
+    return groups
+
+
+def mint_ephemeral_slot(**slot_spec) -> EphemeralSlotHandle:
+    """Prepare and publish one request-scoped Slot.
+
+    Accepts the keyword arguments of :func:`prepare_ephemeral_slot`. Returns
+    the :class:`EphemeralSlotHandle` to pass to :func:`dispose_ephemeral_slot`
+    when done; raises ``ValueError`` for an unusable endpoint or model id.
+    """
+    handle = prepare_ephemeral_slot(**slot_spec)
+    publish_ephemeral_slots([handle])
+    return handle
+
+
+def dispose_ephemeral_slots(handles) -> list[bool]:
+    """Withdraw the handles' slots from the pool in one critical section.
+
+    Removal is by identity in one pass, leaving every other slot in order.
+    Idempotent per handle; returns, per handle, whether this call removed its
+    slot from the pool. A prepared handle that was never published is
+    retired as well. Every exemption release is attempted; the first failure
+    is re-raised afterwards.
+    """
+    handles = list(handles)
+    owned = []
+    for handle in handles:
+        if isinstance(handle, EphemeralSlotHandle):
+            owned.append(handle)
+        elif handle is not None:
+            logger.debug('[Ephemeral] dispose called with non-handle: %r', handle)
+    if not owned:
+        return [False] * len(handles)
 
     from .factory import get_dispatcher
 
     dispatcher = get_dispatcher()
-    removed = False
+    retired: list[EphemeralSlotHandle] = []
+    published: list[EphemeralSlotHandle] = []
     with _lock, dispatcher._lock:
-        if handle.disposed or handle.handle_id not in _handles:
-            return False
+        for handle in owned:
+            if handle.disposed:
+                continue
+            handle.disposed = True
+            retired.append(handle)
+            if _handles.pop(handle.handle_id, None) is not None:
+                published.append(handle)
+        # Configuration reload preserves active slots; a slot already removed
+        # by another owner still retires its registry entry.
+        removed_slots = dispatcher.slots.withdraw(
+            [handle.slot for handle in published])
+    removed = {id(handle) for handle in published
+               if id(handle.slot) in removed_slots}
+    published_ids = {id(handle) for handle in published}
+    first_error = None
+    for handle in retired:
         try:
-            dispatcher.slots.remove(handle.slot)
-            removed = True
-        except ValueError as exc:
-            # Configuration reload preserves active slots; tolerate explicit
-            # removal by another owner without stranding the registry entry.
-            logger.debug('[Ephemeral] slot already absent from pool: %s', exc)
-        handle.disposed = True
-        _handles.pop(handle.handle_id, None)
-    _audit_slot('ephemeral_slot_dispose', handle=handle.handle_id,
-                owner=handle.owner, removed=removed,
-                lifetime_ms=int((time.time() - handle.minted_at) * 1000))
-    logger.info('[Ephemeral] dispose handle=%s owner=%s removed=%s lifetime=%.1fs',
-                handle.handle_id, handle.owner or '?', removed,
-                time.time() - handle.minted_at)
-    return removed
+            _release_proxy_bypass(handle)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    for (owner, provider_id), group in _route_groups(
+            handle for handle in retired if id(handle) in published_ids).items():
+        removed_count = sum(id(handle) in removed for handle in group)
+        lifetime = time.time() - group[0].minted_at
+        _audit_slot('ephemeral_slot_dispose', handle=group[0].handle_id,
+                    owner=owner, provider_id=provider_id, slots=len(group),
+                    removed=removed_count, lifetime_ms=int(lifetime * 1000))
+        logger.info('[Ephemeral] dispose provider=%s owner=%s slots=%d removed=%d lifetime=%.1fs',
+                    provider_id, owner or '?', len(group), removed_count, lifetime)
+    if first_error is not None:
+        raise first_error
+    return [id(handle) in removed for handle in handles]
+
+
+def dispose_ephemeral_slot(handle: EphemeralSlotHandle) -> bool:
+    """Remove one ephemeral slot from the dispatcher pool.
+
+    Idempotent: calling twice on the same handle returns False the
+    second time. Returns True on the first successful removal.
+    """
+    return dispose_ephemeral_slots([handle])[0]
 
 
 def count_ephemeral_slots() -> int:

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.frontend_visual import frontend_visual_origin, frontend_visual_page as frontend_visual_page  # noqa: F401
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "tests" / "screenshots"
@@ -18,6 +19,7 @@ pytestmark = pytest.mark.visual
 
 @pytest.fixture(scope="module")
 def activity_renderer_bundle(tmp_path_factory):
+    require_node_modules('vite')
     bundle = tmp_path_factory.mktemp("compaction-trigger") / "activity-renderer.js"
     result = subprocess.run([
         str(ROOT / "scripts/vite_test_bundle.mjs"),
@@ -46,7 +48,7 @@ def test_visual_compaction_trigger_wording(
       document.body.innerHTML='<main id="fixture" class="conversation-surface" style="max-width:800px;width:100%;padding:16px;box-sizing:border-box;margin:auto"></main>';
       const localizedText=(key,fallback,values={}) => (labels[key]||fallback)
         .replace(/\{(\w+)\}/g, (match,name)=>values[name]??match);
-      for (const [index,trigger] of ['window','dispatch_guard','context_overflow'].entries()) {
+      for (const [index,trigger] of ['working_set','window','dispatch_guard','context_overflow','reactive','manual','force','checkpoint'].entries()) {
         const node=document.createElement('div');
         node.className='conversation-block conversation-block--activity-event';
         node.dataset.trigger=trigger;
@@ -66,26 +68,36 @@ def test_visual_compaction_trigger_wording(
     }""", {"labels": labels, "language": language, "theme": theme})
 
     triggers = {
+        "working_set": "workingSet",
         "window": "window",
         "dispatch_guard": "dispatchGuard",
         "context_overflow": "contextOverflow",
+        "reactive": "reactive",
+        "manual": "manual",
+        "force": "force",
+        "checkpoint": "checkpoint",
     }
-    summary_label = labels["activity.compaction.summaryModel"].replace("{model}", "Luna")
     main_label = labels["activity.compaction.taskModel"].replace("{model}", "Sol")
     rendered_causes = []
     for trigger, key in triggers.items():
         card = page.locator(f'[data-trigger="{trigger}"]')
-        facts = card.locator('.activity-event__body > .activity-event__facts')
         cause = labels[f"activity.compaction.trigger.{key}"]
         rendered_causes.append(cause)
-        assert facts.inner_text() == f"{summary_label} · {cause}"
-        assert "Sol" not in facts.inner_text()
+        assert card.locator('.activity-event__compaction-trigger').inner_text() == cause
+        assert card.locator('.activity-event__compaction-model').inner_text() == 'Luna'
+        # No routing facts or main-model attribution leak into the header.
+        header = card.locator(':scope > details > summary')
+        assert 'Sol' not in header.inner_text()
+        assert 'summary-provider' not in header.inner_text()
+        assert main_label not in header.inner_text()
+        assert card.locator('.activity-event__body > .activity-event__facts').count() == 0
         assert card.locator('.activity-event__summary').inner_text() == labels['activity.compaction.succeeded']
         assert not card.locator('details').evaluate('node=>node.open')
         assert not card.locator('details .activity-event__detail').is_visible()
         assert card.locator('button[data-conversation-action="open-compaction"]').is_visible()
-        assert facts.evaluate('node=>node.scrollWidth<=node.clientWidth+1'), "Trigger label is clipped"
-    assert len(set(rendered_causes)) == 3
+        assert card.locator('.activity-event__compaction-trigger').evaluate(
+            'node=>node.scrollWidth<=node.clientWidth+1'), "Trigger label is clipped"
+    assert len(set(rendered_causes)) == len(triggers)
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
 
     OUT.mkdir(parents=True, exist_ok=True)

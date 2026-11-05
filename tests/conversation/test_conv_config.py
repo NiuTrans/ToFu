@@ -160,6 +160,17 @@ class ResolveConvConfigTest(unittest.TestCase):
         )
         self.assertIsNone(out2['browserClientId'])
 
+    def test_browser_defaults_on_for_the_active_conversation(self):
+        # The composer has no browser toggle; an override without the key
+        # (headless callers) still gets the always-on browser and its device.
+        out = resolve_conv_config(
+            conv_settings={},
+            overrides={'browserClientId': 'client-abc'},
+            is_active=True,
+        )
+        self.assertTrue(out['browserEnabled'])
+        self.assertEqual(out['browserClientId'], 'client-abc')
+
     def test_project_paths_list_copy(self):
         paths = ['/a', '/b']
         out = resolve_conv_config(
@@ -224,7 +235,7 @@ class ResolveConvConfigTest(unittest.TestCase):
             'autoTranslate', 'langCorrectionEnabled', 'uiLang',
             'browserClientId',
             'activeFlow', 'flowBuiltin', 'flowId',
-            'planMode',
+            'planMode', 'delegateMode',
             # MCP wire exposure mode ('auto' default; 'delegate' keeps every
             # MCP schema off the orchestrator's wire).
             'mcpToolExposure',
@@ -364,6 +375,46 @@ class ResolveConvSettingsTest(unittest.TestCase):
         )
         self.assertEqual(out['model'], 'srv-only')
 
+    _OPUS_REF = {'creator_id': 'anthropic', 'model_id': 'claude-opus-5.5'}
+
+    def test_model_choice_never_mixes_conversation_and_composer(self):
+        """A conversation persisted with another conversation's composer state
+        kept its model name but adopted that composer's routed reference."""
+        out = resolve_conv_settings(
+            conv_settings={'model': 'kimi-k3.1-pro', 'modelRef': None,
+                           'preferredProviderId': '', 'thinkingDepth': 'max'},
+            overrides={'model': 'claude-opus-5.5', 'modelRef': self._OPUS_REF,
+                       'preferredProviderId': 'example-corp'},
+        )
+        self.assertEqual((out['model'], out['preset']), ('kimi-k3.1-pro', 'kimi-k3.1-pro'))
+        self.assertIsNone(out['modelRef'])
+        self.assertEqual(out['preferredProviderId'], '')
+
+    def test_already_split_choice_heals_to_its_routed_reference(self):
+        out = resolve_conv_settings(
+            conv_settings={'model': 'kimi-k3.1-pro', 'modelRef': self._OPUS_REF},
+            overrides={'model': 'gpt-6-sol', 'modelRef': None},
+        )
+        self.assertEqual((out['model'], out['preset']), ('claude-opus-5.5', 'claude-opus-5.5'))
+        self.assertEqual(out['modelRef'], self._OPUS_REF)
+
+    def test_offering_reference_keeps_the_selected_name(self):
+        ref = {'provider_id': 'owner-provider', 'offering_id': 'off_1'}
+        out = resolve_conv_settings(
+            conv_settings={'model': 'pending-model', 'modelRef': ref})
+        self.assertEqual(out['model'], 'pending-model')
+        self.assertEqual(out['modelRef'], ref)
+
+    def test_conversation_without_a_choice_adopts_the_composer_unit(self):
+        out = resolve_conv_settings(
+            conv_settings={'thinkingDepth': 'max'},
+            overrides={'model': 'claude-opus-5.5', 'modelRef': self._OPUS_REF,
+                       'preferredProviderId': 'example-corp'},
+        )
+        self.assertEqual(out['model'], 'claude-opus-5.5')
+        self.assertEqual(out['modelRef'], self._OPUS_REF)
+        self.assertEqual(out['preferredProviderId'], 'example-corp')
+
     def test_all_expected_keys_present(self):
         out = resolve_conv_settings(conv_settings={})
         expected = {
@@ -376,7 +427,7 @@ class ResolveConvSettingsTest(unittest.TestCase):
             'imageGenProviderId', 'imageGenCount', 'imageGenAspect',
             'imageGenResolution', 'humanGuidanceEnabled', 'projectPath',
             'projectPaths', 'readOnlyPaths', 'autoTranslate', 'folderId',
-            'activeFlow', 'uiLang', 'autoApply', 'planMode',
+            'activeFlow', 'uiLang', 'autoApply', 'planMode', 'delegateMode',
             # MCP wire exposure mode round-trips to the settings payload.
             'mcpToolExposure',
         }

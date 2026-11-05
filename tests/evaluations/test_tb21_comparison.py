@@ -75,7 +75,7 @@ def _complete(root, reward=1, *, skip=(), mutate=None):
 def test_pair_rejects_different_frozen_runtime_resources(host_tmp_path):
     b, c = [_prepared(host_tmp_path, r) for r in ('baseline', 'candidate')]
     manifest = json.loads((c / 'manifest.json').read_text())
-    manifest['runtime_resource_environment'] = {'TOFU_RESOURCE_PROFILE': 'throughput'}
+    manifest['runtime_resource_environment'] = {'TOFU_AGENT_WORKERS': '32'}
     atomic_write_json(c / 'manifest.json', manifest)
     issues = subject._compatibility(subject._load_run(b), subject._load_run(c))
     assert 'shared_config:runtime_resource_environment' in issues

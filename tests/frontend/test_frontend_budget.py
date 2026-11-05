@@ -4,13 +4,26 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import subprocess
 
 import pytest
 
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_static_startup_imports_are_required_for_every_entry():
+    from scripts.frontend_budget import _startup_assets
+
+    manifest = {
+        'optional.ts': {'file': 'assets/optional.js', 'imports': ['shared'],
+                        'dynamicImports': ['later']},
+        'shared': {'file': 'assets/shared.js', 'imports': ['optional.ts']},
+        'later': {'file': 'assets/later.js'},
+    }
+    assert _startup_assets(manifest, 'optional.ts') == {
+        'assets/optional.js', 'assets/shared.js',
+    }
 
 
 def test_vite_total_includes_shared_static_chunks_and_deduplicates_files():
@@ -68,14 +81,14 @@ def test_vite_budget_rejects_paths_outside_the_asset_directory():
         _vite_graph_and_url_assets({'bad': {'file': '../main.js'}})
 
 
-@pytest.mark.parametrize('main_kib,feature_kib,shared_kib,expected', [
-    (400, 10, 0, 0),  # dual entry/dynamic flags keep the primary entry budget
-    (562, 10, 0, 1),  # the primary entry ceiling still rejects growth
-    (400, 121, 0, 1),  # a real async feature retains its smaller ceiling
-    (400, 10, 700, 1),  # every graph byte still counts toward the total ceiling
+@pytest.mark.parametrize('main_kib,application_kib,feature_kib,shared_kib,expected', [
+    (100, 300, 10, 50, 0),  # required application and shared imports count once
+    (100, 462, 10, 0, 1),  # splitting startup cannot bypass the same ceiling
+    (100, 300, 121, 0, 1),  # a real async feature retains its smaller ceiling
+    (100, 300, 10, 700, 1),  # shared startup bytes retain entry and total ceilings
 ])
 def test_primary_entry_identity_does_not_bypass_any_delivery_budget(
-        monkeypatch, tmp_path, main_kib, feature_kib, shared_kib, expected):
+        monkeypatch, tmp_path, main_kib, application_kib, feature_kib, shared_kib, expected):
     import sys
     from lib import vite_assets
     from scripts import frontend_budget
@@ -83,13 +96,17 @@ def test_primary_entry_identity_does_not_bypass_any_delivery_budget(
     manifest = {
         'frontend/src/main.ts': {
             'file': 'assets/main.js', 'isEntry': True, 'isDynamicEntry': True,
-            'imports': ['shared'], 'dynamicImports': ['feature'],
+            'imports': ['shared'], 'dynamicImports': ['frontend/src/application.ts'],
+        },
+        'frontend/src/application.ts': {
+            'file': 'assets/application.js', 'isDynamicEntry': True,
+            'imports': ['frontend/src/main.ts', 'shared'], 'dynamicImports': ['feature'],
         },
         'frontend/src/admin.ts': {'file': 'assets/admin.js', 'isEntry': True},
         'feature': {'file': 'assets/feature.js', 'isDynamicEntry': True},
         'shared': {'file': 'assets/shared.js'},
     }
-    sizes = {'main.js': main_kib, 'admin.js': 1,
+    sizes = {'main.js': main_kib, 'application.js': application_kib, 'admin.js': 1,
              'feature.js': feature_kib, 'shared.js': shared_kib}
     for name in ('TOFU_BUDGET_VITE_MAIN_KIB', 'TOFU_BUDGET_VITE_ADMIN_KIB',
                  'TOFU_BUDGET_VITE_CHUNK_KIB', 'TOFU_BUDGET_FRONTEND_TOTAL_KIB'):
@@ -116,41 +133,6 @@ def test_vite_url_assets_require_an_explicit_whitelist_entry():
         'assets/pdf.worker.min-rsCePomN.mjs',
         'assets/orchestration-a1b2c3d4.js',
     }) == ['assets/orchestration-a1b2c3d4.js']
-
-
-def test_tool_presentation_policy_maps_the_presentation_directory_to_one_chunk():
-    """The chunk is derived by path prefix, so a rename within the owning
-    presentation directory stays in the chunk instead of silently no-op'ing
-    back into the entry graph."""
-    script = r"""
-import { manualChunkName } from './vite.config.mjs';
-const moduleIds = [
-  '/repo/frontend/src/conversation/presentation/image-source-policy.ts',
-  '/repo/frontend/src/conversation/presentation/tool-approval-presentation.ts',
-  'C:\\repo\\frontend\\src\\conversation\\presentation\\tool-command-execution-presentation.ts',
-  '/repo/frontend/src/conversation/presentation/conversation-view-model.ts',
-  '/repo/frontend/src/conversation/presentation/renamed-future-module.ts',
-  '/repo/frontend/src/conversation/ui/human-guidance-actions.ts',
-  '/repo/frontend/src/features/paper.ts',
-];
-process.stdout.write(JSON.stringify(moduleIds.map(manualChunkName)));
-"""
-    completed = subprocess.run(
-        ['node', '--input-type=module', '--eval', script],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert json.loads(completed.stdout) == [
-        'tool-presentation',
-        'tool-presentation',
-        'tool-presentation',
-        'tool-presentation',
-        'tool-presentation',
-        None,
-        None,
-    ]
 
 
 def test_conversation_architecture_contract_has_one_owner_per_boundary():

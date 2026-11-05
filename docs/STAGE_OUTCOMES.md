@@ -564,7 +564,8 @@ one shared admission budget, at most five seconds and clamped to the frozen stag
 deadline. Parent/witness reads, CAS writes, conflict refreshes and transient retries
 consume that same monotonic budget; each operation receives only its remainder.
 Retries are bounded to five per operation with short bounded backoff. Ordinary
-chat births and running diagnostics retain the 500ms best-effort policy. Owner,
+chat births and running diagnostics keep the best-effort checkpoint budget
+(observed service time inside fixed bounds, `docs/STORAGE.md`). Owner,
 parent, terminal and cancellation fences remain authoritative; exhaustion rejects
 the unstarted carrier without paid dispatch. No new worker, queue or durable store.
 Alternatives: extending every progress write would delay ordinary task startup;

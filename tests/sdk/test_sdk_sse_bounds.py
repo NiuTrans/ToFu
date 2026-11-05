@@ -1,13 +1,11 @@
 """SDK byte budgets and owned-response cleanup under streaming failures."""
 import asyncio
-from pathlib import Path
-import sys
 
 import httpx
 import pytest
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'clients' / 'python'))
-from tofu_sdk import Tofu, TofuError, _parse_sse
-from tofu_sdk.async_client import _parse_async_sse
+from tofu_sdk import Tofu, TofuError
+from tofu_sdk._streaming import _parse_sse
+from tofu_sdk._streaming import _parse_async_sse
 from tofu_sdk import _sse
 
 pytestmark = pytest.mark.unit

@@ -1,3 +1,7 @@
+import { waitForRetry } from '../api/endpoint-registry/retry-delay';
+import { isTransientApiFailure } from '../api/errors';
+import { notifyObserver } from './observer';
+
 export type SendStartupAbortReason =
   | ''
   | 'timeout'
@@ -47,6 +51,80 @@ export function awaitSendPreparation<T>(work: Promise<T>, message: string,
     work.then(value => finish(() => resolve(value)), error => finish(() => reject(error)));
     if (signal?.aborted) abort();
   });
+}
+
+/* Longer than the 75 s config-resolution recovery window, so a deadline
+ * never cuts a resolver short; it only reclaims an attempt that hangs. */
+const SEND_STARTUP_ATTEMPT_TIMEOUT_MS = 90_000;
+const SEND_STARTUP_RETRY_BASE_DELAY_MS = 1_000;
+const SEND_STARTUP_RETRY_MAX_DELAY_MS = 15_000;
+
+/** Capped exponential backoff with jitter: about 1, 2, 4, 8, then 15 s. */
+export function sendStartupRetryDelayMs(retryIndex: number): number {
+  const exponential = SEND_STARTUP_RETRY_BASE_DELAY_MS * 2 ** Math.min(retryIndex, 4);
+  return Math.round(Math.min(SEND_STARTUP_RETRY_MAX_DELAY_MS,
+    exponential * (0.8 + Math.random() * 0.4)));
+}
+
+export interface SendStartupRetry {
+  /** 1 for the first automatic retry. */
+  readonly retry: number;
+  readonly delayMs: number;
+  readonly error: unknown;
+}
+
+export interface SendStartupRetryOptions<T> {
+  /** The send's user-cancellation scope; aborting it ends retrying. */
+  signal: AbortSignal;
+  run(attemptSignal: AbortSignal): Promise<T>;
+  onRetry?(retry: SendStartupRetry): void;
+  /** One attempt's deadline; an expired attempt is aborted and repeated. */
+  attemptTimeoutMs?: number;
+  retryDelayMs?(retryIndex: number): number;
+}
+
+/**
+ * Repeat one send-startup phase until it succeeds, the user cancels, or a
+ * definitive failure occurs, so a transient failure never asks the user to
+ * resend. The caller keeps its inputs and command identity frozen across
+ * attempts, which makes a repeat exactly as safe as the idempotent command.
+ * Each attempt owns its signal and is released before the backoff, so an
+ * expired attempt cannot keep retrying behind its successor.
+ *
+ * `run` must honor its attempt signal. Its settlement is awaited rather than
+ * raced: a write's acknowledgement can cross a stop or a deadline, and an
+ * accepted command must reach the caller instead of being discarded.
+ */
+export async function retryTransientSendStartup<T>(
+  options: SendStartupRetryOptions<T>,
+): Promise<T> {
+  const { signal } = options;
+  const cancelled = () => signal.reason ?? new DOMException('Send cancelled', 'AbortError');
+  for (let retryIndex = 0; ; retryIndex += 1) {
+    if (signal.aborted) throw cancelled();
+    const attempt = new AbortController();
+    let expired = false;
+    const forwardCancel = () => attempt.abort(signal.reason);
+    signal.addEventListener('abort', forwardCancel, { once: true });
+    const timer = globalThis.setTimeout(() => {
+      expired = true;
+      attempt.abort(new DOMException('Send attempt deadline expired', 'TimeoutError'));
+    }, options.attemptTimeoutMs ?? SEND_STARTUP_ATTEMPT_TIMEOUT_MS);
+    let failure: unknown;
+    try {
+      return await options.run(attempt.signal);
+    } catch (error) {
+      failure = error;
+    } finally {
+      globalThis.clearTimeout(timer);
+      signal.removeEventListener('abort', forwardCancel);
+    }
+    if (signal.aborted || !(expired || isTransientApiFailure(failure))) throw failure;
+    const delayMs = (options.retryDelayMs ?? sendStartupRetryDelayMs)(retryIndex);
+    notifyObserver('send-startup-retry', options.onRetry,
+      { retry: retryIndex + 1, delayMs, error: failure });
+    if (!await waitForRetry(delayMs, signal)) throw cancelled();
+  }
 }
 
 /** Serialize draft submissions per conversation; a slow ACK cannot block

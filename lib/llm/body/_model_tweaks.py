@@ -2,10 +2,14 @@
 """Model-specific message tweaks applied before/within body construction.
 
 Cohesive group:
-  - _strip_trailing_assistant_for_claude(messages, model) -> None
+  - _strip_trailing_assistant_for_claude(messages, model) -> list
   - _inject_claude_reasoning_details(messages, model) -> None
-  - _inject_gemini_thought_signatures(messages, model) -> None
+  - _inject_gemini_thought_signatures(messages, model) -> list
   - _GEMINI_SKIP_SIGNATURE (module constant)
+
+The two slot helpers return adapted lists and never write their input, which
+may be a history shared with the caller or another slot attempt;
+``_inject_claude_reasoning_details`` edits ``build_body``'s own copy.
 """
 
 from lib.log import get_logger
@@ -23,54 +27,73 @@ logger = get_logger(__name__)
 CLAUDE_PREFILL_SENTINEL = '[Your previous response for context]:'
 
 
-def _strip_trailing_assistant_for_claude(messages: list, model: str = ''):
-    """Remove trailing assistant messages that trigger Claude's prefill error.
+def _strip_trailing_assistant_for_claude(messages: list, model: str = '') -> list:
+    """Return ``messages`` without trailing turns that trigger Claude's prefill error.
 
-    Mutates messages in place.
+    The input list is never modified; an unchanged history is returned as is.
     """
     if not messages:
-        return
+        return messages
 
     stripped = 0
-    while messages and messages[-1].get('role') == 'assistant':
-        last = messages[-1]
-        content = last.get('content', '') or ''
+    end = len(messages)
+    converted = None
+    while end and messages[end - 1].get('role') == 'assistant':
+        last = messages[end - 1]
+        content = _assistant_text(last.get('content'))
         has_tool_calls = bool(last.get('tool_calls'))
 
         if has_tool_calls:
             logger.warning('[Claude-prefill] Stripping trailing assistant with '
                            'tool_calls (orphaned). model=%s content=%dchars tool_calls=%d',
                            model, len(content), len(last.get('tool_calls', [])))
-            messages.pop()
+            end -= 1
             stripped += 1
             continue
 
         if not content.strip():
             logger.debug('[Claude-prefill] Stripping trailing empty assistant. model=%s', model)
-            messages.pop()
+            end -= 1
             stripped += 1
             continue
 
         logger.warning('[Claude-prefill] Converting trailing assistant to user context '
                        '(content=%dchars). model=%s', len(content), model)
-        messages[-1] = {
+        converted = {
             'role': 'user',
             'content': f'{CLAUDE_PREFILL_SENTINEL}\n{content}',
         }
         stripped += 1
         break
 
-    if stripped:
-        logger.info('[Claude-prefill] Fixed %d trailing assistant message(s). '
-                    'model=%s final_last_role=%s',
-                    stripped, model,
-                    messages[-1].get('role') if messages else 'empty')
+    if not stripped:
+        return messages
+    result = messages[:end]
+    if converted is not None:
+        result[-1] = converted
+    logger.info('[Claude-prefill] Fixed %d trailing assistant message(s). '
+                'model=%s final_last_role=%s',
+                stripped, model,
+                result[-1].get('role') if result else 'empty')
+    return result
+
+
+def _assistant_text(content) -> str:
+    """Text of an assistant turn; block content contributes its text parts.
+
+    Only text can stand in the user turn a trailing assistant converts to, so
+    non-text blocks (thinking, images) neither count as content nor carry over.
+    """
+    if isinstance(content, list):
+        return ''.join(part.get('text') or '' for part in content
+                       if isinstance(part, dict) and part.get('type') == 'text')
+    return content or ''
 
 
 def _inject_claude_reasoning_details(messages: list, model: str) -> None:
     """Rebuild OpenRouter-style ``reasoning_details`` on replayed Claude turns.
 
-    The sankuai OpenAI-compat gateway streams a Claude thinking block as
+    The example-corp OpenAI-compat gateway streams a Claude thinking block as
     ``reasoning_content`` text + a separate ``reasoning_details`` chunk
     carrying the opaque ``signature``.  On a follow-up request (Continue, or
     just the next tool-loop turn) the gateway requires that signed thinking
@@ -108,7 +131,11 @@ def _inject_claude_reasoning_details(messages: list, model: str) -> None:
 
     _patched = 0
     _stripped = 0
-    for msg in messages:
+    _latest_stripped = False
+    _latest_assistant = max(
+        (index for index, msg in enumerate(messages)
+         if msg.get('role') == 'assistant'), default=-1)
+    for index, msg in enumerate(messages):
         if msg.get('role') != 'assistant':
             continue
         if msg.get('reasoning_details'):
@@ -127,15 +154,19 @@ def _inject_claude_reasoning_details(messages: list, model: str) -> None:
         else:
             del msg['reasoning_content']
             _stripped += 1
+            _latest_stripped = _latest_stripped or index == _latest_assistant
 
+    # Both normalizations repeat deterministically on every later round for
+    # the same history; only a fresh unsigned turn is new evidence.
     if _patched:
-        logger.info('[build_body] Rebuilt reasoning_details (signed thinking block) '
-                    'on %d replayed Claude assistant turn(s)', _patched)
+        logger.debug('[build_body] Rebuilt reasoning_details (signed thinking block) '
+                     'on %d replayed Claude assistant turn(s)', _patched)
     if _stripped:
-        logger.warning('[build_body] Stripped unsigned reasoning_content from %d '
-                       'Claude assistant turn(s) — upstream rejects thinking with '
-                       'no signature (HTTP 400); the model re-reasons instead',
-                       _stripped)
+        (logger.warning if _latest_stripped else logger.debug)(
+            '[build_body] Stripped unsigned reasoning_content from %d '
+            'Claude assistant turn(s) — upstream rejects thinking with '
+            'no signature (HTTP 400); the model re-reasons instead',
+            _stripped)
 
 
 # Dummy signature value recognized by Gemini to skip validation.
@@ -143,7 +174,7 @@ def _inject_claude_reasoning_details(messages: list, model: str) -> None:
 _GEMINI_SKIP_SIGNATURE = 'skip_thought_signature_validator'
 
 
-def _inject_gemini_thought_signatures(messages: list, model: str) -> None:
+def _inject_gemini_thought_signatures(messages: list, model: str) -> list:
     """Inject dummy thought_signature on tool_calls that lack one (Gemini 3.x).
 
     When conversation history contains tool_calls produced by a non-Gemini
@@ -154,13 +185,15 @@ def _inject_gemini_thought_signatures(messages: list, model: str) -> None:
     ``'skip_thought_signature_validator'`` skips validation for injected/
     cross-model tool_calls.
 
-    Mutates messages in-place. Only runs for Gemini models.
+    Returns the adapted list; only patched messages are copied, along the
+    path to their first tool_call. Only runs for Gemini models.
     """
     if not is_gemini(model):
-        return
+        return messages
 
+    result = None
     _patched = 0
-    for msg in messages:
+    for index, msg in enumerate(messages):
         if msg.get('role') != 'assistant':
             continue
         tool_calls = msg.get('tool_calls')
@@ -174,17 +207,20 @@ def _inject_gemini_thought_signatures(messages: list, model: str) -> None:
             if isinstance(google, dict) and google.get('thought_signature'):
                 continue  # already has a real signature
         # Missing — inject the skip sentinel
-        if not isinstance(ec, dict):
-            ec = {}
-            first_tc['extra_content'] = ec
+        ec = dict(ec) if isinstance(ec, dict) else {}
         google = ec.get('google')
-        if not isinstance(google, dict):
-            google = {}
-            ec['google'] = google
+        google = dict(google) if isinstance(google, dict) else {}
         google['thought_signature'] = _GEMINI_SKIP_SIGNATURE
+        ec['google'] = google
+        if result is None:
+            result = list(messages)
+        result[index] = {**msg, 'tool_calls': [
+            {**first_tc, 'extra_content': ec}, *tool_calls[1:]]}
         _patched += 1
 
-    if _patched:
-        logger.info('[build_body] Injected dummy thought_signature on %d '
-                    'assistant tool_call message(s) for Gemini cross-model '
-                    'compatibility', _patched)
+    if result is None:
+        return messages
+    logger.info('[build_body] Injected dummy thought_signature on %d '
+                'assistant tool_call message(s) for Gemini cross-model '
+                'compatibility', _patched)
+    return result

@@ -16,6 +16,8 @@ import sys
 
 import pytest
 
+from tofu_dotenv import read_dotenv_values
+
 pytestmark = pytest.mark.unit
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'scripts' / 'deploy_tofudb_engine.py'
@@ -30,14 +32,54 @@ def _candidate(tmp_path: Path, name: str = 'tofu-db',
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:
+    # No deadline of its own: the script bounds every child it starts, and the
+    # rest (interpreter start-up, fsync-bound writes) takes as long as the host
+    # needs. The per-test hang guard stops a wedged run and kills this child.
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True,
     )
 
 
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_source_provenance_probe_never_writes_the_checkout_index(tmp_path, monkeypatch):
+    """A killed status probe must not leave index.lock in the operator checkout.
+
+    ``git status`` refreshes and rewrites a stale index under index.lock unless
+    optional locks are off; the deploy script bounds the probe with a timeout,
+    so a probe killed mid-refresh would block every later commit there.
+    """
+    import importlib.util
+
+    repo = tmp_path / 'checkout'
+    source = repo / 'packages' / 'tofu-db' / 'lib.rs'
+    source.parent.mkdir(parents=True)
+    source.write_text('fn engine() {}\n', encoding='utf-8')
+
+    def git(*args: str) -> None:
+        subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid',
+                        *args], cwd=repo, check=True, capture_output=True, timeout=60)
+
+    git('init', '-q')
+    git('add', '.')
+    git('commit', '-qm', 'engine source')
+    index = repo / '.git' / 'index'
+    stat = source.stat()
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+    before = index.read_bytes()
+
+    spec = importlib.util.spec_from_file_location('deploy_tofudb_engine_probe', SCRIPT)
+    deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(deploy)
+    monkeypatch.setattr(deploy, 'REPO_ROOT', repo)
+    head = deploy._source_head()
+
+    assert head is not None and not head.endswith('-dirty')
+    assert index.read_bytes() == before
+    assert not (repo / '.git' / 'index.lock').exists()
 
 
 def _deploy(tmp_path: Path, candidate: Path, *extra: str) -> subprocess.CompletedProcess:
@@ -108,11 +150,42 @@ def test_deploy_rewrites_stale_env_pin(tmp_path):
     assert json.loads(result.stdout)['env_file'] == str(env_file)
 
 
+@pytest.mark.parametrize('assignment', [
+    ' TOFUDB_EXPECTED_SHA256 = "{pin}"\n',
+    '\ufeffTOFUDB_EXPECTED_SHA256={pin}\n',
+    'TOFUDB_EXPECTED_SHA256={pin}\nTOFUDB_EXPECTED_SHA256 = {pin}\n',
+])
+def test_deploy_rewrites_every_supported_dotenv_pin_form(tmp_path, assignment):
+    candidate = _candidate(tmp_path)
+    env_file = tmp_path / '.env'
+    env_file.write_text(assignment.format(pin='0' * 64) + 'UNRELATED=keep\n',
+                        encoding='utf-8')
+
+    result = _deploy(tmp_path, candidate)
+
+    assert result.returncode == 0, result.stderr
+    assert read_dotenv_values(env_file) == {
+        'TOFUDB_EXPECTED_SHA256': _digest(candidate), 'UNRELATED': 'keep'}
+    assert json.loads(result.stdout)['env_file'] == str(env_file)
+
+
 def test_deploy_warns_when_env_bin_points_elsewhere(tmp_path):
     candidate = _candidate(tmp_path)
     env_file = tmp_path / '.env'
     env_file.write_text('TOFUDB_BIN=/somewhere/else/tofu-db\n', encoding='utf-8')
     result = _deploy(tmp_path, candidate)
+    assert result.returncode == 0, result.stderr
+    assert 'TOFUDB_BIN' in result.stderr
+
+
+def test_deploy_warns_for_supported_dotenv_bin_spacing(tmp_path):
+    candidate = _candidate(tmp_path)
+    env_file = tmp_path / '.env'
+    env_file.write_text(' TOFUDB_BIN = "/somewhere/else/tofu-db"\n',
+                        encoding='utf-8')
+
+    result = _deploy(tmp_path, candidate)
+
     assert result.returncode == 0, result.stderr
     assert 'TOFUDB_BIN' in result.stderr
 

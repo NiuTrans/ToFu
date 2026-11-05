@@ -210,7 +210,7 @@ class NativeTaskCostPolicy:
                     saved['public_round'] = row['round']
                 projection['rounds'].append(saved)
         # Live transfers must still be witnessed by the original actor account.
-        from lib.billing.cost import native_task_cost
+        from lib.billing.native_cost import native_task_cost
         if projection['wallet_user_id']:
             from lib.billing.native_settlement import project
             projection['wallet_settlement'] = project(self.task)
@@ -297,9 +297,9 @@ class NativeTaskCostPolicy:
             grants = self.task.get('_nativeChildFeeGrants', ())
             child_rows = [row for row in rows if 'sourceRound' in row and row.get('billableTaskId') == self.task_id]
             if child_rows:
-                from lib.billing.cost import NativeRecoveredChildFeeGrant
+                from lib.billing.native_cost import NativeRecoveredChildFeeGrant
                 grants = (*grants, NativeRecoveredChildFeeGrant(self.task, child_rows, account))
-            from lib.billing.cost import native_task_cost
+            from lib.billing.native_cost import native_task_cost
             candidate = dict(self.task, apiRounds=rows, usage=usage, cost=cost,
                 _nativeFrozenCostProjection=True, _nativeChildFeeGrants=grants,
                 _checkpointApiRounds=billing_prefix)

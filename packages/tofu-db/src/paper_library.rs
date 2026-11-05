@@ -37,10 +37,6 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
-
 fn owner_key(
     transaction: &AuthorityTransaction,
     namespace: &str,
@@ -242,7 +238,7 @@ impl Request {
                 ]
                 .into_iter()
                 .try_fold(0usize, usize::checked_add)
-                .ok_or_else(|| exhausted("paper library metadata byte count overflow"))
+                .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("paper library metadata byte count overflow"))
             }
             Self::Delete { paper_id } | Self::Get { paper_id, .. } => {
                 validate_text(paper_id, 256, true)?;
@@ -279,7 +275,7 @@ impl Request {
                     }
                     bytes = bytes
                         .checked_add(arxiv_id.len())
-                        .ok_or_else(|| exhausted("paper library input identities overflow"))?;
+                        .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("paper library input identities overflow"))?;
                 }
                 Ok(bytes)
             }
@@ -363,7 +359,7 @@ fn write_count(
     count: usize,
 ) -> io::Result<()> {
     if count > MAX_PAPER_LIBRARY_ROWS_PER_OWNER {
-        return Err(exhausted("paper library owner capacity is exhausted"));
+        return Err(crate::resource_exhaustion::capacity_quota("paper library owner capacity is exhausted"));
     }
     database.entity_put(
         transaction,
@@ -476,7 +472,7 @@ fn store_document<T: Serialize>(
     let raw = serde_json::to_vec(request.value)
         .map_err(|_| invalid_data("paper library document cannot be encoded"))?;
     if raw.len() > request.maximum_bytes {
-        return Err(exhausted("paper library document exceeds its byte bound"));
+        return Err(crate::resource_exhaustion::domain_bound("paper library document exceeds its byte bound"));
     }
     let bytes = raw.len();
     versioned_document::put_with_blob_owner_bounded(
@@ -600,7 +596,7 @@ fn paper_put(
     let previous = load_state(database, transaction, paper_id)?;
     let count = read_count(database, transaction)?;
     if previous.is_none() && count >= MAX_PAPER_LIBRARY_ROWS_PER_OWNER {
-        return Err(exhausted("paper library owner capacity is exhausted"));
+        return Err(crate::resource_exhaustion::capacity_quota("paper library owner capacity is exhausted"));
     }
     let core = LibraryCore {
         id: paper_id.clone(),
@@ -844,7 +840,7 @@ fn encode_response(value: &Value) -> io::Result<Vec<u8>> {
     let encoded = serde_json::to_vec(value)
         .map_err(|_| invalid_data("paper library response cannot be encoded"))?;
     if encoded.len() > MAX_PAPER_LIBRARY_RESPONSE_BYTES {
-        return Err(exhausted("paper library response exceeds 64 MiB"));
+        return Err(crate::resource_exhaustion::domain_bound("paper library response exceeds 64 MiB"));
     }
     Ok(encoded)
 }
@@ -879,7 +875,7 @@ fn paper_list(
             projected_bytes = projected_bytes
                 .checked_add(core_bytes)
                 .filter(|bytes| *bytes <= MAX_PAPER_LIBRARY_RESPONSE_BYTES)
-                .ok_or_else(|| exhausted("paper library response exceeds 64 MiB"))?;
+                .ok_or_else(|| crate::resource_exhaustion::domain_bound("paper library response exceeds 64 MiB"))?;
             detail_value(
                 &state,
                 &load_core(database, transaction, &id)?,
@@ -1329,7 +1325,7 @@ fn library_restore(
     let core_raw = serde_json::to_vec(&core)
         .map_err(|_| invalid_data("paper library core cannot be encoded"))?;
     if core_raw.len() > MAX_PAPER_LIBRARY_CORE_DOCUMENT_BYTES {
-        return Err(exhausted("paper library core exceeds its byte bound"));
+        return Err(crate::resource_exhaustion::domain_bound("paper library core exceeds its byte bound"));
     }
     let state = LibraryState {
         id: request.id.clone(),
@@ -1370,7 +1366,7 @@ fn library_restore(
     }
     let count = read_count(database, transaction)?;
     if count >= MAX_PAPER_LIBRARY_ROWS_PER_OWNER {
-        return Err(exhausted("paper library owner capacity is exhausted"));
+        return Err(crate::resource_exhaustion::capacity_quota("paper library owner capacity is exhausted"));
     }
     store_document(
         database,

@@ -463,11 +463,7 @@
     }
 
     #[test]
-    fn restart_settlement_preserves_prefill_checkpoint_and_human_guidance_options() {
-        let attempt = json!({"_config": {"model": "gpt-4o"}})
-            .as_object()
-            .unwrap()
-            .clone();
+    fn restart_settlement_rewinds_prose_tails_and_keeps_checkpoint_options() {
         let projection = json!({
             "content": "partial 🚀",
             "thinking": "working",
@@ -490,38 +486,53 @@
         .as_object()
         .unwrap()
         .clone();
-        let settlement = restart_settlement(&attempt, &projection);
+        let settlement = restart_settlement(&projection);
         assert_eq!(settlement["cause"], "server_restart");
-        assert_eq!(settlement["resumeOptions"][0]["operation"], "continue");
-        assert_eq!(settlement["resumeOptions"][0]["anchor"]["contentChars"], 9);
+        // A prose tail is never offered as a prefill continuation: the
+        // checkpoint resume rolls it back and resends from the last result.
         assert_eq!(
-            settlement["resumeOptions"][1]["anchor"],
-            json!({
+            settlement["resumeOptions"][0],
+            json!({"operation": "checkpoint_resume", "anchor": {
                 "type": "tool_checkpoint",
                 "keptToolRounds": 2,
                 "replayableToolRounds": 1,
                 "retainedToolRoundPositions": [0],
                 "content": "", "thinking": "", "segments": []
-            })
+            }})
         );
         assert_eq!(
-            settlement["resumeOptions"][2]["operation"],
+            settlement["resumeOptions"][1]["operation"],
             "answer_guidance"
         );
         assert_eq!(
-            settlement["resumeOptions"][2]["anchor"]["retainedToolRoundPositions"],
+            settlement["resumeOptions"][1]["anchor"]["retainedToolRoundPositions"],
             json!([0])
         );
-        assert_eq!(settlement["resumeOptions"][3]["operation"], "regenerate");
+        assert_eq!(settlement["resumeOptions"][2]["operation"], "regenerate");
+        assert_eq!(settlement["resumeOptions"].as_array().unwrap().len(), 3);
 
-        let claude = json!({"_config": {"model": "aws.anthropic.claude-opus-5"}})
-            .as_object()
-            .unwrap()
-            .clone();
+        // Without tool rounds the checkpoint is the turn start.
         let prose_only = json!({"content": "partial"}).as_object().unwrap().clone();
         assert_eq!(
-            restart_settlement(&claude, &prose_only)["resumeOptions"],
-            json!([{"operation": "regenerate", "anchor": {"type": "turn_start"}}])
+            restart_settlement(&prose_only)["resumeOptions"],
+            json!([
+                {"operation": "checkpoint_resume", "anchor": {
+                    "type": "tool_checkpoint",
+                    "keptToolRounds": 0,
+                    "replayableToolRounds": 0,
+                    "retainedToolRoundPositions": [],
+                    "content": "", "thinking": "", "segments": []
+                }},
+                {"operation": "regenerate", "anchor": {"type": "turn_start"}}
+            ])
+        );
+
+        // A prose-free tail still continues by replay only.
+        let thinking_only = json!({"thinking": "working"}).as_object().unwrap().clone();
+        assert_eq!(
+            restart_settlement(&thinking_only)["resumeOptions"][0],
+            json!({"operation": "continue",
+                   "anchor": {"type": "replay_only", "contentChars": 0}})
         );
     }
 

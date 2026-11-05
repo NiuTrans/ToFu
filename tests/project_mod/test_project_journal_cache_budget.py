@@ -37,6 +37,40 @@ def journal(directory, rows):
     return str(directory), path
 
 
+def retained_size(value, seen=None):
+    """Independent oracle: every distinct object reachable from ``value`` once."""
+    import sys
+    seen = set() if seen is None else seen
+    if id(value) in seen:
+        return 0
+    seen.add(id(value))
+    size = sys.getsizeof(value)
+    if isinstance(value, dict):
+        size += sum(retained_size(key, seen) + retained_size(child, seen)
+                    for key, child in value.items())
+    elif isinstance(value, list):
+        size += sum(retained_size(child, seen) for child in value)
+    return size
+
+
+@pytest.mark.parametrize('budget_ratio, admitted', [(1.25, True), (0.9, False)])
+def test_budget_admits_a_history_by_its_retained_size(tmp_path, monkeypatch, budget_ratio, admitted):
+    # Decoded index rows share their key strings; the budget bounds memory, so
+    # repeated keys must not be charged as if every row owned a copy.
+    rows = [{'type': 'write_file', 'path': f'src/module_{index}.py', 'basePath': '/project',
+             'convId': f'conv-{index % 5}', 'taskId': f'task-{index % 11}',
+             'changeId': f'{index:032x}', 'existed': True, 'timestamp': 1.7e9 + index}
+            for index in range(400)]
+    session, _ = journal(tmp_path / 'shared-keys', rows)
+    budget = int(retained_size(mods._load_from_disk(session)) * budget_ratio)
+    monkeypatch.setattr(mods, '_MODS_CACHE_MAX_BYTES', budget)
+    monkeypatch.setattr(mods, '_MODS_CACHE_MAX_SESSION_BYTES', budget)
+    assert mods._cache_get(session) == rows
+    assert (session in mods._mods_cache) is admitted
+    if admitted:
+        assert mods._mods_cache_bytes[session] <= budget
+
+
 def test_byte_budget_evicts_lru_and_reconstructs_without_touching_disk(tmp_path, monkeypatch):
     sessions = [journal(tmp_path / name, [row(name, name * 1000)])
                 for name in ('a', 'b', 'c')]
@@ -73,6 +107,26 @@ def test_oversize_session_is_readable_but_not_retained_by_active_view(tmp_path):
     assert not mods._mods_cache_identity
     assert not mods._mods_cache_bytes
     assert path.read_bytes() == original
+
+
+def test_oversized_history_is_weighed_once_until_its_index_is_rewritten(tmp_path, monkeypatch):
+    session, path = journal(tmp_path / 'grows', [row('large', 'x' * (16 * 1024))])
+    log = path.parent / 'modifications.journal'
+    walks = []
+    weigh = mods._mods_cache_weight
+    monkeypatch.setattr(mods, '_mods_cache_weight',
+                        lambda *args: (walks.append(args[0]), weigh(*args))[1])
+    assert [r['path'] for r in mods._cache_get(session)] == ['large']
+    assert walks == [session] and not mods._mods_cache
+    # Appends only add rows, so a longer log on the same index stays oversized.
+    for name in ('first', 'second'):
+        with open(log, 'a') as handle:
+            handle.write(json.dumps(row(name)) + '\n')
+        assert mods._cache_get(session)[-1]['path'] == name
+    assert walks == [session] and not mods._mods_cache
+    mods._atomic_json_write(str(path), {'modifications': [row('small')]})
+    assert [r['path'] for r in mods._cache_get(session)] == ['small', 'first', 'second']
+    assert walks == [session, session] and session in mods._mods_cache
 
 
 def test_growing_payloads_keep_bounded_metadata_cache_and_exact_durable_content(tmp_path):

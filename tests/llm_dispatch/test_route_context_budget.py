@@ -20,8 +20,10 @@ def slot(window=1_000_000, owner=7, pin='request-a', **kwargs):
 
 
 def pool(monkeypatch, slots):
+    from lib.llm_dispatch.slot_pool import SlotPool
+    live = slots if isinstance(slots, SlotPool) else SlotPool(slots)
     monkeypatch.setattr('lib.llm_dispatch.factory.get_dispatcher',
-                        lambda: SimpleNamespace(slots=slots))
+                        lambda: SimpleNamespace(slots=live))
     monkeypatch.setattr('lib.context_limits.resolve_learned_context_limit',
                         lambda provider, model, window: window)
 
@@ -83,8 +85,40 @@ def test_selected_slot_window_reaches_clamp_and_transport_recount(monkeypatch):
     assert '_route_context_window' not in source
 
 
+class _WatchedSlot:
+    """Forward to a real slot; once armed, record every attribute read."""
+
+    def __init__(self, inner, reads):
+        object.__setattr__(self, '_inner', inner)
+        object.__setattr__(self, '_reads', reads)
+        object.__setattr__(self, '_armed', False)
+
+    def __getattr__(self, name):
+        if object.__getattribute__(self, '_armed'):
+            object.__getattribute__(self, '_reads').append(name)
+        return getattr(object.__getattribute__(self, '_inner'), name)
+
+
+def test_a_context_read_evaluates_only_its_selection_scope(monkeypatch):
+    from lib.llm_dispatch.slot_pool import SlotPool
+    reads = []
+    others = [_WatchedSlot(slot(16_000, pin=f'request-{index}'), reads) for index in range(400)]
+    configured = Slot(key_name='configured', api_key='', model='gateway-flash',
+                      logical_model='deepseek-v4.1-flash', capabilities={'text'},
+                      context_window=64_000, provider_id='gateway',
+                      routing_provider_id='gateway', routing_owner_user_id=7)
+    pool(monkeypatch, SlotPool([slot(), *others, slot(200_000), configured]))
+    for watched in others:
+        object.__setattr__(watched, '_armed', True)
+    assert pinned_context_profile('deepseek-v4.1-flash', pin='request-a')['window'] == 200_000
+    # Unpinned reads see configured slots only, never another request's group.
+    assert pinned_context_profile('deepseek-v4.1-flash', owner_user_id=7)['window'] == 64_000
+    assert reads == []
+
+
 def test_live_slot_replacement_does_not_leave_a_stale_context_cache(monkeypatch):
-    slots = [slot()]
+    from lib.llm_dispatch.slot_pool import SlotPool
+    slots = SlotPool([slot()])
     pool(monkeypatch, slots)
     assert pinned_context_profile('deepseek-v4.1-flash', pin='request-a')['window'] == 1_000_000
     slots[:] = [slot(128_000)]

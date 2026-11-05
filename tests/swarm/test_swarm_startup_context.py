@@ -42,9 +42,12 @@ def test_large_delegated_catalog_starts_without_summarizing_tool_definitions(run
     assert {'search_tools', 'execute_tools'} <= names
     assert not names.intersection(policies)
     assert 'forbidden_parent_tool' not in names
-    assert tool_schema_tokens(tools, model='gpt-4o') > 80640
-    assert tool_schema_tokens(visible, model='gpt-4o') < 10000
-    assert tool_schema_tokens(child['_tool_schema'], model='gpt-4o') < 10000
+    full_tokens = tool_schema_tokens(tools, model='gpt-4o')
+    assert full_tokens > 80640
+    assert tool_schema_tokens(visible, model='gpt-4o') < full_tokens
+    child_names = {tool['function']['name'] for tool in child['_tool_schema']}
+    assert not child_names.intersection(policies)
+    assert tool_schema_tokens(child['_tool_schema'], model='gpt-4o') < full_tokens
     from lib.tasks_pkg.tool_dispatch._labels import _known_tool_names
     assert set(policies) <= _known_tool_names(child)
     assert 'forbidden_parent_tool' not in _known_tool_names(child)

@@ -21,7 +21,6 @@ const _push = (() => {
   // transport owns an explicit HTTP fallback instead.
   let _rpcPending = new Map();
   let _rpcSequence = 0;
-  const RPC_PENDING_MAX = 32;
   const RPC_TIMEOUT_MS = 10000;
   // Connection must hold this long before we trust it as "healthy" and
   // reset the reconnect attempt counter. See onclose.
@@ -60,7 +59,8 @@ const _push = (() => {
   }
   let _pingTimer = null;
   let _pingTimeoutTimer = null;    // per-ping watchdog emits before the next tick
-  let _lastPingSentAt = 0;         // client timestamp of the outstanding ping
+  let _lastPingSentAt = 0;         // outstanding proof-of-life watchdog timestamp
+  let _pendingRttSentAt = 0;       // latest socket-local RTT correlation, even after data
   let _lastInboundAt = 0;          // last time ANY frame arrived (proof-of-life ledger)
   let _latencyMs = null;           // last measured RTT; null = unknown
   let _latencyState = 'unknown';   // unknown | good | ok | poor | timeout | offline
@@ -81,7 +81,7 @@ const _push = (() => {
 
   function _emitLatency() {
     // Stamp each reading for diagnostics and late-subscriber presentation.
-    const reading = { ms: _latencyMs, state: _latencyState, connected: _connected, at: Date.now() };
+    const reading = getLatency();
     for (const fn of _latencyListeners) {
       try { fn(reading); }
       catch (e) { console.error('[Push] latency listener error:', e); }
@@ -166,11 +166,6 @@ const _push = (() => {
       return Promise.reject(_rpcError(
         'Control socket is unavailable', 'rpc_unavailable'));
     }
-    if (_rpcPending.size >= RPC_PENDING_MAX) {
-      return Promise.reject(_rpcError(
-        'Control request queue is full', 'rpc_overloaded'));
-    }
-
     const id = (_wsRid || 'socket') + '-rpc' + (++_rpcSequence);
     const timeoutMs = Math.max(
       1, Number(opts.timeout == null ? RPC_TIMEOUT_MS : opts.timeout) || RPC_TIMEOUT_MS);
@@ -212,16 +207,12 @@ const _push = (() => {
     // the outstanding probe — see onmessage): the socket is HALF-OPEN —
     // TCP-dead but readyState still OPEN, so _ws.send() won't throw and no
     // onclose fires on its own. Push frames would silently stop forever with
-    // no reconnect. Surface the timeout AND force-close so onclose →
-    // _scheduleReconnect re-establishes the socket.
+    // no reconnect. Retire the failed transport and recover independently
+    // of whether its TCP closing handshake ever finishes.
     if (_lastPingSentAt && Date.now() - _lastPingSentAt > _pingTimeoutMs()) {
-      _latencyMs = null;
-      _latencyState = 'timeout';
-      _emitLatency();
       console.warn('[Push] ping timeout (%dms) — closing half-open socket to force reconnect',
         Date.now() - _lastPingSentAt);
-      try { _ws.close(); }
-      catch (e) { console.debug('[Push] force-close after ping timeout failed:', e); }
+      _recoverSilentSocket();
       return;   // do NOT probe again on a socket we've just declared dead
     }
     // Keep only ONE outstanding ping at a time. Re-sending (and overwriting
@@ -231,6 +222,7 @@ const _push = (() => {
     // clear _lastPingSentAt before starting a fresh probe.
     if (_lastPingSentAt) return;
     _lastPingSentAt = Date.now();
+    _pendingRttSentAt = _lastPingSentAt;
     const ping = { action: 'ping', t: _lastPingSentAt };
     const shouldProbeBuild = !_lastBuildProbeAt ||
       _lastPingSentAt - _lastBuildProbeAt >= BUILD_PROBE_INTERVAL_MS;
@@ -248,8 +240,8 @@ const _push = (() => {
 
   // Fired by the per-ping watchdog when a pong has not returned within
   // PING_TIMEOUT_MS. Emits the timeout state IMMEDIATELY (so the signal badge
-  // stops showing a stale green reading) and force-closes the half-open socket
-  // so onclose → _scheduleReconnect re-establishes it. Mirrors the interval
+  // stops showing a stale green reading) and retires the half-open socket
+  // before requesting a replacement. Mirrors the interval
   // backstop branch in _sendPing but fires seconds sooner.
   function _firePingTimeout() {
     _pingTimeoutTimer = null;
@@ -257,14 +249,38 @@ const _push = (() => {
      * _lastPingSentAt — so reaching the verdict below means total inbound
      * silence for the whole window: a genuinely half-open socket. */
     if (!_lastPingSentAt) return;   // a frame already cleared the outstanding ping
-    _latencyMs = null;
-    _latencyState = 'timeout';
-    _emitLatency();
     console.warn('[Push] ping timeout (watchdog) — closing half-open socket to force reconnect');
-    if (_ws) {
-      try { _ws.close(); }
-      catch (e) { console.debug('[Push] force-close after ping-timeout watchdog failed:', e); }
+    _recoverSilentSocket();
+  }
+
+  function _retireSocket(socket, latencyState = 'offline') {
+    if (!socket || _ws !== socket) return false;
+    // Retire logical ownership before publishing or waiting for TCP close.
+    // Late callbacks cannot mutate a replacement or settle its RPC requests.
+    if (_connectedAt && Date.now() - _connectedAt >= MIN_UPTIME_MS) {
+      _reconnectAttempt = 0;
     }
+    _connected = false;
+    _connectedAt = 0;
+    _ws = null;
+    _stopPinging();
+    _lastInboundAt = 0;
+    _latencyMs = null;
+    _latencyState = latencyState;
+    _rejectPendingRpc(_rpcError(
+      'Control socket disconnected', 'rpc_disconnected'));
+    _emitLatency();
+    return true;
+  }
+
+  function _recoverSilentSocket() {
+    const socket = _ws;
+    if (!_retireSocket(socket, 'timeout')) return;
+    try { socket.close(); }
+    catch (e) { console.debug('[Push] force-close after ping timeout failed:', e); }
+    // A dead transport may never complete its closing handshake, or report
+    // normal closure after our explicit close. Neither cancels recovery.
+    if (!_ws) _scheduleReconnect();
   }
 
   function _startPinging() {
@@ -295,14 +311,16 @@ const _push = (() => {
     if (_pingTimer) { clearInterval(_pingTimer); _pingTimer = null; }
     if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }
     _lastPingSentAt = 0;
+    _pendingRttSentAt = 0;
     _lastBuildProbeAt = 0;
   }
 
   function _onPong(t) {
-    if (!t || t !== _lastPingSentAt) return;   // stale / mismatched pong
+    if (!t || t !== _pendingRttSentAt) return;   // stale / mismatched pong
     _latencyMs = Date.now() - t;
     _latencyState = _classify(_latencyMs);
     _lastPingSentAt = 0;
+    _pendingRttSentAt = 0;
     if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }
     _emitLatency();
   }
@@ -361,14 +379,19 @@ const _push = (() => {
       return;
     }
 
+    // Explicit demand consumes an already-scheduled retry. Leaving it alive
+    // can reconnect again after this attempt receives a terminal 1008 close.
+    if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
     const url = _buildUrl();
     // A CLOSING/CLOSED socket may not have delivered onclose yet. Clear its
     // logical ownership before constructing the replacement so senders queue
     // behind the new CONNECTING socket instead of calling send() on it under
     // the stale `_connected=true` bit.
-    _connected = false;
-    _connectedAt = 0;
-    _stopPinging();
+    if (_ws) {
+      _retireSocket(_ws);
+      // A latency observer may synchronously establish the replacement.
+      if (_ws) return;
+    }
     let socket;
     try {
       socket = new WebSocket(url);
@@ -425,6 +448,12 @@ const _push = (() => {
        * definition of a NOT-half-open socket. Stamp the ledger BEFORE parsing
        * so even a malformed frame counts. */
       _lastInboundAt = Date.now();
+      // Silence detection and RTT correlation are separate. Any inbound
+      // bytes disarm the former; only the matching pong settles the latter.
+      // Do this before parsing/dispatch so server heartbeats, stale pongs and
+      // malformed frames cannot falsely close a communicating transport.
+      _lastPingSentAt = 0;
+      if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }
       let frame;
       try { frame = JSON.parse(event.data); }
       catch (e) { console.debug('[Push] dropped malformed frame:', e && e.message); return; }
@@ -438,19 +467,6 @@ const _push = (() => {
         return;
       }
       if (frame.type === 'ping') return;
-
-      /* A DATA frame restarts the probe cycle: a server busy streaming large
-       * event frames can have its pong queued behind the data (the pong has
-       * a server-side priority lane, but the client verdict must not depend
-       * on it), and the watchdog used to only clear on a matching pong — so
-       * heavy server→client traffic (the sign of a HEALTHY socket) could end
-       * in a force-close. Clear the outstanding ping + watchdog on any frame;
-       * the next interval tick re-arms a fresh probe. The skipped RTT sample
-       * is acceptable (a late pong is ignored by _onPong's t-match). */
-      if (_lastPingSentAt) {
-        _lastPingSentAt = 0;
-        if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }
-      }
 
       if (frame.jsonrpc === '2.0') {
         _onRpcResponse(frame);
@@ -489,34 +505,22 @@ const _push = (() => {
     socket.onclose = (e) => {
       // connect() is allowed to replace a CLOSING socket before its delayed
       // close event arrives. That old event cannot clear the new connection.
-      if (_ws !== socket) return;
       // Reset attempt counter only when the connection actually held long
       // enough to be useful. Without this, a connection that opens then
       // closes within milliseconds would keep _reconnectAttempt=0 and
       // burn CPU reconnecting in a tight loop — onopen alone is not a
       // sufficient signal that the server is healthy.
-      if (_connectedAt && Date.now() - _connectedAt >= MIN_UPTIME_MS) {
-        _reconnectAttempt = 0;
-      }
-      _connected = false;
-      _connectedAt = 0;
-      _ws = null;
-      _stopPinging();
-      _lastInboundAt = 0;
-      _latencyMs = null;
-      _latencyState = 'offline';
-      _rejectPendingRpc(_rpcError(
-        'Control socket disconnected', 'rpc_disconnected'));
-      _emitLatency();
+      if (!_retireSocket(socket)) return;
       if (e.code === 1000) return;                  // normal close
-      // Permanent close codes — the server is telling us not to come back.
-      // Reconnecting just generates noise in the server log and risks IP
-      // throttling. 1008=policy violation, 1011=internal error during open.
-      if (e.code === 1008 || e.code === 1011) {
+      // Policy refusal is terminal. RFC 6455's 1011 is an unexpected server
+      // condition, not an authorization denial; it must recover like 1006.
+      if (e.code === 1008) {
         console.warn(`[Push] Server closed with permanent code ${e.code} — not reconnecting`);
         return;
       }
-      _scheduleReconnect();
+      // A latency observer may already own a replacement. The retired
+      // lifetime cannot schedule a retry behind that connection's verdict.
+      if (!_ws) _scheduleReconnect();
     };
   }
 

@@ -84,6 +84,39 @@ class WaiterTest(unittest.TestCase):
             self.assertLess(elapsed, 0.9)
         asyncio.new_event_loop().run_until_complete(go())
 
+    def test_event_appended_while_stream_sends_a_frame_wakes_next_wait(self):
+        """SSE generators drain, yield frames, then wait; a nudge for an event
+        appended while a frame is being sent must wake that next wait."""
+        async def go():
+            task = {'id': 'tframe', 'status': 'running', 'events': ['delta']}
+            loop = asyncio.get_running_loop()
+
+            def append_terminal_event():
+                task['events'].append('done')
+                task['status'] = 'done'
+                admission.notify_task('tframe', terminal=True)
+
+            admission.register_waiter('tframe')
+            delivered, cursor = [], 0
+            t0 = time.monotonic()
+            try:
+                while 'done' not in delivered:
+                    new_events = task['events'][cursor:]
+                    cursor = len(task['events'])
+                    for event in new_events:
+                        delivered.append(event)
+                        if event == 'delta':
+                            # The stream is suspended sending this frame
+                            # when the worker appends the terminal event.
+                            await loop.run_in_executor(None, append_terminal_event)
+                    if 'done' not in delivered:
+                        await admission.wait_for_event('tframe', timeout=2.0)
+            finally:
+                admission.unregister_waiter('tframe')
+            self.assertEqual(delivered, ['delta', 'done'])
+            self.assertLess(time.monotonic() - t0, 1.0)
+        asyncio.new_event_loop().run_until_complete(go())
+
 
 class TerminalCallbackTest(unittest.TestCase):
 

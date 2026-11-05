@@ -8,7 +8,7 @@ The report progress UI used to be a fixed three-zone layout (tool cards / one
 aggregated thinking block / body). The objective: reuse the agent-bubble
 inline tool timeline so thinking + narration appear next to the tool calls
 that produced them. This suite pins the RESULT in a real browser against the
-real bundle, with ``/api/v1/paper/report/start`` + ``/api/v1/paper/report/poll``
+real bundle, with ``/api/v4/paper/report/start`` + ``/api/v4/paper/report/poll``
 stubbed to replay a recorded event sequence (no LLM cost, deterministic
 timing), for BOTH views that share the pipeline (owner criterion 3 — a
 shared-code-path claim is not a verification):
@@ -140,7 +140,7 @@ def _poll_payload(
 
 def _install_report_task_routes(
         page, *, include_thinking: bool = True,
-        include_delta_reset: bool = True) -> None:
+        include_delta_reset: bool = True) -> dict:
     """Stub the report-task endpoints (shared by report AND review — the review
     reuses the whole report pipeline with a composite cache key), plus the two
     review-only pre/post chains (venue registry, translation cache).
@@ -172,14 +172,22 @@ def _install_report_task_routes(
         payload['ok'] = True
         _fulfill(route, payload)
 
-    page.route('**/api/v1/paper/report/start', on_start)
+    # Fail closed if an API version/path changes: fixture text must never
+    # start a real generation task while the recorded transport is missed.
+    def unexpected_task_route(route) -> None:
+        route.abort()
+        raise AssertionError(f'Unstubbed Paper task request: {route.request.url}')
+
+    page.route('**/api/*/paper/report/start', unexpected_task_route)
+    page.route('**/api/*/paper/translate/start', unexpected_task_route)
+    page.route('**/api/v4/paper/report/start', on_start)
     # Trailing '**' swallows the ?task_id=…&cursor=N query string — without it
     # the glob must match the WHOLE url and the real (404ing) server answers.
-    page.route('**/api/v1/paper/report/poll**', on_poll)
+    page.route('**/api/v4/paper/report/poll**', on_poll)
     # Review generation resolves the venue BEFORE starting (composite cache
     # key review:<venue>:<lang>) — one venue so the resolve picks it.
     page.route(
-        '**/api/v1/paper/review/venues**',
+        '**/api/v4/paper/review/venues**',
         lambda route: _fulfill(route, {
             'ok': True,
             'venues': [{'key': 'neurips2026', 'name': 'NeurIPS 2026'}],
@@ -188,26 +196,26 @@ def _install_report_task_routes(
     # instantly through _renderFinalReport (the path that must keep the
     # timeline), so no translate task is ever started.
     page.route(
-        '**/api/v1/paper/translate/cache',
+        '**/api/v4/paper/translate/cache',
         lambda route: _fulfill(route, {'ok': True, 'text': _REVIEW_ZH}))
     return captured
 
 
 def _enter_paper_mode(page) -> None:
-    """Load the lazy Vite Paper domain before inspecting its global seams."""
+    """Enter the lazy Paper workspace before driving its generation surface."""
     page.evaluate("""async () => {
         await window.TofuModules.invokeFeature('togglePaperMode', [], () => {});
     }""")
     page.wait_for_function(
-        "window.paperMode && typeof window.TofuModules.resolveAction("
-        "'_reportSegmentsForRender') === 'function'",
+        "window.paperMode && document.getElementById('paperReportContent')",
         timeout=15000)
     # Paper library hydration is intentionally async and may replace the
     # active entry. Let it settle before the fixture stages its synthetic id.
     page.wait_for_timeout(800)
 
 
-def _start_generation(page, view: str = 'report', *, enter: bool = True) -> None:
+def _start_generation(page, view: str = 'report', *, enter: bool = True,
+                      title: str = 'Timeline fixture') -> None:
     """Stage a paper through its owner and drive the real generation flow.
 
     Paper state is module-owned after the ESM migration.  Assigning similarly
@@ -219,12 +227,12 @@ def _start_generation(page, view: str = 'report', *, enter: bool = True) -> None
     if enter:
         _enter_paper_mode(page)
     page.evaluate(
-        "async (entryAction) => {"
+        "async ({entryAction, title}) => {"
         " const resolve = window.TofuModules.resolveAction;"
         " const create = resolve('_createPaperEntry');"
         " const setActive = resolve('_setActivePaperId');"
         " const open = resolve('_openPaperEntry');"
-        " const paper = create('Timeline fixture', '',"
+        " const paper = create(title, '',"
         "   'parsed paper text', '', 'p-tl');"
         " paper.paperHash = 'h-tl';"
         # ``create`` selects the new entry.  Clear that selection before
@@ -234,7 +242,7 @@ def _start_generation(page, view: str = 'report', *, enter: bool = True) -> None
         " await open(paper);"
         " await resolve(entryAction)();"
         " }",
-        _VIEWS[view]['entry'])
+        {'entryAction': _VIEWS[view]['entry'], 'title': title})
 
 
 def _panel_order(page, view: str = 'report'):
@@ -360,6 +368,61 @@ def test_report_stream_uses_chat_inline_tool_timeline(page, assert_no_js_errors)
     _enter_paper_mode(page)
     _start_generation(page, 'report', enter=False)
     _assert_timeline_flow(page, 'report')
+
+
+@pytest.mark.parametrize('metadata_delivery', ['event', 'snapshot'])
+def test_report_postpasses_and_title_adoption_do_not_write_library_metadata(
+        page, assert_no_js_errors, metadata_delivery):
+    _wait_ready(page)
+    _install_report_task_routes(page)
+    terminal_pages = []
+    writes = []
+
+    def observe(request):
+        if (terminal_pages and request.method in ('POST', 'PUT', 'PATCH')
+                and '/api/v4/paper/library' in urlparse(request.url).path):
+            writes.append((request.method, request.url))
+
+    def poll(route):
+        cursor = int(parse_qs(urlparse(route.request.url).query).get('cursor', ['0'])[0])
+        payload = _poll_payload(cursor)
+        payload['ok'] = True
+        if payload['status'] == 'done':
+            terminal_pages.append(cursor)
+            final = len(terminal_pages) == 3
+            payload['workerActive'] = not final
+            payload['resolvedTitle'] = 'Recovered server title'
+            payload['meta'] = {'model': 'tail-model' if final else 'guard-model'}
+            if len(terminal_pages) > 1:
+                payload['events'] = []
+            if metadata_delivery == 'event':
+                payload['events'].append({'type': 'report_meta', 'meta': payload['meta']})
+        route.fulfill(status=200, content_type='application/json', body=json.dumps(payload))
+
+    page.on('request', observe)
+    page.route('**/api/v4/paper/report/poll**', poll)
+    _start_generation(page, title='arxiv:1234.5678')
+    page.wait_for_function("""() => document.querySelector(
+      '#paperReportContent .paper-report-finish-tag')?.textContent.includes('guard-model')""")
+    original_article = page.locator('#paperReportContent .paper-report-article').element_handle()
+    try:
+        page.wait_for_function("""() =>
+          document.getElementById('paperSidebarTitle')?.textContent === 'Recovered server title'
+          && document.querySelector('#paperReportContent .paper-report-finish-tag')
+            ?.textContent.includes('tail-model')""", timeout=20000)
+    except Exception:
+        print({'terminal_pages': terminal_pages, 'writes': writes, 'view': page.evaluate("""() => ({
+          title: document.getElementById('paperSidebarTitle')?.textContent,
+          finish: document.querySelector('#paperReportContent .paper-report-finish-tag')?.textContent,
+          body: document.getElementById('paperReportContent')?.textContent
+        })""")})
+        raise
+    assert len(terminal_pages) == 3
+    assert writes == [], writes
+    assert original_article.evaluate("""node => node === document.querySelector(
+      '#paperReportContent .paper-report-article')""")
+    assert 'Final report body with the verified facts.' in page.locator(
+        '#paperReportContent').inner_text()
 
 
 def test_review_stream_uses_chat_inline_tool_timeline(page, assert_no_js_errors):

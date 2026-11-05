@@ -21,6 +21,11 @@ retain provider candidates for final wire projection and child policy snapshots.
 
 ## Editing rules
 
+`_startup` owns common phase publication, task-owned project roots, presence and
+external-edit probes. `_vu_startup` only binds synthetic-user phase feedback.
+The invocation calls the same project preparation for every role. Verify
+`test_project_startup`, abort-preparation and startup-phase contracts.
+
 - Keep the root loop, turn state, round state, one model attempt, tool dispatch,
   post-loop work, and finalization as explicit phases with a single transition
   owner.
@@ -52,13 +57,21 @@ with native execution. It never appends history, closes rounds or commits done.
 Preserve sanitization, tool/context metadata and best-effort publication; verify
 completion projection and root/native terminal retry tests.
 
+_completion_receipt.py projects terminal fields and continuation metadata;
+_completion_observers.py attaches experiment metadata and records diagnostics.
+Neither owns terminal writes or release. ../round_costs.py supplies shared
+request snapshots and terminal display totals; frozen native quotes never
+consult later Python prices. Verify fact-card/receipt and observer tests, Flow
+child accounting, terminal ordering, persistence debt and heavy-state release.
+
 An explicit _nativePreparedInvocation hands the prepared RootLoopRequest to
 native task ownership. Skip Python loop/finalization after handoff; retain common
 teardown. Projected terminal failures propagate unchanged, and preterminal
 fatal writing disables whole-turn retry. Verify native-root-selection, failed
 invocation history, child and terminal tests; no default selection is implied.
 
-_completion_translation owns one final prose submission before terminal handoff.
+Completion submits no translation: the durable whole-turn job translates the
+final reply once after settlement (lib/translate/terminal.py).
 _post_commit owns shared acknowledged-terminal observers and heavy-field release;
 never invoke it from a projected/pending candidate. Verify native-completion
 retry/cancel tests, finalize tests, heavy-state release and actual native tasks.

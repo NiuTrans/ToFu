@@ -2,11 +2,13 @@
 
 import base64
 import re
+from importlib import import_module
 
 import requests
 
-from tofu_search.search.vertical import base
 from tofu_search.search.vertical.base import _FETCH_FAILED, _HEADERS, logger
+
+base = import_module('tofu_search.search.vertical.base')  # leaf, not via package: base.py
 
 TYPE = 'github'
 DOMAIN = 'code'

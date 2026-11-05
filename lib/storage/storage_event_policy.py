@@ -10,7 +10,9 @@ Entry point
 -----------
 ``resolve_storage_event_budget`` returns batcher RAM/file representation thresholds, and the per-RPC composition bound
 required by the 64 MiB storage.v1 frame. StorageEventBatcher never treats its
-count or RAM hints as permission to refuse an event.
+count or RAM hints as permission to refuse an event. The composition bound is
+the one ``contracts/task_event_delivery_v1.json`` declares for
+``turn.event.record_batch``, so both authorities enforce the same numbers.
 """
 
 from __future__ import annotations
@@ -19,12 +21,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import os
 
+from lib.storage.generated_task_event_delivery_contract import (
+    STRUCTURAL_BATCH_MAX_EVENTS,
+    STRUCTURAL_BATCH_MAX_WIRE_BYTES,
+)
 from runtime_guards import resolve_resource_budget
 
 
 _MIB = 1024 * 1024
-STORAGE_EVENT_BATCH_MAX_EVENTS = 500
-STORAGE_EVENT_BATCH_FRAME_HARD_MIB = 60
+STORAGE_EVENT_BATCH_MAX_EVENTS = STRUCTURAL_BATCH_MAX_EVENTS
+STORAGE_EVENT_BATCH_FRAME_HARD_MIB = STRUCTURAL_BATCH_MAX_WIRE_BYTES // _MIB
 STORAGE_EVENT_FRAME_HEADROOM_BYTES = 64 * 1024
 
 

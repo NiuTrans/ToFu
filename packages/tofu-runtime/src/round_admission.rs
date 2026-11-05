@@ -23,10 +23,14 @@ pub enum Evidence<'a> {
     Abandoned,
 }
 type Settle = Box<dyn for<'a> FnOnce(Evidence<'a>) -> Result<(), Value> + Send>;
+/// Call order the settlement of one returned response publishes for concurrent
+/// tool dispatch: entry `i` lists the earlier response positions call `i` waits for.
+pub type ToolOrder = Arc<std::sync::OnceLock<Vec<Vec<usize>>>>;
 pub struct Permit {
     settle: Option<Settle>,
     ledger: Option<Arc<State>>,
     messages: Option<Vec<Value>>,
+    tool_order: Option<ToolOrder>,
 }
 impl Permit {
     pub fn new(settle: Settle) -> Self {
@@ -34,7 +38,17 @@ impl Permit {
             settle: Some(settle),
             ledger: None,
             messages: None,
+            tool_order: None,
         }
+    }
+    /// The settle callback fills `order` from the host's acknowledgement; the
+    /// Agent dispatches that response's calls under it. Grants no authority.
+    pub fn with_tool_order(mut self, order: ToolOrder) -> Self {
+        self.tool_order = Some(order);
+        self
+    }
+    pub(crate) fn tool_order(&self) -> Option<ToolOrder> {
+        self.tool_order.clone()
     }
     /// Trusted round preparation replaces only canonical history. Agent validates
     /// its retained-byte bound before dispatch; route/catalog authority is unchanged.

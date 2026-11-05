@@ -5,17 +5,20 @@ continue-checkpoint scanner out of ``routes/chat.py``. They have no Flask
 request state, so they live in lib; the send translator delegates bounded
 work to the process-wide attended-translation lane.
 
-``_TRANSLATE_SEND_TIMEOUT`` is the synchronous translate budget; it must stay
-comfortably below the frontend's safety abort timer (``_sendTimeout`` in
-static/js/main.js — currently 90 s) so the user sees a clean fallback rather
-than a generic AbortError.
+``_TRANSLATE_SEND_TIMEOUT`` bounds one attended send translation: the
+attempt-start job of an accepted turn (``start_deferred_input_translation``,
+joined by ``lib.tasks_pkg.input_translation``) and the synchronous steer path.
+The turn command itself never translates.
 """
 
 import threading
 import time
 import uuid
+from concurrent.futures import Future
+from typing import NamedTuple
 
 from lib.chat.messages import resolve_conv_refs
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 
 from lib.llm.diagnostic_timing import current_timing, timed_stage, timing_stage
@@ -86,8 +89,8 @@ def auto_translate_user(text, config, *, user_id, conv_id=None):
     the caller knows it (e.g. a benchmark harness that knows each instance's
     language); otherwise it is left blank and the translator infers it.
 
-    Capped at ``_TRANSLATE_SEND_TIMEOUT`` seconds to prevent the synchronous
-    HTTP handler from blocking long enough to trigger the frontend's abort.
+    Capped at ``_TRANSLATE_SEND_TIMEOUT`` seconds; the calling thread waits
+    on the shared lane and falls back to the original text.
 
     ``user_id`` is the authenticated owner used for fair admission.
     ``conv_id`` is optional correlation data for the lane job id and logs.
@@ -289,7 +292,143 @@ def translate_user_text_to_english(text, config):
     return translated, text, usage, None
 
 
-def build_user_msg_from_payload(payload, config, *, user_id, conv_id=None):
+def _stamp_input_translation(user_msg, translated_text, original_text,
+                             translate_model, translate_fail):
+    """Record one send-path translation verdict on an input projection."""
+    user_msg['content'] = translated_text
+    if original_text:
+        user_msg['originalContent'] = original_text
+        user_msg['_translateDone'] = True
+        if translate_model:
+            user_msg['_translateModel'] = translate_model
+    elif translate_fail:
+        # Auto-translate was attempted (autoTranslate on, Chinese present) but
+        # failed/timed out — the ORIGINAL text was sent to the model. Flag it
+        # so the frontend can show a non-silent 'sent original' notice.
+        user_msg['_translateFailed'] = translate_fail
+
+
+def translate_input_projection(projection, config, *, user_id, conv_id=None):
+    """Synchronously translate an input delivered into an already running lane.
+
+    A steer or queued input has no attempt start of its own that could defer
+    the work, so it keeps the attended send-path budget.
+    """
+    text = projection.get('content')
+    if not isinstance(text, str) or projection.get('_translateDone'):
+        return projection
+    updated = dict(projection)
+    _stamp_input_translation(updated, *auto_translate_user(
+        text, config, user_id=user_id, conv_id=conv_id))
+    return updated
+
+
+class DeferredInputTranslation(NamedTuple):
+    """An accepted input's attempt-start translation, before its verdict is durable.
+
+    ``original`` is the input Turn's authored text at ``projection_revision``;
+    ``translated`` is ``None`` when the model reads that text, and ``failure``
+    names a translator failure the verdict records. ``recorded`` marks a Turn
+    that already carries its verdict, so the worker writes nothing.
+    """
+
+    input_turn_id: str
+    projection_revision: int | None
+    original: str
+    translated: str | None
+    model: str | None = None
+    failure: str | None = None
+    recorded: bool = False
+
+
+def start_deferred_input_translation(conversation_id, turn_id, config, *,
+                                     user_id) -> Future:
+    """Translate an accepted attempt's input while its executor starts.
+
+    The future resolves to :class:`DeferredInputTranslation`, or ``None`` when
+    the attempt has no input Turn. The job never writes: the worker that joins
+    it records the verdict (:func:`record_deferred_input_translation`) before
+    its first model request, so a stopped, stalled or superseded attempt can
+    never rewrite an input Turn that a later attempt's authority is pinned to.
+    """
+    future = Future()
+
+    def run():
+        from lib.log import set_log_context
+
+        set_log_context(conversation_id=conversation_id, user_id=user_id)
+        try:
+            outcome = _translate_accepted_input(
+                conversation_id, turn_id, config, user_id=user_id)
+        except BaseException as exc:
+            logger.warning('[Send] Deferred input translation failed conv=%s turn=%s: %s',
+                           str(conversation_id)[:8], str(turn_id)[:8], exc,
+                           exc_info=True)
+            future.set_exception(exc)
+            return
+        future.set_result(outcome)
+
+    threading.Thread(target=run, daemon=True,
+                     name=f'input-translate-{str(turn_id)[:8]}').start()
+    return future
+
+
+def _translate_accepted_input(conversation_id, turn_id, config, *, user_id):
+    from lib.translate.commit import input_translation_verdict_recorded
+    from lib.turn_lifecycle import get_turn
+
+    target = get_turn(conversation_id, turn_id, user_id=user_id) or {}
+    input_turn_id = str(target.get('parentTurnId') or '')
+    if not input_turn_id:
+        return None
+    source = get_turn(conversation_id, input_turn_id, user_id=user_id) or {}
+    revision = source.get('projectionRevision')
+    projection = source.get('projection') or {}
+    text = projection.get('content')
+    authored = text if isinstance(text, str) else ''
+    original = projection.get('originalContent')
+    if isinstance(original, str) and original != authored:
+        # A recorded translation: the model view already reads ``authored``.
+        return DeferredInputTranslation(input_turn_id, revision, original, authored,
+                                        recorded=True)
+    if input_translation_verdict_recorded(projection) or not authored.strip():
+        return DeferredInputTranslation(input_turn_id, revision, authored, None,
+                                        recorded=True)
+    translated, original, model, fail = auto_translate_user(
+        text, config, user_id=user_id, conv_id=conversation_id)
+    if original:
+        return DeferredInputTranslation(input_turn_id, revision, text, translated, model)
+    return DeferredInputTranslation(input_turn_id, revision, text, None,
+                                    failure=fail, recorded=fail is None)
+
+
+def record_deferred_input_translation(conversation_id, outcome, *, user_id):
+    """Record ``outcome``'s verdict on its input Turn; return the settled revision.
+
+    The result is the input Turn revision the worker's model view reflects:
+    the verdict's revision while the Turn still holds the translated authored
+    text, otherwise the translated revision, so authority pinned to it refuses
+    an input that was edited in the meantime.
+    """
+    if outcome.recorded:
+        return outcome.projection_revision
+    from lib.translate.commit import record_input_translation_verdict
+
+    turn = record_input_translation_verdict(
+        conversation_id, outcome.input_turn_id,
+        authored_text=outcome.original, translated_text=outcome.translated,
+        model=outcome.model, failure_reason=outcome.failure, user_id=user_id)
+    projection = turn.get('projection') or {}
+    authored = projection.get('originalContent')
+    if not isinstance(authored, str):
+        authored = projection.get('content')
+    if authored != outcome.original:
+        return outcome.projection_revision
+    return turn.get('projectionRevision')
+
+
+def build_user_msg_from_payload(payload, config, *, user_id, conv_id=None,
+                                translate_input=True):
     """Build a user message dict from frontend payload + optional auto-translate.
 
     Args:
@@ -298,6 +437,9 @@ def build_user_msg_from_payload(payload, config, *, user_id, conv_id=None):
         config: task config dict (reads autoTranslate)
         user_id: authenticated owner used for referenced-conversation reads.
         conv_id: optional correlation id for translation lane jobs and logs.
+        translate_input: ``False`` keeps the authored text; the accepted
+            attempt then owns translation (see
+            :func:`start_deferred_input_translation`).
 
     Returns:
         user_msg dict ready to append to conv.messages
@@ -305,14 +447,14 @@ def build_user_msg_from_payload(payload, config, *, user_id, conv_id=None):
     text = payload.get('text', '')
     timestamp = payload.get('timestamp') or int(time.time() * 1000)
 
-    translated_text, original_text, translate_model, translate_fail = auto_translate_user(
-        text, config, user_id=user_id, conv_id=conv_id)
-
     user_msg = {
         'role': 'user',
-        'content': translated_text,
+        'content': text,
         'timestamp': timestamp,
     }
+    if translate_input:
+        _stamp_input_translation(user_msg, *auto_translate_user(
+            text, config, user_id=user_id, conv_id=conv_id))
     # Carry the client-generated stable _msgId through verbatim. The frontend
     #   assigns _msgId to the optimistic user message BEFORE the send POST, and
     #   its persistence layer dedups on _msgId (rescue-PUT rebase
@@ -325,16 +467,6 @@ def build_user_msg_from_payload(payload, config, *, user_id, conv_id=None):
     _client_msg_id = payload.get('_msgId')
     if _client_msg_id:
         user_msg['_msgId'] = _client_msg_id
-    if original_text:
-        user_msg['originalContent'] = original_text
-        user_msg['_translateDone'] = True
-        if translate_model:
-            user_msg['_translateModel'] = translate_model
-    elif translate_fail:
-        # Auto-translate was attempted (autoTranslate on, Chinese present) but
-        # failed/timed out — the ORIGINAL text was sent to the model. Flag it
-        # so the frontend can show a non-silent 'sent original' notice.
-        user_msg['_translateFailed'] = translate_fail
     if payload.get('images'):
         user_msg['images'] = payload['images']
     if payload.get('attachments'):
@@ -378,6 +510,13 @@ _VIDEO_ATTACHMENT_KEYS = (
 )
 
 
+def _frame_bytes(frame):
+    try:
+        return int(frame.get('bytes') or 0)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise BadRequest('Video frame bytes must be an integer', field='message') from exc
+
+
 def _sanitize_video_attachments(videos):
     """Whitelist a client-supplied videos[] payload down to the known shape.
 
@@ -397,7 +536,7 @@ def _sanitize_video_attachments(videos):
         if isinstance(frames, list):
             entry['frames'] = [
                 {'url': f['url'], 't': f.get('t', 0),
-                 'bytes': int(f.get('bytes') or 0)}
+                 'bytes': _frame_bytes(f)}
                 for f in frames
                 if isinstance(f, dict)
                 and isinstance(f.get('url'), str)

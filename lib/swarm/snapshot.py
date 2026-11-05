@@ -25,7 +25,7 @@ import json
 from typing import Any
 
 from lib.log import get_logger
-from lib.tools.result_envelope import sparse_result_items
+from lib.tools.result_envelope import sparse_result_items, tool_result_observation
 
 logger = get_logger(__name__)
 
@@ -66,10 +66,14 @@ def _round_handle(round_entry: dict) -> dict:
     """Decode a launch receipt without inferring identity from agent names."""
     if not isinstance(round_entry, dict) or round_entry.get('toolName') != 'spawn_agents':
         return {}
-    try:
-        handle = _unwrap_result_payload(json.loads(round_entry.get('toolContent') or ''))
-    except (ValueError, TypeError):
+    raw = round_entry.get('toolContent')
+    if not isinstance(raw, str) or not raw:
         return {}
+    try:
+        handle = _unwrap_result_payload(json.loads(raw))
+    except (ValueError, TypeError):
+        handle = _unwrap_result_payload(tool_result_observation(
+            raw, round_entry.get('toolResultEvidence')))
     return handle if isinstance(handle, dict) else {}
 
 
@@ -99,24 +103,10 @@ def matching_snapshot_ids(round_entry: dict, snapshot: dict) -> set[str]:
 def _round_handle_ids(round_entry: dict) -> set[str]:
     """Return the set of agent ids referenced by a spawn round's handle.
 
-    The persisted ``spawn_agents`` round stores the launch handle JSON in
-    ``toolContent`` (``{agents:[{id, ...}]}``). Returns an empty set when the
-    round isn't a parseable spawn handle.
+    The shared receipt decoder handles canonical and model-projected forms.
+    Returns an empty set when the round isn't a parseable spawn handle.
     """
-    if not isinstance(round_entry, dict):
-        return set()
-    if round_entry.get('toolName') != 'spawn_agents':
-        return set()
-    raw = round_entry.get('toolContent')
-    if not isinstance(raw, str) or not raw:
-        return set()
-    try:
-        handle = json.loads(raw)
-    except (ValueError, TypeError) as e:
-        logger.debug('[SwarmSnapshot] spawn handle JSON parse failed: %s', e)
-        return set()
-    handle = _unwrap_result_payload(handle)
-    agents = handle.get('agents') if isinstance(handle, dict) else None
+    agents = _round_handle(round_entry).get('agents')
     if not isinstance(agents, list):
         return set()
     return {a.get('id') for a in agents

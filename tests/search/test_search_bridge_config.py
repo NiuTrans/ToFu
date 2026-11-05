@@ -22,15 +22,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
-# The FETCH_* attributes sync_search_config reads off `lib` (aliased _lib).
+# The attributes sync_search_config reads off `lib` (aliased _lib).
 _LIB_STUB = {
-    'LLM_CONTENT_FILTER_ENABLED': True,
-    'FETCH_TOP_N': 6,
-    'FETCH_TIMEOUT': 15,
-    'FETCH_MAX_CHARS_SEARCH': 60000,
-    'FETCH_MAX_CHARS_DIRECT': 200000,
-    'FETCH_MAX_CHARS_PDF': 0,
-    'FETCH_MAX_BYTES': 20 * 1024 * 1024,
     'SKIP_DOMAINS': {'youtube.com'},
     'PREFETCH_GATE_ENABLED': True,
 }
@@ -46,9 +39,7 @@ def _capture_configure_kwargs(monkeypatch, env=None):
     monkeypatch.setattr(sb, '_resolve_proxy_url', lambda: '')
 
     for var in ('PREFETCH_GATE_ENABLED', 'PREFETCH_GATE_MIN_QUERY_TERMS',
-                'PREFETCH_GATE_MIN_FETCH', 'TOFU_SEARCH_PROXY_DUAL_ATTEMPT',
-                'FETCH_FILTER_MIN_CHARS', 'FETCH_FILTER_TIMEOUT',
-                'FETCH_FILTER_MODE', 'FETCH_FILTER_GATE_MAX_CHARS'):
+                'PREFETCH_GATE_MIN_FETCH', 'TOFU_SEARCH_PROXY_DUAL_ATTEMPT'):
         monkeypatch.delenv(var, raising=False)
     for k, v in (env or {}).items():
         monkeypatch.setenv(k, v)
@@ -76,33 +67,36 @@ class TestSyncSearchConfigKnobs:
         assert cap['prefetch_gate_min_fetch'] == 3
         # 0.4.1 adaptive proxy
         assert cap['proxy_dual_attempt'] is True
-        # sanity: the pre-existing knobs still flow
-        assert cap['fetch_top_n'] == 6
-        assert cap['filter_enabled'] is True
-        # 0.6.0 content-filter rework: gate mode is the bridge default, and
-        # the timeout default follows the library's 300 → 45 tightening.
-        assert cap['filter_mode'] == 'gate'
-        assert cap['filter_timeout'] == 45
-        assert cap['filter_min_chars'] == 6000
-        assert cap['gate_input_max_chars'] == 6000
+        assert cap['skip_domains'] == {'youtube.com'}
+
+    def test_search_limits_stay_library_defaults(self, monkeypatch):
+        cap = _capture_configure_kwargs(monkeypatch)
+        # Result counts, page sizes, timeouts, download limits and deepening
+        # are owned by tofu-search's SearchConfig; the host never re-declares
+        # (and so can never shadow) them.
+        for key in ('fetch_top_n', 'fetch_timeout', 'fetch_max_chars_search',
+                    'fetch_max_chars_direct', 'fetch_max_chars_pdf',
+                    'fetch_max_bytes', 'deepen_enabled'):
+            assert key not in cap
+
+    def test_llm_relevance_gate_is_off_regardless_of_legacy_settings(self, monkeypatch):
+        import lib.search.search_bridge as sb
+        monkeypatch.setattr(sb._lib, '_SAVED_CONFIG', {'search': {
+            'profile': 'deep', 'llm_content_filter': True}}, raising=False)
+        cap = _capture_configure_kwargs(monkeypatch, env={'FETCH_LLM_FILTER': '1'})
+        assert cap['filter_enabled'] is False
+        # The model seam stays installed for explicitly configured callers.
+        assert cap['llm_function'] is sb._chatui_llm
 
     def test_env_overrides_are_honoured(self, monkeypatch):
         cap = _capture_configure_kwargs(monkeypatch, env={
             'PREFETCH_GATE_MIN_QUERY_TERMS': '4',
             'PREFETCH_GATE_MIN_FETCH': '1',
             'TOFU_SEARCH_PROXY_DUAL_ATTEMPT': 'no',
-            'FETCH_FILTER_MODE': 'rewrite',
-            'FETCH_FILTER_TIMEOUT': '120',
-            'FETCH_FILTER_MIN_CHARS': '7000',
-            'FETCH_FILTER_GATE_MAX_CHARS': '5000',
         })
         assert cap['prefetch_gate_min_query_terms'] == 4
         assert cap['prefetch_gate_min_fetch'] == 1
         assert cap['proxy_dual_attempt'] is False
-        assert cap['filter_mode'] == 'rewrite'
-        assert cap['filter_timeout'] == 120
-        assert cap['filter_min_chars'] == 7000
-        assert cap['gate_input_max_chars'] == 5000
 
     # ── 0.10.0 multi-proxy failover chain (SOFT floor) ──
 
@@ -118,9 +112,7 @@ class TestSyncSearchConfigKnobs:
         monkeypatch.setattr(lp, 'global_proxy_failover_urls', lambda: list(pool))
         for var in ('PREFETCH_GATE_ENABLED', 'PREFETCH_GATE_MIN_QUERY_TERMS',
                     'PREFETCH_GATE_MIN_FETCH', 'TOFU_SEARCH_PROXY_DUAL_ATTEMPT',
-                    'TOFU_SEARCH_PROXY_RACE', 'FETCH_FILTER_MIN_CHARS',
-                    'FETCH_FILTER_TIMEOUT', 'FETCH_FILTER_MODE',
-                    'FETCH_FILTER_GATE_MAX_CHARS'):
+                    'TOFU_SEARCH_PROXY_RACE'):
             monkeypatch.delenv(var, raising=False)
         for k, v in (env or {}).items():
             monkeypatch.setenv(k, v)
@@ -229,3 +221,78 @@ def test_rewrite_adapter_keeps_long_output_budget_and_unrelated_stops(
     assert 'max_tokens' not in captured
     assert captured['extra'] == {'stop': ['<END>']}
     assert captured['max_429_attempts'] == 1
+
+
+@pytest.mark.unit
+def test_filter_adapter_reports_read_budget_expiry_as_timeout(monkeypatch):
+    """tofu-search recognizes the builtin TimeoutError as budget expiry."""
+    import lib.search.search_bridge as sb
+    from lib.llm.llm_errors import ResponseReadTimeoutError
+
+    expiry = ResponseReadTimeoutError(base_url='https://gateway.example/v1',
+                                      timeout_seconds=1.08756)
+
+    def fake_dispatch(messages, **kwargs):
+        raise expiry
+
+    monkeypatch.setattr('lib.llm_dispatch.api.dispatch_chat', fake_dispatch)
+    with pytest.raises(TimeoutError) as caught:
+        sb._chatui_llm([{'role': 'user', 'content': 'page'}], timeout=1.08756)
+    assert caught.value.__cause__ is expiry
+    assert 'timeout budget: 1.08756s' in str(caught.value)
+
+
+def _non_budget_failures():
+    from lib.llm.llm_errors import (
+        RequestTransportError, RequestUploadTimeoutError, RetryableAPIError,
+    )
+    return [
+        RetryableAPIError('HTTP 503 from gateway', status_code=503),
+        RequestTransportError(failure_stage='connection', reason='connection_error'),
+        RequestUploadTimeoutError(base_url='https://gateway.example/v1',
+                                  timeout_seconds=10),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('failure_index', range(3))
+def test_filter_adapter_keeps_other_failures_unchanged(monkeypatch, failure_index):
+    import lib.search.search_bridge as sb
+
+    failure = _non_budget_failures()[failure_index]
+
+    def fake_dispatch(messages, **kwargs):
+        raise failure
+
+    monkeypatch.setattr('lib.llm_dispatch.api.dispatch_chat', fake_dispatch)
+    with pytest.raises(type(failure)) as caught:
+        sb._chatui_llm([{'role': 'user', 'content': 'page'}], timeout=2.0)
+    assert caught.value is failure
+    assert not isinstance(caught.value, TimeoutError)
+
+
+@pytest.mark.unit
+def test_host_filter_budget_expiry_is_reported_below_error(monkeypatch, caplog):
+    """The host adapter and tofu-search agree on what an elapsed budget is."""
+    import logging
+
+    import lib.search.search_bridge as sb
+    from lib.llm.llm_errors import ResponseReadTimeoutError
+    from tofu_search.config import SearchConfig
+    from tofu_search.fetch.content_filter import filter_web_content
+
+    def fake_dispatch(messages, **kwargs):
+        raise ResponseReadTimeoutError(base_url='https://gateway.example/v1',
+                                       timeout_seconds=kwargs['timeout'])
+
+    monkeypatch.setattr('lib.llm_dispatch.api.dispatch_chat', fake_dispatch)
+    raw = 'Real article body. ' * 400
+    config = SearchConfig(filter_enabled=True, llm_function=sb._chatui_llm,
+                          filter_cache_ttl=0)
+    with caplog.at_level(logging.DEBUG):
+        out = filter_web_content(raw, url='https://example.com/slow', query='q',
+                                 timeout=2.0, config=config)
+    assert out == raw
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert any(record.levelno == logging.WARNING and 'TIMEOUT' in record.getMessage()
+               for record in caplog.records)

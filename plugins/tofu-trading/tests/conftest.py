@@ -3,10 +3,23 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
+import sys
 
 import pytest
 
-from tofu_trading.storage import TradingConnection
+# These tests certify this checkout's plugin source. Without the binding the
+# import failed unless PYTHONPATH named the plugin, or an editable install
+# answered it from another checkout (a sibling tofu-trade).
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_PLUGIN_ROOT))
+
+import tofu_trading  # noqa: E402
+from tofu_trading.storage import TradingConnection  # noqa: E402
+
+if not Path(tofu_trading.__file__).resolve().is_relative_to(_PLUGIN_ROOT):
+    raise pytest.UsageError(
+        f'tofu_trading was imported from {tofu_trading.__file__}, not {_PLUGIN_ROOT}')
 
 
 class InMemoryTradingRepository:
@@ -60,9 +73,15 @@ class InMemoryTradingRepository:
 
 
 @pytest.fixture
-def trading_connection_factory():
+def trading_repository():
+    """Expose the atomic repository for commit-failure specifications."""
+    return InMemoryTradingRepository()
+
+
+@pytest.fixture
+def trading_connection_factory(trading_repository):
     """Return owner-bound connections over one shared in-memory repository."""
-    shared_repository = InMemoryTradingRepository()
+    shared_repository = trading_repository
     opened: list[TradingConnection] = []
 
     def create(

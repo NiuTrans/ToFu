@@ -14,7 +14,7 @@ import sys
 
 from lib.storage_authority_sql.preflight import ProjectLease
 from lib.storage_authority_sql.projection_paths import (
-    resolve_search_projection_paths,
+    prepare_search_projection_paths,
     validate_search_projection_directory,
 )
 
@@ -123,7 +123,7 @@ def main() -> None:
     projection = (
         validate_search_projection_directory(args[3], authority)
         if len(args) == 4
-        else resolve_search_projection_paths(data_dir).directory
+        else prepare_search_projection_paths(data_dir).directory
     )
     command = [binary, 'serve', '--data-dir', str(authority),
                '--owner-id', owner, '--search-projection-dir',
@@ -131,10 +131,19 @@ def main() -> None:
     command.extend(_durability_args())
     native_fastpath = os.environ.get('TOFU_DB_FASTPATH_DIR', '').strip()
     native_interval = os.environ.get('TOFU_DB_FASTPATH_SYNC_INTERVAL_MS', '').strip()
+    # Only the supervisor's automatic selection sets ``auto``: a typed
+    # pre-relocation refusal then serves the classic authority.
+    native_admission = os.environ.get('TOFU_DB_FASTPATH_ADMISSION', '').strip().lower()
+    if native_admission not in ('', 'required', 'auto'):
+        raise RuntimeError('TOFU_DB_FASTPATH_ADMISSION must be required or auto')
+    if native_admission and not native_fastpath:
+        raise RuntimeError('TOFU_DB_FASTPATH_ADMISSION requires TOFU_DB_FASTPATH_DIR')
     if native_fastpath:
         if not Path(native_fastpath).is_absolute():
             raise RuntimeError('TOFU_DB_FASTPATH_DIR must be an absolute existing local base')
         command.extend(['--fastpath-dir', native_fastpath])
+        if native_admission:
+            command.extend(['--fastpath-admission', native_admission])
         if native_interval:
             try:
                 interval = int(native_interval)
@@ -151,15 +160,27 @@ def main() -> None:
     if int(tenant):
         command.extend(['--tenant-id', tenant])
     parent_pid = int(os.environ['TOFU_STORAGE_PARENT_PID'])
+    server_owner_verifier = None
+    service_id = os.environ.get('TOFU_STORAGE_SERVICE_ID')
+    service_state = os.environ.get('TOFU_STORAGE_SERVICE_STATE')
+    if service_id and service_state:
+        from serverctl_pkg.native_storage_service import serves_web_owner
+        server_owner_verifier = lambda web_pid: serves_web_owner(
+            Path(service_state), service_id, parent_pid, web_pid)
     lease = ProjectLease(data_dir, expected_parent_pid=parent_pid,
-                         owner_kind='tofudb', owner_label='Tofu-DB')
+                         owner_kind='tofudb', owner_label='Tofu-DB',
+                         server_owner_verifier=server_owner_verifier)
     lease.acquire()
     try:
         locator = {
             'format': 'tofu.storage-locator/v1', 'backend': 'tofudb',
             'authority_path': str(authority), 'fastpath_active': False,
         }
-        if native_fastpath:
+        # An automatic first activation may still be declined by the engine;
+        # until the relocation fence exists the classic path stays the locator.
+        relocation_certain = (native_admission != 'auto'
+                              or os.path.lexists(authority / 'FASTPATH'))
+        if native_fastpath and relocation_certain:
             # Match the native source-path namespace; this is a launch locator,
             # not a readiness or saved-preference witness.
             namespace = _native_fastpath_namespace(authority)

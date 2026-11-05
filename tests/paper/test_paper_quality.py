@@ -282,6 +282,35 @@ class TestPdfProbes:
         assert 'poppler_unavailable' in codes
         assert all(r['severity'] == 'info' for r in rows)
 
+    def test_page_count_comes_from_build_synctex(self, monkeypatch):
+        import gzip
+
+        import lib.paper.checks as checks
+
+        artifacts = {
+            'document.pdf': b'%PDF-1.4 fake-bytes',
+            'document.synctex.gz': gzip.compress(
+                b'SyncTeX Version:1\nInput:1:main.tex\n'
+                b'{1\n}1\n{2\n}2\n{3\n}3\n'),
+        }
+
+        class _Cache:
+            @contextlib.contextmanager
+            def open_artifact(self, owner, document_id, build_id, name):
+                data = artifacts[name]
+                yield io.BytesIO(data), len(data)
+
+        scheduler = type('S', (), {'cache': _Cache()})()
+        monkeypatch.setattr(checks, 'get_scheduler', lambda: scheduler)
+        monkeypatch.setattr(checks.shutil, 'which', lambda name: None)
+        receipt = {'document_id': 'd' * 64, 'build_id': 'b' * 32,
+                   'owner_user_id': 1,
+                   'artifacts': [{'name': 'document.pdf', 'size_bytes': 18}]}
+        rows = run_pdf_checks({'document_id': 'd' * 64}, receipt,
+                              owner_user_id=1)
+        size_row = next(r for r in rows if r['code'] == 'pdf_size_pages')
+        assert '3 pages' in size_row['message']
+
 
 class TestReviewDossier:
     def test_contains_rubric_and_claims_protocol(self, tmp_path):

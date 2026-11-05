@@ -6,12 +6,15 @@ import re
 from pathlib import Path
 
 import pytest
+from tests.frontend.test_frontend_conversation_surface_vite import (
+    conversation_bundle as conversation_bundle,
+    _run as run_conversation,
+)
 
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 STYLE = ROOT / "frontend/src/styles/application/05-paper-report-media.css"
-SURFACE = ROOT / "frontend/src/conversation/ui/conversation-surface.ts"
 
 
 def _strip_comments(css: str) -> str:
@@ -38,11 +41,27 @@ def test_css_base_action_bar_remains_bottom_hover_reveal() -> None:
     assert "margin-top:" in body
 
 
-def test_typed_surface_owns_the_failed_turn_class() -> None:
-    source = SURFACE.read_text(encoding="utf-8")
-    assert "turn.status === 'failed' || turn.status === 'interrupted'" in source
-    assert "' turn-failed'" in source
-    assert "turn.actor !== 'human'" in source
+def test_typed_surface_owns_the_failed_turn_class(conversation_bundle) -> None:
+    result = run_conversation(conversation_bundle, r"""
+const dom = new (require('jsdom').JSDOM)('<main></main>');
+global.Element = dom.window.Element;
+const surface = feature.createConversationSurface(dom.window.document.querySelector('main'));
+const cases = [['assistant','failed'],['assistant','interrupted'],['assistant','running'],
+  ['assistant','completed'],['human','failed'],['human','interrupted']];
+const failed = cases.map(([actor, status]) => {
+  const state = feature.createTurnState('conversation');
+  state.turnsById.turn = {turnId:'turn', presentationId:'turn', conversationId:'conversation',
+    laneId:'main', ordinal:1, actor, kind:'reply', status, projectionRevision:1,
+    projection:{content:'Visible content'}, settlement:{}, createdAt:1, updatedAt:1};
+  state.laneOrder.main = ['turn'];
+  surface.render(feature.selectConversationViewModel(state));
+  const node = surface.root.querySelector('[data-turn-id="turn"]');
+  return node.classList.contains('turn-failed');
+});
+surface.dispose();
+console.log(JSON.stringify({failed}));
+""")
+    assert result['failed'] == [True, True, False, False, False, False]
 
 
 def test_css_reveal_negative_control() -> None:

@@ -87,6 +87,16 @@
       }
     },
     {
+      "key": "knowledge",
+      "scheme": "setting",
+      "tab": "knowledge",
+      "tabLevel": true,
+      "name": {
+        "zh": "知识库",
+        "en": "Knowledge Base"
+      }
+    },
+    {
       "key": "network",
       "scheme": "setting",
       "tab": "network",
@@ -177,6 +187,26 @@
       }
     },
     {
+      "key": "dx",
+      "scheme": "setting",
+      "tab": "dx",
+      "tabLevel": true,
+      "name": {
+        "zh": "大象",
+        "en": "Daxiang"
+      }
+    },
+    {
+      "key": "github",
+      "scheme": "setting",
+      "tab": "github",
+      "tabLevel": true,
+      "name": {
+        "zh": "GitHub",
+        "en": "GitHub"
+      }
+    },
+    {
       "key": "language",
       "scheme": "setting",
       "tab": "general",
@@ -192,10 +222,6 @@
       "name": {
         "zh": "系统提示词",
         "en": "System Prompt"
-      },
-      "description": {
-        "zh": "逐块开关内置系统提示词，并可追加自定义指令。CLAUDE.md / 记忆 / 多智能体 / 日期仍会注入。",
-        "en": "Toggle the built-in system-prompt blocks and optionally append custom instructions. CLAUDE.md / memory / swarm / date are still injected."
       }
     },
     {
@@ -203,7 +229,7 @@
       "scheme": "setting",
       "tab": "general",
       "name": {
-        "zh": "默认思维深度 (Thinking Depth)",
+        "zh": "默认思维深度",
         "en": "Default Thinking Depth"
       }
     },
@@ -212,8 +238,8 @@
       "scheme": "setting",
       "tab": "general",
       "name": {
-        "zh": "输入框发送方式（Shift+Enter 始终插入换行）",
-        "en": "Input Send Behavior (Shift+Enter always inserts a newline)"
+        "zh": "发送快捷键",
+        "en": "Send Shortcut"
       }
     },
     {
@@ -225,8 +251,8 @@
         "en": "Auto-Generate Conversation Titles"
       },
       "description": {
-        "zh": "首轮回复结束后用 AI 自动为对话生成标题。关闭后需要手动重命名对话（默认关闭）。",
-        "en": "After the first reply, let AI generate a title for the conversation. When off, you rename conversations manually (off by default)."
+        "zh": "首轮回复后用 AI 为对话命名。",
+        "en": "Name conversations with AI after the first reply."
       }
     },
     {
@@ -238,8 +264,8 @@
         "en": "Debug Mode"
       },
       "description": {
-        "zh": "显示 trace_id、复制会话 ID 按钮等开发调试信息",
-        "en": "Show trace_id, copy conv ID buttons, and other debug info"
+        "zh": "显示 trace_id、会话 ID 等调试信息。",
+        "en": "Show trace IDs, conversation IDs and other debug details."
       }
     },
     {
@@ -251,8 +277,8 @@
         "en": "Daily Optimizer"
       },
       "description": {
-        "zh": "每天 03:30 分析日志并提出改进建议。关闭后停止分析，已应用的改动须手动撤销。",
-        "en": "Analyze logs and suggest improvements daily at 03:30. Disabling stops analysis; revert applied changes manually."
+        "zh": "每天 03:30 分析日志并提出改进建议。",
+        "en": "Analyzes logs daily at 03:30 and suggests improvements."
       }
     },
     {
@@ -264,8 +290,8 @@
         "en": "Trading / Fund Module"
       },
       "description": {
-        "zh": "关闭后停止交易服务、资讯抓取与自动驾驶，不再产生相关模型费用。",
-        "en": "Disabling stops trading services, news crawling and autopilot, including their model costs."
+        "zh": "交易顾问、基金筛选与资讯抓取。",
+        "en": "Trading advisor, fund screening and news crawling."
       }
     },
     {
@@ -277,8 +303,8 @@
         "en": "PPTX Translation Module"
       },
       "description": {
-        "zh": "上传 PPTX 文件进行全文翻译，保留原始格式",
-        "en": "Upload PPTX files for full translation with formatting preserved"
+        "zh": "上传 PPTX 全文翻译，保留原格式。",
+        "en": "Translate PPTX files with formatting preserved."
       }
     },
     {
@@ -286,8 +312,8 @@
       "scheme": "setting",
       "tab": "preset",
       "name": {
-        "zh": "默认模型 （LLM_MODEL）",
-        "en": "Default Model (LLM_MODEL)"
+        "zh": "默认模型",
+        "en": "Default Model"
       }
     },
     {
@@ -297,67 +323,6 @@
       "name": {
         "zh": "回退模型 （主模型失败时自动切换）",
         "en": "Fallback Model (auto-switch on primary failure)"
-      }
-    },
-    {
-      "key": "search-profile",
-      "scheme": "setting",
-      "tab": "search",
-      "name": {
-        "zh": "搜索档位",
-        "en": "Search profile"
-      },
-      "description": {
-        "zh": "档位一键决定抓取页数、每页字符上限、内容过滤与链接深化；选「自定义」即可在下方「高级参数」里逐项微调。",
-        "en": "A profile sets pages fetched, per-page cap, content filtering, and link deepening in one click; choose \"Custom\" to tune each knob under \"Advanced parameters\" below."
-      }
-    },
-    {
-      "key": "search-deepen",
-      "scheme": "setting",
-      "tab": "search",
-      "name": {
-        "zh": "链接深化",
-        "en": "Link deepening"
-      },
-      "description": {
-        "zh": "跟随高相关页面中的链接再读取一层。",
-        "en": "Follow links from highly relevant pages and read one additional level."
-      }
-    },
-    {
-      "key": "fetch-topn",
-      "scheme": "setting",
-      "tab": "search",
-      "name": {
-        "zh": "每次搜索抓取的网页数",
-        "en": "Pages fetched per search"
-      },
-      "description": {
-        "zh": "调大更全面但更慢、更费 token；调小更快但可能漏掉关键页面",
-        "en": "Higher = more complete but slower and more tokens; lower = faster but may miss key pages"
-      }
-    },
-    {
-      "key": "fetch-timeout",
-      "scheme": "setting",
-      "tab": "search",
-      "name": {
-        "zh": "抓取超时（秒）",
-        "en": "Fetch timeout (seconds)"
-      }
-    },
-    {
-      "key": "llm-content-filter",
-      "scheme": "setting",
-      "tab": "search",
-      "name": {
-        "zh": "LLM 相关性门",
-        "en": "LLM Relevance Gate"
-      },
-      "description": {
-        "zh": "抓取后用小模型判断网页是否与问题相关；相关页保留原始正文。开启=更精准但更慢且消耗 API；关闭=更快更省，依赖本地词法重排。",
-        "en": "A small model judges whether each fetched page is relevant; useful pages keep their original text. ON is more selective but slower and uses API calls; OFF is faster and relies on local lexical reranking."
       }
     },
     {
@@ -382,8 +347,8 @@
         "en": "Enable Machine Translation"
       },
       "description": {
-        "zh": "开启后，翻译将优先使用机器翻译 API，失败时自动回退到 LLM",
-        "en": "When enabled, translation uses the MT API first, falling back to LLM on failure"
+        "zh": "优先使用机器翻译 API，失败时回退到模型翻译。",
+        "en": "Use the machine-translation API first and fall back to model translation on failure."
       }
     },
     {
@@ -427,12 +392,12 @@
       "scheme": "setting",
       "tab": "speech",
       "name": {
-        "zh": "启用语音输入",
-        "en": "Enable Voice Input"
+        "zh": "启用此识别服务",
+        "en": "Enable this speech service"
       },
       "description": {
-        "zh": "关闭后立即停用语音识别（麦克风按钮隐藏），已填写的凭证会保留",
-        "en": "Disabling turns voice input off immediately (mic button hidden); saved credentials are kept"
+        "zh": "停用会保留配置；其他已启用的识别服务仍可使用。",
+        "en": "Disabling keeps the configuration; other enabled services still work."
       }
     },
     {

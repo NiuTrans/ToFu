@@ -31,7 +31,7 @@ def test_legacy_profile_migrates_to_three_type_store(context_data_dir):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', encoding='utf-8') as handle:
         handle.write('## Preferences\n- Reply in Chinese\n'
-                     '## About the user\n- Works at Meituan\n'
+                     '## About the user\n- Works at YourProvider\n'
                      '## Old custom heading\n- Uses an internal cluster\n')
 
     status = up.context_status()
@@ -63,7 +63,7 @@ def test_work_rule_roundtrip_and_hard_cap(context_data_dir):
 def test_assistant_change_can_be_undone_and_conflicts_are_safe(context_data_dir):
     import lib.memory.user_profile as up
     added = up.create_context_item(
-        {'type': 'identity', 'text': 'Works at Meituan'},
+        {'type': 'identity', 'text': 'Works at YourProvider'},
         source='assistant', record_change=True)
     assert added['change_id'].startswith('chg_')
     assert up.undo_context_change(added['change_id'])['undone']
@@ -80,7 +80,7 @@ def test_assistant_change_can_be_undone_and_conflicts_are_safe(context_data_dir)
 def test_all_context_categories_are_injected_for_unrelated_query(context_data_dir):
     import lib.memory.user_profile as up
     up.save_context_items([
-        {'type': 'identity', 'text': 'Works at Meituan'},
+        {'type': 'identity', 'text': 'Works at YourProvider'},
         {'type': 'response_preference', 'text': 'Reply in Chinese'},
         {'type': 'work_rule', 'condition': 'using internal documentation',
          'action': 'use the xuecheng MCP'},
@@ -88,7 +88,7 @@ def test_all_context_categories_are_injected_for_unrelated_query(context_data_di
     block = up.render_profile_block()
     assert block is not None
     assert '[USER CONTEXT]' in block
-    assert 'Works at Meituan' in block
+    assert 'Works at YourProvider' in block
     assert 'Reply in Chinese' in block
     assert 'using internal documentation' in block
     assert 'use the xuecheng MCP' in block
@@ -321,7 +321,7 @@ def test_consolidation_input_excludes_assistant_reasoning(context_data_dir,
     monkeypatch.setattr('lib.llm_dispatch.dispatch_chat', fake_dispatch)
     pc.run_profile_consolidation([
         {'role': 'user', 'content':
-         'I explicitly work at Meituan and want that durable fact remembered. '
+         'I explicitly work at YourProvider and want that durable fact remembered. '
          'This message is intentionally long enough for the context learner '
          'to run while keeping the evidence entirely in a real user message. '
          'Please retain it for future conversations and unrelated projects.'},
@@ -331,7 +331,7 @@ def test_consolidation_input_excludes_assistant_reasoning(context_data_dir,
         {'role': 'user', '_isMeta': True,
          'content': '[PROJECT CO-PILOT MODE] SECRET SYNTHETIC CONTEXT'},
     ])
-    assert 'I explicitly work at Meituan' in captured['surface']
+    assert 'I explicitly work at YourProvider' in captured['surface']
     assert 'SECRET MODEL REASONING' not in captured['surface']
     assert 'SECRET TOOL OUTPUT' not in captured['surface']
     assert 'SECRET SYNTHETIC CONTEXT' not in captured['surface']
@@ -350,7 +350,7 @@ def test_clear_memories_preserves_context_and_skill_packages(context_data_dir,
     project_memory = create_memory(
         'Project lesson', body='A verified project-specific failure pattern.',
         scope='project', project_path=str(project))
-    up.create_context_item({'type': 'identity', 'text': 'Works at Meituan'})
+    up.create_context_item({'type': 'identity', 'text': 'Works at YourProvider'})
 
     skill = context_data_dir / 'skills' / 'global' / 'demo-skill'
     skill.mkdir(parents=True)
@@ -366,7 +366,7 @@ def test_clear_memories_preserves_context_and_skill_packages(context_data_dir,
     assert set(result['deleted_ids']) == {
         global_memory['id'], project_memory['id']}
     assert result['failed_ids'] == []
-    assert up.load_context()['items'][0]['text'] == 'Works at Meituan'
+    assert up.load_context()['items'][0]['text'] == 'Works at YourProvider'
     assert skill_file.is_file()
 
 
@@ -406,7 +406,7 @@ def test_replace_removal_records_tombstone_and_undo_restores(context_data_dir):
     import lib.memory.user_profile as up
 
     saved = up.save_context_items([
-        {'type': 'identity', 'text': 'Works at Meituan'},
+        {'type': 'identity', 'text': 'Works at YourProvider'},
         {'type': 'response_preference', 'text': 'Reply in Chinese'},
     ])
     keep, drop = saved['items']

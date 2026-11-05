@@ -176,7 +176,6 @@ def _run_harness(tmp_path, scenario: str) -> dict:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not NODE, reason="node not installed")
 def test_stage_catalog_models_ship_routable_supply(tmp_path):
     out = _run_harness(
         tmp_path,
@@ -246,7 +245,6 @@ def test_stage_catalog_models_ship_routable_supply(tmp_path):
     assert out["llamaCount"] == 1
 
 
-@pytest.mark.skipif(not NODE, reason="node not installed")
 def test_stage_custom_model_pending_identity(tmp_path):
     out = _run_harness(
         tmp_path,
@@ -294,7 +292,6 @@ def test_stage_custom_model_pending_identity(tmp_path):
     assert out["customCount"] == 1
 
 
-@pytest.mark.skipif(not NODE, reason="node not installed")
 def test_price_falls_back_to_catalog_list_pricing(tmp_path):
     out = _run_harness(
         tmp_path,
@@ -324,7 +321,6 @@ def test_price_falls_back_to_catalog_list_pricing(tmp_path):
 
 
 @pytest.mark.parametrize('supported', [True, False])
-@pytest.mark.skipif(not NODE, reason="node not installed")
 def test_model_add_respects_server_inheritance_support(tmp_path, supported):
     scenario = r"""
   Api.modelRouting.get = async () => (SERVER_CAPABILITIES);
@@ -339,7 +335,6 @@ def test_model_add_respects_server_inheritance_support(tmp_path, supported):
         assert 'inherited_model_fields' not in offering
 
 
-@pytest.mark.skipif(not NODE, reason="node not installed")
 def test_matrix_always_rendered_and_key_input_usable(tmp_path):
     out = _run_harness(
         tmp_path,
@@ -402,7 +397,6 @@ def test_key_card_layout_stacks_secret_above_stats():
     assert ".stg-keys-input" in generic
 
 
-@pytest.mark.skipif(not NODE, reason="node not installed")
 def test_matrix_rows_state_chips_sort_filter_and_actions(tmp_path):
     out = _run_harness(
         tmp_path,
@@ -503,7 +497,6 @@ def test_matrix_rows_state_chips_sort_filter_and_actions(tmp_path):
     assert "custom-x" not in search
 
 
-@pytest.mark.skipif(not NODE, reason="node not installed")
 def test_probe_pass_waits_for_explicit_apply(tmp_path):
     out = _run_harness(
         tmp_path,
@@ -591,7 +584,6 @@ def test_probe_pass_waits_for_explicit_apply(tmp_path):
     assert out["repeatToast"] == "没有需要应用的推荐"
 
 
-@pytest.mark.skipif(not NODE, reason="node not installed")
 @pytest.mark.parametrize("entry_point", ["start", "poll", "resume"])
 def test_probe_lifecycle_never_changes_routing_or_toasts(tmp_path, entry_point):
     scenario = r"""
@@ -635,7 +627,6 @@ def test_probe_lifecycle_never_changes_routing_or_toasts(tmp_path, entry_point):
     assert "stg-mx-apply" in out["html"]
 
 
-@pytest.mark.skipif(not NODE, reason="node not installed")
 def test_apply_mixed_recommendations_preserves_scope_and_grant_policy(tmp_path):
     out = _run_harness(tmp_path, r"""
   // Distinct grant objects per credential — a shared reference would alias
@@ -711,7 +702,6 @@ def test_apply_mixed_recommendations_preserves_scope_and_grant_policy(tmp_path):
     assert out["toasts"] == ["已应用：移除 2 项模型授权 — 保存后生效。"]
 
 
-@pytest.mark.skipif(not NODE, reason="node not installed")
 @pytest.mark.parametrize("status", ["running", "error"])
 def test_incomplete_probe_cannot_enable_request_names(tmp_path, status):
     out = _run_harness(tmp_path, r"""
@@ -790,7 +780,6 @@ def test_matrix_toolbar_static_contract():
     assert "stg-v2-model-row" not in shared
 
 
-@pytest.mark.skipif(not NODE, reason="node not installed")
 def test_all_wire_pool_logical_head_and_shared_grants(tmp_path):
     out = _run_harness(tmp_path, r"""
   global._stgModelRouting.deployments = ['esm-east', 'esm-west'].map((wire, i) => ({
@@ -828,7 +817,6 @@ def test_all_wire_pool_logical_head_and_shared_grants(tmp_path):
     assert 'data-id="esm"' in out['onHtml']
 
 
-@pytest.mark.skipif(not NODE, reason="node not installed")
 @pytest.mark.parametrize('status', ['ok', 'rate_limited', 'not_found', 'unauthorized', 'error'])
 def test_probe_outcomes_observational_apply_only_removes_grants(tmp_path, status):
     out = _run_harness(tmp_path, r"""
@@ -862,7 +850,6 @@ def test_probe_outcomes_observational_apply_only_removes_grants(tmp_path, status
         {'creator_id': 'meta', 'model_id': 'esm'}])
 
 
-@pytest.mark.skipif(not NODE, reason="node not installed")
 def test_manual_alias_has_explicit_identity_but_no_probe_or_switch(tmp_path):
     """A manually added request name is a plain identity, not a state change.
 

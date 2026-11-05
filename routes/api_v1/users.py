@@ -50,9 +50,10 @@ from lib.api_response import (
     api_unauthorized,
 )
 from lib.billing.users import (
-    USER_ROLES, authenticate, create_user, get_user, list_users,
-    set_user_status, update_user_role,
+    USER_ROLES, USER_STATUSES, authenticate, create_user, get_user,
+    list_users, set_user_status, update_user_role,
 )
+from lib.error_envelope import BadRequest
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import (
@@ -197,7 +198,7 @@ def signup_route():
     try:
         user = create_user(email, password=password,
                           display_name=display_name, role=role)
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e), field='email')
     # Optional welcome credit so a fresh user can issue test calls.
     welcome = int(settings.get('signup_welcome_credit_micro') or 0)
@@ -299,10 +300,9 @@ def list_users_route():
     except (ValueError, TypeError):
         return api_bad_request('limit/offset must be integers', field='limit')
     status = (request.args.get('status') or '').strip()
-    try:
-        rows = list_users(limit=limit, offset=offset, status=status)
-    except ValueError as e:
-        return api_bad_request(str(e), field='status')
+    if status and status not in USER_STATUSES:
+        return api_bad_request(f'Invalid status: {status!r}', field='status')
+    rows = list_users(limit=limit, offset=offset, status=status)
     return api_ok(users=[_user_payload(u) for u in rows],
                   limit=limit, offset=offset)
 
@@ -324,7 +324,7 @@ def admin_create_user_route():
     try:
         user = create_user(email, password=password,
                           display_name=display_name, role=role)
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e), field='email')
     return api_created(user=_user_payload(user))
 
@@ -352,12 +352,12 @@ def patch_user_route(user_id):
     if 'role' in body:
         try:
             user = update_user_role(user_id, body['role'])
-        except ValueError as e:
+        except BadRequest as e:
             return api_bad_request(str(e), field='role')
     if 'status' in body:
         try:
             user = set_user_status(user_id, body['status'])
-        except ValueError as e:
+        except BadRequest as e:
             return api_bad_request(str(e), field='status')
     return api_ok(_user_payload(user))
 

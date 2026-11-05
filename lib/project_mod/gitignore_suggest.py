@@ -314,7 +314,7 @@ def accept_suggestions(base: str, dirs: list[str]) -> dict:
                 with open(gi_path, errors='replace') as f:
                     existing = f.read()
             trailing = '' if existing.endswith('\n') or not existing else '\n'
-            header = f'\n# ── Auto-added by grep_search timeout probe on {time.strftime("%Y-%m-%d")} ──\n'
+            header = f'\n# ── Auto-added by search_files timeout probe on {time.strftime("%Y-%m-%d")} ──\n'
             body = '\n'.join(f'{d}/' for d in to_add) + '\n'
             with open(gi_path, 'a') as f:
                 # If file missing newline at EOF, fix that before the header.

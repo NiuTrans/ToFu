@@ -5,25 +5,120 @@ lifecycles, and the rules for extending the browser application. Boot status use
 Task-time reads follow visible demand and explicit invalidation: forced paints amplified unchanged reads; paint force now preserves settled reads while server wake hints refresh them. A throttle was rejected because it still amplifies requests and delays updates. The machine-readable ownership and shrinking-debt authority is
 `contracts/frontend_conversation_architecture_v1.json`. The one-hop map for
 conversation browser work is `frontend/src/conversation/README.md`. Update status cards use component-scoped `--space-4` sibling spacing in `02-update-shell.css`: the local-code restart notice and release verdict remain separate without global badge margins; `tests/visual/test_visual_update_spacing.py` verifies all themes and narrow layouts.
+## Optional plugin page delivery
+
+Problem: optional pages depended on deleted classic API/vendor assets and
+implicit global initialization. Decision: `frontend/authoring-inputs.json`
+declares host entries once for Vite, publication and server rendering.
+`plugin.ts` loads shared fonts and hands `PluginHostV1` ports to the same-mount
+module declared by the page. `plugins/ports.ts` composes the existing endpoint
+registry/transport and locked Markdown parser/sanitizer; `plugins/page.ts`
+awaits `mount(host)` and exposes loading, ready and visible failure states.
+The async `tofu_plugin_assets()` Jinja helper uses the existing manifest owner.
+Trading binds these ports before its feature modules and initialization run.
+Ordinary trading JSON calls use the transport's typed error boundary, keeping
+backend detail and request IDs; the former private parser reduced v4 failures
+to an HTTP status. Raw responses keep body ownership with streaming callers.
+
+Alternatives rejected: loading the full application taxes an independent page;
+copied vendor files fork dependency updates; another API facade forks prefix,
+envelope and error behavior. Tests exercise root/proxy mounts, actual packaged
+assets, Markdown sanitation, fonts and startup failures in Chromium.
+
+Build accounting follows every entry's transitive static imports, deduplicated
+by emitted file. Only declared immediate dynamic roots join that startup cost.
+Problem: limiting static traversal to the main entry hid shared dependencies of
+other entries. Decision: correct both required publication and optional budget
+accounting without changing ceilings. This exposes real entry cost; moving a
+dependency into a shared chunk is not a performance saving.
+
+Problem: grouping conversation presenters in a manual chunk also absorbed the
+shared error normalizer. Admin and plugin entries then downloaded and evaluated
+conversation code through their ordinary HTTP transport. Decision: let Rollup
+derive chunks from the actual entry and import graph; source ownership stays in
+the typed modules, independent of emitted filenames. Shared modules retain one
+instance, and a standalone entry cannot initialize an unrelated presentation
+owner merely by importing a shared dependency. `frontend_chunk_ownership.test.cjs`
+builds and executes all three entries to verify that boundary and later chat
+initialization. Existing build accounting still includes every required import.
+
+Alternatives considered: restricting manual chunk membership fixes dependency
+absorption but keeps unnecessary fragmentation and extra compressed bytes in
+the full graph; deleting the grouping improves all three entry measurements.
+Copying error/transport helpers into standalone pages would fork their contracts.
+
+Publication keeps candidate admission separate from previous-generation
+retention. Problem: applying the new required entry set to an older manifest
+discarded its pin when a host entry was added. Decision:
+`scripts/vite_asset_manifest.mjs` validates candidates against the current entry
+contract and snapshots previous generations against their own declared entries.
+Both validate every reference, asset path and file, including URL workers; an
+incomplete or malformed prior graph retains the existing refusal behavior.
+The complete previous graph stays pinned under the unchanged retention policy.
+`scripts/vite_asset_publication.mjs` awaits graph, budget and browser admission
+before copying assets, then commits the serving manifest after every asset is
+present. Filesystem tests cover refusal at each admission phase and copy failure;
+the serving manifest and old assets remain intact on these failures.
+Alternatives rejected: requiring new entries in old graphs makes migrations
+lose old-tab resources; accepting unchecked prior manifests hides corruption.
+
 ## Background agent dock
 
 **Problem:** composer popovers obscured agent execution evidence.
 **Decision:** `agent-sidebar-dock.ts` renders conversation-level background activity inside
-the current main human Turn's existing information column, below model/tools/workspace.
+the current main round input's existing information column, below model/tools/workspace.
+Round inputs are the user-role Turns the round directory counts (human, critic and
+virtual_user). A swarm settlement or autopilot continuation opens its own round, and the
+surface mounts only the current round. Hosting on human Turns alone left that round's
+visible rail empty while agents ran.
 A stable context-content slot prevents fact repaint from destroying agent disclosures.
-Narrow panes use that Turn's existing context fold region, not a floating panel. Names,
-localized status, execution rounds and counts remain readable after foreground settlement;
-only execution details collapse. The latest authoritative main input selects the host;
+Narrow panes use that Turn's existing context fold region, not a floating panel.
+Each agent row answers what the agent does, its state and how far it has run: a state glyph
+in the tool rows' outcome inks (live dot, queued ring, check, cross, ban, attention
+triangle), the objective's opening line (`swarmAgentBrief`, shared with the swarm card's task
+brief) clamped to two lines, then the localized state word, the model round count and the
+agent ID as a quiet monospace identifier. The count is the worker's `round`, as live progress,
+status polls and the durable snapshot (`master._build_agent_snapshot`) all report it, so a
+finished or reloaded row keeps it; a row without that evidence shows no count. An
+agent without a known objective reads its ID as the purpose line. Rows and counts remain
+readable after foreground settlement; only execution details collapse. The latest authoritative main input selects the host;
 unmounted or foreign Turns are never replaced by an older history guess.
-Keyed native disclosures reveal canonical bounded swarm execution cards through
-`agent-sidebar-dock-projection.ts`; omission/truncation remains explicit. Activity enriches
+Keyed native disclosures reveal the canonical bounded swarm execution card body through
+`agent-sidebar-dock-projection.ts`, with no note above it; the card marks omitted calls and
+truncated previews in place. Activity enriches
 an exactly run-bound or uniquely unsettled session owner without mutating Turns or
 reopening evidenced terminal states. Ambiguous reused identities remain separate.
 
+One dock update shares its selected Turn/activity input with run communication.
+`agent-sidebar-dock-projection.ts` resolves assignment evidence before creating
+deferred renderer closures: invocation-local run/session/agent indexes narrow
+candidates, while the existing execution/attempt and missing-stamp predicates
+retain final authority. No index survives through a lazy card renderer.
+The retained `_recoverSwarmAgents` owner in `ui/streaming_swarm_panel.js` reads
+snapshots/launch handles/sibling results and returns new agent objects; it does
+not rewrite frame or round identity, so invocation-local identity reads remain
+stable across recovery. Work counts, memory scope and paired measurements live
+in [Turn rendering performance](TURN_RENDERING_PERFORMANCE.md#swarm-receipt-projection-work).
+
 The detail renderer receives the same merged roster and exact-run messages; updating only headers would leave open details stale.
 Open rows remain mounted on completion until the reader closes them.
+**Stop (owner report 2026-11-02).** Problem: once the spawning turn settled, nothing in
+the browser could stop a background agent the owner knew was no longer needed. Decision:
+an opened running row offers Stop beside its conversation control (`.agent-dock-actions`).
+The projection grants it only while the owner snapshot lists that exact run's agent running
+(`liveStop`): canonical Turn evidence alone, a settled verdict or a queued agent (no live
+invocation to signal) shows none. The port calls the [swarm agent stop](contracts/API_CONTRACT.md#swarm-agent-stop)
+route; an accepted signal keeps the button busy until the snapshot settles the agent. The
+route's own `swarm_agent_not_found`/`swarm_agent_not_running` answers re-arm it quietly;
+any other failure, including a server without the route, re-arms it with an error toast.
+Rejected: a control on the collapsed summary (a control nested in the native disclosure
+summary, one misclick from ending a long run, against the quiet row); reusing the
+whole-swarm abort route (it stops every sibling and deletes the durable session instead of
+settling one agent); optimistic local status (the snapshot stays authority).
 Communication lives in each exact-run agent card, collapsed independently from tool
 execution; all-run communication is a collapsed footer rather than a second chat feed.
+A fold, and a run's section inside the footer, appears only once it holds a message;
+empty or incomplete history is not narrated.
 Participant filters and receipt IDs/timestamps are opt-in; consumed input never implies task acceptance or completion.
 Native message disclosures show a collapsed preview or the expanded body once, with a Collapse summary; receipt diagnostics fold independently.
  Reused agent IDs cannot mix run messages.
@@ -35,30 +130,78 @@ clocks, globals or durable state. Lazy serial rendering fences conversation chan
 and disposal; rich-card reconciliation preserves reader folds/focus. History mounts
 on demand in twenty-row increments. Background commands remain in the composer.
 **Rejected:** a separate dock column, avatar cards and added chat margins fragment the
-existing turn information rail. Automatically opening tool details taxes history rendering.
+existing turn information rail. Keeping the human-only host and falling back to the last
+mounted human rail would place the section off-screen in an earlier round. Automatically opening tool details taxes history rendering.
+Rows led by the agent ID over `running · round 91` (2026-11-01 owner report) named neither
+the task nor any state the glyph does not already carry. The round count then moved into the
+opened detail; the 2026-11-02 owner follow-up asked for it while collapsed, so it returns as
+its own quiet field after the state word, never folded into the state label or leading the row.
+A one-line row with a trailing state cut the purpose to a few words at rail width;
+untruncated objectives turn a dozen agents into a wall of instructions. A note above the
+detail ("recent records … not a full transcript") and "no messages" / "history unavailable"
+notices (2026-11-02 owner report) explained evidence instead of showing it.
 Another poller, fabricated full transcripts and per-message activity chrome duplicate owners.
-Surface commits and the existing rail follower remount from the same snapshot without reads.
+Surface commits and the rail track pass (info-rail.js) remount the section into the rail's
+sticky card from the same snapshot without reads.
 Specs: `agent-sidebar-dock.test.ts`, `agent-sidebar-dock-projection.test.ts` and
 `tests/visual/test_visual_agent_sidebar_dock.py`.
 
 ## Folder configuration and workspace defaults
 
 Problem: the create editor used generic chrome and centered full-path buttons,
-producing an oversized single-column path wall unlike Project CO-PILOT.
-Decision: use the native kit's `appearance: 'project'` shell; desktop identity
-sits above workspace/recent panels, narrow layouts stack them. Recent cards
-show the basename and one truncated secondary path, retaining the exact path
-in their accessible name and tooltip. Selected roots retain full selectable
-paths and ordering/read-only controls. Field content scrolls independently
-from the save/cancel row. Empty Add errors clear on editing or valid name-only
-save. Disclosure still gates recent reads; no startup request is added.
+producing an oversized single-column path wall unlike Project CO-PILOT, and its
+read-only directory picker (location field plus Go/Parent/Home/Use buttons)
+could neither filter, create nor delete folders.
+Decision: use the native kit's `appearance: 'project'` shell with the Co-Pilot
+workbench layout: identity on top, the shared server-folder browser (below)
+beside a rail of default roots and searchable recent projects; narrow layouts
+stack them. Opening reads the browser listing (primary root, else `~`) and the
+recents once each; nothing is written before Save. Root rows are compact: a
+primary star toggle, name plus start-truncated full path (exact path in the
+DOM and tooltip), read-only toggle, up/down and remove. Recent rows add on
+click, report missing paths, and can locate the path in the browser. Field
+content scrolls independently from the save/cancel row. Empty Add errors clear
+on editing or valid name-only save. Deleting a browsed directory that is a
+default root unstages it with the confirmation and restores it if the server
+refuses.
 Rejected: copying legacy modal DOM would lose native focus/lifecycle ownership;
-truncating stored paths would lose directory identity.
+truncating stored paths would lose directory identity; disclosure-gated recents
+hid the primary pick surface behind an extra click.
 
 Browser specification: `tests/visual/test_visual_folder_settings.py` covers
 three themes, Chinese/English, long paths, 390px layout, native focus/Escape,
 name-only creation and directory selection using the existing local HTTP fixture.
 API/store journeys remain in `tests/e2e/test_folder_settings.py`.
+
+### Shared server-folder browser
+
+Problem: the Co-Pilot pane rendered its browser as HTML strings carrying global
+action names from the retained runtime, so the typed folder editor could not
+reuse it and kept a weaker picker; both looked unlike the surrounding cards.
+Decision: `frontend/src/features/project/folder-browser.ts` is the one browser.
+It owns breadcrumbs, a bounded name filter that also opens typed paths (`/`,
+`~`, drive letters) on Enter, inline folder creation that lands inside the new
+folder, an inline delete confirmation with optimistic removal and server-truth
+refresh, hidden-folder toggle, roving keyboard focus, and the server's problem
+`detail` on refusal. Reads go through a host-owned `ProjectBrowseCoordinator`
+(session cache, cancellation, stale fencing); a cached listing the server can
+no longer confirm is dropped with its error, and a deleted folder's own entry
+is invalidated. Hosts keep workspace membership and pass ports (`isAdded`,
+`onAdd` returning an optional refusal the browser shows in place, `onDeleted`
+returning a rollback); the Co-Pilot section binds
+`_mpFolders`, relink mode and its drop zone, the folder editor binds its draft
+roots. Before reading those roots (Co-Pilot Apply, folder Save) a host awaits
+`settled()`, which covers in-flight create/delete commands and their rollback
+but not the follow-up listing read. `cancel()` (modal close) leaves the last
+listing rather than a spinner; `relabel()` follows a UI language switch. Enter
+that commits an IME composition never navigates, creates or adds. Styles live in `10-project-browser.css` on `--project-*`
+roles; a host may retune only `--folder-browser-frame`.
+Rejected: a "pick mode" in the Co-Pilot modal (couples sidebar defaults to the
+active conversation's project apply path); two controllers sharing only CSS
+(they drift); HTML-string rows with global actions (not reusable by typed
+dialogs and they force runtime action exports).
+Specs: `folder-browser.test.ts`, `folder-settings.test.ts`,
+`tests/frontend/test_frontend_project_folder_browser_bridge.py`.
 
 
 **Problem:** repeated outlined project cards overwhelmed navigation, and only
@@ -97,6 +240,30 @@ separate facts; missing counters never become inferred successes or call counts
 from distinct tool names. Human-formatted binary sizes, exact byte counts and all
 raw programStats remain under collapsed Technical details. EN/ZH copy is sourced
 from locales. Execution counters and backend semantics are unchanged.
+
+**Problem:** with programs on by default, a real-app probe showed the
+`execute_program` row rendered as "Incomplete · Result: null · counters
+unavailable" until the program started (only `searching` counted as running,
+and a call still streaming its code had no round status at all); running
+cards repeated "counters unavailable"; expanded cards repeated the result as a
+prose preview plus tool chips; failures dumped the raw error object into the
+header; and the result's lazy-load body drew a second rail, misaligned with the
+code and wasting narrow-screen width. **Decision:** gateway rows share the
+canonical active tool statuses (`isActiveToolStatus`), and the classic
+renderer treats a round-less call as pending only while its Turn is live
+(settled history keeps "Incomplete"); a running card leads with settled child
+calls, never reports missing counters and never renders an in-flight
+placeholder as a result; expanding a settled card opens its result first (code
+and Technical details stay collapsed; gateway history stays closed for its
+lazy body); failures read `code: message` through the shared failure-text
+owner; the body carries no tool chips or preview line because the header
+already names the tools; the result body sits on the card spine. Like other
+active tools, the Round outline opens a running card on first paint.
+**Alternatives rejected:** a separate program status vocabulary drifts from
+tool grouping; treating every round-less call as running would leave
+never-executed calls of settled Turns spinning; keeping the preview line
+duplicates the result in proportional type; removing the result body wrapper
+breaks lazy loading of gateway history.
 
 Only explicit execution parent IDs (`parentToolCallId` / `_programCallId`) receive
 child rails. Receipts stay in original chronological slots, including unrelated
@@ -143,6 +310,46 @@ regex copies were rejected because protocol additions would silently drift.
 
 ## Source and delivery graph
 
+Standalone math dependencies share the npm lockfile with the application.
+Problem: independently maintained artifact files and export CDN literals can
+keep an older renderer after the application dependency is upgraded. Decision:
+`scripts/frontend_vendor_assets.mjs` validates the installed lockfile version,
+captures its renderer, stylesheet and complete referenced font closure, then
+generates the static delivery files and `lib/http_transport/generated_frontend_vendor.py`.
+The artifact adapter is authored in `frontend/src/artifacts/`; its static copy
+is generated. Report exports consume the generated versioned CDN URLs and
+SHA-384 integrity values. They still require CDN access or a browser cache.
+
+`npm run generate:vendor` updates declared outputs; the frontend gate and direct
+build both reject drift. Generation preflights inputs, atomically replaces each
+changed file, publishes metadata last and leaves unowned files alone.
+`lib/http_transport/frontend_vendor.py` gives diagnostics exact byte verification without a
+Node installation. Size thresholds and separate manually pinned versions were
+rejected because neither proves that the tested dependency is the one served.
+DOMPurify is a runtime dependency because `vendor-runtime.ts` bundles it into
+the application. The artifact/export CSP and opaque-origin sandbox remain the
+delivery boundary; dependencies do not gain access to application state.
+
+Public font responses in `lib/static_serving.py` include anonymous CORS headers
+on full, range and conditional responses. Opaque artifact origins need that
+permission to use fonts; allowing same-origin frames or relaxing script CSP
+would unnecessarily expose application state. Other static assets do not gain
+this header.
+
+Report Markdown math belongs to `lib/paper/report_markup.py`. Its preprocessor
+runs after whitespace normalization and fenced-code extraction, before HTML
+block parsing, and uses Python-Markdown's own HTML stash. The previous external
+control-character placeholders were erased during normalization and leaked as
+`MATH0` text. A separate placeholder replacement protocol was rejected because
+it duplicates the parser lifecycle. Formula contents are escaped as text;
+the existing report HTML/attribute policy and route error handling remain.
+
+The standalone closure contains all three font formats referenced by upstream
+CSS: 64 files / 1,380,831 bytes, replacing 23 files / 565,527 bytes. This is a
+complete static dependency graph, not a cache or a new runtime retention policy.
+Verify generation/drift, dependency trust handling, actual preview/export math,
+fonts and sandbox isolation through the frontend vendor and browser specs.
+
 ```text
 frontend/src/api + core + features + lifecycle
                     │ typed imports
@@ -161,12 +368,15 @@ frontend/src/styles/{application,settings} + manifests
                     ▼
        static/{styles,settings}.css (generated)
 
-frontend/src/i18n/locales/{zh,en}.json
+frontend/src/i18n/locales/{zh,en}.json (authored sources)
+                    │ translate_i18n_locales.py (LLM translate → review → validate)
+                    ▼
+frontend/src/i18n/locales/{ja,ko,fr,de,ru}.json (derived) + languages.json
                     │ gen_i18n_contract.mjs
                     ├────────────────────────┐
                     ▼                        ▼
-       contract.generated.ts      generated compact JSON
-                                             │ Vite ?url
+  contract.generated.ts +         generated compact JSON
+  languages.generated.ts                     │ Vite ?url
                                              ▼
                                   content-hashed data assets
 
@@ -187,7 +397,46 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
 
 **Composer/Inspector styles:** Problem: `02-messages-composer.css` mixed 85,875 bytes / 920 lines of field, menus, updates, image receipts and diagnostics. Decision: 22 ordered owners plus the extracted shell owner (largest 83 lines); 17 unchanged copies retain exact admission hashes, while field/Inspector edits pass tokens without exemptions. Only five Inspector owners defer; visible tool anchors, persisted image receipts and Update remain critical. Measurement: critical CSS falls 1,296,877 → 1,275,273 bytes (279,294 → 274,293 gzip); all deferred authoring still counts toward budgets. Alternatives rejected: deferring the whole sheet breaks chat receipts; renamed raw edits evade token admission; a second CSS loader races native preload. Reading and interaction evidence is in `RENDER_CONTRACT.md`.
 
+**Capability and conversation styles:** Problem: one 81,436-byte sheet mixed
+browser setup, Local Control, Memory, branches, references, agent evidence,
+toasts and reasoning controls. Decision: ten explicit owners (largest 18,987
+bytes), with unchanged copied rules admitted by exact manifest hashes.
+Memory body and Local Control styles use their existing feature imports and
+Vite's before-visible CSS admission. Memory frame/palette rules remain critical
+before shared mobile rules; shared modal links and capability toggles have a
+critical owner. Memory's responsive body rules move with its panel, and Skills
+toast motion belongs to its Settings consumer. Unproduced Memory-toggle and
+lazy-sentinel rules are removed. Critical application CSS falls 1,400,904 →
+1,369,749 bytes (298,597 → 291,786 gzip); Settings gains 115 raw / 40 gzip bytes.
+Deferred styles still count toward unchanged source budgets. Alternatives
+rejected: deferring the entire Memory sheet overrides the shared mobile
+full-screen frame; another loader duplicates feature admission; global
+allowlist renewal permits new raw declarations. Real-browser specifications
+cover all themes, mobile geometry, CSS loading, reuse and failed-load recovery.
+
 **Application interactions:** Problem: the 1,733-line retained boot owner mixed DOM gestures, uploads, sizing and unowned resources. Decision: seven typed `application-shell/interactions/` owners (largest 69 lines) receive explicit ports; retained `main.js` is 1,391 lines and preserves boot order. Shared `lifecycle.ts` releases completed/cancelled tasks and fences teardown deliveries; partial installation rolls back owned resources. Alternative rejected: more classic fragments preserve ambient dependencies; parallel timer registries duplicate lifecycle authority; whole-entry deferral delays required input. Resource measurements and delivery tradeoffs live in `RESOURCE_CONTROL.md`; `check:application-interactions` plus shipped-app browser contracts verify behavior. The 1,747-line toolbar is now 1,164 lines. Model-picker UI is separately owned by `application-shell/model-picker/`: canonical projection, display planning, row/fold rendering, search index and scoped provider popup; retained toolbar actions keep persistence authority.
+
+## Refresh critical path
+
+**Problem:** waiting for the full runtime before fetching the selected language
+serialized two large downloads, while idle features began network work before
+the shell was ready. Uncompressed fonts also competed for the same connection.
+**Decision:** the small `main.ts` entry starts i18n and `application.ts` together.
+The application owns runtime composition, feature routing and the existing
+`tofu:app-ready` event; idle feature preloads are scheduled after that event.
+Locale, module-load and startup failures still reach `tofu:app-failed`.
+`authoring-inputs.json` declares required startup imports, and both build and CI
+budgets count these roots and their shared static dependencies once under the
+existing ceilings. A dynamic import changes scheduling, not budget ownership.
+
+Self-hosted font delivery uses lossless WOFF2 generated from the retained TTF
+sources: the nine converted files total 259,548 bytes instead of 771,600 bytes.
+Glyph maps, glyph order, advance widths and vertical metrics are preserved;
+the existing font-display policies and first-paint preload selection remain.
+**Alternatives rejected:** raising size limits hides startup cost; embedding both
+locale dictionaries loads unused language data; waiting for localization before
+requesting the application preserves the waterfall. Tests: `main.test.ts`,
+`test_frontend_budget.py`, the shipped-graph canary, and browser refresh timing.
 
 ## Ownership rules
 
@@ -444,7 +693,7 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   owners remain focused modules but ship as one unconditional lazy chunk;
   adding another always-loaded per-owner dynamic import is architecture debt.
 
-  The standalone Research surface is a full workbench, not a Paper-reader sub-panel. `research-runtime.ts` owns the one live task stream, bounded event replay, poll/push teardown, durable artifact hydration and terminal-quality projection. `research-view.ts` is presentation-only: it renders the five visible stages (harvest, survey, ideate, evaluate, package), ranked experiment briefs, independent review decision, rejection audit, and the reproducibility ledger. A researcher can inspect the running trajectory in the **Live evidence trail** (tool-round projection); after completion the same page retains the corpus, full survey/gap map, usage ledger and review revision queue. Starting a new direction detaches browser polling/push through the runtime disposer but does not cancel the checkpointed server job; explicit **Stop run** is the only cancellation action. Recent directions come from the durable research list, so refresh/reopen never depends on the in-memory task registry. While a job is still in flight, entering Research mode re-attaches to it through `GET /api/v4/tasks?kind=research` (owner-scoped list → snapshot → poll/push re-attach) instead of stranding the researcher on the landing page; a job that finished in the meantime projects its terminal state and hydrates the durable archive. The retained Paper presentation islands are also demand-loaded: report and reader markup live only in the manifest-owned `paper-reader-presenters` runtime, while podcast and video markup live in `paper-media-presenters`. `frontend/src/features/paper.ts` installs both before the typed panel owners. The typed report runtime owns start/regenerate, provisional Stop handoff, polling, and reopen policy. Per-kind generations fence stale success and failure continuations even for two starts on the same paper; cache-hit starts reuse the canonical metadata-only apply path. One explicit cache-resolving lookup preserves live-task precedence and selects the preferred/fallback report server-side. The backend projects that hit from one bounded owner-scoped Sidecar aggregate; only the selected language's additive artifacts cross the process boundary. Rebuttal drafts retain at most 32 papers and 40,000 characters per paper, matching the request/backend limit. A known paper starts by hash only; the server reads at most its 120,000-char prompt source only after live/cache misses. The browser retries with bounded text solely for the explicit pre-dispatch `paper_source_required` 400, after rechecking the same generation fence; ambiguous failures are never replayed. Late owner ports and markup action receivers use the private `featureRegistry`. Mutable retained values use its explicit `readLiveRuntimeBinding` / `writeLiveRuntimeBinding` state port, because the owner override cache must not hide a later paper switch. A raw lexical-global dependency is not a compatibility seam.
+  The standalone Research surface is a full workbench, not a Paper-reader sub-panel. `research-runtime.ts` owns the one live task stream, bounded event replay, poll/push teardown, durable artifact hydration and terminal-quality projection. `research-view.ts` is presentation-only: it renders the five visible stages (harvest, survey, ideate, evaluate, package), ranked experiment briefs, independent review decision, rejection audit, and the reproducibility ledger. A researcher can inspect the running trajectory in the **Live evidence trail** (tool-round projection); after completion the same page retains the corpus, full survey/gap map, usage ledger and review revision queue. Starting a new direction detaches browser polling/push through the runtime disposer but does not cancel the checkpointed server job; explicit **Stop run** is the only cancellation action. Recent directions come from the durable research list, so refresh/reopen never depends on the in-memory task registry. While a job is still in flight, entering Research mode re-attaches to it through `GET /api/v4/tasks?kind=research` (owner-scoped list → snapshot → poll/push re-attach) instead of stranding the researcher on the landing page; a job that finished in the meantime projects its terminal state and hydrates the durable archive. The retained Paper presentation islands are also demand-loaded: report and reader markup live only in the manifest-owned `paper-reader-presenters` runtime, while podcast and video markup live in `paper-media-presenters`. `frontend/src/features/paper.ts` installs both before the typed panel owners. The typed report runtime owns start/regenerate, provisional Stop handoff, polling, and reopen policy. Per-kind generations fence stale success and failure continuations even for two starts on the same paper; cache-hit starts reuse the canonical local report-adoption path. Report lookup, terminal replay and server-confirmed title repair project server-owned facts locally without writing unrelated library metadata back; explicit library edits retain their own persistence owner. The shared `report-article/metadata.ts` completion view reconciles recorded model, cost and token fields on initial paint and subsequent event/snapshot paints; Deepen uses the same owner after its source fence. Equal metadata markup preserves existing article and tag nodes. One explicit cache-resolving lookup preserves live-task precedence and selects the preferred/fallback report server-side. The backend projects that hit from one bounded owner-scoped Sidecar aggregate; only the selected language's additive artifacts cross the process boundary. Rebuttal drafts retain at most 32 papers and 40,000 characters per paper, matching the request/backend limit. A known paper starts by hash only; the server reads at most its 120,000-char prompt source only after live/cache misses. The browser retries with bounded text solely for the explicit pre-dispatch `paper_source_required` 400, after rechecking the same generation fence; ambiguous failures are never replayed. Late owner ports and markup action receivers use the private `featureRegistry`. Mutable retained values use its explicit `readLiveRuntimeBinding` / `writeLiveRuntimeBinding` state port, because the owner override cache must not hide a later paper switch. A raw lexical-global dependency is not a compatibility seam.
 - Paper PDF rendering is owned by the instantiated
   `frontend/src/features/paper/pdf-reader.ts`; `pdf-viewer.ts` adapts existing
   Paper actions and library metadata. The shared lazy PDF.js loader supplies
@@ -462,7 +711,7 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   outline and logs open on demand; verified build locations can follow edits.
   See [Paper builds](PAPER_BUILDS.md#chat-preview) for bounds and verification.
 - Settings retained presenters are demand-loaded as the manifest-owned `settings-presenters` runtime. `frontend/src/features/settings.ts` evaluates the typed Settings owners before that retained island, so every declared typed service is present when the generated runtime closes its dependency boundary. The shell routes `openSettings`, `closeSettings`, `saveSettings`, `switchSettingsTab`, and onboarding's immediate `_oauthLogin` through the feature bridge. Saving keeps its busy latch until feature-toggle writes are acknowledged; a rejected, missing, or failed acknowledgement reaches the footer error and leaves Settings open for retry. Routing-authority reads are coalesced and retried before dependent speech/routing persistence. Reassignable shell state and Settings working copies cross the private registry through live accessors; a captured array, set, boolean, or cache reference is not an acceptable lazy-runtime dependency. Optional panel presentation follows the same residency boundary: the Devices tab imports `frontend/src/features/settings/devices.css`, the Tools inventory owns its complete base/comfort rules in `tools-inventory.css`, and shared modal-only refinements live in `settings-comfort.css`. A manifest-generated CSS entry imports ordered base sections before those refinements; Vite waits for CSS before invocation. The project-folder remote-device picker stays eager because it can render without opening Settings.
-- The composer has one compact **conversation bar**, owned by `features/conversation-bar/{project-context,context-meter,turn-navigation}.ts` and `25-conversation-bar.css`. Project location is the left segment of a content-sized project cluster: Auto stays beside the names. Idle width lives in the strip between Auto and the meter, not inside a stretched trigger. Names that fit that leftover (strip minus Auto/meter/turns/chrome) join with a middle dot; `+N` only counts names that do not. Labels are measured at `max-content` so ellipsis stretch cannot collapse a fit to `+N`. A ResizeObserver on the strip/bar (and sibling mutations) refits the list and is disconnected on destroy. A literal context meter and fixed previous/count/next follow it. There is no pet, scene, pocket, separate project card or ornamental sphere. Native buttons open shared nonmodal `disclosure.ts` panels for full paths and permissions, context counts/compaction actions, and a TurnStore jump list. Named container queries compact labels by actual pane width, not only screen width. Narrow panes move Auto/Manual into project details; the bar never wraps. Panels become fixed before anchor measurement so body flex cannot shift the UI. Escape returns focus; native outside click/focus wins, and resize/scroll/ hidden-page dismissal releases the panel's temporary listeners. Retained project/context/turn adapters inject existing command and accounting ports, not another store. Explicit jumps reveal stable IDs through the Surface-owned 80-turn window and suspend follow; jump lists mount at most 50 rows, with explicit paging/loading for earlier server history. A `+` marks incomplete loaded-history counts. Late history responses are fenced by view generation; project permission/clear completion shares the project controller's navigation generation. Manual compaction is single-flight per page and its progress is visible only in the originating conversation. UI previews cap text at 24,000 characters; durable summaries stay server-owned. Specs: `node --test tests/context_meter.test.cjs tests/turn_navigation.test.cjs tests/project_location.test.cjs`, `tests/conversation/test_conversation_bar_browser.py` and Surface window/reveal tests.
+- The composer has one compact **conversation bar**, owned by `features/conversation-bar/{project-context,context-meter,turn-navigation}.ts` and `25-conversation-bar.css`. Project location is the left segment of a content-sized project cluster: Auto stays beside the names. Idle width lives in the strip between Auto and the meter, not inside a stretched trigger. Names that fit that leftover (strip minus Auto/meter/turns/chrome) join with a middle dot; `+N` only counts names that do not. Labels are measured at `max-content` so ellipsis stretch cannot collapse a fit to `+N`. A ResizeObserver on the strip/bar (and sibling mutations) refits the list and is disconnected on destroy. A literal context meter and fixed previous/count/next follow it. There is no pet, scene, pocket, separate project card or ornamental sphere. Native buttons open shared nonmodal `disclosure.ts` panels for full paths and permissions, context counts/compaction actions, and a TurnStore jump list. Named container queries compact labels by actual pane width, not only screen width. Narrow panes move Auto/Manual into project details; the bar never wraps. Panels become fixed before anchor measurement so body flex cannot shift the UI. Escape returns focus; native outside click/focus wins, and resize/scroll/ hidden-page dismissal releases the panel's temporary listeners. Retained project/context/turn adapters inject existing command and accounting ports, not another store. Exact rank jumps hydrate stable IDs through the v3 coordinator, then the Surface mounts its bounded 80-turn window and aligns through the viewport owner. Instant alignment and one cancellable layout correction replace competing native smooth scrolling; lazy-history frames are invalidated before a jump. The directory shows the authoritative round total and mounts at most 50 rows with numeric/first/last access, not loaded-body arithmetic. Late history responses are fenced by view generation; project permission/clear completion shares the project controller's navigation generation. Manual compaction is single-flight per page and its progress is visible only in the originating conversation. UI previews cap text at 24,000 characters; durable summaries stay server-owned. Specs: `node --test tests/context_meter.test.cjs tests/turn_navigation.test.cjs tests/project_location.test.cjs`, `tests/conversation/test_conversation_bar_browser.py`, Surface window/reveal tests and `tests/visual/test_visual_turn_jump_scroll.py`.
 - Timer creation settles an immutable `timerReceipt` through ordinary tool-result metadata; typed cards describe the background handoff after reload without a waiting-task spinner or browser timer. Live panel rows distinguish code predicates, ready dispatch, fired, failed and expired states; desktop/mobile evidence lives in `tests/visual/test_visual_timer_panel.py`. Update, Timer, and Optimizer retained presenters are one demand-loaded
   `utility-panels` runtime behind `frontend/src/features/utility-panels.ts`.
   Their five pre-land entries have one feature domain, and the shell prepares
@@ -489,23 +738,27 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   image-model Offering list has no startup timer: first Image demand owns the
   coalesced owner-scoped v2 request, and routing reconciliation refreshes only
   an owner that is already resident.
-- The local Knowledge Workbench is the manifest-owned, demand-loaded
-  `knowledge-presenters` runtime behind `frontend/src/features/knowledge.ts`.
-  Its open/close feature domain is intentionally separate from generic `misc`
-  commands, so write approval, stdin, Human Guidance, and cost interactions do
-  not import catalogue/upload/search presentation. First evaluation installs
-  the Workbench-only Escape listener and its generated private action set; no
-  catalogue request or polling timer exists before demand. The chat drop owner
-  reads `_tofuKnowledgeModalOpen` live from `runtimeScope`, while the lazy
-  presenter is the sole writer, preserving drop arbitration without a browser
-  global or captured state.
-- The Project folder workbench is the manifest-owned, demand-loaded `project-presenters` runtime behind `frontend/src/features/project.ts`. Core project state, bar rendering, restore/SSE reconciliation, and background rescan remain retained because they run without the modal. A conversation restore carries its primary recent-path intent inside the same `setPaths` request; an explicit workbench apply carries a primary-first prefix of at most 32 selected roots without truncating the authoritative project list. The browser owns no second recent-path write, and background/status reconciliation omits the optional intent. Write approvals, subprocess stdin, and apply-code confirmation remain in the small retained `execution-interactions.js` section, so coding actions neither wait for nor retain the folder browser. The generated presenter imports its typed browse coordinator and static icon owner only on demand. Mutable conversation/project authority crosses one frozen `ProjectPresentationShellState` live accessor object; individual values must not be captured through `featureRegistry`. The retained clear path probes the optional `ProjectModalPresentation` cleanup owner and never invokes the open/close feature stub, preventing an idle clear from fetching the workspace.
+- The local Knowledge Workbench lives in Settings → Knowledge Base, without a
+  top-bar or mobile-sheet launcher. Its existing corpus, retrieval and access
+  controls are embedded in `frontend/src/settings-panels/knowledge.html` rather
+  than duplicated as a second modal. `features/settings/knowledge-tab.ts`
+  demand-loads the manifest-owned `knowledge-presenters` runtime on first visit,
+  gates delayed publication on the current Settings session, and deactivates
+  the workbench on tab switch or Settings close. Revisiting refreshes it;
+  closing stops its scheduled polling. `openKnowledgeBase` is owned by the
+  Settings domain and resolves to `setting:knowledge`; no catalogue request or
+  polling timer exists before
+  demand. The chat drop owner reads `_tofuKnowledgeModalOpen` live from
+  `runtimeScope`, while the lazy presenter is the sole writer, preserving drop
+  arbitration without a browser global or captured state.
+- The Project folder workbench is the manifest-owned, demand-loaded `project-presenters` runtime behind `frontend/src/features/project.ts`. Core project state, bar rendering, restore/SSE reconciliation, and background rescan remain retained because they run without the modal. A conversation restore carries its primary recent-path intent inside the same `setPaths` request; an explicit workbench apply carries a primary-first prefix of at most 32 selected roots without truncating the authoritative project list. The browser owns no second recent-path write, and background/status reconciliation omits the optional intent. Write approvals, subprocess stdin, and apply-code confirmation remain in the small retained `execution-interactions.js` section, so coding actions neither wait for nor retain the folder browser. The generated presenter imports its typed browse coordinator, the shared folder browser (`features/project/folder-browser.ts`) and static icon owner only on demand; the section only binds the staged workspace, drop zone and remote-device group to that browser. Mutable conversation/project authority crosses one frozen `ProjectPresentationShellState` live accessor object; individual values must not be captured through `featureRegistry`. The retained clear path probes the optional `ProjectModalPresentation` cleanup owner and never invokes the open/close feature stub, preventing an idle clear from fetching the workspace.
 - Local Control's modal, capability status probes, download/diagnostic
   presentation, three-second open-modal poll, and browser-assisted desktop
   relay are the manifest-owned, demand-loaded `local-control-presenters`
   runtime behind `frontend/src/features/local-control.ts`. The retained
-  `local-control-state.js` section owns only the merged permission badge and
-  reads reachability through the optional live
+  `local-control-state.js` section owns only the merged permission badge,
+  which counts the desktop switch (the browser is always on and has no
+  switch), and reads reachability through the optional live
   `LocalControlPresentationState`; an absent owner means unprobed, not broken.
   The independent browser/desktop wire flags cross one frozen
   `LocalControlShellState` getter port and remain conversation-owned. Normal
@@ -516,7 +769,7 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   bounded status poll and closing it clears that interval; modal open alone
   never scans localhost because Chromium may require Local Network Access
   permission.
-- Debug Panel and Request Inspector DOM, task/payload/trace reads, live TurnStore subscription, poll and five Inspector CSS owners belong to the demand-loaded `diagnostics-presenters` entry. Native `diagnostics-message-disclosure.ts` uses UI buttons and restores refresh focus by stable message identity. CSS preload completes before markup; closed panels load neither these sheets nor the runtime. The retained
+- Debug Panel and Request Inspector DOM, task/payload/trace reads, live TurnStore subscription, poll and six Inspector CSS owners belong to the demand-loaded `diagnostics-presenters` entry. Native `diagnostics-message-disclosure.ts` supplies UI disclosure buttons. CSS preload completes before markup; closed panels load neither these sheets nor the runtime. The retained
   `core/debug_state.js` authority owns only evidence that must exist before a
   panel opens: diagnostics/error and per-task snapshot bounds, clipboard
   fallback, and tool-round-to-task identity resolver. Mutable
@@ -527,6 +780,30 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   `/debug-messages` read while closed, so ordinary navigation has neither a
   chunk-load cost nor a hidden diagnostics API cost. First open owns task-list
   loading, subscription, and poll; close disposes both scheduling paths.
+
+  **Problem:** the flat feed rebuilt every message on refresh, discarding
+  selection and nested disclosures; the separate streaming updater compared
+  lengths/counts and could leave equal-size tool arguments or text stale.
+  **Decision:** `diagnostics-message-reconciliation.ts` owns complete JSON wire
+  comparisons and message-node reconciliation for both presenters. The existing
+  `createBlock` remains the sole card renderer, injected through a narrow port;
+  that port retires when the renderer moves to native Diagnostics. Identity
+  matching reserves exact versions before changed duplicate occurrences, and
+  refresh updates ordinals and lazy-render references. Unchanged nodes retain
+  their bodies; changed cards re-render all badges and evidence while preserving
+  outer/raw disclosure state and focused message controls. Surviving text endpoints
+  preserve selection across moves; replaced evidence never inherits a selection.
+  The legacy streaming caller explicitly keeps its positional update policy and
+  structural-reset guard. Initial/inline views reset, while feed dividers,
+  warnings, relative time, trace ownership and scrolling stay with the presenter.
+  **Alternatives rejected:** length/count or object-reference equality misses
+  real edits; fingerprint-only equality can collide; a second card renderer
+  lets tool/compaction/brain presentation drift. Whole-feed replacement loses
+  reading state and performs work proportional to all visible card markup.
+  Versions are weakly keyed by card and never placed in DOM attributes; reads,
+  polling and task/storage authority remain with their existing owners. See
+  [RESOURCE_CONTROL.md](RESOURCE_CONTROL.md#request-inspector-history-working-set)
+  for the measured workload and memory tradeoff.
 
   **Problem:** a transient event-store failure can leave turn dividers but no
   messages; marking those turns expired or overwriting a complete feed makes
@@ -541,6 +818,116 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   its cached wire. **Alternative rejected:** an unconditional "expired" divider
   or a silent poll that paints zero messages hides the storage fault and
   destroys the user's last reliable diagnostic view.
+
+  **Problem:** trace and detached-round continuations identified a selection
+  by task/conversation strings; selecting another round or reopening the same
+  task could let an older response replace current evidence. A completed poll
+  could also rearm its timer after close, and an older live payload read could
+  replace a newer cached snapshot after the task settled.
+  **Decision:** `inspector-session.ts` owns the disposable opening, selected
+  pane and existing polling/store-subscription resources. Each pane has its
+  own identity and content node; replacement, return to feed and close retire
+  it and release its DOM reference. `inspector-details.ts` captures that pane
+  before trace/detached reads; loading and retry retain a working back button.
+  Only its current continuation publishes. `inspector-payloads.ts` owns the
+  existing forty-entry FIFO and pending cache-publication rights by exact
+  task/kind/turn/round address. Later reads or live snapshots retire earlier
+  publication rights. Live reads still bypass historical cache; callers retain
+  their own results, while only the latest observation can update the cache.
+  **Alternatives rejected:** task-ID equality cannot distinguish reopenings;
+  cancelling a timer before an awaited poll finishes cannot stop rescheduling;
+  ignoring stale DOM paints alone leaves the payload cache poisoned. Folded
+  and full reads contain the same complete messages, so missing fold metadata
+  continues through the existing exact previous-round diff rather than a
+  second payload cache. State/request preference, optional-diff failure,
+  retryable storage errors and the common message renderer keep their owners.
+  Verify `test_inspector_read_lifecycle.py`, retained feed/inline contracts,
+  actual browser close/reopen/retry controls and Inspector reading journeys.
+
+  **Problem:** feed navigation kept an array index across history changes,
+  permanently bound its scroller, and rebuilt focused jump rows on every
+  refresh. Each scroll queried the full divider list once per Turn.
+  **Decision:** `inspector-navigation.ts` owns selection by Turn identity
+  (task identity for older unlinked rows), one canonical ordinal projection
+  per refresh, and one index of the currently rendered dividers. Its shared
+  lifecycle scopes retire scroll/highlight work on close, pane replacement
+  and scroller replacement. Pending task landings wait for an actual divider;
+  unavailable task addresses retain the newest-Turn fallback. A new opening
+  starts at the newest Turn, while refresh keeps the selected identity.
+  `inspector-navigation-list.ts` preserves keyed rows and focus, delegates
+  placement/dismissal to the existing anchored disclosure, constrained to the
+  drawer's visible horizontal bounds, and gives row
+  keyboard activation the same feed jump as a pointer. The nested Turn chip
+  still navigates the conversation, independently of its feed row. Detail
+  panes suspend feed-only controls and restore them on return.
+  **Alternatives rejected:** retaining array positions silently retargets a
+  selection after history insertion; a second popover or scroll scheduler
+  duplicates existing owners; rebuilding rows discards focus. Wire loading,
+  history limits, common message rendering and diagnostic detail ownership
+  are unchanged. Specs: `test_inspector_navigation.py` and its browser controls.
+
+  **Problem:** retained Trace markup silently omitted depths above three,
+  treated zero timestamps as absent, and invented a time axis for receipt-only
+  responses. Its standalone stylesheet loaded on every page even while closed.
+  **Decision:** `inspector-trace-projection.ts` uses the generated
+  `TurnTimingTrace` vocabulary to project all represented depths, source and
+  coverage notices, exact server summary buckets, status intervals and browser
+  receipts. A server axis requires finite nonnegative start/total values and
+  a summary; zero remains valid. Missing-clock responses keep their evidence
+  without a server axis. `inspector-trace-view.ts` renders through common
+  `safeHtml`; Trace CSS is owned by the diagnostics entry and uses theme tokens.
+  **Alternatives rejected:** raising the fixed depth limit loses later nested
+  evidence; allocating every intermediate depth makes sparse data expensive;
+  another clock or reducer would invent server evidence; a second CSS loader
+  duplicates feature preload. Original-pane reads, back navigation, retention
+  and server folding keep their existing owners. Specs:
+  `test_inspector_trace_projection.py` and `test_inspector_trace_browser.py`.
+
+  **Problem:** inline tool lookup interpolated task IDs into CSS selectors,
+  lost the matched Turn/phase, and picked the first row when several phases
+  shared a round. Removed anchors could also mount invisible panels. Pending
+  reads retained removed panel/body/title nodes; the close control declared
+  a button role without native keyboard activation.
+  **Decision:** `inspector-inline.ts` owns one mount and read identity, with
+  exact `InspectorRef` task/round/turn comparison. A connected, matching entry
+  wins; unstamped positional anchors retain the entry's explicit task/round
+  arguments and their own phase. Lookup retains the matched phase, and ambiguous phase-less targets use the
+  existing detached detail owner. Removed origins are resolved again. Mounts
+  and pending reads carry weak panel/origin witnesses, so chat DOM replacement
+  needs no additional observer. Each read checks its original mount before
+  optional diff work and publication; removed retry/close controls cannot act
+  on a successor. Inline opening still returns immediately after mounting.
+  `inspector-inline-view.ts` uses shared native buttons/icons, restores focus
+  through the owner on close, and shows loading immediately on retry. Payload
+  state/request preference, exact prefix diffs and tail fallback retain their
+  existing owners; the common Debug renderer still displays all evidence.
+  The existing six-message / 300-KiB auto-expansion threshold controls initial
+  disclosure only and never truncates payloads. Tool schemas remain in full
+  drawer details.
+  **Alternatives rejected:** selector escaping alone cannot resolve phase
+  ambiguity; connected-node checks alone still retain DOM while awaiting;
+  a new observer, payload cache or renderer duplicates existing responsibilities.
+  Specs: `test_inspector_inline_owner.py`, structured-body and inline contracts,
+  and `test_inspector_inline_browser.py` for real keyboard/GC witnesses.
+
+  **Problem:** feed success respected the selected pane, but loading/failure
+  branches could replace Trace or detached evidence. Returning before a first
+  read settled showed an empty feed; copy metadata could still name the previous
+  conversation or tools. Retained markup also duplicated notice/button creation.
+  **Decision:** `inspector-feed.ts` owns one selected feed view and its publication
+  rights. Loading, failure and success share the session's pane gate; background
+  reads still settle through `diagnostics-wire-controller` while details remain
+  selected. Returning to the feed projects its actual pending/failed/ready state.
+  Each rendered action belongs to its original presentation and content node.
+  `inspector-feed-view.ts` creates dividers/coverage notices and delegates every
+  message to the existing reconciler, preserving expansion and scroll behavior.
+  `inspector-pane-view.ts` shares native controls and clears obsolete copy metadata
+  when showing loading or failure. Inline retries reuse the same control factory.
+  **Alternatives rejected:** separate guards on each retained error branch leave
+  multiple state owners; a second message renderer would duplicate reconciliation
+  and evidence semantics. The read controller, session, navigation and payload
+  cache remain independent existing owners. Specs: `test_inspector_feed_owner.py`,
+  flat-feed/read-lifecycle contracts and the Inspector browser journeys.
 
   A native `event.list` page can exceed the storage authority's 8 MiB
   materialization cap even though its requested row count is within 1000.
@@ -560,7 +947,16 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   single-flight suppress repeat navigation reads, while a 32-conversation ×
   64-row LRU and 32 tracked-request ceiling bound resident state. Records keep
   exact total cardinality separately from cached rows, so resource bounding
-  cannot under-report the UI counter. Explicit drawer opens bypass freshness,
+  cannot under-report the UI counter; the count is unknown (`null`, rendered
+  as Unknown) until a listing settles, never a fabricated 0. Every surface
+  render passes the archive IDs its loaded Turns reference
+  (`conversationCompactionArchiveIds`: compaction receipts and compaction
+  Turns) to `observe`, which lists again, bypassing freshness, only for an ID
+  no settled listing covered. A listing covers the IDs observed when it
+  starts, so an ID the endpoint never lists (child scope, pruned, failed-attempt
+  placeholder) costs one listing, and a failed listing retries only on new
+  evidence. An automatic compaction inside a running Turn therefore updates the
+  count without polling. Explicit drawer opens bypass freshness,
   keep the complete list only for the open lifecycle, and reject late list/
   selection responses after close or replacement. The loaded owner subscribes
   to the shared language-change event and owns no boot listener, timer, or API
@@ -585,12 +981,47 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   Composition installs line breaks and a strict-GFM delete tokenizer before
   retained rendering code runs. A tokenizer miss returns `undefined` to stop
   Marked v12 from falling through to its permissive single-tilde rule.
-- Product copy uses the generated `I18nKey`/`Translator` contract. Locale JSON
-  files are the only key and placeholder authority; feature-local string-key
-  translator interfaces are not new extension points. The generator also
-  emits compact delivery copies; Vite content-hashes them as data assets and
-  the browser fetches only the selected language through a two-entry bounded,
-  request-coalescing cache.
+- Product copy uses the generated `I18nKey`/`Translator` contract. The source
+  locales named by `frontend/src/i18n/languages.json` (zh, en) are the only key
+  and placeholder authority; feature-local string-key translator interfaces
+  are not new extension points. `languages.json` is also the only list of UI
+  languages: picker order, BCP 47 `<html lang>` tags, endonyms, the default
+  and the fallback; the server cookie whitelist and i18n digest read it
+  through `lib/http_transport/ui_languages.py`. Settings shows one native
+  language select styled like its neighbouring fields; the i18n owner renders
+  its options from the manifest, each led by the endonym and, for the other
+  languages, followed by the name in the active UI language from
+  `Intl.DisplayNames` ("Deutsch — 德语"). Problem: seven flag pills wrapped
+  raggedly beside the theme cards, flags denote countries rather than
+  languages, and the markup duplicated the manifest. Alternatives rejected: a
+  pill grid that grows with every language, and a custom popup that
+  re-implements native select keyboard, focus and dismissal. Derived locales (ja, ko, fr, de, ru) are
+  produced by `scripts/translate_i18n_locales.py` from both sources with a
+  shared glossary, cross-family model review and mechanical checks; source
+  fingerprints in `translation-sources.json` mark edited copy stale. A derived
+  entry may use each placeholder at most as often as the sources, because some
+  screens replace only the first occurrence; `{s}` is an English plural suffix
+  that other languages replace with count-neutral phrasing. The generator
+  emits compact delivery copies, completing missing or unusable derived
+  entries from the fallback locale so a pending translation never breaks a
+  build or shows a raw key; `check:i18n` fails until every derived locale is
+  complete and current. Problem: per-key manual translation of thousands of
+  strings across five languages does not stay consistent or current.
+  Decision: one tool owns translation, review and staleness; the generator
+  owns runtime safety. Alternatives rejected: failing the build on a pending
+  translation blocks unrelated releases; ICU plural syntax would add a parser
+  and runtime for 11 English-only `{s}` messages. Vite content-hashes the
+  delivery copies as data assets and the browser fetches only the selected
+  language through a request-coalescing loader that retains only the active
+  catalog; the latest picker choice wins over an earlier, slower catalog
+  request. The retained runtime paints while that boot fetch
+  is in flight, so a lookup before any catalog has loaded is premature, not
+  missing: it returns the key, is verified once `ready()` loads the catalog,
+  and repaints through `tofu:language-change`. `[i18n] missing <lang>:<key>`
+  is reserved for a key that a loaded catalog lacks (once per page and key);
+  warning at first paint would flag present keys on every page load.
+  Alternative rejected: deferring every runtime section until `ready()` would
+  delay first paint and move ordering into dozens of owners.
 - Project Brain content translation is a lazy typed owner. It skips source
   items above 12,000 characters, coalesces by text/language through one global
   6-request scheduler with at most 256 pending translations, keeps at most 128
@@ -672,9 +1103,9 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   complete allowlisted Base64 grammar. Every elision is localized and visible.
   The retained layer owns timer ticks, interrupt I/O, and body/output expansion
   sets; it passes only boolean snapshots and named trusted slots to the owner.
-  Vite emits these explicit typed tool-policy modules as one static
-  `tool-presentation` dependency chunk: it is eagerly loaded with the main
-  entry, counted once by the total-JavaScript budget, and independently cached.
+  Vite follows the real import graph for delivery; these typed tool-policy
+  modules load with their conversation consumers. Shared transport dependencies
+  never pull them into independent Admin or plugin entries.
 - Pending write-tool cards live in the DOM-free
   `frontend/src/conversation/presentation/tool-approval-presentation.ts`
   owner. It scans at most 32 generic risk fields or 16 batch edits; bounds
@@ -695,7 +1126,7 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   conversation-title lookup are injected capabilities. Retained code owns
   timeline chronology and the peer-jump event lifecycle only; it carries no
   XML, sender-deduplication, escaping, localization, or resource policy.
-- Human Guidance cards and compact outcome rows live in the DOM-free `frontend/src/conversation/presentation/tool-human-guidance-presentation.ts` owner. Its single immutable port closes the awaiting → skipped → submitted state order. Settled unanswered questions are read-only unless the exact Turn settlement offers `answer_guidance`; that late-answer projection keeps the original choice UI interactive after Stop. It admits at most 16 options, parses legacy option JSON only below 65,536 code units, bounds identifiers at 512, questions at 32,768, labels at 1,024, descriptions at 8,192, and each option-owned note at 4,096 units, and makes every elision or unavailable response visible. Guidance IDs, ordered option indexes, and original choice labels remain escaped `data-*` values consumed by static restricted actions; none can enter executable action text. Translation and sanitized Markdown are injected capabilities. Delegated response behavior lives separately in the lifecycle-scoped `frontend/src/conversation/ui/human-guidance-actions.ts` owner. It reads only card-scoped static selectors, requires card/group/button/note datasets and ordered indexes to agree, rejects more than 16 option groups, and submits only the chosen label and that option's draft. It caps free-text replies at 32,768 code units before translation or transport and permits one in-flight submission per conversation/guidance identity. Choice rollback is exact; translation failure falls back to the bounded original; backend 404 triggers an expired repaint while transport failure keeps its distinct error. Composition owns the presentation store through an immutable lexical port. Retained code keeps only EN-to-CN arrival translation and two forwarding action entries; it publishes no Human Guidance state through `runtimeScope`.
+- Human Guidance cards and compact outcome rows live in the DOM-free `frontend/src/conversation/presentation/tool-human-guidance-presentation.ts` owner. Its single immutable port closes the awaiting → skipped → submitted state order. Settled unanswered questions are read-only unless the exact Turn settlement offers `answer_guidance`; that late-answer projection keeps the original choice UI interactive after Stop. It admits at most 16 options, parses legacy option JSON only below 65,536 code units, bounds identifiers at 512, questions at 32,768, labels at 1,024, descriptions at 8,192, and each option-owned note at 4,096 units, and makes every elision or unavailable response visible. Guidance IDs, ordered option indexes, and original choice labels remain escaped `data-*` values consumed by static restricted actions; none can enter executable action text. Translation and sanitized Markdown are injected capabilities. Delegated response behavior lives separately in the lifecycle-scoped `frontend/src/conversation/ui/human-guidance-actions.ts` owner. It reads only card-scoped static selectors, requires card/group/button/note datasets and ordered indexes to agree, rejects more than 16 option groups, and submits only the chosen label and that option's draft. It caps free-text replies at 32,768 code units before translation or transport and permits one in-flight submission per conversation/guidance identity. Choice rollback is exact; translation failure falls back to the bounded original; backend 404 triggers an expired repaint while transport failure keeps its distinct error. Composition owns the presentation store through an immutable lexical port. Retained code keeps only EN-to-CN arrival translation and two forwarding action entries; it publishes no Human Guidance state through `runtimeScope`. A non-blocking question (`guidanceBlocking: false` on a `done` round) renders the same inputs as a card that never expires, marked `data-hg-reply="chat"` with a neutral badge, a hint, and its trimmed question text (batch questions joined by blank lines) as an escaped `data-hg-quote` bounded at 4,096 units. The action owner routes that card's untranslated answer to the required `replyInChat` composition port instead of the guidance transport: an idle ordinary composer sends it as a quoted chat message (`sent` marks the card replied and collapses it to a read-only row); otherwise the quote and answer join the unsent draft (`drafted`, with a notice; the card stays open). A blocking question the user bypassed by chatting (`guidanceSuperseded`) becomes a read-only row.
 - The chat-picker capability taxonomy lives in the pure, stateful
   `frontend/src/core/model-capability-taxonomy.ts` controller. It starts from
   the backend-parity fallback, validates and atomically replaces that set from
@@ -818,7 +1249,7 @@ sufficient.
 | Demand-loaded Settings retained presentation and live working-state ports | manifest bundle `settings-presenters` + `frontend/src/features/settings.ts` |
 | Lazy Settings feature presentation styles | `frontend/src/features/settings/{devices,tools-inventory}.css` imported by `frontend/src/features/settings.ts` |
 | Demand-loaded Image Generation presentation and live composer state | manifest bundle `image-generation` + `frontend/src/features/image.ts` + `ImageGenerationComposerState` |
-| Demand-loaded local Knowledge Workbench presentation and modal/drop state | manifest bundle `knowledge-presenters` + `frontend/src/features/knowledge.ts` |
+| Demand-loaded local Knowledge Workbench in Settings and drop state | manifest bundle `knowledge-presenters` + `frontend/src/features/settings/knowledge-tab.ts` |
 | Demand-loaded Project workspace with retained state/coding interactions | manifest bundle `project-presenters` + `frontend/src/features/project.ts` + `ProjectPresentationShellState` |
 | Demand-loaded Local Control with retained merged badge | manifest bundle `local-control-presenters` + `frontend/src/features/local-control.ts` + `LocalControlShellState` |
 | Demand-loaded Debug/Request Inspector with retained bounded evidence | manifest bundle `diagnostics-presenters` + `frontend/src/features/diagnostics-presenters.ts` + `DebugShellState` |
@@ -844,6 +1275,7 @@ sufficient.
 | Human Guidance card and outcome-row presentation | `frontend/src/conversation/presentation/tool-human-guidance-presentation.ts` |
 | Human Guidance delegated response DOM, single-flight and rollback lifecycle | `frontend/src/conversation/ui/human-guidance-actions.ts` |
 | Context grouping taxonomy and passive provenance placement | Registry-generated `system-note-presentation.generated.ts`; `presentation/context-note-grouping.ts`; `presentation/context-provenance.ts` (one owner inside note disclosures, separate pending actions) |
+| Context row facts shared by typed and retained renderers (registry label, glyph, authority, glimpse, verbatim text runs) | `frontend/src/conversation/presentation/context-note-presentation.ts`; styles `23-reading-context.css` |
 | Turn provenance HTML, inline Markdown and safe action arguments | `frontend/src/conversation/presentation/turn-provenance.ts` |
 | Write-gate refusal normalization, localized badge and safe notice | `frontend/src/conversation/presentation/write-gate-refusal.ts` |
 | Compaction, write/edit diff cards and bounded generic tool results | `frontend/src/conversation/presentation/tool-result-presentation.ts` |
@@ -867,16 +1299,19 @@ sufficient.
 | Settings 服务商 (Providers) tab: provider-scoped supply only — ProviderAccess summary with in-card Connection/Credential editor and per-provider 模型管理 dialog (Offering enable/alias/remove, no tabs); classic two-row key card (hint-only secret + today's per-key stats/override toggle) fed by `GET /api/v4/dispatch/key-stats` (`key_namespace` composes the owner-scoped provider id that override writes must target). Never re-renders the 模型 tab. | `runtime/sections/settings/provider_render.js::_renderModelRoutingProvidersTab` + `_renderV2KeyCardStats` |
 | Provider template catalog: searchable official/third-party/local groups of compact brand+name tiles (endpoint host on the tooltip; seed metadata powers search only, never renders), single-flight fresh reads, keyboard/teardown lifecycle, credential-first empty-inventory discovery; never infers account availability from template membership. Specs: `tests/provider_template_picker.test.cjs`, `tests/providers/test_provider_template_picker_browser.py`. | `frontend/src/features/settings/provider-template-picker.ts` + API adapter in `frontend/src/features/settings.ts`; retained `_stageModelRoutingProviderBundle` owns the existing CAS create path |
 | Settings 模型 (Models) tab: global, read-only Creator/Model registry grouped by model developer — kept up-to-date by world-catalogue sync + subscription sync; provider supply, credentials, offerings, deployments, aliases, routes never render here (the Creator/Model-only projection handed to the feature is the data boundary, not a view convention). Flows that reload the v2 authority or mutate creators/models repaint both tabs via `_renderModelRoutingTabs()`. | `runtime/sections/settings/model_catalog_tab.js::_renderModelCatalogTab` + `frontend/src/features/model-catalog/panel.ts` |
-| Owner-scoped model-routing v2 Settings load/CAS/secret replacement | `runtime/sections/settings/core_panel.js::_loadModelRoutingAuthority` + `runtime/sections/settings/save_export.js::_saveServerConfig`; concurrent Settings reads coalesce, and Save joins or retries authority readiness before feature persistence |
+| Owner-scoped model-routing v2 Settings load/CAS/secret replacement | `frontend/src/features/settings/model-routing-authority.ts` + `save-export.ts`; reads coalesce, Save joins authority readiness, and committed responses enter the common picker projection |
 | 本地部署 page: live hardware strip, curated catalog ranked against it (purpose-filtered, fit-tiered, download-hint cards that hand off to the chat agent), DeepSeek V4 Flash cloud escape hatch deep-linking the template wizard, managed-instance ledger with failure diagnosis → agent repair handoff, then the engine preset chooser / batch endpoint probe-and-stage / managed model-path handoff | `runtime/sections/settings/local_deploy.js::addLocalProvider` (read-only `Api.localServe` → `routes/api_v1/local_serve.py`; staging via `provider_render.js::_stageModelRoutingProviderBundle`) |
 | Provider-first chat picker, automatic Provider choice, and provider-scoped pending identity | `runtime/sections/main/main_toolbar_ui.js::_modelRoutingDropdownModels` |
-| Chat picker startup and readiness recovery | `frontend/src/features/model-catalog/model-picker-startup.ts` + `runtime/sections/main/main_toolbar_ui.js::_loadServerConfigAndPopulate` |
+| Chat picker startup, committed routing projection and readiness recovery | `frontend/src/features/model-catalog/model-picker-startup.ts` + the retained toolbar bridge |
 | Model visibility/default projection from enabled v2 Offerings | `runtime/sections/settings/core_panel.js::_getAllModels` + `runtime/sections/settings/visibility_defaults.js` |
-| Speech ProviderAccess bundle creation/update/deletion and encrypted credential handoff | `frontend/src/features/settings/speech.ts` + `Api.modelRouting` |
+| Speech ProviderAccess activation, configuration and encrypted credential handoff | `frontend/src/features/settings/speech-provider.ts` (pure policy), `speech.ts` (form/commands) + `Api.modelRouting` |
 | RouteSnapshot serving-route and failover presentation | `frontend/src/conversation/presentation/turn-serving-route.ts` + `runtime/sections/ui/finish_info.js` |
 | Authoritative Turn projection into catalog-shell metadata | `frontend/src/core/turn-projection.ts` |
 | Turn commands | `frontend/src/core/turn-command.ts` |
-| Turn runtime orchestration | `frontend/src/core/turn-runtime.ts` |
+| Turn runtime orchestration | `frontend/src/core/turn-runtime.ts`; explicit snapshot coalescing and shell handoff in `core/turn-hydration.ts` |
+| Turn runtime types and command execution | `core/turn-runtime-contracts.ts` and `core/turn-command-execution.ts`; public types remain available from `core/turn-runtime.ts` |
+| Attempt callback leases and live settlement observations | `frontend/src/core/turn-attempt-lifecycle.ts`; one owner per canonical store, using the existing sync coordinator |
+| Turn DOM-commit witnesses and receive clocks | `frontend/src/core/turn-render-observations.ts`; sends observations through `core/perception-recorder.ts` |
 | Conversation DOM reconciliation | `frontend/src/conversation/ui/conversation-surface.ts` |
 | Rich tool HTML and live Swarm subtree reconciliation | `frontend/src/conversation/ui/classic-conversation-renderers.ts` |
 | Presentation-only state and scheduling | `frontend/src/conversation/application/conversation-surface-controller.ts` |
@@ -884,7 +1319,7 @@ sufficient.
 | Conversation diagnostics projection | `frontend/src/features/diagnostics.ts` over `ConversationTurnRead` + active Surface |
 | Catalog shells and settings persistence | `runtime/sections/core/conversation_catalog.js`; composer capture adapter in `runtime/sections/main.js` |
 | Per-conversation connection badge health | `frontend/src/core/connection-health.ts` |
-| Send startup cancellation | `frontend/src/core/send-startup.ts` |
+| Send startup cancellation and automatic retry | `frontend/src/core/send-startup.ts` |
 | Send translating/connecting overlay | `frontend/src/conversation/application/send-preparation-overlay.ts` on the transient overlay |
 | Composer submission echo | `frontend/src/conversation/application/optimistic-user-turn.ts` on the transient overlay |
 | Resource cleanup | `frontend/src/lifecycle.ts` |
@@ -927,12 +1362,130 @@ feature IDs, never mutate a Turn projection, and declare a disposal or size
 bound. A new feature cannot add a conversation-level mirror merely because a
 legacy endpoint happens to return message-shaped data.
 
+### Independent appearance and reconciliation
+
+Problem: the Surface's keyed reconciliation and history residency code also
+selected CSS classes, built styled controls, chose fallback renderers and wrote
+localized labels. Changing appearance required editing the streaming hot path;
+unchanged shell classes and labels were written again on every content update.
+
+Decision: `conversation/ui/conversation-surface.ts` is the public composition
+entry. It supplies `surface-design.ts` through the type-only
+`surface-design-contracts.ts` port to `surface-engine.ts` and
+`surface-turn-renderer.ts`. The design owns CSS loading, visual classes, labels,
+default renderer selection and construction of round/history controls. The
+engine owns stable IDs, keyed reuse, windows, scroll, intent delegation and
+retirement. Semantic action attributes remain independent of visual classes.
+Design updates compare actual DOM values before changing shell classes or
+control text; they do not introduce a second cache or state owner. Content
+renderers still own their own markup and cleanup, and custom renderer identity
+continues to invalidate the corresponding part.
+
+The server commits ordered changes before waking readers. Browser transport
+reduces every accepted change into TurnStore; the existing Surface controller
+coalesces only the latest paint demand. Drawing, visibility and perception
+receipts never gate backend execution or durability. A renderer failure retains
+uncommitted presentation demand without rolling back an accepted sync cursor;
+a reducer/protocol failure still refuses that cursor and repairs from authority.
+The browser can still spend time on its own main thread: this separation is not
+a claim of parallel JavaScript execution.
+
+Alternatives rejected: moving only CSS leaves control markup and renderer
+selection in the performance owner; a second client transcript or backend HTML
+projection duplicates authority; waiting for paint before consuming events
+couples synchronization to visibility; dropping ordered events to reduce paints
+breaks replay. No transport, protocol, persistence, capacity or tuning knob is
+added.
+
+Verification: `surface-design.test.ts` replaces appearance while preserving
+paging, focus, keyed nodes and disposal. A deterministic 64-frame content fixture
+reduces redundant class mutations from 640 to 0 while displaying every update
+and retaining unchanged control text nodes. This measures DOM writes, not
+browser frame latency. `turn-runtime-ingestion.test.ts` withholds all painting,
+accepts 64 ordered changes, injects a design failure, accepts another change and
+commits the newest graph with one initial snapshot. The renderer boundary gate
+rejects CSS, visual writes and design composition imports in the engine. Backend
+`test_conversation_sync_wake_budget.py` exercises 20,000 wake hints with a stalled
+observer; the durable log and existing wake owner remain unchanged. Native
+browser convergence and history journeys cover the complete renderer graph.
+
 ## Conversation hydration
 
 One v3 snapshot contains settings, revision, a Turn window, its attempts, cursor, heartbeat policy, and an opt-in metadata-free artifact existence bit.
 The generated browser requests the newest 96 main-lane Turns for linear conversations; the default public representation remains complete, and branch-bearing conversations receive that full representation until lane-directory paging exists.
-`turn-runtime.ts` applies settings at the snapshot boundary, hands metadata to feature adapters, then dispatches TurnState. `hasArtifacts:false` commits empty artifact presentation immediately and skips the legacy list request; `true` or absence keeps that request for rolling compatibility. A weak conversation-shell generation fence prevents older list responses overwriting newer negative hints.
+`turn-runtime.ts` verifies the snapshot revision and ingests TurnState before applying settings and handing metadata to feature adapters. A rejected older snapshot cannot acknowledge a new replay cursor or publish stale settings; the coordinator retains its recovery barrier. `hasArtifacts:false` commits empty artifact presentation immediately and skips the legacy list request; `true` or absence keeps that request for rolling compatibility. A weak conversation-shell generation fence prevents older list responses overwriting newer negative hints.
 The pure selector reads Turn state directly and the controller commits to the keyed Surface. `turn-projection.ts` updates only catalog/lifecycle metadata; it cannot materialize a parallel transcript.
+
+**Problem:** a coalesced hydration retained its first catalog shell, and an outer
+projection could repaint an older graph or change connection demand after a host
+callback had already adopted a newer shell or state. **Decision:** the existing
+hydration lane in `core/turn-hydration.ts` shares one snapshot while its latest
+requested or bound shell owns
+settings, metadata and binding. Each required callback can transfer that claim;
+completion checks the same store lifetime. Projection and connection work check
+both binding identity and the current canonical state after callbacks. Deferred
+terminal repaint reads the current graph before releasing the matching attempt's
+UI latch. Command acknowledgement also respects a newer pending hydration claim;
+the original server outcome remains unchanged. **Alternatives rejected:** one read per shell duplicates authority IO;
+blocking reentrant host operations loses newer navigation or accepted state;
+a second connection scheduler duplicates the sync coordinator. Specs:
+`core/turn-runtime-ingestion.test.ts` and the neighboring command/attempt/health
+contracts.
+
+**Problem:** the sidebar can consume a terminal Turn before its scheduled answer
+commits, and dropping pending demand on a renderer exception leaves the body
+stale until reload. **Decision:** the Surface controller retains only the latest
+canonical graph until rendering, scroll restoration, mount notification and the
+required commit receipt all succeed. Every scheduled or explicit flush shares
+one failure owner: one immediate repair per conversation-local failure streak,
+then existing canonical/health/UI demand retries without a new read or poller.
+Disposal and host/conversation replacement reset that local budget; stale
+callbacks cannot consume another conversation's work. Convergence ownership is
+false while pending, failed or detached; the separate physical `isMounted` port
+grants bounded artifact presentation reads without inventing a sync ACK. A
+callback's new presentation demand has its own token, so finishing the earlier
+frame cannot drop it or recursively commit it. An absent host retains demand
+without self-scheduling; mount setup failures retain the same conversation/host
+repair budget even before a Surface exists. The typed render scheduler races a preferred RAF
+against one 100 ms fallback, cancels the loser and commits at most once even
+when cancellation fails. Browser throttling or a blocked main thread can delay
+both clocks; this is a convergence mechanism, not a guaranteed perceived latency.
+The frame-only perception adapter still requires a real visible paint opportunity.
+Turn command execution is composed through `core/turn-command-execution.ts`.
+**Problem:** command payloads, HTTP responses and conflict adoption were mixed
+with canonical store, stream and rendering lifecycles in one runtime closure.
+**Decision:** keep command methods together behind explicit store, hydration,
+binding and connection ports. The existing `turn-command.ts` still builds wire
+requests; `turn-state.ts` still owns reduction and `conversation-sync.ts` still
+owns snapshot/replay transport. Shared TypeScript contracts have no runtime side
+effects, and the composition entry preserves its public type exports.
+**Alternative rejected:** copying coordinator logic into endpoint helpers would
+add competing snapshot and connection owners rather than clarify command flow.
+Its composition boundary is `core/turn-render-observations.ts`. **Problem:**
+mount identity, receive clocks and paint eligibility were spread through runtime
+ingestion, rendering and teardown. **Decision:** keep these content-free witnesses
+together, with explicit reads of canonical state, active ownership and connection
+health. Stage receive clocks before dispatch because a forced render can commit
+synchronously. Only actual mounted DOM commits grant evidence; snapshot restoration
+cannot invent network timing. Existing retention remains 64 receive clocks and
+128 mounted identities. `perception-recorder.ts` still owns paint scheduling,
+receipt queues and retries. **Alternative rejected:** moving receipt delivery into
+the renderer would duplicate retry/lifecycle ownership and couple DOM presentation
+to transport. Specs: `tests/turn_lifecycle/test_turn_runtime_perception_commit.py`.
+Healthy heartbeat callback deduplication applies only after the active Surface has
+acknowledged its graph. A pending or failed commit retains the existing heartbeat's
+repair demand; inactive or converged surfaces still avoid redundant paints. Ordered
+changes keep their existing canonical render demand, not an additional health-driven
+repaint per event. A genuinely replaced canonical graph arriving inside a failed
+commit is scheduled after unwinding; same-graph presentation invalidation does not
+reset the bounded failure budget or create a recursive retry loop. Direct history
+reveal/latest window commits use the same failure boundary even with no pending
+graph; a renderer error retains canonical repair demand and withdraws convergence.
+**Rejected:** treating scheduled work as rendered evidence, changing only sidebar
+badges, endless RAF retries, or adding a transcript poller creates false success,
+unbounded work or a competing authority. Specs: `turn-runtime-ingestion.test.ts`,
+`conversation-surface-controller.test.ts`, `animation-frame-scheduler.test.ts` and
+`tests/visual/test_visual_terminal_render_convergence.py`.
 Initial catalog boot is metadata-only: inactive shells issue zero Turn snapshot requests, so startup network/memory concurrency does not grow with sidebar size. Opening a conversation owns one on-demand snapshot: no second settings request or fallback to archived bodies or IndexedDB transcripts.
 
 Settled Turns normally carry their authoritative cost stamp in that snapshot.
@@ -948,8 +1501,18 @@ ordinal for each loaded lane. `ConversationSyncCoordinator.loadTurnPage()`
 requires the currently applied `syncSeq`, shares only an identical in-flight
 request, restores reference dictionaries, and synchronously publishes only if
 both server and local sequence still match. History pages are additive Store
-snapshots, never deletion authority. The retained adapter merely forwards the
-Surface's typed `load-earlier-turns` intent to this runtime method.
+snapshots; their only deletion is a continuous frontier page removing Turns that
+a replacing tail-window snapshot retained below its window and the page omits
+([Recovery keeps loaded history](contracts/CONVERSATION_SYNC_V3.md)). The
+runtime starts those re-reads itself after the snapshot and again on every
+stream the coordinator opens while the range is unverified, so a skipped or
+failed re-read cannot leave a stale Turn mounted. The retained adapter
+merely forwards the
+Surface's typed `load-earlier-turns` intent to this runtime method. A continuous
+page that chains from a page cut short by bytes doubles its `windowBytes` (pure
+policy `nextHistoryPageBytes` in `core/conversation-load-budget.ts`, at most four
+viewport budgets); detached jumps and unchained reads use the viewport budget.
+Specs: `conversation-history-budget.test.ts`, `conversation-load-budget.test.ts`.
 
 Push and BroadcastChannel notifications only invalidate the coordinator. For
 a numeric `conv_changed` wake hint, the bounded catalog revision gate may skip
@@ -971,6 +1534,14 @@ filter could land on a different invocation with the same round number, so it
 is rejected.
 The hot projector canonicalizes each message once in a fused prefix scan and retains
 SHA-256 digests; each row's exact canonical prefix hash controls rebuild integrity.
+Problem: hashlib releases the GIL for every update of 2,048 bytes or more, so beside
+busy threads each message waited about a switch interval, twice; projecting a 3.8 MB
+history took 6.0 s next to two CPU-bound threads while other tasks queued behind the
+process-wide projector lock. Decision: both digests feed hashlib slices below that
+threshold (`lib/utils.py` `update_holding_gil`); digests and rows stay byte-identical, and the same
+projection took 51 ms (`benchmarks/round_prep_body.py`). Alternatives: a cheaper
+non-cryptographic fingerprint changes the retained digest contract; per-task locks would
+stop the queueing but leave every scan as slow.
 Raw archives are lazy blocks on the selected diagnostic Turn. Each block retains one
 256 KiB window, replaced on paging; metadata names partial/quota/scrubbed evidence.
 
@@ -1015,12 +1586,50 @@ whether the conversation has any Turns:
   and 75 seconds, with a 10-second per-attempt timeout. Only network/timeout or
   gateway 500/502/503/504 failures without a backend request ID are retried;
   backend-attributed failures remain immediate. No mutation or task-start POST
-  shares this recovery boundary.
+  shares this recovery boundary. The caller's signal ends recovery at once, so
+  an abandoned send never keeps resolving in the background.
 - All retries for one logical PATCH reuse the same transport-owned idempotency
   key. A retry loop never mints a key per attempt.
 - Lazy TypeScript features receive `captureActiveConversationSettings` through
   the private feature service registry. They do not copy composer state or
   call a settings endpoint directly.
+
+Send startup repeats transient failures itself. Problem: a 30-second
+preparation timer bounded config resolution, shorter than the resolver's
+75-second recovery window, so a forwarded-port stall failed the send while the
+resolver was still recovering, and every transient failure required a manual
+resend. Decision: `retryTransientSendStartup` runs
+both the resolution and the Turn command as attempts. Each attempt owns an
+AbortSignal and a 90-second deadline, longer than the resolver window, so the
+deadline only reclaims a hung attempt. Transport network/timeout failures,
+408/429/502/503/504, unattributed 500s and retryable storage codes repeat with
+capped backoff (about 1, 2, 4, 8, then 15 seconds) behind a visible
+`send.retrying` status, without an attempt cap, until the command is accepted,
+a definitive failure surfaces, or the user presses stop. The command write
+resends the frozen request with its `commandId`, so a lost ACK replays through
+the idempotent `createTurn` contract instead of duplicating. The helper awaits
+an attempt's own settlement rather than racing its signal, because an
+acknowledgement can cross a stop and must still reach the pipeline. The send
+lease keeps only the stop button's cancellation scope. Alternatives
+considered: lengthening the preparation timer keeps two nested deadlines and
+still ends in a manual resend after a longer stall; waiting without
+per-attempt deadlines can hang on a stalled write; a durable outbox across
+reloads would add browser-owned state that draft restore already covers.
+
+Stop during a first send's startup must still settle on screen. Problem: Stop
+aborted the command request while the server was still accepting it, so the
+Turn committed but its ACK never arrived. Only the ACK path adopted the draft
+shell; still `_localOnly`, the runtime paused the conversation stream after
+the next change and the stopped Turn kept its startup phase until reload.
+Stopping send-time translation also left the generation-start lease held, so
+the control stayed a live Stop and every click re-sent the conversation abort.
+Decision: an explicit hydration snapshot exists only for a conversation
+authority holds, so it adopts its claimant shell before binding decides
+connection demand; translation Stop ends the lease like any startup Stop.
+Alternatives considered: clearing the flag only in the send pipeline's
+recovery leaves every other lost-ACK hydration exposed; resuming paused
+coordinators on catalog invalidation would add a second owner of connection
+demand.
 
 Settings restore is paint-only. It normalizes mutually exclusive interaction
 modes at the boundary but does not persist merely because a conversation was
@@ -1052,11 +1661,16 @@ and adding another observer/scheduler. Verification and measurements live in
   invalidation marker only.
 - Long linear histories start as a bounded 96-Turn Store tail while the Surface
   keeps an independent 80-Turn DOM window. Earlier/later controls first shift
-  locally by stable Turn identity; exhausting the prefix requests one bounded,
-  64-Turn sequence-CAS history page and additively merges it through the same reducer.
-  The Surface anchors and reveals prepended Turns without creating a second
-  render path. Durable authority remains in storage; no transcript copy enters
-  IndexedDB.
+  locally by stable Turn identity. Reader demand toward earlier content requests
+  the next bounded 64-Turn sequence-CAS history page while less than twelve viewports
+  of loaded history (mounted Turns above the reader plus loaded, unmounted Turns at
+  their mean height) remain above the reader, and additively merges it through
+  the same reducer. A settled flight holds its lane until the Store render that
+  carries the page retires it in the same anchored commit; failed pages retry only
+  near the loaded top. The Surface anchors and reveals prepended Turns without
+  creating a second render path. Durable authority remains in storage; no
+  transcript copy enters IndexedDB. Specs: `conversation-surface-history.test.ts`,
+  `surface-windowing.test.ts`, `tests/visual/test_visual_history_paging_latency.py`.
 - Catalog fingerprints are invalidation metadata only. They contain no content
   document and cannot suppress a Surface commit for the active conversation.
 - Backend-authored live phase stays in TurnState. There is no phase Map,
@@ -1265,3 +1879,785 @@ Executable evidence: `conversation-activity.test.ts`, `live-phase.test.ts`,
 `view-model/{goal-progress,terminal-segment-presentation}.test.ts` and Chromium
 `tests/visual/test_visual_goal_progress.py`: run/actor fences, phase parity,
 rich-round retention, narrow EN/ZH context, sidebar rate limits and settled cleanup.
+
+## Committed model-routing projection
+
+Problem: Settings adopted a successful routing PUT only into its editor draft.
+The subsequent config-only refresh left the composer on its previous catalog and
+reasoning controls. Late reads could also replace a newly committed draft.
+
+Decision: the existing typed model-picker startup owner accepts committed routing
+responses from Settings reads and writes through a narrow retained-shell bridge.
+It projects the complete server response, refuses older revisions, and fences
+responses and failures from superseded reads. Equal revisions can refresh
+availability. Before the initial config policy is available, publication keeps
+only the latest accepted catalog and starts no extra reads. Config success paints
+policy before that catalog; authorization refusal and disposal drop the pending
+view. Full startup also joins any newer config refresh before projecting its
+catalog; disposed owners accept no publication or recovery work. Config coordination
+retains settlement only, not the response payload. A fresh-process GC probe
+projects a synthetic 1 MiB response exactly once and verifies its release while
+the picker remains alive. The same probe verifies that only the newest pending
+catalog survives and that disposal releases it; this is a reference-lifetime
+check, not an RSS claim.
+
+`settings/model-routing-authority.ts` owns read/CAS lifetimes and serialized
+persistence; `core-panel.ts` assembles the Settings surface and publishes its
+existing bindings. Keeping the transactions inside panel assembly was rejected
+because it obscured the owner of draft replacement and committed publication.
+
+The editor remains separate from committed presentation: reads preserve drafts,
+credential input and CAS revisions changed while awaiting the server. A failed
+write publishes nothing; serialized writes still commit edits made during a
+pending save. Subscription refresh also uses this committed projection and never
+repaints the composer from the unsaved editor draft. Even synchronous read refusal
+retires the shared in-flight promise
+so the next action can retry.
+
+Alternatives rejected: another whole-catalog GET wastes the successful PUT
+response; painting only the model list leaves reasoning controls stale; sharing
+the mutable draft with the composer publishes unsaved changes; dropping every
+older-started read would also drop a provably newer server revision.
+
+Specifications: `tests/model_picker_startup.test.cjs`,
+`tests/frontend/test_settings_routing_projection.py`, and
+`tests/model_routing/test_model_reasoning_settings_browser.py`. The browser
+journey verifies model/provider inheritance and no extra catalog GET after Save.
+
+### Credential replacement settlement
+
+Problem: the Settings save coordinator replaced secrets outside the routing
+write chain, advanced the editor revision from partial receipts, and cleared the
+entire pending map. New input could disappear during a request, and a failed
+batch retried credentials already acknowledged by the server.
+
+Decision: `model-routing-authority.ts::persistModelRoutingCredentialSecrets`
+owns one batch in the existing queue. It snapshots replacements, verifies each
+credential identity and advancing revision, and removes only the acknowledged
+value from the same editor/map. Changed values, newly staged keys and replaced
+editors survive; unsent values changed after the snapshot are left for the next
+Save. The batch advances a local CAS revision, then obtains one complete
+projection, including after partial success. Failed or stale refreshes retain
+the editor's previous CAS and never restore acknowledged pending values.
+The server remains responsible for encrypted storage, atomic per-key CAS and
+secret reclamation; a multi-key save is not an atomic backend transaction.
+
+The save coordinator keeps Settings open when drafts remain or refresh did not
+complete. It distinguishes saved work with new unsaved edits from a failed
+refresh, using the existing localized notices. A complete response
+also transfers surviving credential input bindings through the existing typed
+reveal owner, preserving focus and newer text. A changed secret reference retires
+the old plaintext baseline; pending reveals from the previous document cannot
+populate the updated input. Closing the view releases plaintext without
+cancelling a request already accepted by the server.
+
+Alternatives rejected: a separate secret queue still races Provider mutations;
+clearing the map only at batch completion replays successful rotations after a
+later failure; assigning a partial receipt's revision to the draft risks writing
+stale secret references; replacing the entire Provider DOM loses active edits.
+
+Specifications: `tests/frontend/test_settings_credential_replacement.py`,
+`tests/providers/test_provider_credentials_view.py`, and the Provider browser
+credential replacement journeys exercise real edits during and after Save.
+
+### Catpaw connection lifetime
+
+Problem: Catpaw's retained status presenter reset the automatic-import latch
+whenever it displayed a connection. Disconnect then deleted a Provider outside
+the routing queue and its status read immediately imported it again. Independent
+initial reads, interval polling and CLI-login continuations could also revive
+retired views, and the disconnect promise finished before its deletion.
+
+Decision: `settings/catpaw-connection.ts` owns one connection intent and view
+lifetime. `catpaw-settings.ts` adapts the existing controls, typed API facade and
+shared routing owner. Opening Settings starts its read independently from OAuth
+account status. Overlapping reads and same-kind commands coalesce; polling has
+one outstanding read and the existing fixed 60-check/3-second window. A slow
+read does not extend that window, and replies after expiry cannot import.
+`CATPAW_LOGIN_STATUS_CHECKS` and `CATPAW_LOGIN_STATUS_INTERVAL_MS` name that
+existing liveness contract; the refactor adds no tuning controls.
+Closing/removing the panel retires reads, login links and unconfirmed actions.
+An old confirmation cannot block a reopened panel, while an accepted routing
+write keeps settling through the existing shared queue.
+
+An observed connection consumes automatic onboarding for this browser owner;
+ordinary Provider deletion therefore does not rearm it. An explicit confirmed
+disconnect suppresses automatic imports across panel reopen, and only a new
+manual connect command changes that intent. This is transient browser intent,
+not a new durable auto-import preference: a fresh application load still follows
+the existing server-authorized local-import policy. The server retains local
+credential issuance, encrypted storage, owner identity, admission and CAS.
+The ordinary Provider view also signals its confirmed Catpaw deletion to this
+owner before queue admission, so even a late initial onboarding read cannot
+recreate the target. Its prepared removal still uses the common mutation queue.
+
+Both Provider deletion views use `provider-mutations.ts::prepareProviderRemoval`
+to capture the displayed Provider/access before confirmation, validate it when
+approval returns, and recheck the access in the shared mutation queue. The
+complete-response adopter protects unrelated drafts, pending keys and CAS;
+refresh/render failures are separate from acknowledged endpoint writes and do
+not invite an import/delete replay.
+
+Alternatives rejected: a deletion-only queue adapter leaves polling able to
+reimport; a second Catpaw queue races the routing editor; resetting an import
+latch during rendering confuses observation with user intent; persistent local
+storage would introduce another owner/authentication-policy authority.
+
+Specifications: `tests/providers/test_catpaw_connection_lifecycle.py` exercises
+the actual native adapter, shared authority and controls; Provider mutation
+contracts cover confirmation targets and atomic deletion. Backend local-import
+tests remain the service-policy authority.
+
+### Speech settings save coordination
+
+Problem: STT Provider writes bypassed the routing queue and replaced the editor
+from a private GET, dropping unrelated drafts and leaving its saved JSON stale.
+Every ordinary Settings Save rewrote the STT bundle, even without form changes;
+an acknowledged credential remained in the form and could be submitted again.
+
+Decision: `settings/speech.ts` captures the submitted form before waiting and
+uses `model-routing-authority.ts::runModelRoutingMutation`. Its explicit
+`persistDraft` policy commits the other edits authorized by the global Save
+before the STT endpoint call, within the same queue slot. Commands may report
+an explicit unchanged result without a write or catalog read. STT validation,
+stored-secret reuse and bundle preparation read the current authority only
+after entering the queue. Missing or disabled form controls never request
+deletion; a global Save cannot treat an unfinished/failed load as user intent.
+The STT owner retains its provider/grant/model policy and backend admission;
+the shared owner alone adopts full responses and protects later drafts/CAS.
+
+Only a validated advancing receipt clears the submitted plaintext, and only
+from the same form lifetime when the value still matches. Later form edits
+remain pending, including during the subsequent miscellaneous-config save.
+Closing or repopulating the form retires its plaintext through the existing
+lifecycle scope without cancelling accepted writes. A failed refresh keeps
+Settings open and cannot become a reason to repeat an acknowledged secret.
+`core-panel.ts` begins that form lifetime before showing Settings. Speech
+controls stay disabled while its initial authority/config load is outstanding;
+only the matching completion can populate and enable them. Load failure keeps
+the controls unavailable, and closing/reopening invalidates older completions.
+This prevents a late initial read from overwriting a seemingly usable toggle.
+Configuration replacement retires pending replacements for credentials it
+removes; an activation change retains all existing credentials and pending keys.
+
+Alternatives rejected: a second speech write queue would still race Provider
+commands; overwriting the editor from a private read loses work; validating
+stored credentials before the queue observes stale authority; caching submitted
+plaintext to detect duplicates extends its lifetime. Comparing the form with
+the current routing projection avoids redundant writes without another store.
+
+### Speech service activation
+
+Problem: the speech enable switch deleted its Provider graph, despite promising
+to retain saved credentials. Re-enabling rebuilt default grants and metadata.
+Its description also promised an immediate global microphone switch even though
+changes take effect on Save and voice availability includes every runnable
+owner speech route.
+
+Decision: `speech-provider.ts` owns pure routing projection and bundle policy;
+`speech.ts` owns form intent, plaintext and view lifetime. An activation-only
+command changes the projected access's existing `enabled` flag in a detached
+authority document. It preserves connections, credentials, grants, offerings,
+deployments, registration evidence and sibling accesses. The common routing
+queue commits it with CAS and adopts the complete PUT response through the same
+boundary as reads; no follow-up GET is needed. Late drafts retain their original
+CAS, and a presentation failure remains distinct from a rejected write.
+Configuration edits retain the existing Provider bundle admission path.
+The access identity and activation intent are captured before queue admission;
+new metadata committed by an earlier command cannot turn a toggle into a stale
+bundle replacement. Saved model IDs outside a preset select remain selected
+through a temporary option owned by the current form lifetime, preventing an
+unrelated Save from silently selecting the default model.
+
+The control says “Enable this speech service” and explains Save and credential
+retention. It introduces no global microphone policy; another enabled speech
+service can still provide voice input. Explicit Provider/credential deletion
+retains its separate removal semantics. The retained speech panel's source now
+lives in `frontend/src/settings-panels/speech.html`, composed to its existing
+server-delivered fragment. Durable-secret measurements and cleanup ownership
+are in `STORAGE_OPERATIONS.md`, “Model-routing secret reclamation”.
+
+Alternatives rejected: deleting/recreating the Provider loses saved authority;
+rebuilding a bundle just to toggle can discard grants, probe evidence and
+sibling accesses; a browser credential cache creates a second secret store;
+a new global setting duplicates the existing owner route-availability policy.
+
+Specifications: `tests/providers/test_speech_routing_lifecycle.py`,
+`test_speech_provider_persist.py`, `test_speech_settings_browser.py`, and
+`tests/frontend/test_frontend_stt_settings.py` cover ordering, unchanged saves,
+late edits, receipts, secret retirement and the live Settings registry boundary.
+
+### Provider Settings read projection
+
+Problem: every Provider card rebuilt joins over the entire routing draft and
+four catalog dictionaries. Its supply matrix repeated that work and scanned all
+provider deployments for each offering. Model picker reads lived in the same
+retained file as credential operations and routing mutations.
+
+Decision: `settings/provider-settings-projection.ts` owns these pure reads using
+the generated routing types. One synchronous render builds shared indexes and
+catalog metadata, then passes each provider context to its card and matrix.
+Supply rows group deployments by offering once and retain first-seen request
+names and their original global indices. Source rows remain the live draft
+objects; grants, identity, pricing provenance and first-access selection are
+unchanged. The retained context bridge creates a fresh projection for each read,
+scoped to the selected provider so it does not index unrelated accesses.
+The authority/CAS, credential, request-name editing and manual probe owners keep
+their existing responsibilities. No draft is published to the composer here.
+
+Alternatives rejected: a persistent draft cache needs invalidation for in-place
+edits and async saves; copying rows breaks the editor's identity and mutation
+semantics; adding per-surface selectors preserves duplicate policy and scans.
+The projection adds only render-local indexes, with no retained cache or timers.
+
+Verification: `tests/provider_settings_projection.test.cjs` specifies identity,
+source indices, access isolation, legacy duplicates, pricing and picker
+eligibility. `tests/providers/test_provider_model_add.py` covers the retained
+integration; the request-name, reasoning and manual-probe browser journeys cover
+the rendered surface. A seeded comparison against the pre-extraction readers
+matched 203 documents. Paired Node 22 measurements (3 warmups, 15 samples) for
+40 providers, 8,000 offerings and 24,000 request names reduced median projection
+time from 211.09 ms to 12.22 ms. This measures pure projection, not DOM rendering,
+network latency, whole-page performance or memory usage.
+
+### Provider model-add transactions
+
+Problem: model-add loops changed offerings, connections and grants before every
+request-name face was validated. A later disabled face left partial draft rows
+even though the UI reported failure. Contexts and request-name sets captured
+before template reads also survived provider removal, credential replacement
+and concurrent additions.
+
+Decision: `settings/provider-model-staging.ts` owns preparation and synchronous
+publication. It captures the editor identity before the capability read, fences
+the selected access and connection identities/URLs after each await, and rereads
+current catalog facts, credential rows and existing request names. Removed
+providers or replaced drafts cancel the old action. Changed planner inputs or a
+removed/retired selected model produce an actionable refusal. Credential changes
+and catalog metadata updates are adopted from the current draft.
+
+`provider-connection-staging.ts` prepares the existing face matching, disabled
+connection refusal, missing metadata and connection grants without mutating
+inputs. Alias edits and model adds share it. Model batches prepare replacement
+rows and new arrays, so a later face or ID failure publishes nothing. Successful
+publication preserves existing connection/credential row identities and grant
+denials. Confirmed catalog associations and custom pending identities retain
+their existing metadata negotiation, defaults and unprobed deployments.
+
+After publication, render and immediate Save use the existing routing authority.
+A failed CAS/save leaves the complete staged batch and any newer edits available
+for that authority's retry; it does not roll the editor back. The preparation
+holds no persistent cache, timer or alternate write authority.
+
+Alternatives rejected: restoring an entire saved draft would overwrite edits
+made while a request was pending; incremental mutation plus rollback duplicates
+every changed field and can miss a later failure; independent face resolvers
+would let alias and model-add routing rules diverge.
+
+Specifications: `tests/providers/test_provider_model_staging.py` reproduces the
+11 failure/concurrency cases before the fix. The native connection/model staging
+tests cover pure preparation, fault injection, policy preservation and failed
+Save semantics. The request-name browser journey adds a disabled-face model,
+then saves Settings and verifies that no hidden partial supply reaches the PUT.
+
+
+### Provider model picker lifetime
+
+Problem: three retained globals represented every Provider model picker. A
+pending add cleared newer choices, repainted another picker or discarded newly
+typed input. Removed overlays retained event handlers that acted on the next
+picker, and closing Settings left the overlay alive.
+
+Decision: `settings/provider-model-picker.ts` owns one session per open. It
+reads current eligibility through the Provider projection and submits through
+the existing model-add transaction. Catalog completion removes only submitted
+choices; preparation refusal preserves eligible choices for retry. Failed Save
+keeps the transaction's complete draft and excludes those already-staged models
+from the picker. Filtering never discards selections merely hidden by a query.
+
+Custom completion clears an input only when both its value and edit revision
+are unchanged; it restores focus only from the submitted input/button. A retired
+session cannot repaint or focus its successor. Explicit close, Settings close
+and external removal release the session's DOM, listeners and removal observer.
+An authorized add continues and reports its outcome through existing notices.
+Pending methods retain submitted values and a session whose DOM reference can
+be cleared, rather than a captured input or overlay.
+
+The retained view supplies existing markup, actions, localized hints and
+notices. It preserves checkbox focus when eligible rows are refreshed. Empty
+search results distinguish a query miss from an exhausted addable catalog.
+
+Alternatives rejected: provider-ID checks cannot distinguish reopening the same
+provider; a single busy lock would unnecessarily prevent new choices while Save
+is pending; cancelling a write on close would alter the routing authority's
+durability contract. Replacing the existing overlay with a native top-layer
+dialog would also alter styling and its relationship with retained error dialogs,
+so this change keeps the current view rather than introducing a second modal API.
+
+Specifications: `tests/providers/test_provider_model_picker.py` exercises pending
+Save, refused preparation, reopened sessions, focus and retired DOM events using
+the actual retained view and native staging owner. Settings close/save tests
+cover disposal wiring; the Provider browser journey covers the registered actions.
+
+### Provider credential presentation and statistics
+
+Problem: reveal callbacks retained replaced inputs, displayed plaintext after
+Settings closed and moved focus away from newer edits. Comparing an edited
+staged replacement to itself could also discard that replacement. Statistics
+failures were cached as empty successes. Overrides issued before the namespace
+read could write a bare provider bucket that the dispatcher never consulted;
+legacy or foreign buckets could also shadow the server's explicit owner prefix.
+
+Decision: `settings/provider-key-reveal.ts` owns only temporary reveal/edit
+presentation. Pending replacements and persistence remain in the routing
+authority. Each view binds the current draft and credential row; pending reads
+hold releasable entries. Re-render, Settings close and external removal mask old
+inputs and clear plaintext/DOM references through the shared lifecycle scope.
+A late read cannot repopulate a retired view or take newer focus. A staged value
+is not treated as the committed server baseline when undoing an edit. The
+audited reveal endpoint and encrypted-envelope display policy remain unchanged.
+
+`settings/provider-key-stats.ts` owns reconstructible statistics state and
+runtime override coordination. Reads coalesce within the current view, fail
+explicitly and remain retryable. A server-reported `key_namespace`, including
+an explicit empty prefix, selects the statistics and write target. Without that
+field, only a unique existing credential bucket supplies legacy evidence;
+missing or ambiguous evidence refuses a write. No client-invented owner ID is
+accepted as a substitute.
+
+Writes reserve click order while namespace reads settle, then serialize at the
+canonical server namespace/credential across draft refreshes. Different targets
+remain concurrent. This is command ordering, not a capacity limit. Closing a
+view preserves accepted writes; a draft replacement refuses old commands that
+have not begun their POST. Completed writes update a reopened view only with
+matching namespace evidence, and their receipts survive an older in-flight
+statistics snapshot. Pending checkbox intent remains visible until its newest
+command settles. Durable-disabled credentials still re-enable through the
+existing staged Settings save, rather than a runtime override.
+
+The retained adapter owns existing card markup and notices. These controllers
+own neither dispatch admission/health policy nor general named credentials from
+`credentials-vault.ts`. They start no timer or network work at module import.
+Statistics refresh creates one Provider projection and one credential index per
+provider for the pass, rather than rebuilding catalog metadata for every key.
+It preserves focused controls when repainting their metrics/actions. In a
+paired Node 22/jsdom run with 40 providers, 800 credentials, 8,000 catalog models,
+8,000 offerings and 16,000 request names, the median refresh fell from
+4,732.33 ms to 238.65 ms (2 warmups, 7 alternating samples). Both paths used the
+same health renderer and produced identical DOM. This isolates projection/index
+reuse in statistics refresh; it does not measure startup, network or whole-page
+latency.
+
+Alternatives rejected: a shared plaintext cache would outlive the view; treating
+a staged value as the server baseline loses unsaved edits; merely ignoring an
+older write response does not order the actual backend commands; a provider-ID
+guess or arbitrary matching bucket is not owner evidence; serializing every
+credential behind one queue would delay independent work.
+
+Specifications: `tests/providers/test_provider_credentials_view.py` covers
+retirement, draft replacement, staged edits, focus, failed reads, namespace
+selection, ordered writes and independent targets. The Provider browser journey
+reproduces a reveal response arriving after the real Settings close action.
+
+### Immediate Provider commands and unsaved credential inputs
+
+Problem: Enter and blur could submit the same key twice. Failed adds left the
+input disabled; cancellation and replacement left plaintext in detached inputs.
+Delete confirmations captured old rows but used a later draft revision. Provider
+endpoint calls bypassed the whole-document save chain, and their subsequent GET
+could erase edits made before or during the write, including pending secret
+replacements. A failed refresh was indistinguishable from a failed write.
+
+Decision: `provider-key-editor.ts` owns the input's listeners, plaintext and
+submission promise using the shared lifecycle scope. Cancel handles the pointer
+event before blur; Enter/blur join one submission. Closing/removing the view
+releases references and plaintext without cancelling an accepted command.
+Acknowledged adoption can carry newer inputs into the resulting draft; repaint
+waits until those inputs settle, so an older response cannot discard a reopened
+input. Failures restore only a current input and do not take newer focus.
+
+`provider-mutations.ts` prepares detached Provider bundles and credential grants
+from the current draft after entering the existing routing write chain. The
+backend retains atomic Provider/secret storage and revision admission. The view
+captures confirmation identity before awaiting the dialog; the command checks
+the provider/access and credential identities again when it starts. Separate
+inputs remain separate accepted adds; only duplicate submission of one input is
+coalesced. A later error-dialog focus change cannot resubmit unchanged failed
+text; Enter or an edited value supplies a new retry intent. Another dialog
+taking focus is not a credential submission. The retained adapter owns card
+markup, confirmation and notices.
+
+`model-routing-authority.ts::runModelRoutingMutation` shares the queue used by
+`persistModelRoutingNow`. A partial endpoint receipt is followed by a fresh full
+projection read, with the editor guard captured before the POST. Failed refresh
+does not turn an acknowledged add into a retryable failed write. Existing or
+newer unsaved routing edits retain their draft and original CAS revision; pending
+secret replacements survive metadata refresh. Only acknowledged deletion clears
+that credential's pending replacement. A separate notice explains when the
+operation committed but the view could not fully update. No automatic rebase or
+blind retry claims authority over other actors' changes.
+
+Alternatives rejected: a second Provider write queue still races the common
+whole-document PUT; rereading the global revision after a confirmation silently
+authorizes a different target; swallowing write errors strands the input;
+treating every post-write refresh problem as write failure invites duplicate
+secrets; merging a partial receipt into an arbitrary newer draft would invent a
+conflict resolution policy without the full committed write response.
+
+Specifications: `tests/providers/test_provider_mutations.py` covers input
+retirement, confirmation identity, retry and ordering, draft/CAS preservation,
+secret replacements and acknowledged refresh failures. The Provider browser
+credential editor journey exercises real cancel, Enter, refusal, retry and
+close-during-write actions; routing projection tests preserve the existing
+whole-document read/save contract.
+
+### Provider creation and the commit wake hint
+
+Problem: template, custom-endpoint, discovery and local-deploy adds created the
+Provider outside the routing write chain, assigned the receipt revision to the
+editor draft, and joined any in-flight authority read. The repository publishes
+`model_routing.changed` inside its commit, before the create endpoint returns,
+so Settings live sync was usually reading already. That read saw the draft
+revision change underneath it and declined the committed document; the add then
+repainted the old draft, so the new Provider card stayed missing until Settings
+was reopened. With no read in flight, the same path silently discarded unsaved
+routing edits and pending key replacements.
+
+Decision: `_stageModelRoutingProviderBundle` creates through
+`runModelRoutingMutation` like every other Provider command and never writes the
+editor revision. A refresh owed to an acknowledged write is satisfied once any
+complete adoption, typically the wake-hint read that won the race, has brought
+the editor to that revision: the revision only advances together with an adopted
+committed document. The command's own declined read therefore no longer reports
+the "saved, but the view could not update" notice; a draft the user kept unsaved
+still reports it.
+
+Alternatives rejected: suppressing hints for the page's own writes needs a
+write-origin field in the push contract and leaves the receipt racing opening
+and other-tab reads; waiting for live sync to settle adds a timing policy;
+rebasing a kept draft onto the new authority invents a merge policy.
+
+Specifications: `tests/providers/test_provider_mutations.py` drives the real
+live-sync and authority owners through both read orders, draft/secret
+preservation and write-chain admission;
+`tests/frontend/test_settings_routing_projection.py` pins the refresh rule; and
+`tests/e2e/test_provider_template_add.py` holds the receipt in real Chromium so
+the wake-hint read is provably in flight while the new card opens.
+
+### Surface projection and retirement ownership
+
+Problem: keyed DOM caches and retained round controls kept superseded projection
+objects after equivalent snapshots, and a failed tool cleanup could skip siblings
+or retry an already-retiring body. Decision: `conversation/ui/surface-turn-renderer.ts` owns keyed Turn parts,
+grouped reply entries and the tool panel header slot. The Surface supplies ephemeral window
+ranges, panel state and current-identity navigation ports, retaining sole ownership of scroll
+and residency. Presentation caches advance even when equality skips painting; round controls retain IDs,
+not old projections. `conversation/ui/surface-node-lifecycle.ts` releases only
+Surface-owned DOM references and finishes sibling cleanup before rethrowing the
+first error. A retired panel toggle is inert (delegation is rooted in the live
+Surface), and panel choices are keyed by presentation, never by node. Surface
+disposal clears its graph, window maps, panel choices and public root.
+Singleton slots and keyed children share one `createSurfaceDom` instance bound
+to this retirement owner. It collects duplicate siblings before retiring them,
+keeps the first node and its reader state, and finishes all duplicate cleanup
+before propagating the first error. Raw removal is not an alternative for a
+managed duplicate: it detaches DOM but leaves renderer requests/listeners and
+projection references alive. The lifecycle specification covers both keyed
+blocks/Turns and singleton content/lane slots with real abortable resources;
+a failed duplicate cleanup still retires every duplicate exactly once.
+Alternatives rejected: disabling keyed reuse loses reader focus/disclosure state;
+a generic best-effort lifecycle scope would swallow required renderer failures.
+Specs: `surface-lifecycle.test.ts` and `tests/conversation_surface_retention.test.cjs`;
+the measured ownership boundary is documented in `RESOURCE_CONTROL.md`.
+
+
+### Surface window preparation
+
+Problem: every streamed frame traversed all loaded Turns to discover branches
+and locate the first/last mounted Turn, although composition already owned the
+lane and Turn-location indexes. Decision: `surface-window-preparation.ts` owns
+pure lane discovery, budget allocation and stable-ID remapping. The Surface
+reads geometry once and retains DOM, history-flight and frame lifecycles.
+Composition shares its existing maps through an optional read-only `navigation`
+port and publishes ordered child-lane IDs. Eligible local deltas reuse locations
+and child IDs; structural changes rebuild them without mutating earlier views.
+Only an exact indexed lane identity can use the fast path. External or serialized
+views use their explicit Turn/branch graph; cycle-rejected graphs keep diagnostic
+placeholders and omit navigation. Collapsed branches keep the same reachability
+and allocation order. Windows, reader focus and tool disclosure remain unchanged.
+
+Alternatives rejected: a Surface-owned index would duplicate graph invalidation;
+flattening every frame keeps the history-sized traversal; trusting an index after
+replacing its lane could display stale branches. `surface-window-index.test.ts`
+covers bounded reads, graph equivalence, stable anchors, ordering and fallback;
+`selection-deltas.test.ts` verifies incremental composition against a fresh view.
+Equivalent-work measurements and their limits are in `RESOURCE_CONTROL.md`.
+
+### Run-conclusion snapshot publication
+
+Problem: the retained run-conclusion writer replaced an entry inside the same
+summary map, while the lifecycle selector keys that input by map identity. A
+concluded run could keep its old reason and unsent report until another change
+invalidated selection. Decision: the receipt writer publishes a new map and a
+new record, sharing untouched records. Settings hydration already replaces the
+map. Existing report preservation, unsent/incomplete flags and rejection of a
+bare stop after a clean report remain authoritative. The retained writer itself
+now participates in the selector oracle and rendered-notice specification.
+Alternatives rejected: scanning or serializing the complete summary map on every
+streaming frame repeats work; a renderer force-refresh masks stale projection
+and adds another invalidation path. No new cache, event, poll or transcript state
+is introduced. Specs: `presentation/view-model/selection-deltas.test.ts` and
+`tests/frontend/test_frontend_conversation_surface_vite.py`.
+
+### Composer voice capabilities and media lifetime
+
+Problem: the composer checked speech availability only at startup, separately
+from Settings. Re-running its initializer reset active recording state. Repeated
+clicks during permission acquisition could create multiple recorders, and a
+recorder start failure left microphone tracks alive.
+
+Decision: `features/voice/audio-capabilities.ts` coalesces composer/Settings
+reads of `/api/v4/audio/capabilities`. Accepted model-picker routing responses,
+owner-scoped routing push hints and reconnect invalidate older reads. A newer
+invalidation prevents an older response or error from publishing; duplicate
+revision hints cause no read. Equal-revision accepted responses still refresh
+route health. This owner stores no provider/credential policy and adds no poller.
+The open Speech panel subscribes through its existing view lifetime.
+
+`features/voice-input.ts` owns projection and the existing action/boot bridge.
+On the first microphone action it loads `voice/recording.ts` and
+`voice/wave-encoder.ts`. A recording owns its permission request, stream,
+recorder callbacks, audio chunks, prewarmed context and transcription signal.
+Configuration updates preserve the Stop affordance and accepted recording or
+transcription; an unavailable response retires only an ungranted permission.
+Failure/disposal releases each track and context, ignores late callbacks and
+prevents a late decode from uploading. Disposal aborts in-flight transcription
+and cannot inject a late result. No transcription is sent automatically as a
+chat turn: successful text still enters the shared composer at its selection.
+
+The existing conservative codec rule remains: only all-endpoint routes may use
+raw recorded audio; mixed, chat and unknown modes use 16 kHz mono PCM16 WAV.
+Encoding failure retains the original blob and surfaces any eventual API error.
+The existing optional voice timing diagnostic remains available.
+
+Alternatives rejected: calling the old initializer after every save interrupts
+recording; separate per-view readers can publish inconsistent availability; a
+second model-routing event bus duplicates the shared push/commit owners; eagerly
+loading codec code adds optional media work to startup. Tests cover read races,
+permission denial/retirement, recording failures, teardown, codec parity and the
+real Settings-save → microphone projection boundary.
+
+### Settings initial reads and presentation lifetime
+
+Problem: closing and reopening Settings retired Speech and Catpaw views, but
+miscellaneous config, health and desktop reads still published into the same
+DOM. Old responses could replace newer presets/pricing or hide a current
+installer card. Save could also collect prior-opening server fields before
+initial config finished, and exporting config mutated the editor's cache.
+
+Decision: `settings/panel-read-session.ts` owns one opening's read scope and
+initial readiness. Close, pagehide and the next opening abort its reads and
+retire callbacks; DOM identity is checked as well. The existing model-routing
+read/write owner remains shared: retiring a view does not cancel accepted
+routing writes or create a second routing store. Server-backed preset/search/
+network/advanced/Feishu/translation panels remain inert until their config is
+projected. A fast Save waits for initial readiness before collecting or writing;
+a retired wait produces no command and a failed initial read keeps Save from
+writing stale server fields. General local controls remain interactive.
+
+`server-config-reader.ts` coalesces pending reads in the same opening and
+publishes config/pricing only from the current request/session. Its pending
+record retires inside the read before resolving waiters. Export uses a separate
+raw read and can finish after close without altering the active editor.
+`client-downloads.ts` owns readonly desktop/mobile markup and version projection;
+late failures cannot hide a later card, and unavailable iOS links return to an
+inert coming-soon row. Browser architecture probing shares one page-lifetime
+promise; it affects display only. The existing API facade forwards cancellation
+without changing endpoints, timeout/retry policy or backend authority.
+
+Alternatives rejected: checking only the modal's open class accepts old results
+after reopen; only checking DOM presence does not distinguish reused elements;
+clearing or aborting the shared routing owner on close can disrupt accepted
+writes; per-tab config caches duplicate authority. The common read session
+leaves specialized form/write lifetimes with their existing owners.
+
+### Settings save input and feedback ownership
+
+Problem: Save collected later feature flags, Speech fields and miscellaneous
+server settings after earlier writes awaited. Edits made meanwhile, including
+inputs from a reopened modal, could join the older save. Completion could clear
+a newer search key, close a newer window, or replace its failure/status text.
+
+Decision: `settings/save-input.ts` captures feature choices and detached JSON
+payloads before the first write. The Speech owner captures its form, activation
+intent and panel scope at the same boundary. Local client settings apply
+synchronously. `save-export.ts` coordinates those inputs through existing feature,
+routing and config API owners. The routing aggregate retains its established
+serialized draft-drain policy and per-key acknowledgement; this change creates
+no second routing transaction or CAS state owner.
+
+`settings/save-feedback.ts` owns one save latch and the originating view's
+feedback. Close/pagehide/reopen retire presentation while accepted writes settle;
+busy state is released when that save finishes. Input capture follows initial
+readiness, and edit monitoring starts after capture, so edits already included
+in the submission are not reported as pending. New form edits keep the window
+open. Search-key acknowledgement clears only a matching submitted key and gateway
+in the current view. Committed application policy still refreshes independently
+of the editor. Rejected or missing config acknowledgements surface as failures.
+The old delayed success-text clearing timer is removed: successful unchanged saves
+close the window, while failure and unsaved-work notices remain actionable.
+
+Alternatives rejected: collecting each tab after its predecessor finishes mixes
+different user intents; aborting accepted writes on close confuses settlement
+with presentation; freezing every form for the whole network transaction prevents
+useful editing; recreating removed classic save helpers to satisfy old tests would
+leave the real typed coordinator unverified. Native tests and browser journeys
+exercise delayed features, later inputs, credential acknowledgement and reopen.
+
+### Settings import and subscription presentation lifetime
+
+Problem: file import and OAuth completions treated a still-mounted Settings
+node as proof that their original view remained open. Closing and reopening the
+same modal let old imports reopen the editor, old confirmations issue commands,
+and old login callbacks paint or clear new work. Status and device polling had
+independent requests and timers. A subscription refresh could also adopt over a
+draft edited before that refresh began.
+
+Decision: `settings/config-import.ts` uses the existing Save latch and feedback
+owner. Closing retires a pending file read before command submission. An accepted
+import remains pending until its acknowledgement; it refreshes application policy
+but only reopens its original, unchanged editor. Read, JSON and acknowledgement
+failures release the latch and remain visible in that editor.
+
+`settings/oauth-panel-lifetime.ts` reuses each Settings opening's lifecycle scope.
+Status, device observation and transient egress/reset reads share one pending
+request; close aborts reads and releases presentation timers. The existing
+2-second/8-attempt transient read policy and 3-second device observation cadence
+are unchanged. A device status projected on reopening resumes observation.
+Commands invalidate older status reads so a pre-command response cannot repaint
+over an acknowledged login. The retained OAuth presenter supplies transport and
+render ports; remove those bridges when migrating the remaining presenter.
+
+OAuth preparations, confirmations, popup handlers, clipboard feedback and device
+fallback continuations capture their original opening. Accepted exchanges and
+writes still settle after it retires. A flow completion clears only its own
+callback gate and keeps its captured browser-exchange parameters. Codex login
+reuse captures a committed-policy callback independently from its original
+presentation callback. The original origin/state checks, manual-code distinction,
+server-first exchange and constrained-proxy fallback remain unchanged.
+
+`refreshCommittedModelRouting` uses the routing authority's existing fresh-read,
+dirty-draft and credential-preservation policies after a subscription command.
+It publishes committed composer data even when the originating view retired.
+`_refreshSubscriptionModelCatalog` takes that captured view; it cannot adopt
+miscellaneous config or render a newer Settings window on the old command's
+behalf. No additional model catalog or routing-write queue is introduced.
+
+Alternatives rejected: checking connectivity or the modal's `open` class cannot
+distinguish two openings of the same DOM. Cancelling accepted writes would lose
+their acknowledgement without reversing server effects. Keeping independent
+pollers would preserve overlapping requests and duplicate cleanup. Resetting the
+editor from the login response would discard user work and bypass routing's
+committed-state authority.
+
+Verification: `tests/frontend/test_settings_import_oauth_lifecycle.py` exercises
+retired reads, confirmations, accepted writes, flow replacement, captured PKCE
+parameters, shared requests, timer release and retained drafts. Existing OAuth
+gate/exchange/reset/fallback specifications retain their real authorization code;
+classic fragment fixtures explicitly mount the real typed presentation scope.
+`test_settings_oauth_lifecycle_browser.py` verifies close/reopen and device resume
+through actual controls with synthetic intercepted responses.
+
+
+### Settings independent tab activation and MCP reads
+
+Problem: opening General also loaded MCP, Skills, tool inventory, context and
+Database. Revisiting context could replace unsaved edits; closing Settings did
+not retire Database or tool-inventory reads. MCP catalog/update/tool responses
+could repaint the reused modal after close/reopen, while concurrent requests
+repeated the same work.
+
+Decision: `settings/tab-activation.ts` tracks first visits in the existing
+`panel-read-session.ts` and registers each activated feature's cleanup there.
+MCP, Skills, Tools and context load once per opening; Database preserves its
+existing refresh-on-visit behavior. Configuration required by Save still loads
+at opening, and independent tabs do not wait for that configuration. Context
+also fences its follow-up memory read; inventory aborts and fences its own read.
+
+`settings/mcp-settings-reads.ts` coalesces catalog, update and per-server tool
+reads and checks opening, DOM and request identity before publication. Its
+breaker refresh and countdown use the existing 3–15-second and 1-second policy,
+but only while MCP is visible. Closing retires reads and observers; returning
+to a failed catalog allows an ordinary fresh read. No new polling or retry
+policy is introduced.
+
+An acknowledged command needs a fresh post-write catalog even after closing.
+That refresh remains independent of view cancellation, updates the common tool
+summary and publishes markup only to its captured current opening. Ordinary
+refreshes join it; older reads cannot replace it. Reconnect/update invalidates
+cached schemas and reloads expanded tool lists. Install, connection, toggle,
+rollback and confirmation authorities remain with their existing command owner.
+The retained presenter supplies explicit transport and projection ports rather
+than another request/timer store.
+
+Alternatives considered: making every tab load on every visit loses edits and
+repeats work; deferring shared config would weaken Save readiness; aborting all
+post-write reads on close would leave the application tool summary stale; merely
+checking DOM presence cannot distinguish successive openings using the same
+nodes. A second Settings state machine is unnecessary because each feature
+already has an explicit lifecycle.
+
+Verification: native activation/read tests exercise lazy visits, coalescing,
+retirement, late errors, hidden timers and accepted-command settlement. Actual
+Chromium controls verify network activation, close/reopen and preserved context
+edits with synthetic endpoints. Retained MCP optimistic/error contracts and
+neighboring Save, OAuth, Tools, context and Database suites remain applicable.
+
+### MCP command input and presentation ownership
+
+Problem: installation continuations read the mutable current dialog target;
+closing or replacing the dialog could redirect polling or close a later form.
+Old confirmations still issued destructive commands after Settings retired.
+Custom server creation claimed successful connection without checking its
+response. Concurrent per-tool full replacements could settle out of order, and
+rollback could overwrite a later edit.
+
+Decision: `settings/mcp-commands.ts` owns install, connection, removal, update
+and custom-server commands through the existing MCP API facade. Inputs are
+captured before awaiting. Repeated submissions in the same dialog join its
+pending command; pending card state has operation identity so one completion
+cannot clear another operation. Accepted installation observation retains the
+existing 2.5-second cadence and six-minute deadline, even if its view closes.
+Acknowledged writes refresh the common catalog/tool summary independently of
+view lifetime. A created server remains committed when its connection fails;
+the form reports that failure and catalog refresh still occurs.
+
+`mcp-command-view.ts` attaches feedback and dialog resources to the common
+Settings opening. Closing retires callbacks/timers and clears temporary form
+values. Delayed success only closes its original unchanged form. An unchanged
+successful submission remains disabled during that delay; a later edit cancels
+the close and permits a new explicit submission. Confirmations must retain the
+same view before authorizing a write. Retired failures remain in debug output
+without replacing a later dialog's feedback.
+
+`mcp-tool-selection.ts` retains only outstanding user intents and the last
+acknowledged tool policy for each server. It sends one full replacement at a
+time for that server, immediately projects queued edits, and rebases them after
+success or refusal. Different servers remain independent. Fresh tool rows
+adopt pending intent by tool name. Failed rendering cannot undo an acknowledged
+write or strand a queued edit; idle server records are released before callers
+resume. This is command ordering, not a new admission or resource limit.
+
+Alternatives considered: aborting all commands on close loses accepted effects;
+checking only overlay visibility accepts a replacement form using the same
+nodes; discarding older responses does not fix out-of-order server writes;
+capturing whole optimistic snapshots carries a refused earlier edit into later
+requests. A second catalog or server-policy store is unnecessary: presentation
+rows and API authority remain with their existing owners.
+
+Verification: native command scenarios cover capture, stale confirmations,
+close/reopen, acknowledgement, duplicate submission, partial connection failure,
+independent servers, failed-write rebase and projection fault injection. Their
+drivers require a completion receipt, since a pending Promise alone does not
+keep Node alive. Existing optimistic/error and read-lifetime contracts remain
+applicable; real-browser tests exercise the actual dialog/action composition.

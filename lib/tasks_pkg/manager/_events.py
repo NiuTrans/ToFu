@@ -9,12 +9,13 @@ and steerable through the package facade.
 """
 
 from contextlib import nullcontext
+from functools import partial
 
 from lib.agent_core.publication import check_publication
 import time
 import uuid
 
-from lib.agent_core.events import EventType
+from lib.agent_core.events import EventType, require_registered_event
 from lib.conversation_sync.attempt_identity import is_conversation_attempt
 from lib.error_envelope import make_envelope
 from lib.log import get_logger
@@ -175,17 +176,60 @@ def _strip_base64_for_snapshot(messages):
 
 
 def reset_task_text(task, *, content='', thinking=''):
-    """Replace live text and advance the snapshot generation atomically."""
+    """Replace live text and advance the snapshot generation atomically.
+
+    A vetoed answer the replacement drops passes to its continuation record
+    in the same critical section, so no segment projection shows it twice or
+    not at all. The segment mirror is then refreshed before the caller's
+    ``DELTA_RESET``, whose structural projection would otherwise clear the
+    live answer while the stale mirror still lacks the released record.
+    """
+    from lib.tasks_pkg.segments import release_continuation_prose
     # Runtime-owned tasks always carry the lock. Legacy/recovered task-shaped
     # mappings (and extension/test seams) may predate that field; they are not
     # live stream writers, so a no-op guard preserves read/reset compatibility
     # without mutating the mapping just to inspect it.
     with task.get('content_lock') or nullcontext():
+        released = release_continuation_prose(
+            task, content=content, thinking=thinking)
         task['content'] = content
         task['thinking'] = thinking
         epoch = int(task.get('_contentEpoch') or 0) + 1
         task['_contentEpoch'] = epoch
+    if released:
+        try:
+            from lib.conversation_sync.settled_rows import settle_items
+            from lib.tasks_pkg.segments import assemble_segments
+            # The mirror is replaced wholesale, never edited: share it.
+            task['segments'] = settle_items(
+                assemble_segments(task), previous=task.get('segments'))
+        except Exception:
+            logger.warning('[Task %s] segment mirror refresh after a vetoed '
+                           'answer release failed', str(task.get('id', ''))[:8],
+                           exc_info=True)
     return epoch
+
+
+def begin_live_text_paragraph(task):
+    """Start the next assistant message on a new paragraph of the live text.
+
+    A continuation that keeps the vetoed answer as the provisional answer
+    leaves it in the live text, and the next message's deltas append to it.
+    Without a blank line between them Markdown runs the two messages into one
+    paragraph. Returns the separator appended to each non-empty channel; the
+    caller streams it as one ``DELTA`` so the live view stays byte-identical
+    to the accumulated text.
+    """
+    appended = {}
+    with task.get('content_lock') or nullcontext():
+        for channel in ('content', 'thinking'):
+            text = task.get(channel) or ''
+            if not text or text.endswith('\n\n'):
+                continue
+            separator = '\n' if text.endswith('\n') else '\n\n'
+            task[channel] = text + separator
+            appended[channel] = separator
+    return appended
 
 
 def snapshot_task_text(task):
@@ -285,7 +329,94 @@ def _try_readopt_task(task) -> bool:
     return True
 
 
+def _revoke_stale_attempt(task):
+    """Stop a worker whose conversation attempt the authority proved stale.
+
+    The attempt is settled or superseded: this worker is a zombie with no
+    durable sink. Flag the cooperative abort so the round-start gate /
+    abort_check stop it at the next poll instead of letting it flood
+    error.log for hours (2026-08-17: 5 tasks ran 2h+ past their v2 abort,
+    ~30k withheld pushes). Idempotent — the same stamp the abort endpoints
+    plant — then revoke this executor's publication.
+    """
+    if not task.get('aborted'):
+        task['aborted'] = True
+        task['_abort_timestamp'] = time.time()
+        task['_abort_reason'] = 'conversation_attempt_stale_fence'
+        abort_event = task.get('abort_event')
+        if abort_event is not None:
+            abort_event.set()
+        logger.warning('[Task %s] conversation attempt rejected as stale — '
+                       'cooperative abort flagged so the worker '
+                       'unwinds instead of looping',
+                       (task.get('id') or '?')[:8])
+    from lib.tasks_pkg.event_delivery import EventDeliveryRevoked
+    raise EventDeliveryRevoked(
+        'conversation event rejected: attempt is stale or no longer current')
+
+
+def _refuse_rejected_task_event(task):
+    """Raise the verdict for a Turn event write the authority rejected."""
+    from lib.turn_lifecycle import get_attempt, LIVE_ATTEMPT_STATUSES
+    from lib.tasks_pkg.manager._registry import task_user_id
+    from lib.agent_core.storage_errors import StorageError
+    current_attempt = get_attempt(task['_attemptId'], user_id=task_user_id(task))
+    if (current_attempt['status'] in LIVE_ATTEMPT_STATUSES
+            and current_attempt.get('taskId') in (None, '', task['id'])):
+        # A rejected live CAS is not a revocation witness.
+        # Retain its exact head for repair rather than dropping
+        # the accepted tail or planting a false zombie abort.
+        raise StorageError('database_conflict',
+                           'Live task event authority write was rejected')
+    _revoke_stale_attempt(task)
+
+
+def _persist_task_event_batch(task, entries):
+    """Persist a frozen FIFO run of queued Turn events in one batch call.
+
+    Each ``TaskEventBatchEntry`` is exactly what its item's own
+    ``_persist_before_push`` would record, and each outcome maps back with
+    that path's rules. The delivery FIFO retries the same entry objects, so
+    ``record_task_events`` reconciles exact rows and never applies a
+    committed entry twice.
+    """
+    check_publication()
+    if task.get('_invocationPublicationClosed'):
+        raise RuntimeError('Child invocation publication revoked')
+    from lib.tasks_pkg.event_log import (
+        EventAttemptStaleError,
+        append_persistent_event,
+        reset_persistent_event_projection,
+    )
+    from lib.turn_lifecycle import record_task_events
+    outcomes = record_task_events(task, entries)
+    if not all(outcomes):
+        for entry, outcome in zip(entries, outcomes):
+            if not outcome:
+                reset_persistent_event_projection(task['id'], entry.task_event['event'])
+        _refuse_rejected_task_event(task)
+    for entry, outcome in zip(entries, outcomes):
+        if outcome != 'carried':
+            # The authority applied the record without carrying its row.
+            try:
+                append_persistent_event(task['id'], entry.sequence, entry.task_event['event'])
+            except EventAttemptStaleError:
+                _revoke_stale_attempt(task)
+
+
 def append_event(task, event):
+    # Raw frames bypass build_event; this seam writes the log that durable
+    # reconstruction folds, so it admits only the registered vocabulary.
+    require_registered_event(event)
+    if (task.get('_background_detached')
+            and task.get('status') in TASK_REPLAY_TERMINAL_STATUSES):
+        # A handed-off command outlives its turn and reports through its
+        # durable completion receipt. A late frame for the settled turn would
+        # re-enter the closed attempt, whose stale-attempt fence then aborts
+        # the shared task signal that the command itself observes.
+        logger.debug('[Manager] ignored %s from a detached command of settled task=%s',
+                     event.get('type'), str(task.get('id') or '?')[:8])
+        return None
     from lib.tasks_pkg.event_delivery import delivery_lane_for
     lane = delivery_lane_for(task)
     if task.get('_eventDeliveryAdmissionError') and event.get('type') not in TASK_REPLAY_TERMINAL_EVENT_TYPES:
@@ -504,33 +635,38 @@ def _append_event_ordered(task, event, *, lane=None):
         # executor; critical interaction/checkpoint/terminal fences converge
         # earlier accepted work. Legacy provider ports keep their own guard.
         _ingress_token = active_provider_ingress_token(task)
-        from lib.agent_core.events import interaction_types
-        barrier = event.get('type') in (
-            frozenset(TASK_REPLAY_TERMINAL_EVENT_TYPES) | interaction_types()
-            | {'background_command_inject', EventType.TOOL_EFFECT})
+        from lib.tasks_pkg.event_delivery import is_barrier_event
+        # The raw frame drives terminal fencing and the delivered wire is what
+        # record_task_events judges: a barrier in either form never queues.
+        barrier = is_barrier_event(event) or is_barrier_event(_wire)
         publication_status = task.get('status')
         projection_source = None
         projection_bytes = 0
         projection_identity = None
         if lane is not None:
-            from copy import deepcopy
-            _wire = deepcopy(_wire)
-            event = deepcopy(event)
+            from lib.conversation_sync.settled_rows import detach_frame_sharing_settled, detach_sharing_settled
+            # A queued frame is copied and charged in one visit; a barrier is never charged.
+            detached, wire_charge = ((detach_sharing_settled(_wire, measure=False)[0], None) if barrier
+                                     else detach_frame_sharing_settled(_wire))
+            # Without a wire transform both names hold one frame: detach once.
+            event = detached if _wire is event else detach_sharing_settled(event, measure=False)[0]
+            _wire = detached
             if not barrier and is_conversation_attempt(task):
-                from lib.turn_lifecycle import capture_task_projection_source, task_event_projection_is_progress
-                from lib.tasks_pkg.event_delivery import coordinator, retained_snapshot_bytes
-                with coordinator().condition:
-                    previous_source, previous_bytes = lane.projection_source, lane.projection_bytes
-                    previous_identity = lane.projection_identity
-                projection_source = capture_task_projection_source(
-                    task, event, previous_source=previous_source)
-                if task_event_projection_is_progress(event) and previous_source is not None:
-                    projection_bytes = previous_bytes
-                    projection_identity = previous_identity
-                else:
-                    projection_bytes = retained_snapshot_bytes({
-                        key: value for key, value in projection_source.items()
-                        if key not in {'content', 'thinking', 'phase'}})
+                from lib.turn_lifecycle import capture_task_projection_snapshot, task_event_projection_is_progress
+                # One reference read: the coordinator swaps the triple whole,
+                # so this producer never waits for the coordinator lock.
+                previous = lane.projection
+                projection_source, projection_bytes = capture_task_projection_snapshot(
+                    task, event, previous_source=previous.source,
+                    previous_bytes=previous.source_bytes)
+                if task_event_projection_is_progress(event) and previous.source is not None:
+                    projection_identity = previous.identity
+        # A queued Turn frame of a live attempt may share one record_batch
+        # transaction with its FIFO neighbours. Like the observer status, the
+        # class is fixed at acceptance.
+        turn_batch = (lane is not None and not barrier and is_conversation_attempt(task)
+                      and not _is_post_settlement_observer_event(
+                          {'status': publication_status}, _wire))
 
         prepared_durable_wire = None
         def _persist_before_push(_seq, *, preceding_task_events=None):
@@ -554,28 +690,6 @@ def _append_event_ordered(task, event, *, lane=None):
                     reset_persistent_event_projection,
                 )
 
-                def _flag_stale_attempt_zombie():
-                    # The conversation authority permanently rejected this attempt
-                    # (settled or superseded): this worker is a zombie with no
-                    # durable sink. Flag the cooperative abort so the
-                    # round-start gate / abort_check stop it at the next poll
-                    # instead of letting it flood error.log for hours
-                    # (2026-08-17: 5 tasks ran 2h+ past their v2 abort,
-                    # ~30k withheld pushes). Idempotent — the same stamp the
-                    # abort endpoints plant.
-                    if task.get('aborted'):
-                        return
-                    task['aborted'] = True
-                    import time as _time
-                    task['_abort_timestamp'] = _time.time()
-                    task['_abort_reason'] = 'conversation_attempt_stale_fence'
-                    abort_event = task.get('abort_event')
-                    if abort_event is not None:
-                        abort_event.set()
-                    logger.warning('[Task %s] conversation attempt rejected as stale — '
-                                   'cooperative abort flagged so the worker '
-                                   'unwinds instead of looping',
-                                   (task.get('id') or '?')[:8])
                 # The live frame remains byte-identical. Only its durable
                 # storage_events carrier receives the shared storage
                 # projection (usage diagnostics stripped; messages snapshots
@@ -641,21 +755,7 @@ def _append_event_ordered(task, event, *, lane=None):
                     raise RuntimeError('terminal Turn settlement remains pending')
                 if not outcome:
                     reset_persistent_event_projection(task['id'], durable_wire)
-                    from lib.turn_lifecycle import get_attempt, LIVE_ATTEMPT_STATUSES
-                    from lib.tasks_pkg.manager._registry import task_user_id
-                    from lib.agent_core.storage_errors import StorageError
-                    current_attempt = get_attempt(task['_attemptId'], user_id=task_user_id(task))
-                    if (current_attempt['status'] in LIVE_ATTEMPT_STATUSES
-                            and current_attempt.get('taskId') in (None, '', task['id'])):
-                        # A rejected live CAS is not a revocation witness.
-                        # Retain its exact head for repair rather than dropping
-                        # the accepted tail or planting a false zombie abort.
-                        raise StorageError('database_conflict',
-                                           'Live task event authority write was rejected')
-                    _flag_stale_attempt_zombie()
-                    from lib.tasks_pkg.event_delivery import EventDeliveryRevoked
-                    raise EventDeliveryRevoked(
-                        'conversation event rejected: attempt is stale or no longer current')
+                    _refuse_rejected_task_event(task)
                 if (outcome and event.get('type') in
                         TASK_REPLAY_TERMINAL_EVENT_TYPES):
                     # The turn projection is now durably terminal. Translation
@@ -676,15 +776,7 @@ def _append_event_ordered(task, event, *, lane=None):
                         # the exact verdict the old per-frame pre-read
                         # produced on this lane. Same fail-closed outcome:
                         # nothing durable, nothing pushed, worker aborted.
-                        _flag_stale_attempt_zombie()
-                        from lib.tasks_pkg.event_delivery import EventDeliveryRevoked
-                        raise EventDeliveryRevoked(
-                            'conversation event rejected: attempt is stale or no longer current')
-                if not outcome:
-                    _flag_stale_attempt_zombie()
-                    from lib.tasks_pkg.event_delivery import EventDeliveryRevoked
-                    raise EventDeliveryRevoked(
-                        'conversation event rejected: attempt is stale or no longer current')
+                        _revoke_stale_attempt(task)
                 if event.get('type') == EventType.TOOL_EFFECT and (outcome is True or outcome == 'carried'):
                     effect_durable = True
             else:
@@ -706,15 +798,15 @@ def _append_event_ordered(task, event, *, lane=None):
                            user_id=int(task['_userId']))
 
         def _enqueue_before_push(sequence):
-            from lib.tasks_pkg.event_delivery import coordinator, retained_snapshot_bytes
+            from lib.tasks_pkg.event_delivery import coordinator
             try:
                 if event.get('type') == 'phase' and isinstance(task.get('phase'), dict):
                     task['phase']['seq'] = sequence
                     if projection_source is not None and isinstance(projection_source.get('phase'), dict):
                         projection_source['phase']['seq'] = sequence
-                own_values = ((_wire,) if projection_source is None else
-                    (_wire, projection_source['content'], projection_source['thinking'],
-                     projection_source.get('phase')))
+                wire_bytes, own_bytes = wire_charge.complete(*(() if projection_source is None else (
+                    projection_source['content'], projection_source['thinking'],
+                    projection_source.get('phase'))))
                 progress_frame = None
                 persist_progress = None
                 progress_wire_bytes = 0
@@ -724,7 +816,7 @@ def _append_event_ordered(task, event, *, lane=None):
                     from lib.tasks_pkg.event_delivery import ProgressFrame
                     from lib.tasks_pkg.event_log import project_persistent_event
                     progress_frame = ProgressFrame(sequence, _wire, _publish_ordered_event)
-                    progress_wire_bytes = retained_snapshot_bytes(_wire) * 2
+                    progress_wire_bytes = wire_bytes * 2
                     from lib.storage.protocol import canonical_json
                     progress_payload_bytes = len(canonical_json(_wire)) + 256
                     def persist_progress(frames):
@@ -732,16 +824,43 @@ def _append_event_ordered(task, event, *, lane=None):
                             'event': project_persistent_event(task['id'], frame.event)}
                             for frame in frames[:-1]]
                         _persist_before_push(sequence, preceding_task_events=preceding)
+                batch_port = {}
+                if turn_batch:
+                    from lib.agent_core.generated_task_event_delivery_contract import (
+                        STRUCTURAL_BATCH_COMMAND,
+                    )
+
+                    def batch_entry(frames):
+                        # The carrier _persist_before_push would send, with
+                        # each row projected once, in FIFO order.
+                        nonlocal prepared_durable_wire
+                        from lib.tasks_pkg.event_log import project_persistent_event
+                        from lib.turn_lifecycle import TaskEventBatchEntry
+                        preceding = [{'task_id': task['id'], 'sequence': frame.sequence,
+                            'event': project_persistent_event(task['id'], frame.event)}
+                            for frame in (frames or ())[:-1]]
+                        if prepared_durable_wire is None:
+                            prepared_durable_wire = project_persistent_event(task['id'], _wire)
+                        carrier = {'task_id': task['id'], 'sequence': sequence,
+                                   'event': prepared_durable_wire}
+                        if preceding:
+                            carrier['preceding_events'] = preceding
+                        return TaskEventBatchEntry(
+                            raw_event=_wire, sequence=sequence,
+                            projection_source=projection_source,
+                            preceding_events=preceding or None, task_event=carrier)
+                    batch_port = dict(batch_scope=STRUCTURAL_BATCH_COMMAND,
+                                      persist_batch=partial(_persist_task_event_batch, task),
+                                      batch_entry=batch_entry)
                 # submit checks the producer fence atomically with FIFO
                 # acceptance and transfers deferred contexts to this root.
                 # record_task_event still owns the parent's attempt/CAS fence.
-                coordinator().submit(lane, sequence,
-                    retained_snapshot_bytes(*own_values) + retained_snapshot_bytes(_wire),
+                coordinator().submit(lane, sequence, own_bytes + wire_bytes,
                     lambda: _persist_before_push(sequence), _publish_ordered_event,
                     projection_source=projection_source, projection_bytes=projection_bytes,
                     projection_identity=projection_identity, progress_frame=progress_frame,
                     persist_progress=persist_progress, progress_wire_bytes=progress_wire_bytes,
-                    progress_payload_bytes=progress_payload_bytes)
+                    progress_payload_bytes=progress_payload_bytes, **batch_port)
                 if _ingress_token:
                     from lib.tasks_pkg.manager._provider_ingress_guard import record_deferred_observer_event
                     record_deferred_observer_event(task, token=_ingress_token,
@@ -769,11 +888,15 @@ def _append_event_ordered(task, event, *, lane=None):
                 task['_terminalPersistencePending'] = True
                 task['_terminalPersistenceRetryReady'] = True
             flush_task_events(task)
-            _persist_before_push(sequence)
+            from lib.tasks_pkg.persistence_wait import wait_for_persistence
+            wait_for_persistence(
+                task, lambda: _persist_before_push(sequence),
+                label='task event barrier', cancellable=False)
             from lib.tasks_pkg.event_delivery import advance_event_visibility
             advance_event_visibility(task, sequence)
             if terminal:
-                lane.projection_source = None
+                from lib.tasks_pkg.event_delivery import coordinator
+                coordinator().release_projection(lane)
 
         _before_push = (None if _ingress_token else _persist_before_push)
         deliver_push = not bool(_ingress_token) and not callable(task.get('_invocationEventSink'))

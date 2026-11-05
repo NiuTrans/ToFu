@@ -17,7 +17,7 @@ def _record(text):
         'lib.retention_test', logging.INFO, __file__, 1, text, (), None)
 
 
-def test_log_family_budget_prunes_oldest_rotated_only(tmp_path):
+def test_log_family_budget_prunes_oldest_rotated_only(tmp_path, caplog):
     base = tmp_path / 'app.log'
     base.write_bytes(b'current')
     old = tmp_path / 'app.log.2026-01-01'
@@ -26,6 +26,7 @@ def test_log_family_budget_prunes_oldest_rotated_only(tmp_path):
     newer.write_bytes(b'n' * 80)
     os.utime(old, ns=(1, 1))
     os.utime(newer, ns=(2, 2))
+    caplog.set_level(logging.INFO, logger='lib.logging_pkg.log_retention')
 
     handler = _SizeAndTimeRotatingFileHandler(
         str(base), when='midnight', backupCount=30, encoding='utf-8',
@@ -36,6 +37,14 @@ def test_log_family_budget_prunes_oldest_rotated_only(tmp_path):
         assert newer.exists(), 'budget fits after deleting only the oldest'
     finally:
         handler.close()
+    [record] = [record for record in caplog.records
+                if getattr(record, 'tofu_event_name', '')
+                == 'logging.retention_removed']
+    assert record.levelno == logging.WARNING
+    assert record.tofu_event_fields['path'] == str(old)
+    assert record.tofu_event_fields['reason'] == 'family_budget'
+    assert record.tofu_event_fields['bytes'] == 80
+    assert record.tofu_event_fields['budget_bytes'] == 100
 
 
 def test_multiple_size_rollovers_get_unique_chunks(tmp_path):

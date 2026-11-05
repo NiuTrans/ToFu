@@ -594,6 +594,13 @@ def _tool_display_desktop(fn_name, fn_args, tc_id, tc_args_str):
     elif fn_name == 'desktop_system_info':
         kind = str(args.get('type') or 'overview').strip()
         display = f'Desktop system info [{kind}]'
+    elif fn_name == 'await_device':
+        device = str(args.get('device') or '').strip()
+        reason = str(args.get('reason') or '').strip()
+        display = f'Wait for device: {device}' if device else 'Wait for a device'
+        if reason:
+            clip = reason if len(reason) <= 60 else reason[:59] + '…'
+            display += f' · {clip}'
     else:
         display = fn_name
     return display, {'toolName': fn_name}
@@ -718,6 +725,27 @@ def _tool_display_inspect_image(fn_name, fn_args, tc_id, tc_args_str):
         ops.append('grid')
     suffix = f' — {", ".join(ops)}' if ops else ''
     return f'{base}{suffix}', {'toolName': 'inspect_image'}
+
+
+def _tool_display_inspect_video(fn_name, fn_args, tc_id, tc_args_str):
+    """Build display info for inspect_video calls: ``clip.mp4 — 01:15–01:30``."""
+    path = str(fn_args.get('path') or '?')
+    base = os.path.basename(path.rstrip('/')) or path
+
+    def _clock(value):
+        try:
+            seconds = max(0, int(float(value)))
+        except (TypeError, ValueError):
+            return ''
+        if seconds >= 3600:
+            return f'{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}'
+        return f'{seconds // 60:02d}:{seconds % 60:02d}'
+
+    start, end = fn_args.get('start'), fn_args.get('end')
+    suffix = ''
+    if start is not None or end is not None:
+        suffix = f' — {_clock(start) or "00:00"}–{_clock(end) or "end"}'
+    return f'{base}{suffix}', {'toolName': 'inspect_video'}
 
 
 def _mv_base(path):
@@ -878,17 +906,17 @@ def _tool_display_paper_build(fn_name, fn_args, tc_id, tc_args_str):
 def _tool_display_search_settings(fn_name, fn_args, tc_id, tc_args_str):
     """Build display info for ``update_search_settings`` calls.
 
-    No-arg call is a pure READ of the current values; a call with kwargs is
-    a write — the label names the knobs being tuned.
+    No-arg call is a pure READ of the fetch blocklist; a call with kwargs is
+    a write — the label names the changes requested.
     """
     args = fn_args if isinstance(fn_args, dict) else {}
     keys = sorted(k for k, v in args.items() if v is not None)
     if not keys:
-        return 'Read search/fetch settings', {'toolName': fn_name}
+        return 'Read fetch blocklist', {'toolName': fn_name}
     shown = ', '.join(keys[:4])
     if len(keys) > 4:
         shown += f' +{len(keys) - 4} more'
-    return f'Tune search/fetch settings: {shown}', {'toolName': fn_name}
+    return f'Edit fetch blocklist: {shown}', {'toolName': fn_name}
 
 
 def _tool_display_human_guidance(fn_name, fn_args, tc_id, tc_args_str):
@@ -904,6 +932,32 @@ def _tool_display_human_guidance(fn_name, fn_args, tc_id, tc_args_str):
     if len(question) > _FULL_LIMIT:
         question = question[:_FULL_LIMIT - 1] + '…'
     return question, {'toolName': 'ask_human'}
+
+
+def _tool_display_exploration(fn_name, fn_args, tc_id, tc_args_str):
+    """Name the owned Chat exploration operation without implying completion."""
+    args = fn_args if isinstance(fn_args, dict) else {}
+    if fn_name == 'get_exploration':
+        display = {'catalog': 'List exploration plans',
+                   'experiments': 'Read experiment evidence'}.get(
+                       args.get('view'), 'Read exploration plan')
+    elif args.get('action') == 'create':
+        display = 'Start exploration' if args.get('start') is True else 'Plan exploration'
+        request = args.get('request')
+        objective = request.get('objective') if isinstance(request, dict) else None
+        if isinstance(objective, str) and objective.strip():
+            display += ': ' + objective.strip()[:80]
+    elif args.get('action') == 'command':
+        command = args.get('command')
+        action = command.get('action') if isinstance(command, dict) else None
+        display = {'start': 'Start exploration', 'pause': 'Pause exploration',
+                   'resume': 'Resume exploration', 'retry': 'Retry exploration',
+                   'cancel': 'Cancel exploration'}.get(action, 'Control exploration')
+    else:
+        display = {'append': 'Add exploration experiments',
+                   'guide': 'Guide current experiment'}.get(
+                       args.get('action'), 'Manage exploration')
+    return display, {'toolName': fn_name}
 
 
 def _tool_display_evolution(fn_name, fn_args, tc_id, tc_args_str):
@@ -1000,12 +1054,29 @@ def _tool_display_generic(fn_name, fn_args, tc_id, tc_args_str, *, user_id=None)
 
 
 _WORKFLOW_TOOL_LABELS = {
+    'create_conversation': 'Create a project conversation',
+    'dispatch_project_assignment': 'Dispatch a project assignment',
+    'get_project_assignment': 'Read a project assignment',
+    'report_to_user': 'Send a Coordinator update',
+    'update_task_progress': 'Update the task board',
     'get_project_workers': 'Read project Workers',
     'cancel_project_work': 'Cancel project work',
     'finish_project_request': 'Finish project request',
+    'request_user_decision': 'Request a project decision',
     'delegate_project_work': 'Delegate project work',
     'await_project_workers': 'Wait for Worker results',
     'review_project_work': 'Review Worker evidence',
+    'route_to_project': 'Forward a request to a Project Router',
+    'get_router_projects': 'Read Project Routers',
+    'router_instruction_create': 'Record a standing instruction',
+    'router_instruction_list': 'List standing instructions',
+    'router_instruction_cancel': 'Cancel a standing instruction',
+    'watchdog_snapshot': 'Read router health',
+    'watchdog_resolve_signals': 'Close fault signals',
+    'watchdog_schedule_recheck': 'Schedule a Watchdog re-check',
+    'watchdog_message': 'Send a Watchdog message',
+    'watchdog_notify_router': 'Notify the Global Router',
+    'watchdog_configure_review': 'Configure the Watchdog review',
     'evolution_explore': 'Explore research evidence',
     'evolution_artifact': 'Manage research artifacts',
     'evolution_review': 'Review research evidence',
@@ -1019,6 +1090,14 @@ _WORKFLOW_TOOL_LABELS = {
     'publish_response_file': 'Publish a response file',
     'publish_rich_response': 'Publish a rich response',
     'inspect_tool_effect': 'Inspect a tool effect',
+    'channel_threads': 'List channel threads',
+    'channel_read': 'Read channel events',
+    'channel_send': 'Send a channel message',
+    'channel_configure_thread': 'Configure a channel thread',
+    'channel_subscribe': 'Subscribe a conversation to a thread',
+    'channel_unsubscribe': 'Unsubscribe a conversation from a thread',
+    'channel_outbox': 'Read the channel outbox',
+    'channel_outbox_approve': 'Decide a channel draft',
 }
 
 

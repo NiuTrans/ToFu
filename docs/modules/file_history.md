@@ -81,11 +81,25 @@ the next eligible maintenance rewrite converts retained rows in place.
   Symlink components, traversal and unavailable platform primitives fail visibly.
   Alternatives rejected: lexical containment and realpath prechecks alone leave
   a check/use race; a second restore implementation duplicates the authority.
+- Version numbers are never reused. Redo points `latest_version` back at the
+  restored blob and records `highest_version`; later backups are allocated
+  past it, so they cannot overwrite a blob that another snapshot pins.
+- Redo restores only the paths whose version in the round's snapshot differs
+  from the preceding snapshot. Every snapshot pins the whole tracked map, so
+  restoring all of it would rewind later rounds' and the user's edits to
+  files the round never touched; those files keep their current bytes.
 - Restore is per-file, not a multi-file transaction. Rejected files retain their
   tracked evidence. Successful files can remain changed on partial failure, but
   the result is `ok: false` with applied paths and failure reasons; no successful
   `redoOf` snapshot is appended when any selected file fails. Public task redo
   propagates these failures rather than converting them into a success receipt.
+- Failure rows and result-level refusals are typed. A missing backup or a key
+  or target that the validator or anchored filesystem refuses (`ValueError`)
+  is `refused: true` with its authored reason; any other per-file exception is
+  a `refused: false` fault row whose reason is only `internal error (<type>)`,
+  logged with its traceback. An unexpected whole-restore exception stays an
+  error envelope, which task redo raises as `FileHistoryFault`. See
+  [refusals and faults](../PROJECT_FILE_UNDO.md#refusals-and-faults).
 - Malformed JSON is skipped. A wrong-base or malformed delta and all dependent
   deltas fail closed until the next full anchor.
 - A torn final append is separated before the next row, so it cannot poison all
@@ -129,6 +143,7 @@ pytest -q tests/file_history/test_file_history_snapshot_log.py
 pytest -q tests/project_mod/test_project_undo_path_boundary.py
 pytest -q tests/file_history/test_file_history_compaction.py tests/file_history/test_file_history_external_edit_guards.py
 pytest -q tests/tasks_pkg/test_commit_round_daemon.py tests/project_mod/test_project_undo_redo_concurrent_resolution.py
+pytest -q tests/file_history/test_file_history_redo_round_scope.py tests/conversation/test_conversation_file_change_undo_outcome.py tests/conversation/test_conversation_file_change_fault_boundary.py
 ```
 
 The snapshot-log tests pin legacy/v2 parity, byte reduction, anchors, corrupt

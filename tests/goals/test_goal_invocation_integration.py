@@ -165,7 +165,10 @@ def test_goal_live_completion_seal_retains_full_ordered_evidence_and_ids(runtime
     # public carriers. Compare every public field, not object-internal links.
     public_blocks = [{k: v for k, v in b.items() if not k.startswith('_')}
                      for b in blocks]
-    assert runtime.parent['segments'] == public_blocks
+    # The parent holds the child's own segments (normal-mode parity); the
+    # projection boundary strips the private links the same way for both.
+    assert [{k: v for k, v in b.items() if not k.startswith('_')}
+            for b in runtime.parent['segments']] == public_blocks
     assert runtime.parent['toolRounds'] == projection['toolRounds']
 
 
@@ -437,11 +440,12 @@ def test_goal_tool_cancellation_persistence_failure_and_late_publication(runtime
         assert task['abort_event'].wait(2)
         assert task['aborted']
         task['_invocationStorageFree'] = False
-        with pytest.raises(RuntimeError, match='synthetic evidence persistence failure'):
-            from lib.tasks_pkg.round_evidence import build_round_evidence
-            append_event(task, build_round_evidence(
-                task, [], ref=task['_inspectorRef'], kind='request',
-                model='fixture-model', prepared_messages=[]))
+        from lib.tasks_pkg.round_evidence import build_round_evidence
+        # Accepted after Stop, never refused; its refusal by the authority
+        # surfaces at the child's terminal settle, not inside this tool.
+        append_event(task, build_round_evidence(
+            task, [], ref=task['_inspectorRef'], kind='request',
+            model='fixture-model', prepared_messages=[]))
         return call_id, 'cancelled synthetic tool', False
 
     runtime.parent['_tool_env'] = SimpleNamespace(resolve=lambda name: blocked_tool)
@@ -449,7 +453,10 @@ def test_goal_tool_cancellation_persistence_failure_and_late_publication(runtime
         _run_goal(runtime)
     assert len(runtime.calls) == 1  # Cancellation prevents another model request.
     child, late_sink = captured[0]
-    assert persistence_attempts == [(child['_inspectorTaskId'], 'messages_snapshot')]
+    # One exact evidence head; barriers may repair it before the refusal.
+    assert persistence_attempts
+    assert set(persistence_attempts) == {(child['_inspectorTaskId'], 'messages_snapshot')}
+    assert '_invocationEvidenceLane' not in child
     assert child['_invocationPublicationClosed']
     assert chat_task_runtime.get(child['id']) is None
     assert not runtime.parent['abort_event'].is_set()  # No upward cancellation.

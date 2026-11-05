@@ -74,6 +74,44 @@ asynchronous index maintenance weakens same-transaction visibility. Tests cover
 concurrent disjoint headers, same-header conflicts, read-your-writes predicates,
 and old-or-new header/index recovery at every injected commit I/O fault.
 
+## Catalog pages (2026-10-29)
+
+Problem: the sidebar's `catalog_page` form of `conversation.list` never used
+the directory. Owners with at most 1,000 conversations read and sorted every
+header for each page, including the storage warm-up's `limit: 1` probe; larger
+owners scanned the tombstone-bearing updated index. Production logs between
+2026-10-28 03:47 and 2026-10-29 07:08 recorded 261 such calls slower than 2 s
+(median 4.6 s, maximum 30.8 s), driven by the 300 s warm-up and page loads.
+
+Decision: unfolded catalog pages whose rows lie inside the directory window
+use the same coverage gates as lists, hydrate only their own rows and check
+each row's `updated_at` and identity. `total_count` is the gated live count. A
+cursor page is resolved by binary search over the directory order; when the
+directory is truncated, every conversation outside it is older than all of its
+entries, so a cursor that some entry follows determines `has_more` exactly. A
+cursor beyond the last entry of a truncated directory, a page extending past the
+window, a folder filter or any gate disagreement uses the unchanged legacy plan.
+
+Restore now increments the owner count before its header funnel maintains the
+directory. Previously the directory recorded the pre-restore count, so every
+directory read fell back to the legacy plan until the next recency write.
+
+Alternatives rejected: folder-filtered pages need every header to count
+matches, so they keep the legacy plan rather than gaining another index;
+caching rendered pages in the application adds a second invalidation owner.
+
+Verification: `catalog_pages_inside_the_directory_window_match_the_legacy_catalog`
+compares every cursor (existing and synthetic, including equal-timestamp ties),
+limit and settings projection byte for byte with the legacy plan across bump,
+delete and restore; `catalog_pages_beyond_a_truncated_directory_fall_back_exactly`
+covers a 135-conversation owner and count drift;
+`directory_catalog_page_reads_only_its_own_headers` fails if a page reads every
+header. The ignored `catalog_page_cold_read_measurement` uses 1,000
+conversations, limit 50 and disabled engine hot caches on a fresh debug-build
+authority (operating-system file caches were not dropped): five-run medians
+drop from 71.4 to 10.8 ms on local XFS and from 69.7 to 10.6 ms on DolphinFS.
+These are component timings, not production sidebar or warm-up latency.
+
 ## Invariants (certification surface)
 
 1. A list served from the directory is byte-identical to the legacy

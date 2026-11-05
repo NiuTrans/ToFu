@@ -136,7 +136,6 @@ export function blockFromSegment(
       displayMode,
       terminal: Boolean(segment.terminal),
       memberBlockIds: [blockId],
-      ...(segment.signature ? { signature: segment.signature } : {}),
     };
   }
   if (segment.type === 'system_note') {

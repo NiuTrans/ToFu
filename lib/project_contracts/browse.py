@@ -3,13 +3,16 @@
 Entry points: normalize_browse_request and browse_request_schema. HTTP and
 control RPC consume this boundary before invoking project filesystem services;
 contracts/control_rpc_v1.yaml declares the corresponding method parameters.
-Dependencies: standard-library mappings and types; no runtime services.
+Dependencies: standard-library mappings and types and the typed client fault;
+no runtime services.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+
+from lib.error_envelope import BadRequest
 
 BROWSE_PATH_MAX_CHARS = 4096
 
@@ -37,13 +40,13 @@ def normalize_browse_request(params: Mapping[str, Any]) -> tuple[str | None, boo
     """Validate once for either transport; blank/null paths select the home view."""
     unknown = set(params) - BROWSE_REQUEST_FIELDS
     if unknown:
-        raise ValueError("Unknown project.browse parameter: " + sorted(unknown)[0])
+        raise BadRequest("Unknown project.browse parameter: " + sorted(unknown)[0])
     path = params.get("path")
     if path is not None and not isinstance(path, str):
-        raise ValueError("path must be a string")
+        raise BadRequest("path must be a string", field="path")
     if path is not None and (len(path) > BROWSE_PATH_MAX_CHARS or "\0" in path):
-        raise ValueError("path exceeds the project browse limit")
+        raise BadRequest("path exceeds the project browse limit", field="path")
     show_hidden = params.get("showHidden", False)
     if not isinstance(show_hidden, bool):
-        raise ValueError("showHidden must be a boolean")
+        raise BadRequest("showHidden must be a boolean", field="showHidden")
     return (path.strip() or None) if path is not None else None, show_hidden

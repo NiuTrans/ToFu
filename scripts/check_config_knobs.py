@@ -32,13 +32,43 @@ STATUSES = ("legacy", "documented", "deprecated")
 _ENV_TARGETS = ("environ", "getenv")
 
 
-def _env_reads(tree: ast.AST) -> set[str]:
-    """Literal env reads, including resource and worker-environment adapters."""
+def _environment_argument_index(func: ast.AST) -> int | None:
+    if isinstance(func, ast.Name):
+        if func.id == 'proc_env_value':
+            return 1
+        if func.id in {'getenv', 'resolve_resource_budget'}:
+            return 0
+    if isinstance(func, ast.Attribute):
+        if (func.attr == 'getenv' and isinstance(func.value, ast.Name)
+                and func.value.id == 'os'):
+            return 0
+        if (func.attr in {'get', 'setdefault', 'pop'}
+                and isinstance(func.value, ast.Attribute)
+                and func.value.attr == 'environ'
+                and isinstance(func.value.value, ast.Name)
+                and func.value.value.id == 'os'):
+            return 0
+    return None
+
+
+def _direct_env_reads(tree: ast.AST) -> set[str]:
+    """Literal/table-driven reads, including resource and environment adapters."""
     names: set[str] = set()
 
     def _literal(node: ast.AST) -> str | None:
         return node.value if isinstance(node, ast.Constant) and isinstance(
             node.value, str) else None
+
+    # Placement policies select their env name from a module-level table.
+    # Inspect only literal values of a table actually used by an environment
+    # getter; unrelated dictionaries and computed names are not knob evidence.
+    tables = {}
+    for statement in getattr(tree, 'body', ()):
+        if isinstance(statement, ast.Assign) and isinstance(statement.value, ast.Dict):
+            values = {value for node in statement.value.values if (value := _literal(node))}
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    tables[target.id] = values
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Subscript):
@@ -53,30 +83,87 @@ def _env_reads(tree: ast.AST) -> set[str]:
                     names.add(name)
         elif isinstance(node, ast.Call):
             func = node.func
-            is_env_call = (
-                (
-                    isinstance(func, ast.Attribute)
-                    and func.attr in {"get", "setdefault", "pop"}
-                    and isinstance(func.value, ast.Attribute)
-                    and func.value.attr == "environ"
-                    and isinstance(func.value.value, ast.Name)
-                    and func.value.value.id == "os"
-                )
-                or (
-                    isinstance(func, ast.Attribute)
-                    and func.attr == "getenv"
+            if (isinstance(func, ast.Attribute) and func.attr in {'get', 'setdefault', 'pop'}
                     and isinstance(func.value, ast.Name)
-                    and func.value.id == "os"
-                )
-                or (isinstance(func, ast.Name) and func.id == "getenv")
-                or (isinstance(func, ast.Name) and func.id == "resolve_resource_budget")
-            )
-            worker_env_call = isinstance(func, ast.Name) and func.id == 'proc_env_value'
-            argument_index = 1 if worker_env_call else 0
-            if (is_env_call or worker_env_call) and len(node.args) > argument_index:
+                    and func.value.id in {'environment', 'environ', 'env'} and node.args
+                    and isinstance(node.args[0], ast.Subscript)
+                    and isinstance(node.args[0].value, ast.Name)):
+                names.update(tables.get(node.args[0].value.id, ()))
+            argument_index = _environment_argument_index(func)
+            if argument_index is not None and len(node.args) > argument_index:
                 name = _literal(node.args[argument_index])
                 if name:
                     names.add(name)
+    return names
+
+
+def _env_reads(tree: ast.AST) -> set[str]:
+    """Include local adapters whose parameters flow to an environment reader.
+
+    Infer adapters from their bodies, not names such as ``_env_int``. Follow
+    forwarding to a fixed point; nested scopes and reassigned parameters are
+    not evidence that a caller's literal becomes an environment key.
+    """
+    names = _direct_env_reads(tree)
+    if not any(isinstance(node, ast.Call)
+               and (index := _environment_argument_index(node.func)) is not None
+               and len(node.args) > index and isinstance(node.args[index], ast.Name)
+               for node in ast.walk(tree)):
+        return names
+    functions = {node.name: node for node in getattr(tree, 'body', ())
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    parameters = {name: [arg.arg for arg in function.args.posonlyargs
+                        + function.args.args + function.args.kwonlyargs]
+                  for name, function in functions.items()}
+    readers: dict[str, set[int]] = {}
+
+    def arguments(call):
+        if isinstance(call.func, ast.Name) and call.func.id in readers:
+            positions = readers[call.func.id]
+            params = parameters[call.func.id]
+            positional_count = len(functions[call.func.id].args.posonlyargs
+                                   + functions[call.func.id].args.args)
+            keys = {params[index] for index in positions}
+            return ([call.args[index] for index in positions
+                     if index < min(len(call.args), positional_count)]
+                    + [keyword.value for keyword in call.keywords
+                       if keyword.arg in keys])
+        index = _environment_argument_index(call.func)
+        return ([call.args[index]] if index is not None and index < len(call.args)
+                else [])
+
+    def local_nodes(function):
+        pending = list(function.body)
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef, ast.Lambda)):
+                continue
+            yield node
+            pending.extend(ast.iter_child_nodes(node))
+
+    bodies = {name: list(local_nodes(function))
+              for name, function in functions.items()}
+    changed = True
+    while changed:
+        changed = False
+        for name, nodes in bodies.items():
+            rebound = {node.id for node in nodes
+                       if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
+            params = parameters[name]
+            positions = {params.index(argument.id)
+                         for node in nodes if isinstance(node, ast.Call)
+                         for argument in arguments(node)
+                         if isinstance(argument, ast.Name)
+                         and argument.id in params and argument.id not in rebound}
+            if positions - readers.get(name, set()):
+                readers.setdefault(name, set()).update(positions)
+                changed = True
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            names.update(argument.value for argument in arguments(node)
+                         if isinstance(argument, ast.Constant)
+                         and isinstance(argument.value, str) and argument.value)
     return names
 
 
@@ -173,15 +260,15 @@ def check() -> list[str]:
     vanished = sorted(set(knobs) - set(readers))
     if unregistered:
         problems.append(
-            f"{len(unregistered)} env knob(s) read but not registered "
-            f"(first: {unregistered[0]}); register them with "
+            f"{len(unregistered)} env knob(s) read but not registered: "
+            f"{', '.join(unregistered)}; register them with "
             "`python3 scripts/check_config_knobs.py --rescan` and document "
             "owner + description"
         )
     if vanished:
         problems.append(
-            f"{len(vanished)} registered knob(s) no longer read anywhere "
-            f"(first: {vanished[0]}); drop them with --rescan"
+            f"{len(vanished)} registered knob(s) no longer read anywhere: "
+            f"{', '.join(vanished)}; drop them with --rescan"
         )
 
     for name, entry in sorted(knobs.items()):

@@ -421,7 +421,7 @@ async def system_prompt_default():
         if project:
             _preview_tool_names |= {
                 'write_file', 'edit_file',
-                'find_files', 'grep_search', 'run_command',
+                'find_files', 'search_files', 'run_command',
             }
     def _build():
         from lib.tasks_pkg import system_prompt_base
@@ -480,7 +480,7 @@ async def system_prompt_blocks():
         if project:
             _preview_tool_names |= {
                 'write_file', 'edit_file',
-                'find_files', 'grep_search', 'run_command',
+                'find_files', 'search_files', 'run_command',
             }
     def _build():
         from lib.tasks_pkg import system_prompt_base

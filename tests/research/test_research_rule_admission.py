@@ -57,8 +57,10 @@ def test_valid_api_admission_preserves_owner_and_exact_revision(monkeypatch):
 def test_stale_revision_is_rejected_before_new_allocation(monkeypatch):
     from lib.research.action import start_research_action
     production,owner,create,load=ports(monkeypatch,{'revision':4,'protocol':{'decision_rule':RULE}})
-    with pytest.raises(ValueError,match='research_workspace_stale'):
+    from lib.turn_lifecycle import LifecycleConflict
+    with pytest.raises(LifecycleConflict) as stale:
         start_research_action('Study',action='experiment',expected_revision=3,confirm_external_writes=True,user_id=7)
+    assert stale.value.code=='research_workspace_stale'
     production.new_task_id.assert_not_called();owner.spawn.assert_not_called()
 
 

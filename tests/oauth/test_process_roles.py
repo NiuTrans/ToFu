@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import lib.server.server_background_services as background_services
+
 import pytest
 
 from lib.process_roles import (
@@ -59,7 +61,7 @@ def test_route_background_owners_are_role_scoped(monkeypatch):
     import lib.oauth.outbound as oauth_outbound
     import lib.scheduler.manager as scheduler_manager
     import routes
-    import routes.plugin_registry as plugins
+    import lib.app.plugin_registry as plugins
     import runtime_guards
 
     calls: list[str] = []
@@ -93,13 +95,13 @@ def test_route_background_owners_are_role_scoped(monkeypatch):
             self.extensions = {}
 
     api_app = App()
-    assert routes.start_registered_background_services(
+    assert background_services.start_registered_background_services(
         api_app, process_role='api') == 1
     assert calls == ['oauth-reconcile', 'codex']
 
     calls.clear()
     scheduler_app = App()
-    assert routes.start_registered_background_services(
+    assert background_services.start_registered_background_services(
         scheduler_app, process_role='scheduler') == 1
     assert calls == ['scheduler']
     assert len(scheduler_principals) == 1
@@ -109,7 +111,7 @@ def test_route_background_owners_are_role_scoped(monkeypatch):
 
     calls.clear()
     worker_app = App()
-    assert routes.start_registered_background_services(
+    assert background_services.start_registered_background_services(
         worker_app, process_role='worker') == 2
     assert calls == ['enrichment', 'plugins']
 
@@ -136,7 +138,7 @@ def test_distributed_role_does_not_invent_a_daily_report_owner(monkeypatch):
     class App:
         extensions = {}
 
-    assert routes.start_registered_background_services(
+    assert background_services.start_registered_background_services(
         App(), process_role='scheduler') == 1
     assert calls == ['scheduler']
     assert len(scheduler_principals) == 1
@@ -169,6 +171,6 @@ def test_distributed_api_role_does_not_start_ownerless_codex_catalog(
         def __init__(self):
             self.extensions = {}
 
-    assert routes.start_registered_background_services(
+    assert background_services.start_registered_background_services(
         App(), process_role='api') == 0
     assert calls == []

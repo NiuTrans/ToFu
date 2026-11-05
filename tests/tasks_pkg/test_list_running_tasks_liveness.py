@@ -13,9 +13,10 @@ liveness check, no per-conversation dedup. Two consequences:
   * Counting per-task, not per-conversation: one autopilot conversation spawns
     dozens of tasks, so "3 busy convs" was reported as "63".
 
-The fix adds (a) an activity filter using the SAME dual-clock predicate the
-reaper uses (``_t_last_event`` AND ``_dispatch_heartbeat`` both stale past
-``_stuck_task_max_silent_secs()`` → wedged → excluded) and (b) per-convId dedup.
+The fix adds (a) an activity filter using the SAME verdict the reaper acts on
+(``lib.tasks_pkg.liveness.is_wedged``: ``_t_last_event`` AND
+``_dispatch_heartbeat`` both stale past ``stall_threshold_seconds()`` with no
+explained wait → wedged → excluded) and (b) per-convId dedup.
 
 These tests drive ``list_running_tasks()`` directly against synthetic in-memory
 tasks. They include the REVERSE assertions the fix must never break: a task
@@ -50,11 +51,11 @@ def _mk(tid, conv, *, created, last_event=None, heartbeat=None,
 
 def _install(monkeypatch, task_list, *, max_silent=300):
     """Install a public-runtime snapshot and pin the liveness threshold."""
-    import lib.tasks_pkg.manager._maintenance as _maintenance
+    import lib.tasks_pkg.liveness as liveness
     import lib.tasks_pkg.manager._registry as _registry
     runtime = SimpleNamespace(snapshot=lambda: list(task_list))
     monkeypatch.setattr(_registry, 'chat_task_runtime', runtime, raising=True)
-    monkeypatch.setattr(_maintenance, '_stuck_task_max_silent_secs',
+    monkeypatch.setattr(liveness, 'stall_threshold_seconds',
                         lambda: max_silent, raising=True)
 
 

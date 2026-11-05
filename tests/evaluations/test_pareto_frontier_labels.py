@@ -18,6 +18,7 @@ import subprocess
 import pytest
 
 from tests._runtime_sections import ROOT
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -37,8 +38,8 @@ def _overlap(left, right):
     )
 
 
-@pytest.mark.skipif(not NODE, reason='node not installed')
 def test_frontier_labels_never_overlap_when_centered_rows_blocked(tmp_path):
+    require_node_modules('vite')
     entry = tmp_path / 'entry.ts'
     output = tmp_path / 'labels.cjs'
     module = ROOT / 'frontend/src/features/model-catalog/pareto-chart.ts'

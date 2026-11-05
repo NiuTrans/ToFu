@@ -66,6 +66,17 @@ describe('incremental conversation shell projection', () => {
     expect(reconciler.apply({conversation, state: next})).toBe(false);
   });
 
+  it('repaints the composer only for the active conversation', () => {
+    const effectsFor = (active: boolean): string[] => {
+      const effects: string[] = [];
+      applyTurnStateProjection({...ports({}, initial(), effects), active});
+      return effects;
+    };
+    expect(effectsFor(true)).toEqual(['persist', 'render', 'navigation', 'catalog', 'send']);
+    // Another conversation streaming must not repaint this composer several times a second.
+    expect(effectsFor(false)).toEqual(['persist', 'catalog']);
+  });
+
   it('does not read unchanged historical Turns for a valid local receipt', () => {
     const reconciler = createTurnProjectionReconciler(), conversation: ProjectedConversation = {};
     const before = initial(); reconciler.apply({conversation, state: before});

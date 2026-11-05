@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/codex_session_audit_v2.schema.json",
+  "title": "Observed Codex rollout audit metrics v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "path",
+    "nested_tool_calls",
+    "nested_tool_calls_by_name",
+    "nested_tool_calls_observation",
+    "runtime_item_completions",
+    "events",
+    "invalid_lines",
+    "model_turns",
+    "token_events",
+    "tool_calls",
+    "compactions",
+    "yielded_execs",
+    "wait_calls",
+    "avoidable_wait_rounds",
+    "tool_output_chars",
+    "max_tool_output_chars",
+    "max_input_tokens_per_turn",
+    "events_by_type",
+    "response_items_by_type",
+    "tool_calls_by_name",
+    "protocol_events_per_tool_call",
+    "session_span_s",
+    "task_duration_s",
+    "max_tool_duration_s",
+    "cache_hit_ratio",
+    "average_input_tokens_per_turn",
+    "tokens"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "path": {
+      "type": "string"
+    },
+    "nested_tool_calls": {
+      "type": "null",
+      "description": "Complete nested invocation counts are not observable in the supported rollout records; never coerce null to zero."
+    },
+    "nested_tool_calls_by_name": {
+      "type": "null"
+    },
+    "nested_tool_calls_observation": {
+      "const": "unavailable"
+    },
+    "runtime_item_completions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "distinct_items",
+        "by_type",
+        "duplicate_notifications",
+        "unidentified_notifications"
+      ],
+      "properties": {
+        "distinct_items": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "by_type": {
+          "$ref": "#/$defs/counts"
+        },
+        "duplicate_notifications": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unidentified_notifications": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "description": "Observed item_completed notifications deduplicated by thread_id, turn_id and item.id. All item types are counted, including messages/reasoning. Not a complete tool-call count or success verdict."
+    },
+    "events": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "invalid_lines": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "model_turns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Positive last_token_usage snapshots, not an independent billing receipt."
+    },
+    "token_events": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "tool_calls": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "compactions": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "yielded_execs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "wait_calls": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "avoidable_wait_rounds": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Legacy heuristic min(yielded_execs, wait_calls); not a paired causal trace or proof that any wait was avoidable."
+    },
+    "tool_output_chars": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "max_tool_output_chars": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "max_input_tokens_per_turn": {
+      "type": "integer",
+      "description": "Maximum recorded input_tokens in positive last_token_usage snapshots; 0 when no such snapshot exists."
+    },
+    "events_by_type": {
+      "$ref": "#/$defs/counts"
+    },
+    "response_items_by_type": {
+      "$ref": "#/$defs/counts"
+    },
+    "tool_calls_by_name": {
+      "$ref": "#/$defs/counts"
+    },
+    "protocol_events_per_tool_call": {
+      "type": "number"
+    },
+    "session_span_s": {
+      "type": "number"
+    },
+    "task_duration_s": {
+      "type": "number"
+    },
+    "max_tool_duration_s": {
+      "type": "number"
+    },
+    "cache_hit_ratio": {
+      "type": "number"
+    },
+    "average_input_tokens_per_turn": {
+      "type": "number"
+    },
+    "tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+        "uncached_input_tokens"
+      ],
+      "properties": {
+        "input_tokens": {
+          "type": "integer"
+        },
+        "cached_input_tokens": {
+          "type": "integer"
+        },
+        "cache_write_input_tokens": {
+          "type": "integer"
+        },
+        "output_tokens": {
+          "type": "integer"
+        },
+        "reasoning_output_tokens": {
+          "type": "integer"
+        },
+        "total_tokens": {
+          "type": "integer"
+        },
+        "uncached_input_tokens": {
+          "type": "integer"
+        }
+      },
+      "description": "Last available total_token_usage snapshot; uncached_input_tokens is max(0, input_tokens - cached_input_tokens)."
+    },
+    "shadow_cost": {
+      "type": "number",
+      "description": "Optional CLI-only calculation from explicit per-million prices; not a bill."
+    }
+  },
+  "$defs": {
+    "counts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    }
+  }
+}

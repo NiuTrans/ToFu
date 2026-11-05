@@ -11,13 +11,10 @@
 
 import { escapeHtmlText } from '../../html-safety';
 import type { I18nArgs, I18nKey, Translator } from '../../i18n';
-
-type UnknownRecord = Readonly<Record<string, unknown>>;
-
-type BoundedText = Readonly<{
-  value: string;
-  truncated: boolean;
-}>;
+import {
+  record, field, nonNegativeInteger as safeNonNegativeInteger,
+  type UnknownRecord, type BoundedText,
+} from './tool-payload-values';
 
 type LineProjection = Readonly<{
   lines: readonly BoundedText[];
@@ -74,22 +71,6 @@ export type ToolApprovalPresentationDependencies = Readonly<{
   translate: Translator;
 }>;
 
-const EMPTY_RECORD: UnknownRecord = Object.freeze({});
-
-function record(value: unknown): UnknownRecord {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as UnknownRecord
-    : EMPTY_RECORD;
-}
-
-function field(value: unknown, name: string): unknown {
-  try {
-    return record(value)[name];
-  } catch {
-    return undefined;
-  }
-}
-
 function safeText(value: unknown): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'string') return value;
@@ -111,14 +92,6 @@ function boundedText(value: unknown, limit: number): BoundedText {
     value: text.length > limit ? `${text.slice(0, limit)}…` : text,
     truncated: text.length > limit,
   };
-}
-
-function safeNonNegativeInteger(value: unknown, fallback: number): number {
-  return typeof value === 'number'
-    && Number.isSafeInteger(value)
-    && value >= 0
-    ? value
-    : fallback;
 }
 
 function trustedHtml(value: unknown): string {

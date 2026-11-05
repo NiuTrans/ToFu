@@ -69,10 +69,51 @@ export function checkRendererDependencies(projectRoot, owners, scope = 'Renderer
   return failures;
 }
 
+/** Enforce the design/reconciliation seam without pinning engine algorithms. */
+export function checkSurfaceDependencies(projectRoot, owners) {
+  const failures = [];
+  const forbidden = new Set([
+    owners.conversationDom, owners.surfaceDesign, owners.surfaceDefaultRendering,
+  ].map(path => resolve(projectRoot, path).replace(/\.tsx?$/, '')));
+  for (const owner of [owners.surfaceEngine, owners.surfaceTurnRendering]) {
+    const path = resolve(projectRoot, owner);
+    const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true);
+    const fail = detail => failures.push(`${owner}: ${detail}; use the Surface design port.`);
+    const inspect = node => {
+      const specifier = ts.isImportDeclaration(node) || ts.isExportDeclaration(node)
+        ? node.moduleSpecifier
+        : ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword
+          ? node.arguments[0] : null;
+      if (specifier && ts.isStringLiteral(specifier)) {
+        const dependency = resolve(dirname(path), specifier.text).replace(/\.[jt]sx?$/, '');
+        if (/\.(?:css|scss|less)$/.test(specifier.text) || forbidden.has(dependency)) {
+          fail(`reconciliation imports appearance ${specifier.text}`);
+        }
+      }
+      const property = ts.isPropertyAccessExpression(node) ? node.name.text
+        : ts.isElementAccessExpression(node) && ts.isStringLiteral(node.argumentExpression)
+          ? node.argumentExpression.text : '';
+      if (['className', 'classList', 'style', 'innerHTML', 'textContent'].includes(property)) {
+        fail(`reconciliation accesses visual property ${property}`);
+      }
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+          && ['setAttribute', 'removeAttribute', 'toggleAttribute'].includes(node.expression.name.text)
+          && node.arguments[0] && ts.isStringLiteral(node.arguments[0])
+          && ['class', 'style'].includes(node.arguments[0].text)) {
+        fail(`reconciliation writes visual attribute ${node.arguments[0].text}`);
+      }
+      ts.forEachChild(node, inspect);
+    };
+    inspect(source);
+  }
+  return failures;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const contract = JSON.parse(readFileSync(resolve(projectRoot, 'contracts/frontend_conversation_architecture_v1.json'), 'utf8'));
   const failures = [
+    ...checkSurfaceDependencies(projectRoot, contract.owners),
     ...checkRendererDependencies(projectRoot, contract.owners),
     ...checkRendererDependencies(projectRoot, {
       conversationRendererModules: contract.owners.viewModelModules,

@@ -2,7 +2,8 @@
 
 > **铁律(charter 2026-07-27,owner 拍板):** 新增任何 agent 驱动的功能 MUST 建在共享底盘上:
 > agent 循环用 `lib/agent_loop/agent_loop.py` 的 `run_agent_loop`(+ `AbortSignal`),
-> 「一句话 → 成品」类能力用 `lib/production/` 的 ProductionRuntime + 阶段图。
+> 「一句话 → 成品」类能力用 `lib/production/` 的 ProductionRuntime +
+> `AgentToolWorkflow` 固定节点契约，编译到共享阶段图。
 > **禁止**新增私有的多轮工具调用循环、私有的中止逻辑、私有的崩溃恢复。
 > 棘轮 `tests/agent_core/test_agent_loop_adoption_guard.py` 会把新私有循环打成红。
 > 底盘缺能力时**改底盘**,不在调用方打补丁。
@@ -14,10 +15,20 @@
 | 形状 | 例子 | 该用的底盘 |
 |---|---|---|
 | 多轮「LLM ↔ 工具」循环,直到模型不再调工具 | paper 报告、QA、自由检索、综述 | `run_agent_loop` + `AbortSignal`(本文档) |
-| 「一句话 → 成品」流水线(研究→分镜→渲染→合成) | 播客、motion 视频、长篇报告 | `lib/production/` ProductionRuntime + `Stage` 阶段图(见 `docs/modules/production.md`) |
+| 固定交付节点、节点内允许模型工作的 agent-based 工具 | PPT、完整视频制作、研究交付、长篇报告 | `AgentToolWorkflow` + `WorkflowNode` + 现有 `Stage` / ProductionRuntime，见 `docs/modules/production.md` |
 | 单发 LLM 调用(无工具、无循环) | 翻译、摘要、术语回填 | 直接 `dispatch_chat` / `dispatch_stream`,**不需要** agent 底盘 |
 
 判断错了形状才会觉得底盘不够用——先对号再动手。
+
+固定流程工具与自由委托有不同的控制权：流程及节点契约由代码声明，模型只在
+节点内工作，输出必须通过 JSON schema 和领域门禁。定义可用 `describe()`
+导出，schema 为 `contracts/agent_tool_workflow_v1.schema.json`；这份描述不授予
+模型、工具或文件权限。复用现有调用、任务、检查点、取消和质量交付入口。
+
+普通对话直接选用语义工具，不要求用户切换 Goal 模式。返回 task_id 只是接收
+工作，对话可以继续处理同次委托的其他事项；后台任务的实际结果决定是否交付。
+明确托付的持续研究使用现有 `manage_exploration` / `get_exploration`，沿用真实
+用户来源、预算及实验验证机制。固定流程不会自行获得递归自我改进的能力。
 
 ## 2. `run_agent_loop` 五分钟接入
 

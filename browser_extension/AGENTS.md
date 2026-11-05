@@ -6,6 +6,14 @@ The extension is the Chromium-side half of browser automation. Read
 `docs/modules/browser_automation.md` and `docs/chrome-web-store/README.md`.
 Server protocol and policy live in `lib/browser/` and `routes/browser.py`.
 
+## Runtime owners
+
+`background.js` composes classic worker owners from `worker/` using synchronous
+`importScripts`. Poll lifecycle, result receipts and accepted command teardown
+live there; Chrome handlers and independently serialized page functions remain
+in `background.js`. Every imported script must ship in both archive variants
+and the authenticated download. See `worker/AGENTS.md` for the focused ladder.
+
 ## Editing rules
 
 - Keep `manifest.json`, `background.js`, popup behavior, server capability

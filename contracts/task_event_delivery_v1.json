@@ -49,6 +49,22 @@
     "acknowledgement": "exact-task-event-count-before-visibility",
     "ownership": "queued-batches-plus-inflight-callbacks-telemetry-never-admission"
   },
+  "structuralBatch": {
+    "command": "turn.event.record_batch",
+    "producer": "lib/turn_lifecycle.py::record_task_events",
+    "maxEvents": 500,
+    "maxWireBytes": 62914560,
+    "bounds": "the-existing-storage-event-rpc-composition-bound-shared-with-event-append-batch-rows-counted-across-entries-and-their-progress-prefixes",
+    "eligibility": "non-terminal-non-interaction-non-background-acknowledgement-non-tool-effect-entries-of-one-task-attempt-each-carrying-its-task-event-row",
+    "order": "rows-strictly-ascending-across-entries",
+    "commit": "one-transaction-of-ordinary-turn-event-record-steps-all-or-nothing",
+    "nativeCommitShape": "a-multi-entry-batch-that-no-longer-fits-one-ordinary-overlay-commit-carrying-its-new-blocks-is-refused-database-resource-exhausted-nothing-written-a-single-entry-never",
+    "split": "the-producer-records-the-first-half-of-a-refused-chunk-alone-later-chunks-start-at-the-committed-size",
+    "acknowledgement": "one-ordinary-turn-event-record-result-per-entry-before-visibility",
+    "reconciliation": "after-an-unknown-outcome-read-the-exact-rows-all-identical-committed-none-resend-some-fail-closed",
+    "capability": "an-authority-without-the-command-falls-back-to-the-per-event-path",
+    "delivery": "a-pump-taking-an-unstarted-fifo-head-claims-every-already-queued-unstarted-item-of-its-batch-scope-persists-the-run-in-one-call-and-retries-exactly-that-frozen-run"
+  },
   "generator": "scripts/gen_task_event_delivery_contract.py",
   "performanceProfile": {
     "format": "tofu.task-event-delivery-profile/v1",

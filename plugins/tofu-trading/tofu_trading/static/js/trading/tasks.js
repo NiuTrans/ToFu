@@ -76,7 +76,7 @@
 
     function doPoll() {
       if (stopped) return;
-      window.Api.trading.raw('/tasks/' + taskId + '/poll?cursor=' + lastCursor)
+      F.apiRaw('/tasks/' + taskId + '/poll?cursor=' + lastCursor)
         .then(function (r) {
           // ★ FIX: Stop polling immediately on 404 (task gone — server restarted or expired)
           if (r.status === 404) {
@@ -211,7 +211,7 @@
   }
 
   function _tryFetchCompletedResult(taskId, type) {
-    window.Api.trading.raw('/tasks/' + taskId + '/result')
+    F.apiRaw('/tasks/' + taskId + '/result')
       .then(function (r) {
         if (r.status === 404) {
           // Task gone from server — clean up in-memory tracking

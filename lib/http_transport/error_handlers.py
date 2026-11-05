@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from quart import current_app, make_response, request, websocket
 from werkzeug.exceptions import HTTPException
@@ -15,6 +15,9 @@ from lib.api_response import (
 )
 from lib.log import get_logger, req_id
 
+if TYPE_CHECKING:
+    from lib.storage import StorageError
+
 
 logger = get_logger('server.lifecycle')
 
@@ -24,6 +27,28 @@ def _explicit_exception_info(error: BaseException) -> tuple[type, BaseException,
     original = getattr(error, 'original_exception', None)
     failure = original if isinstance(original, BaseException) else error
     return type(failure), failure, failure.__traceback__
+
+
+def _storage_outage_cause(error: BaseException) -> StorageError | None:
+    """The storage outage a domain error was explicitly raised from, if any.
+
+    Domain adapters translate storage failures into their own taxonomy
+    (``raise ModelRoutingError(...) from storage_error``). An outage behind
+    such a wrapper is still a retryable 503, not an internal fault. Only
+    explicit ``__cause__`` links and outage codes count: an implicit context
+    or a wrapped integrity/conflict failure keeps the internal-error path.
+    """
+    from lib.storage import StorageError
+    from lib.storage.errors import TRANSIENT_STORAGE_CODES
+
+    cause = error.__cause__
+    for _ in range(8):
+        if cause is None:
+            return None
+        if isinstance(cause, StorageError):
+            return cause if cause.code in TRANSIENT_STORAGE_CODES else None
+        cause = cause.__cause__
+    return None
 
 
 def _v4_problem(
@@ -145,14 +170,17 @@ async def handle_uncaught(error: BaseException):
     method, path = safe_method_path()
 
     from lib.storage import StorageError, http_status_for_storage_error
-    if isinstance(error, StorageError):
-        status = http_status_for_storage_error(error)
+    storage_error = (error if isinstance(error, StorageError)
+                     else _storage_outage_cause(error))
+    if storage_error is not None:
+        status = http_status_for_storage_error(storage_error)
         storage_log = logger.error if status >= 500 else logger.warning
         storage_log(
             '[%s] %d storage error code=%s operation_id=%s retryable=%s '
             'retry_after_ms=%s message=%s: %s %s',
-            request_id, status, error.code, error.operation_id,
-            error.retryable, error.retry_after_ms, error.message, method, path)
+            request_id, status, storage_error.code, storage_error.operation_id,
+            storage_error.retryable, storage_error.retry_after_ms,
+            storage_error.message, method, path)
         v4_response = _v4_problem(
             status=status,
             code='storage_unavailable',
@@ -164,20 +192,20 @@ async def handle_uncaught(error: BaseException):
         if path.startswith('/api/'):
             from lib.api_response import api_error
             return api_error(
-                error.code,
+                storage_error.code,
                 status=status,
-                message=error.message,
-                retryAfter=max(1, (error.retry_after_ms or 0) // 1000),
-                operationId=error.operation_id or None,
+                message=storage_error.message,
+                retryAfter=max(1, (storage_error.retry_after_ms or 0) // 1000),
+                operationId=storage_error.operation_id or None,
             )
         return await make_response(
             f'<h2>{status}</h2><p>Storage is unavailable. '
             f'Request ID: <code>{request_id}</code></p>', status)
 
-    # Field/body validation failures from lib.request_parser are client
-    # errors, not internal ones — routes without @safe_route (e.g. the v3
-    # conversation-sync blueprint) otherwise surface them as a redacted 500.
-    from lib.request_parser import BadRequest
+    # The typed client fault (request_parser field checks and application
+    # rejections alike) is a 400, not an internal error — routes without
+    # @safe_route otherwise surface it as a redacted 500.
+    from lib.error_envelope import BadRequest
     if isinstance(error, BadRequest):
         logger.warning('[%s] 400 Bad Request: %s %s: %s',
                        request_id, method, path, error)

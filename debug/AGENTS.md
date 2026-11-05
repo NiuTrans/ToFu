@@ -16,6 +16,14 @@ read a leftover SQLite file as native state. SQLite discovery must fail closed
 when a fastpath shadow exists but no unique write front can be proven. Native
 locators identify authority; they never grant query access or contain secrets.
 
+It works on conversations that are being written (running agents, swarms).
+Exit 0 means one verified revision; exit 3 means partial evidence: an
+`INCOMPLETE` budget stop, a `LIVE` final Turn still being written, or a
+`BEST-EFFORT` view whose turns are marked `[as of revision N]`. Never treat a
+best-effort view as one snapshot, and never weaken the per-read fences to make
+one; the strategy and its limits are owned by
+`docs/contracts/CONVERSATION_DIAGNOSTICS.md` (concurrent-write reads).
+
 ## Editing rules
 
 - Diagnostics are read-only by default. A migration or recovery script must be

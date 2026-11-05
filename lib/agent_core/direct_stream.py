@@ -17,28 +17,14 @@ from concurrent.futures import Future
 from lib.agent_core.execution_session import ExecutionPhase, ExecutionSession
 from lib.error_envelope import make_envelope
 from lib.llm.stream_result import ProviderStreamResult, ensure_provider_stream_result
+from lib.compat.openai_projection import (
+    openai_completion_chunk, openai_finish_reason,
+)
 from lib.log import get_logger
 from lib.turn_verdict import TerminalTaskFailure, derive_provider_stream_verdict
 
 
 logger = get_logger(__name__)
-
-
-def _openai_finish_reason(raw_finish: str) -> str:
-    mapping = {
-        'stop': 'stop', 'done': 'stop', 'completed': 'stop',
-        'end_turn': 'stop', 'length': 'length', 'max_tokens': 'length',
-        'context_length': 'length', 'budget_exceeded': 'length',
-        'incomplete': 'length', 'max_turns': 'length',
-        'aborted': 'length', 'interrupted': 'length',
-        'tool_calls': 'tool_calls', 'tool_use': 'tool_calls',
-        'function_call': 'function_call', 'content_filter': 'content_filter',
-    }
-    try:
-        return mapping[raw_finish]
-    except KeyError as exc:
-        raise ValueError(
-            f'unsupported verified finish reason: {raw_finish!r}') from exc
 
 
 # Sentinel pushed onto the bridge queue when the dispatch task finishes.
@@ -118,13 +104,10 @@ def _chunk_frame(completion_id: str, model: str, *, role=False, content=None,
         delta['content'] = content
     if thinking is not None:
         delta['reasoning_content'] = thinking
-    chunk = {
-        'id': completion_id,
-        'object': 'chat.completion.chunk',
-        'created': int(time.time()),
-        'model': model,
-        'choices': [{'index': 0, 'delta': delta, 'finish_reason': None}],
-    }
+    chunk = openai_completion_chunk(
+        completion_id, model,
+        created=int(time.time()),
+        delta=delta)
     return f'data: {json.dumps(chunk, ensure_ascii=False)}\n\n'
 
 
@@ -467,26 +450,20 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
         if calls:
             # Emit only the fully validated provider batch. Partial/failed
             # attempts never hand a client a callable tool result.
-            tool_frame = {
-                'id': completion_id, 'object': 'chat.completion.chunk',
-                'created': int(time.time()), 'model': model,
-                'choices': [{'index': 0, 'delta': {'tool_calls': [
-                    dict(call, index=index) for index, call in enumerate(calls)
-                ]}, 'finish_reason': None}],
-            }
+            tool_frame = openai_completion_chunk(
+                completion_id, model,
+                created=int(time.time()),
+                delta={'tool_calls': [dict(call, index=index) for index, call in enumerate(calls)]})
             yield f'data: {json.dumps(tool_frame, ensure_ascii=False)}\n\n'
 
-        final = {
-            'id': completion_id, 'object': 'chat.completion.chunk',
-            'created': int(time.time()), 'model': model,
-            'choices': [{'index': 0, 'delta': {},
-                         'finish_reason': _openai_finish_reason(
-                             provider_finish)}],
-        }
+        final = openai_completion_chunk(
+            completion_id, model,
+            created=int(time.time()),
+            finish_reason=openai_finish_reason(provider_finish))
         if stream_result.usage:
             final['usage'] = stream_result.usage
             if client_tools is not None:
-                from lib.compat.openai import project_completion_usage
+                from lib.compat.openai_projection import project_completion_usage
                 final['usage'] = project_completion_usage(stream_result.usage)
         if terminal_metadata.get('billing'):
             final['billing'] = terminal_metadata['billing']

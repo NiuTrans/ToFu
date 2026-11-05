@@ -22,6 +22,25 @@ def test_non_public_address_classes_are_blocked(address):
     assert ip_is_public(address) is False
 
 
+
+@pytest.mark.parametrize('address', [
+    '100.100.100.200',  # Alibaba Cloud ECS instance metadata service
+    '100.64.0.1', '100.127.255.254', '::ffff:100.100.100.200',
+])
+def test_shared_address_space_is_not_public(address):
+    """RFC 6598 space is not globally routable and hosts cloud metadata."""
+    assert ip_is_public(address) is False
+
+
+def test_hostname_resolving_to_alibaba_metadata_is_blocked(monkeypatch):
+    monkeypatch.delenv('TOFU_TEST_FETCH_ALLOW', raising=False)
+    monkeypatch.setattr('lib.safe_fetch.socket.getaddrinfo', lambda *a, **k: [
+        (None, None, None, None, ('100.100.100.200', 80)),
+    ])
+    with pytest.raises(SafeFetchError, match='100.100.100.200'):
+        validate_public_url('http://metadata.example.test/latest/meta-data/',
+                            allow_hosts_env='TOFU_TEST_FETCH_ALLOW')
+
 def test_all_dns_answers_must_be_public(monkeypatch):
     monkeypatch.delenv('TOFU_TEST_FETCH_ALLOW', raising=False)
     answers = [

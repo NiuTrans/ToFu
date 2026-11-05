@@ -360,7 +360,7 @@ fn write_restore(
         document["_modelContextDisplayOffset"] = json!(request.model_context_display_offset);
     }
     let document_key = super::turn_key(transaction, conversation_id, turn_id)?;
-    let (_, stored) = crate::versioned_document::put_with_blob_owner_bounded_returning_envelope(
+    let (_, stored) = super::metadata_summary::put_document(
         database,
         transaction,
         crate::versioned_document::PutRequest {
@@ -372,7 +372,6 @@ fn write_restore(
             expected_version: Some(0),
             updated_at_ms: request.updated_at.max(1),
         },
-        transaction.owner_user_id(),
         crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES,
     )?;
     database.entity_put(

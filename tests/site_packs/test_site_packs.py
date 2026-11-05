@@ -198,16 +198,19 @@ def test_xhs_search_pipeline_matches_legacy_call_sequence(monkeypatch):
     assert captured['candidates'] == [{'title': 't', 'url': 'u'}]
 
 
-def test_xhs_search_limit_clamps_to_pack_bound(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(
-        'lib.site_packs._interpreter.read_search_records',
-        lambda page, query, limit, source_id, source_name, **kw: captured
-        .setdefault('limit', limit) or [])
-    pack = _xhs_pack()
-    handler = operation_handler(pack, _operation(pack, 'search'))
-    handler(_FakePage(), {'query': 'tofu', 'limit': 99})
-    assert captured['limit'] == 30  # legacy: max(1, min(30, limit))
+def test_xhs_search_limit_refuses_before_browser_effects(monkeypatch):
+    from lib.browser import adapters
+    from lib.browser.adapter_errors import AdapterValidationError
+    from lib.site_packs._projection import pack_to_adapter
+    adapter = pack_to_adapter(_xhs_pack())
+    monkeypatch.setattr(adapters, 'get_adapter', lambda name: adapter)
+    monkeypatch.setattr(adapters, 'acquire_browser_lease',
+                        lambda **kw: pytest.fail('invalid search acquired a page'))
+    # The extraction step supports 30. Its public input contract must refuse
+    # larger requests before any browser work, rather than returning fewer.
+    with pytest.raises(AdapterValidationError):
+        adapters.invoke_adapter(adapter.id, 'search', {'query': 'tofu', 'limit': 31},
+                                owner_user_id='41', client_id='device')
 
 
 def test_xhs_detail_pipeline_truncates_fields(monkeypatch):

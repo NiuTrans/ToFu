@@ -29,6 +29,7 @@ _CARGO_CANDIDATES = (
 
 _RESOLVED: Path | None = None
 _RESOLUTION_ATTEMPTED = False
+_CARGO_BUILD_TIMEOUT_SECONDS = 1800
 
 
 def _digest(path: Path) -> str:
@@ -52,6 +53,35 @@ def _sync_stable_copy(built: Path, stable: Path) -> None:
     shutil.copyfile(built, temporary)
     os.chmod(temporary, 0o755)
     os.replace(temporary, stable)
+
+
+def _run_build(argv: list[str], *, cwd: Path, env: dict[str, str],
+               timeout: float) -> subprocess.CompletedProcess:
+    """Run one build in its own session; retire the whole group on every exit.
+
+    cargo forks rustc, cc, collect2 and the linker. ``subprocess.run`` kills
+    only its direct child on a timeout or on an exception raised into the wait
+    (a pytest-timeout interruption), which leaves the toolchain running under
+    PID 1. The group is retired before any outcome, including success, is
+    reported (docs/DEFENSIVE_PATTERNS.md, "Joined producers").
+    """
+    from lib.project_mod.process_group import retire_process_group
+
+    process = subprocess.Popen(
+        argv, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    finally:
+        try:
+            retire_process_group(
+                process.pid, wait_leader=lambda seconds: process.wait(timeout=seconds))
+        finally:
+            process.stdout.close()
+            process.stderr.close()
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, argv, stdout, stderr)
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
 def _cargo_build(project_root: Path, cargo: Path) -> Path:
@@ -79,14 +109,12 @@ def _cargo_build(project_root: Path, cargo: Path) -> Path:
         env['PATH'] = f'{cargo.parent}:{env.get("PATH", "")}'
         env['CARGO_TARGET_DIR'] = str(target)
         try:
-            subprocess.run(
+            _run_build(
                 [str(cargo), 'build', '--manifest-path', str(manifest)],
                 # cargo discovers .cargo/config.toml from the working
-                # directory, not the manifest path: the package config pins
-                # a devtoolset C toolchain that libmimalloc-sys requires.
-                cwd=str(manifest.parent),
-                check=True, capture_output=True, text=True, timeout=1800,
-                env=env,
+                # directory, not the manifest path: build from the crate so
+                # any package-local cargo configuration applies.
+                cwd=manifest.parent, env=env, timeout=_CARGO_BUILD_TIMEOUT_SECONDS,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             detail = str(getattr(exc, 'stderr', '') or exc)[-2000:]

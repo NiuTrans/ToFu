@@ -103,7 +103,7 @@ def test_ptc_eligibility_is_explicit_not_the_idempotent_partition():
     from lib.tools.programmatic import eligible_programmatic_tool_names
 
     names = eligible_programmatic_tool_names()
-    assert {'read_files', 'grep_search', 'fetch_url'} <= names
+    assert {'read_files', 'search_files', 'fetch_url'} <= names
     # Retry-safe is insufficient: these routes lose citations/native artifacts
     # or mutate the active instruction surface when hidden in a program.
     assert {'web_search', 'inspect_image', 'load_skill'}.isdisjoint(names)
@@ -123,14 +123,14 @@ def test_program_parent_is_persisted_before_children_and_settled(monkeypatch):
         '_responses_items': [{
             'type': 'program', 'call_id': 'prog-1', 'fingerprint': 'opaque',
             'code': 'const a = await tools.read_files({path:"a"});\n'
-                    'const b = await tools.grep_search({query:a.content});',
+                    'const b = await tools.search_files({query:a.content});',
         }],
         'tool_calls': [{
             'id': 'child-1', 'caller': _caller(),
             'function': {'name': 'read_files', 'arguments': '{}'},
         }, {
             'id': 'child-2', 'caller': _caller(),
-            'function': {'name': 'grep_search', 'arguments': '{}'},
+            'function': {'name': 'search_files', 'arguments': '{}'},
         }],
     }
     assert _programmatic.reconcile_programmatic_items(

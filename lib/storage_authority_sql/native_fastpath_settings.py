@@ -18,6 +18,7 @@ from collections.abc import Mapping, MutableMapping
 from typing import Any
 
 from tofu_dotenv import read_dotenv_values, update_dotenv_file
+from lib.error_envelope import BadRequest
 from lib.storage_authority_sql.storage_capabilities import describe_mount
 
 FASTPATH_ENV = 'TOFU_DB_FASTPATH_DIR'
@@ -84,45 +85,67 @@ def native_fastpath_state(data_dir: Path, runtime: Mapping[str, Any],
         'supported': True, 'kind': 'native', 'mode': 'on' if base else 'off',
         'enabled': bool(base), 'directory': base, 'active': active,
         'activeDirectory': front if active else (str(authority) if active is False else ''),
-        'restartRequired': (pending != front if active else bool(base)),
+        # Without an explicit base an active front (automatic or retained)
+        # has no pending selection to apply.
+        'restartRequired': (pending != front if active and base else bool(base) and not active),
         'locked': locked, 'lockReason': _LOCK_REASON if locked else '',
         'authorityPath': front if active else (str(authority) if active is False else ''),
         'shadowPath': shadow,
+        'automatic': _automatic_state(data_dir, env),
     }
 
 
+def _automatic_state(data_dir: Path, env: Mapping[str, str]) -> dict[str, Any] | None:
+    """Automatic selection, capacity and exit status; never fails the panel."""
+    try:
+        from lib.storage_authority_sql.native_fastpath_auto import automatic_state
+
+        return automatic_state(data_dir, env)
+    except Exception:
+        from lib.log import get_logger
+
+        get_logger(__name__).debug(
+            'Automatic native fastpath state is unavailable for the settings panel',
+            exc_info=True)
+        return None
+
+
 def _validate_base(base: str, authority: Path) -> str:
+    field = 'fastPath.directory'
     if not isinstance(base, str) or not base or len(base) > 4096 or '\x00' in base:
-        raise ValueError('Native fastPath requires an explicit directory')
+        raise BadRequest('Native fastPath requires an explicit directory', field=field)
     path = Path(base)
     if not path.is_absolute() or not path.is_dir():
-        raise ValueError('Native fastPath.directory must be an existing absolute directory')
+        raise BadRequest('Native fastPath.directory must be an existing absolute directory', field=field)
     path = path.resolve()
     if path.is_relative_to(authority) or authority.is_relative_to(path):
-        raise ValueError('Native fastPath.directory must not overlap durable authority')
+        raise BadRequest('Native fastPath.directory must not overlap durable authority', field=field)
     mount = describe_mount(path)
     if mount.storage_class != 'local-block' or mount.persistence != 'persistent':
-        raise ValueError('Native fastPath.directory requires observed local persistent non-memory storage')
+        raise BadRequest('Native fastPath.directory requires observed local persistent non-memory storage',
+                         field=field)
     if not os.access(path, os.W_OK | os.X_OK):
-        raise ValueError('Native fastPath.directory must be writable')
+        raise BadRequest('Native fastPath.directory must be writable', field=field)
     # No mkdir, leaf probe, source rewrite or relocation at save. Native launch
     # performs measured capacity/fsync admission before activating this consent.
     _, front, shadow = _selection(authority.parent, str(path))
 
     front_path, shadow_path = Path(front).resolve(), Path(shadow).resolve()
     if front_path.is_relative_to(shadow_path) or shadow_path.is_relative_to(front_path):
-        raise ValueError('Native fastpath front must not overlap its recovery shadow')
+        raise BadRequest('Native fastpath front must not overlap its recovery shadow', field=field)
     for target in (Path(front).parent, Path(front), Path(shadow)):
         if os.path.lexists(target) and target.resolve() != target:
-            raise ValueError('Native fastpath namespace must not contain symlinks')
+            raise BadRequest('Native fastpath namespace must not contain symlinks', field=field)
     return str(path)
 
 
 def _validate_launch_constraints(env: Mapping[str, str]) -> None:
     if env.get('TOFUDB_TRANSPORT', 'auto').strip().lower() == 'embedded':
-        raise ValueError('Native fastpath requires daemon transport; explicit embedded mode cannot enable it')
+        raise BadRequest('Native fastpath requires daemon transport; explicit embedded mode cannot enable it',
+                         field='fastPath.enabled')
     if env.get('TOFU_DB_DURABILITY', 'strict').strip().lower() not in ('', 'strict') or env.get('TOFU_DB_WAL_FLUSH_INTERVAL_MS', '').strip():
-        raise ValueError('Native fastpath requires Strict WAL durability without a flush interval')
+        raise BadRequest('Native fastpath requires Strict WAL durability without a flush interval',
+                         field='fastPath.enabled')
     interval = env.get('TOFU_DB_FASTPATH_SYNC_INTERVAL_MS', '').strip()
     if interval:
         from lib.storage.generated_v2_semantics import (
@@ -178,7 +201,8 @@ def save_native_fastpath_settings(data_dir: Path, env_path: Path, enabled: bool,
         if enabled:
             requested = _validate_base(requested, authority)
         elif env.get('TOFU_DB_FASTPATH_SYNC_INTERVAL_MS', '').strip():
-            raise ValueError('Remove TOFU_DB_FASTPATH_SYNC_INTERVAL_MS before disabling native fastpath')
+            raise BadRequest('Remove TOFU_DB_FASTPATH_SYNC_INTERVAL_MS before disabling native fastpath',
+                             field='fastPath.enabled')
         update_dotenv_file(env_path, {FASTPATH_ENV: requested})
         env[FASTPATH_ENV] = requested
         return native_fastpath_state(data_dir, runtime, env)

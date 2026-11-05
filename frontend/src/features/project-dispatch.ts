@@ -9,14 +9,15 @@ import { createDispatchDependencies, dependencyProjection, sameDependencies } fr
 import type { CoordinationBinding } from '../api/project-coordination.generated';
 import type { ProjectDispatchRequest, ProjectDispatchRetry, ProjectDispatchRevoke,
   ProjectDispatchReviewRequest, ProjectDispatchProfile, ProjectDispatchReworkOf,
-  ProjectDispatchPublishRequest, ProjectDispatchView, ProjectDispatchPage, ProjectDispatchListQuery } from '../api/project-dispatch.generated';
+  ProjectDispatchPublishRequest, ProjectDispatchView, ProjectDispatchPage, ProjectDispatchLookup,
+  ProjectDispatchListQuery } from '../api/project-dispatch.generated';
 import { createAssignmentHistoryNavigation } from './project-assignment-history';
 
 export interface DispatchHumanTurn { turnId: string; projectionRevision: number; actor: 'human'; promptPreview?: string; }
 export interface ProjectDispatchPorts {
   recipients(): Array<{ id: string; title: string }>;
   humanTurns(): DispatchHumanTurn[];
-  list(path: string, commandId?: string, options?: Pick<ProjectDispatchListQuery, 'cursor' | 'assignmentId'>): Promise<ProjectDispatchPage>;
+  list(path: string, commandId?: string, options?: Pick<ProjectDispatchListQuery, 'cursor' | 'assignmentId'>, signal?: AbortSignal): Promise<ProjectDispatchPage>;
   grant(request: ProjectDispatchRequest, commandId: string): Promise<ProjectDispatchView>;
   dispatch(request: ProjectDispatchRetry): Promise<ProjectDispatchView>;
   revoke(request: ProjectDispatchRevoke): Promise<ProjectDispatchView>;
@@ -182,7 +183,8 @@ export function createProjectDispatch(ports: ProjectDispatchPorts, scope: Scope)
     tokens.value = String(req.budget.maxTokens); requests.value = String(req.budget.maxModelRequests);
 
     restoreProfile(req.profile); setRework(req.reworkOf); dependencies.restore(req.dependencies);
-    deadline.textContent = t('projectDispatch.deadline', { deadline: new Date(req.budget.deadline * 1000).toISOString() });
+    deadline.textContent = req.budget.deadline === undefined ? ''
+      : t('projectDispatch.deadline', { deadline: new Date(req.budget.deadline * 1000).toISOString() });
     consent.input.checked = true;
     feedback.append(text(t('projectDispatch.uncertain')));
   } else if (pending) feedback.append(text(t('projectDispatch.otherPending')));
@@ -302,7 +304,9 @@ export function createProjectDispatch(ports: ProjectDispatchPorts, scope: Scope)
       const uncertain = ownPending() && pending?.attempted && !pending.busy ? pending : null;
       const [page, reconciliation] = await Promise.all([
         ports.list(scope.path, undefined, historyCursor ? { cursor: historyCursor } : undefined),
-        uncertain ? ports.list(scope.path, uncertain.commandId).catch(() => null) : Promise.resolve(null),
+        // An exact commandId read is an assignmentLookup: complete views, not history rows.
+        uncertain ? (ports.list(scope.path, uncertain.commandId) as Promise<ProjectDispatchLookup>).catch(() => null)
+          : Promise.resolve(null),
       ]);
       if (!scope.valid() || sequence !== readSequence) return;
       if (!Array.isArray(page?.assignments)) throw new Error(t('projectDispatch.unavailable'));

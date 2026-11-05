@@ -13,6 +13,116 @@ task_runtime = _fixture_runtime
 pytestmark = pytest.mark.visual
 
 
+def open_studio_records(page):
+    """Execution records and their original-source reader live in the studio journal's work tab."""
+    from playwright.sync_api import expect
+    page.locator('.evo-slot[data-place=work]').click()
+    expect(page.locator('[role=tab][data-place=work]')).to_have_attribute('aria-selected', 'true')
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+def test_chat_plan_opens_notebook_and_returns_to_original_conversation(
+        browser, live_server, stored_program_runtime, width):
+    """Canonical human Turn/attempt + programme/storage + shell; zero model calls."""
+    from playwright.sync_api import expect
+    from tests._seed import seed_conversation, delete_conversation
+    from tests.conftest import _dismiss_onboarding_modals
+    from lib.evolution.chat_programs import execute
+    _, _, tasks = stored_program_runtime
+    conversation_id = 'chat-exploration-' + uuid.uuid4().hex
+    content = 'Prepare a synthetic reproducibility plan from this conversation.'
+    seed_conversation(conversation_id, title='Original exploration conversation')
+    context = browser.new_context(viewport={'width': width, 'height': 960})
+    context.add_init_script("localStorage.setItem('tofu_onboarding_v1_done','1'); localStorage.setItem('tofu_ui_lang','en')")
+    page = context.new_page()
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    try:
+        response = page.request.post(live_server + '/api/v4/conversations/' + conversation_id + '/turns', data={
+            'commandId': 'synthetic-human-' + uuid.uuid4().hex,
+            'inputTurn': {'content': content}, 'config': {},
+        })
+        assert response.status == 200, response.text()
+        assert len(tasks) == 1
+        task = tasks[0]
+        result = execute(task, 'manage_exploration', {'action': 'create',
+            'request': {'objective': 'Synthetic Chat-first research workflow',
+                        'acceptance': ['Keep the original conversation and verified experiment records.']},
+            'idempotency_key': 'synthetic-chat-plan'})
+        assert result['chat_source']['conversation_id'] == conversation_id
+        assert result['status'] == 'ready' and not result['execution_started']
+        assert len(tasks) == 1
+        page.goto(live_server + '/' + result['detail_path'])
+        _dismiss_onboarding_modals(page)
+        expect(page.locator('.exp-original')).to_be_visible(timeout=20000)
+        expect(page.locator('.exp-original')).to_contain_text('Synthetic Chat-first research workflow')
+        expect(page.locator('[data-program-chat]')).to_be_visible()
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
+        output = Path('output/playwright') / f'chat-exploration-notebook-{width}.png'
+        output.parent.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(output), full_page=True)
+        page.locator('[data-program-chat]').click()
+        expect(page.locator('.chat-container')).to_contain_text(content, timeout=20000)
+        assert '/evolution' not in page.url
+        assert len(tasks) == 1 and not errors
+        page.screenshot(path=str(output.with_name(f'chat-exploration-return-{width}.png')), full_page=True)
+        output.with_suffix('.json').write_text(json.dumps({'width': width, 'result': result,
+            'task_births': len(tasks), 'model_calls': 0,
+            'scope': 'Real human Turn admission, programme storage and browser navigation; controlled tool selection'}, indent=2))
+    finally:
+        context.close()
+        delete_conversation(conversation_id)
+
+
+def test_installed_skill_selection_reaches_owned_program_without_starting_work(
+        browser, live_server, stored_program_runtime, tmp_path):
+    """Real installed catalog, form, HTTP and selected storage; no model calls."""
+    from playwright.sync_api import expect
+    from tests.conftest import _dismiss_onboarding_modals
+    project = tmp_path / 'selected-project'
+    package = project / '.tofu/skills/novelty-synthetic'
+    package.mkdir(parents=True)
+    (package / 'SKILL.md').write_text('---\nname: novelty-synthetic\ndescription: Synthetic checks\n---\nRequire an observed falsifier.\n')
+    _, _, tasks = stored_program_runtime
+    context = browser.new_context(viewport={'width': 390, 'height': 960})
+    context.add_init_script("localStorage.setItem('tofu_onboarding_v1_done','1'); localStorage.setItem('tofu_ui_lang','en')")
+    page = context.new_page()
+    try:
+        page.goto(live_server + '/#/evolution/programs/new')
+        _dismiss_onboarding_modals(page)
+        expect(page.locator('.exp-create-form')).to_be_visible(timeout=20000)
+        page.locator('[name=objective]').fill('Synthetic reproducibility workflow')
+        page.locator('[name=project]').fill(str(project))
+        with page.expect_response(lambda response: '/api/v4/skills?' in response.url) as catalog:
+            page.locator('[data-load-skills]').click()
+        assert catalog.value.status == 200
+        expect(page.locator('[data-skill-options] option[value=novelty-synthetic]')).to_have_count(1)
+        page.locator('[data-skill-options]').select_option('novelty-synthetic')
+        page.reload()
+        expect(page.locator('[name=selected-skills]')).to_have_value('novelty-synthetic', timeout=20000)
+        assert not tasks
+        with page.expect_response(lambda response: response.request.method == 'POST' and response.url.endswith('/programs')) as saved:
+            page.locator('.exp-create-form').get_by_role('button', name=re.compile('Save plan|保存计划')).click()
+        assert saved.value.status == 201
+        result = saved.value.json()['data']['program']
+        options = result['execution_options']
+        assert options['skill_selection'] == ['novelty-synthetic']
+        assert options['skill_bindings'][0]['skill_id'] == 'novelty-synthetic'
+        assert len(options['skill_bindings'][0]['content_hash']) == 16
+        assert result['status'] == 'ready' and not tasks
+        expect(page.locator('.exp-original')).to_be_visible(timeout=20000)
+        page.locator('.exp-original details.exp-execution-options summary').click()
+        expect(page.locator('.exp-original')).to_contain_text('novelty-synthetic')
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
+        output = Path('output/playwright/required-skills-mobile.png')
+        output.parent.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(output), full_page=True)
+        retained = page.request.get(live_server + '/api/v4/evolution/programs/' + result['program_id'])
+        assert retained.status == 200 and retained.json()['data']['program']['execution_options'] == options
+    finally:
+        context.close()
+
+
 @pytest.mark.parametrize('width', [390, 1440])
 def test_execution_options_freeze_roles_and_restore_drafts_in_real_storage(browser, live_server, stored_program_runtime, monkeypatch, width):
     """Real form/HTTP/native records; catalog and model task execution are controlled."""
@@ -168,8 +278,8 @@ def test_declared_artifact_survives_live_file_removal_in_real_storage(browser, l
         assert hashlib.sha256(source.encode()).hexdigest() == run['artifact_evidence_source']['source_sha256']
         page.goto(live_server+'/#/evolution/runs/'+run['run_id'])
         _dismiss_onboarding_modals(page)
-        expect(page.locator('.evo-mission-panel')).to_contain_text(run['objective'], timeout=20000)
-        page.locator('.evo-ledger-head[data-studio-action=details]').click()
+        expect(page.locator('.evo-quest-title')).to_have_text(run['objective'], timeout=20000)
+        open_studio_records(page)
         page.locator(f'[data-outcome-task-id="{executor["id"]}"]').click()
         choice = page.locator('[data-source-action=artifact_evidence]')
         expect(choice).to_be_visible(); choice.click()
@@ -195,8 +305,8 @@ def test_declared_artifact_survives_live_file_removal_in_real_storage(browser, l
         screenshot = Path('output/playwright')/f'declared-artifact-native-{width}.png'
         screenshot.parent.mkdir(parents=True,exist_ok=True); page.screenshot(path=str(screenshot))
         page.reload()
-        expect(page.locator('.evo-mission-panel')).to_contain_text(run['objective'],timeout=20000)
-        page.locator('.evo-ledger-head[data-studio-action=details]').click()
+        expect(page.locator('.evo-quest-title')).to_have_text(run['objective'], timeout=20000)
+        open_studio_records(page)
         page.locator(f'[data-outcome-task-id="{executor["id"]}"]').click()
         page.locator('[data-source-action=artifact_evidence]').click()
         expect(page.locator('.evo-outcome-reader pre')).to_have_text(source[:6000])
@@ -372,7 +482,7 @@ def test_catalog_beyond_first_window_keeps_selected_program_and_draft(browser, l
     page = context.new_page(); errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     try:
-        page.goto(live_server+'/#/evolution');_dismiss_onboarding_modals(page)
+        page.goto(live_server+'/#/evolution/programs/new');_dismiss_onboarding_modals(page)
         expect(page.locator('.exp-create-form')).to_be_visible(timeout=20000)
         ids = []
         for index in range(53):
@@ -476,8 +586,8 @@ def test_committed_terminal_original_survives_recovery_and_is_readable_beyond_in
         assert recovered['status'] == 'reviewing' and recovered['receipts'][0]['restored_from_outcome'] is True
         assert recovered['result_source']['total_chars'] == len(content)
         page.goto(live_server + '/#/evolution/runs/' + run['run_id'])
-        expect(page.locator('.evo-mission-panel')).to_contain_text(run['objective'], timeout=20000)
-        page.locator('.evo-ledger-head[data-studio-action=details]').click()
+        expect(page.locator('.evo-quest-title')).to_have_text(run['objective'], timeout=20000)
+        open_studio_records(page)
         trigger = page.locator(f'[data-outcome-task-id="{executor["id"]}"]')
         expect(trigger).to_be_visible(timeout=20000)
         with page.expect_response(lambda response: '/outcomes/' in response.url):
@@ -496,7 +606,7 @@ def test_committed_terminal_original_survives_recovery_and_is_readable_beyond_in
         runs._save(updated, version, owner)
         with page.expect_response(lambda response: '/runs/' + run['run_id'] in response.url and '/outcomes/' not in response.url):
             page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
-        expect(page.locator('.evo-mission-diagnosis pre')).to_contain_text('synthetic poll update')
+        expect(page.locator('.evo-tab-inspector[data-tab=work] .evo-diagnosis pre')).to_contain_text('synthetic poll update')
         assert element.evaluate('node => node === document.querySelector(".evo-outcome-reader pre")')
         expect(original).to_be_focused()
         assert page.evaluate('window.getSelection().toString()') == content[6000:12000]
@@ -524,8 +634,8 @@ def test_committed_terminal_original_survives_recovery_and_is_readable_beyond_in
         artifact.parent.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(artifact))
         page.reload()
-        expect(page.locator('.evo-mission-panel')).to_contain_text(run['objective'], timeout=20000)
-        page.locator('.evo-ledger-head[data-studio-action=details]').click()
+        expect(page.locator('.evo-quest-title')).to_have_text(run['objective'], timeout=20000)
+        open_studio_records(page)
         page.locator(f'[data-outcome-task-id="{executor["id"]}"]').click()
         expect(page.locator('.evo-outcome-reader pre')).to_have_text(content[:6000])
         assert len(tasks) == 2
@@ -561,7 +671,7 @@ def test_semantic_history_opens_original_failed_evidence_without_new_consumption
     page = context.new_page(); errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     try:
-        page.goto(live_server + '/#/evolution');_dismiss_onboarding_modals(page)
+        page.goto(live_server + '/#/evolution/programs/new');_dismiss_onboarding_modals(page)
         expect(page.locator('.exp-create-form')).to_be_visible(timeout=20000)
         page.locator('[name=objective]').fill('Inspect older failures before inventing a transfer mechanism.')
         with page.expect_response(lambda response: '/programs/' in response.url and response.url.endswith('/commands')):
@@ -663,7 +773,7 @@ def test_executor_invention_is_visible_durable_and_not_a_success_claim(browser, 
     page = context.new_page(); errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     try:
-        page.goto(live_server + '/#/evolution')
+        page.goto(live_server + '/#/evolution/programs/new')
         _dismiss_onboarding_modals(page)
         expect(page.locator('.exp-create-form')).to_be_visible(timeout=20000)
         page.locator('[name=objective]').fill('Discover unmet needs in interrupted research.')
@@ -707,7 +817,7 @@ def test_program_notebook_real_create_pause_resume_review_and_reload(browser, li
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     try:
-        page.goto(live_server + '/#/evolution')
+        page.goto(live_server + '/#/evolution/programs/new')
         _dismiss_onboarding_modals(page)
         expect(page.locator('.exp-create-form')).to_be_visible(timeout=20000)
         page.locator('[name=objective]').fill('Explain binary search and retain restart evidence.')
@@ -808,7 +918,7 @@ def test_failure_diagnosis_proposal_review_and_retained_checks_survive_reload(br
     page = context.new_page(); errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     try:
-        page.goto(live_server + '/#/evolution'); _dismiss_onboarding_modals(page)
+        page.goto(live_server + '/#/evolution/programs/new'); _dismiss_onboarding_modals(page)
         expect(page.locator('.exp-create-form')).to_be_visible(timeout=20000)
         assert page.locator('[name=auto-replan]').input_value() == 'auto'
         page.locator('[name=objective]').fill('Find a new mechanism for interrupted research handoffs.')
@@ -874,7 +984,7 @@ def test_recovered_review_keeps_partial_cost_visible_after_program_settlement(br
     page = context.new_page(); errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     try:
-        page.goto(live_server + '/#/evolution');_dismiss_onboarding_modals(page)
+        page.goto(live_server + '/#/evolution/programs/new');_dismiss_onboarding_modals(page)
         expect(page.locator('.exp-create-form')).to_be_visible(timeout=20000)
         page.locator('[name=objective]').fill('Explore restart-safe evidence handoffs.')
         with page.expect_response(lambda response: '/programs/' in response.url and response.url.endswith('/commands')):
@@ -948,11 +1058,11 @@ def test_invalid_review_retry_preserves_original_output_cost_and_decision_after_
         assert settled['status']==('completed' if outcome=='pass' else 'needs_attention')
         assert settled['actuals']['tokens']==45 and len(settled['receipts'])==3
         page.goto(live_server+'/#/evolution/runs/'+run['run_id'],wait_until='domcontentloaded')
-        expect(page.locator('.evo-mission-panel')).to_contain_text(run['objective'],timeout=20000)
+        expect(page.locator('.evo-quest-title')).to_have_text(run['objective'], timeout=20000)
         for reload in (False,True):
             if reload:
-                page.reload();expect(page.locator('.evo-mission-panel')).to_contain_text(run['objective'],timeout=20000)
-            page.locator('.evo-ledger-head[data-studio-action=details]').click()
+                page.reload();expect(page.locator('.evo-quest-title')).to_have_text(run['objective'], timeout=20000)
+            open_studio_records(page)
             notice=page.locator(f'[data-review-format-retry="{invalid["id"]}"]')
             expect(notice).to_be_visible(timeout=20000)
             expect(notice).to_contain_text(re.compile('A new review was scheduled|已安排重新评审'))
@@ -1076,7 +1186,7 @@ def test_prepare_inspect_and_change_pacing_without_execution(browser, live_serve
     page.on('request', lambda request: commands.append(request.post_data_json)
             if request.method == 'POST' and '/evolution/programs/' in request.url and request.url.endswith('/commands') else None)
     try:
-        page.goto(live_server + '/#/evolution')
+        page.goto(live_server + '/#/evolution/programs/new')
         _dismiss_onboarding_modals(page)
         page.locator('[name=objective]').fill('Prepare a durable multi-day experiment before spending')
         page.locator('[name=acceptance]').fill('Preserve evidence and compare independently against the original goal')
@@ -1149,16 +1259,16 @@ def test_durable_background_wait_survives_reload_then_opens_late_original(browse
         waiting=runs.advance_run(run['run_id'],user_id=owner,terminal_task=executor)
         assert waiting['background_wait'] and len(tasks)==1
         page.goto(live_server+'/#/evolution/runs/'+run['run_id'])
-        expect(page.locator('.evo-mission-panel')).to_contain_text(run['objective'],timeout=20000)
-        expect(page.locator('.evo-mission-panel')).to_contain_text(__import__('re').compile('Waiting for background experiments|正在等待后台实验'))
-        page.reload();expect(page.locator('.evo-mission-panel')).to_contain_text(__import__('re').compile('Waiting for background experiments|正在等待后台实验'),timeout=20000)
+        expect(page.locator('.evo-quest-title')).to_have_text(run['objective'], timeout=20000)
+        expect(page.locator('.evo-quest-state')).to_have_text(__import__('re').compile('Waiting for background experiments|正在等待后台实验'))
+        page.reload();expect(page.locator('.evo-quest-state')).to_have_text(__import__('re').compile('Waiting for background experiments|正在等待后台实验'),timeout=20000)
         raw='$ experiment\n'+('measured paired data 🧪 <script>throw 1</script>\n'*250)+'LATE_ORIGINAL_TAIL\n[exit code: 0]'
         commands.finish_handed_off_command(command_id=handle,result=raw,error=None)
         resumed=runs.advance_run(run['run_id'],user_id=owner)
         assert resumed['status']=='reviewing' and len(tasks)==2
         with commands._lock:commands._registry.pop(handle,None)
-        page.reload();expect(page.locator('.evo-mission-panel')).to_contain_text(run['objective'],timeout=20000)
-        page.locator('.evo-ledger-head[data-studio-action=details]').click()
+        page.reload();expect(page.locator('.evo-quest-title')).to_have_text(run['objective'], timeout=20000)
+        open_studio_records(page)
         page.locator(f'[data-outcome-task-id="{executor["id"]}"]').click()
         button=page.locator('[data-source-action=background_evidence]');expect(button).to_be_visible(timeout=20000);button.click()
         original=page.locator('.evo-outcome-reader pre');expect(original).to_contain_text('measured paired data')

@@ -13,6 +13,17 @@ Entry points:
 - workspace_tree_write_lease fences real recursive/lifecycle targets, including
   prospective/non-Git directories. Acquire tree before checkout/file scopes.
 - lease_claim_order((scope, target)) orders multi-claim wrappers consistently.
+- set_admission_wait_observer(observer) installs the process-wide sink that
+  receives one AdmissionWait per acquisition that had to wait. Higher layers
+  (the task engine) install it; this module never imports them.
+- workspace_claims_lease(..., purpose=) names the request (its claims and a
+  bounded summary). Wait lines and AdmissionWait name both the waiting and the
+  blocking request.
+
+Callers are Tofu's own whole-workspace operations (delivery, integration
+snapshots, linear checkpoints, dependency setup, Git maintenance). Model tool
+calls take no lease (docs/runbooks/GIT_WORKSPACE_GUARD.md, "Tool calls take
+no workspace leases").
 Git worktrees share a common-dir but have distinct locks keyed by the real
 checkout path. Checkout leases never imply common-directory metadata ownership;
 Git's native locks/CAS and explicit publication transactions own shared refs.
@@ -38,10 +49,19 @@ external linked worktrees and their Git administration) without scans. Complete 
 are revalidated after admission; metadata rebinding fails visibly. Persistent
 zero-byte lockfiles are one inode per historical root/file/setup key, not per
 checkout alone, and are never unlinked or migrated by release.
+
+Admission order: a blocked request queues on its key. A fresh request may not
+overtake an earlier queued request of a conflicting mode while every holder
+blocking that request is younger than _QUEUE_ORDER_MAX_HOLDER_AGE_SECONDS;
+reentrant requests are never held back. A writer is therefore not starved by
+overlapping shared holders, compatible work is not frozen behind a writer that
+waits for a long-running holder, and queue order cannot close a lock-order
+cycle for longer than that fixed bound.
 """
 from __future__ import annotations
 
 import contextlib
+from dataclasses import dataclass
 import hashlib
 import math
 import os
@@ -51,6 +71,8 @@ import stat
 import sys
 import threading
 import time
+
+from lib.tools.execution_timing import timing_phase
 
 
 class WorkspaceBusyError(RuntimeError):
@@ -69,6 +91,67 @@ _WRITE = 'write'
 _FILE_BARRIER = 'file-write'
 _READ = 'read'
 _UNKNOWN = 'unknown'
+_QUEUED = 'queued'
+
+# Queue order holds a fresh compatible request back only while every holder
+# blocking the earlier request is younger than this. Behind an older holder the
+# earlier request cannot be admitted anyway, so compatible work proceeds
+# instead of freezing behind it. The same bound ends any wait that queue order
+# alone imposes, so it cannot become a lock-order cycle. A fixed scheduling
+# constant, independent of hardware.
+_QUEUE_ORDER_MAX_HOLDER_AGE_SECONDS = 2.0
+
+
+@dataclass(frozen=True)
+class AdmissionWait:
+    """One acquisition that could not be admitted on its first probe.
+
+    Instants are this process's ``time.monotonic()`` seconds; observers project
+    them onto their own clocks. Identity fields are bounded identifiers; the
+    lock root and claim labels (``scope:basename[rule]``) carry basenames only,
+    never full paths. The holder is the one observed blocking this wait for the
+    longest stretch; it is empty when no local holder was known (another
+    process holds the flock). It may be an earlier queued request (mode
+    ``queued-<mode>``; its held time is then its time queued). Its command is a
+    bounded one-line summary, present only when the holder's task has the
+    waiter's owner.
+    """
+
+    started_monotonic: float
+    ended_monotonic: float
+    mode: str
+    lock_domain: str
+    lock_root: str
+    outcome: str
+    waiter_tool: str = ''
+    tool_call_id: str = ''
+    round_num: int | None = None
+    holder_tool: str = ''
+    holder_task: str = ''
+    holder_conversation: str = ''
+    holder_held_ms: int | None = None
+    waiter_claims: str = ''
+    holder_mode: str = ''
+    holder_claims: str = ''
+    holder_command: str = ''
+
+
+_admission_wait_observer = None
+
+
+def set_admission_wait_observer(observer):
+    """Install the process-wide admission-wait sink; ``None`` uninstalls it.
+
+    Called as ``observer(task, wait)`` on the waiting thread once its
+    acquisition ends (admitted, cancelled or refused), never for an immediate
+    admission. It runs outside every lease condition but may hold the admitted
+    lease, so it must not acquire workspace leases. Its failures are swallowed:
+    evidence never decides admission.
+    """
+    global _admission_wait_observer
+    if observer is not None and not callable(observer):
+        raise TypeError('admission-wait observer must be callable or None')
+    _admission_wait_observer = observer
 
 _NEUTRAL_BINDING = object()  # Physical tree keys are not Git checkout identities.
 
@@ -220,27 +303,75 @@ def is_source_workspace_path(path) -> bool:
 
 
 _registry_lock = threading.Lock()
+_registry_condition = threading.Condition(_registry_lock)
+_opening_descriptors = 0  # fork waits for open -> registration/close
 _registry = {}  # active holders/waiters only; removed at last departure
 _active_descriptors = set()  # includes pending cross-process admission
 
 _lease_scope_state = threading.local()  # bounded depth + pending hint, never ownership
+_admission_wait_state = threading.local()  # armed flag + this thread's open wait record
+_admission_request_state = threading.local()  # this thread's outermost named lease request
+
+@contextlib.contextmanager
+def _timed_registry():
+    """Measure admission bookkeeping wait, never protected filesystem work.
+
+    Fork waits for in-flight descriptor creation before taking its snapshot;
+    registry ownership itself never needs to cover lockfile filesystem I/O.
+    """
+    lock = _registry_lock
+    acquired = False
+    try:
+        with timing_phase('workspace_registry_wait'):
+            lock.acquire()
+            acquired = True
+        yield
+    finally:
+        if acquired:
+            lock.release()
+
 
 def _after_fork():
     # Close, never LOCK_UN: the parent's open-file-description owns the flock.
-    global _registry_lock, _registry, _active_descriptors, _lease_scope_state
+    global _registry_lock, _registry_condition, _opening_descriptors
+    global _registry, _active_descriptors, _lease_scope_state
+    global _admission_wait_state, _admission_publications_lock, _admission_publications
+    global _admission_request_state
     for fd in _active_descriptors:
         try:
             os.close(fd)
         except OSError:
             pass
     _registry_lock = threading.Lock()
+    _registry_condition = threading.Condition(_registry_lock)
+    _opening_descriptors = 0
     _registry = {}
     _active_descriptors = set()
     _lease_scope_state = threading.local()
+    _admission_wait_state = threading.local()
+    _admission_request_state = threading.local()
+    _admission_publications_lock = threading.Lock()
+    _admission_publications = {}
 
 
 def _before_fork():
-    _registry_lock.acquire()
+    # CPython ignores exceptions from at-fork callbacks and still forks. An
+    # interrupted barrier must therefore finish, not expose untracked FDs.
+    # Task cancellation remains with the surrounding command lifecycle.
+    while True:
+        try:
+            _registry_lock.acquire()
+            break
+        except BaseException:
+            continue  # Only an interrupted acquire; no ownership was published.
+    # Condition.wait releases registry ownership, allowing pending opens to
+    # register/close and unrelated existing holders to finish. Hold the registry
+    # across the actual fork only after every open descriptor is accounted for.
+    while _opening_descriptors:
+        try:
+            _registry_condition.wait()
+        except BaseException:
+            continue  # Only the at-fork wait; callback errors cannot safely abort fork.
 
 
 def _after_fork_parent():
@@ -262,7 +393,7 @@ def workspace_lease_fds() -> tuple[int, ...]:
     Parent release is close-only; children retain exclusion until last close.
     """
     thread_id = threading.get_ident()
-    with _registry_lock:
+    with _timed_registry():
         return tuple(fd for entry in _registry.values()
                      if (entry['writer_thread'] == thread_id
                          or thread_id in entry['readers']
@@ -279,17 +410,20 @@ def _open_lock(common: Path, root: str):
     digest = hashlib.sha256(os.fsencode(root)).hexdigest()
     flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
     directory_fd = os.open(lock_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    fd = None
     try:
-        fd = os.open(digest + '.lock', flags, 0o600, dir_fd=directory_fd)
-    finally:
-        os.close(directory_fd)
-    try:
+        try:
+            fd = os.open(digest + '.lock', flags, 0o600, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise WorkspaceBusyError(f'Unsafe workspace lock file for {root}')
     except BaseException:
-        # Opening succeeded but descriptor validation did not transfer ownership.
-        os.close(fd)
+        # Includes directory-close failure after opening: no descriptor may
+        # escape the pending-open barrier without registration or retirement.
+        if fd is not None:
+            os.close(fd)
         raise
     return fd, fcntl
 
@@ -311,21 +445,119 @@ def _validate_lock_fd(common, root, fd):
         raise WorkspaceBusyError('Workspace lock metadata rebound during admission: ' + root)
 
 
+def _bounded_identifier(value):
+    value = str(value or '')
+    return value if re.fullmatch(r'[A-Za-z0-9_.:-]{1,96}', value) else ''
+
+
 def _holder_identity(cancel_event):
-    """Bounded diagnostic values only; never retain task/runtime/command bodies."""
+    """Bounded diagnostic values; never retain task/runtime/command bodies."""
     from .tool_admission import cancellation
     scoped = cancellation()
     task = getattr(cancel_event, 'task', None) or getattr(scoped, 'task', None) or {}
     tool = getattr(cancel_event, 'tool_name', '') or getattr(scoped, 'tool_name', '')
-
-    def identifier(value):
-        value = str(value or '')
-        return value if re.fullmatch(r'[A-Za-z0-9_.:-]{1,96}', value) else ''
-
+    # Acquisitions outside any tool scope (settlement, delivery, checkpoints)
+    # carry no tool/task; the thread name is what names their subsystem.
     return {'pid': os.getpid(), 'thread': threading.get_ident(),
-            'tool': identifier(tool), 'task': identifier(task.get('id')),
-            'conversation': identifier(task.get('convId')),
-            'since': time.monotonic()}
+            'thread_name': _bounded_identifier(threading.current_thread().name),
+            'tool': _bounded_identifier(tool), 'task': _bounded_identifier(task.get('id')),
+            'conversation': _bounded_identifier(task.get('convId')),
+            'owner': _bounded_identifier(task.get('_userId')),
+            'request': getattr(_admission_request_state, 'request', None)}
+
+
+@dataclass(frozen=True)
+class _LeaseRequest:
+    """What one lease transaction asked for, as wait diagnostics name it.
+
+    ``claims`` keeps at most ``_REQUEST_CLAIMS_SHOWN`` (scope, path) pairs;
+    ``total`` counts every claim. ``purpose`` is the caller's bounded one-line
+    summary, never a body.
+    """
+
+    claims: tuple
+    total: int
+    purpose: str
+
+
+_REQUEST_CLAIMS_SHOWN = 4
+_PURPOSE_CHARS = 160
+
+
+def _describe_request(claims, purpose):
+    claims = tuple(claims)
+    shown = tuple((str(scope), os.path.abspath(os.path.expanduser(os.fspath(path))))
+                  for scope, path in claims[:_REQUEST_CLAIMS_SHOWN])
+    text = ' '.join(''.join(char if char.isprintable() else ' '
+                            for char in str(purpose or '')).split())
+    if len(text) > _PURPOSE_CHARS:
+        text = text[:_PURPOSE_CHARS - 1] + '…'
+    return _LeaseRequest(shown, len(claims), text)
+
+
+@contextlib.contextmanager
+def _lease_request(claims, *, purpose=''):
+    """Name this thread's outermost lease request for holder/waiter diagnostics.
+
+    Nested public scopes re-enter keys the outer transaction already admitted,
+    so the outermost request names them. Naming never decides admission.
+    """
+    state = _admission_request_state
+    if getattr(state, 'request', None) is not None:
+        yield
+        return
+    try:
+        request = _describe_request(claims, purpose)
+    except Exception as error:
+        # Diagnostics never decide admission.
+        from lib.log import get_logger
+        get_logger(__name__).debug('[WorkspaceLease] request description dropped: %s', error)
+        request = None
+    state.request = request
+    try:
+        yield
+    finally:
+        state.request = None
+
+
+def _path_label(path):
+    """A path's basename, bounded and restricted to model-safe characters."""
+    name = os.path.basename(path.rstrip(os.sep)) or os.sep
+    return re.sub(r'[^\w .@+=,~-]', '?', name)[:96]
+
+
+def _request_label(request, *, full_paths=False):
+    """'scope:name,...' for a named request; '' when none was named."""
+    if request is None or not request.claims:
+        return ''
+    parts = [f'{scope}:{path if full_paths else _path_label(path)}'
+             for scope, path in request.claims]
+    if request.total > len(request.claims):
+        parts.append(f'+{request.total - len(request.claims)} more')
+    return ','.join(parts)
+
+
+def _purpose(holder):
+    request = holder.get('request')
+    return request.purpose if request is not None else ''
+
+
+def _same_owner(holder, viewer):
+    """Whether *holder*'s command summary may be shown to *viewer*.
+
+    TODO(enterprise): owner identity is the task's ``_userId``; a holder of
+    another owner is named only by its ids, lock and claim labels.
+    """
+    return holder.get('owner', '') == viewer.get('owner', '')
+
+
+def _holder_mode_label(holder):
+    mode = holder.get('mode', '')
+    return 'queued-' + mode if holder.get('queued') and mode else mode
+
+
+def _quoted(text):
+    return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
 # A wait longer than this is invisible to every other subsystem: no process
@@ -339,55 +571,99 @@ def _log_admission_wait(root, mode, active, entry, waited_s, waiter):
     """Bounded diagnostic; never raises into admission or retains command text."""
     try:
         from lib.log import get_logger
+        request = waiter.get('request')
         get_logger(__name__).warning(
             '[WorkspaceLease] wait %.0fs mode=%s root=%s waiter(pid=%s thread=%s '
-            'tool=%s task=%s conv=%s)%s',
+            'thread_name=%s tool=%s task=%s conv=%s claims=%s cmd=%s)%s',
             waited_s, mode, root,
-            waiter.get('pid'), waiter.get('thread'), waiter.get('tool') or '-',
+            waiter.get('pid'), waiter.get('thread'), waiter.get('thread_name') or '-',
+            waiter.get('tool') or '-',
             waiter.get('task') or '-', waiter.get('conversation') or '-',
-            _holder_summary(entry, active))
-    except Exception:
-        pass  # Diagnostics never decide admission.
+            _request_label(request, full_paths=True) or '-',
+            _quoted(request.purpose) if request is not None and request.purpose else '-',
+            _holder_summary(entry, active, mode))
+    except Exception as error:
+        # Diagnostics never decide admission.
+        from lib.log import get_logger
+        get_logger(__name__).debug('[WorkspaceLease] admission-wait notice dropped: %s', error)
 
 
-def _holder_summary(entry, active):
-    """Render the ACTUAL blockers under the caller's condition; '' if unknown."""
-    if entry is None:
-        return ''
+def _blocking_owners(entry, active):
+    """Every (mode, thread) hold that blocks under the caller's condition."""
     if entry['writer_thread'] is not None:
-        owners = [(_WRITE, entry['writer_thread'])]
-    elif active == _READ:
-        owners = [(_READ, thread) for thread in entry['readers']]
-    elif entry['file_writers']:
-        owners = [(_FILE_BARRIER, thread) for thread in entry['file_writers']]
-    else:
-        owners = []
-    details = []
-    for key in owners[:3]:
-        holder = entry['holders'].get(key)
-        if holder is None:
-            continue
-        fields = [f'pid={holder["pid"]}', f'thread={holder["thread"]}',
-                  f'held_seconds={max(0.0, time.monotonic() - holder["since"]):.1f}']
-        fields.extend(f'{name}={holder[name]}' for name in ('tool', 'task', 'conversation')
-                      if holder[name])
-        details.append(', '.join(fields))
+        return [(_WRITE, entry['writer_thread'])]
+    if active == _READ:
+        return [(_READ, thread) for thread in entry['readers']]
+    if entry['file_writers']:
+        return [(_FILE_BARRIER, thread) for thread in entry['file_writers']]
+    return []
+
+
+def _blocking_holders(entry, active, mode=None):
+    """The ACTUAL blockers (at most three) under the caller's condition.
+
+    A request held back by queue order is blocked by the earlier queued request
+    it may not overtake, recomputed for the calling thread and its *mode*.
+    """
+    if entry is None:
+        return []
+    if active == _QUEUED:
+        request = _queued_ahead(entry, threading.get_ident(), mode, time.monotonic())
+        return [request] if request is not None else []
+    return [holder for holder in (entry['holders'].get(key)
+                                  for key in _blocking_owners(entry, active)[:3])
+            if holder is not None]
+
+
+def _holder_fields(holder, show_command):
+    age = f'{max(0.0, time.monotonic() - holder["since"]):.1f}'
+    fields = [f'pid={holder["pid"]}', f'thread={holder["thread"]}',
+              f'queued_seconds={age}' if holder.get('queued') else f'held_seconds={age}']
+    if holder.get('mode'):
+        fields.append(f'mode={_holder_mode_label(holder)}')
+    fields.extend(f'{name}={holder[name]}'
+                  for name in ('thread_name', 'tool', 'task', 'conversation')
+                  if holder.get(name))
+    claims = _request_label(holder.get('request'), full_paths=True)
+    if claims:
+        fields.append(f'claims={claims}')
+    purpose = _purpose(holder)
+    if purpose and show_command:
+        fields.append('cmd=' + _quoted(purpose))
+    return ', '.join(fields)
+
+
+def _holder_summary(entry, active, mode=None, viewer=None):
+    """Render the ACTUAL blockers under the caller's condition; '' if unknown.
+
+    ``viewer`` is the waiting identity when the text returns to a model; a
+    blocker's command summary is then shown only to the blocker's owner.
+    """
+    details = [_holder_fields(holder, viewer is None or _same_owner(holder, viewer))
+               for holder in _blocking_holders(entry, active, mode)]
     return (' [holder: ' + '; '.join(details) + ']') if details else ''
 
-def _busy(root, active, entry=None):
-
-    domain = 'Workspace'
+def _lease_domain(root):
+    """(domain name, path) of a lock key for refusal messages."""
     if root.startswith('tree:'):
-        domain, root = 'Workspace tree lifecycle', root[len('tree:'):]
-    elif root.startswith('git-metadata:'):
-        domain, root = 'Git common-directory metadata', root[len('git-metadata:'):]
+        return 'Workspace tree lifecycle', root[len('tree:'):]
+    if root.startswith('git-metadata:'):
+        return 'Git common-directory metadata', root[len('git-metadata:'):]
+    return 'Workspace', root
+
+
+def _busy(root, active, entry=None, mode=None, viewer=None):
+    domain, root = _lease_domain(root)
     if active == _UNKNOWN:
         return WorkspaceBusyError(
             f'{domain} lease contention is active (holder type unknown): {root}')
-    message = f'{domain} {active} is active: {root}'
+    if active == _QUEUED:
+        message = f'{domain} admission is queued behind an earlier conflicting request: {root}'
+    else:
+        message = f'{domain} {active} is active: {root}'
     # Called under the same condition as admission/release. Report actual
     # blockers, not the waiting caller or an invented cross-process owner.
-    message += _holder_summary(entry, active)
+    message += _holder_summary(entry, active, mode, viewer)
     return WorkspaceBusyError(message)
 
 
@@ -400,38 +676,69 @@ def _try_acquire(entry, thread_id, mode):
     """Attempt admission under entry['cond']; busy markers name ACTUAL blockers."""
     if entry['acquiring_thread'] is not None:
         return _UNKNOWN
-
-    if mode == _FILE_BARRIER:
-        if entry['writer_thread'] == thread_id:
+    if entry['writer_thread'] == thread_id:
+        if mode == _READ:
+            entry['reader_reentry'] += 1
+        else:
             entry['writer_depth'] += 1
-            return 'enter'
-        if entry['writer_thread'] is not None:
-            return _WRITE
+        return 'enter'
+    if entry['writer_thread'] is not None:
+        return _WRITE
+    if mode == _FILE_BARRIER:
         if entry['readers']:
             return _READ
-        return 'acquire'
-    if mode == _WRITE:
-        if entry['writer_thread'] == thread_id:
-            entry['writer_depth'] += 1
-            return 'enter'
-        if entry['writer_thread'] is not None:
-            return _WRITE
+    elif mode == _WRITE:
         if entry['file_writers']:
             return _WRITE
-        if not entry['readers'] or (
+        if entry['readers'] and not (
                 len(entry['readers']) == 1 and thread_id in entry['readers']):
-            return 'acquire'
-        return _READ
-    if entry['writer_thread'] == thread_id:
-        entry['reader_reentry'] += 1
-        return 'enter'
-    if entry['writer_thread'] is not None or entry['file_writers']:
+            return _READ
+    elif entry['file_writers']:
         return _WRITE
+    # A thread already holding this key keeps its admission (an upgrading sole
+    # reader, a nested file barrier); waiting behind a request that waits for
+    # this very thread could not end.
+    if (entry['queued'] and thread_id not in entry['readers']
+            and thread_id not in entry['file_writers']
+            and _queued_ahead(entry, thread_id, mode, time.monotonic()) is not None):
+        return _QUEUED
     return 'acquire'
 
 
+def _modes_conflict(first, second):
+    return not (first == second and first in (_FILE_BARRIER, _READ))
+
+
+def _conflicting_holds(entry, mode, thread_id):
+    return [holder for (held, owner), holder in entry['holders'].items()
+            if owner != thread_id and _modes_conflict(held, mode)]
+
+
+def _queued_ahead(entry, thread_id, mode, now):
+    """The earliest queued request a fresh *mode* request may not overtake.
+
+    Called under entry['cond'] for a thread holding nothing on this key. An
+    earlier queued request of a conflicting mode keeps precedence only while
+    every holder blocking it is younger than _QUEUE_ORDER_MAX_HOLDER_AGE_SECONDS:
+    behind an older holder it cannot be admitted anyway. Precedence follows
+    strictly earlier queue times, so queued requests never hold each other back.
+    """
+    own = entry['queued'].get(thread_id)
+    arrived = own['since'] if own is not None else now
+    for owner, request in entry['queued'].items():
+        if (owner == thread_id or request['since'] >= arrived
+                or not _modes_conflict(request['mode'], mode)):
+            continue
+        if all(now - holder['since'] < _QUEUE_ORDER_MAX_HOLDER_AGE_SECONDS
+               for holder in _conflicting_holds(entry, request['mode'], owner)):
+            return request
+    return None
+
+
 def _publish_hold(entry, thread_id, mode, holder):
-    entry['holders'].setdefault((mode, thread_id), holder)
+    # Held time starts at admission, not when this holder began its own wait.
+    entry['holders'].setdefault((mode, thread_id),
+                                {**holder, 'mode': mode, 'since': time.monotonic()})
     if mode == _WRITE:
         entry['writer_thread'] = thread_id
         entry['writer_depth'] = 1
@@ -444,22 +751,62 @@ def _publish_hold(entry, thread_id, mode, holder):
 
 
 def _close_descriptor(fd):
-    with _registry_lock:
+    with _timed_registry():
         _active_descriptors.discard(fd)
         # No LOCK_UN: an inherited child FD must continue to exclude.
         os.close(fd)
 
 
 def _acquire_process_lock(common, root, deadline, cancel_event, mode):
+    global _opening_descriptors
     fd = None
+    opening = False
     try:
-        with _registry_lock:
-            fd, fcntl = _open_lock(common, root)
-            _active_descriptors.add(fd)
         # Cross-process waits have no local holder entry: state that honestly
         # rather than reporting a fabricated blocker.
         waiter = _holder_identity(cancel_event)
         waited_since = next_notice = None
+        try:
+            with _timed_registry():
+                _opening_descriptors += 1
+                opening = True
+            # Slow mkdir/stat/open on a network volume must not stop unrelated
+            # admission, release, cancellation or registry inspection.
+            with timing_phase('workspace_lock_io'):
+                fd, fcntl = _open_lock(common, root)
+        finally:
+            if opening:
+                # Cleanup must not itself enter fallible diagnostic callbacks.
+                # A returned FD is tracked even if the timing finalizer raised;
+                # the outer exception path then closes it before propagation.
+                pending_error = sys.exc_info()[1]
+                interrupted = None
+                while True:
+                    try:
+                        _registry_lock.acquire()
+                        break
+                    except BaseException as error:
+                        # Finish the one owned reservation before propagating
+                        # interruption; leaving its count behind fences all forks.
+                        if interrupted is None:
+                            interrupted = error
+                try:
+                    try:
+                        if fd is not None:
+                            _active_descriptors.add(fd)
+                    except BaseException:
+                        if fd is not None:
+                            _active_descriptors.discard(fd)
+                            os.close(fd)
+                            fd = None
+                        raise
+                    finally:
+                        _opening_descriptors -= 1
+                        _registry_condition.notify_all()
+                finally:
+                    _registry_lock.release()
+                if interrupted is not None and pending_error is None:
+                    raise interrupted
         while True:
             _check_cancelled(root, cancel_event)
             try:
@@ -471,6 +818,7 @@ def _acquire_process_lock(common, root, deadline, cancel_event, mode):
                 remaining = _wait_remaining(deadline)
                 if remaining is not None and remaining <= 0:
                     raise _busy(root, _UNKNOWN)
+                _note_admission_blocked(root, mode, _UNKNOWN, None)
                 now = time.monotonic()
                 if waited_since is None:
                     waited_since = next_notice = now + _ADMISSION_NOTICE_SECONDS
@@ -479,7 +827,8 @@ def _acquire_process_lock(common, root, deadline, cancel_event, mode):
                     _log_admission_wait(root, mode, _UNKNOWN, None,
                                         now - (waited_since - _ADMISSION_NOTICE_SECONDS),
                                         waiter)
-                time.sleep(0.05 if remaining is None else min(0.05, remaining))
+                with timing_phase('workspace_flock_wait'):
+                    time.sleep(0.05 if remaining is None else min(0.05, remaining))
     except BaseException as error:
         if fd is not None:
             _close_descriptor(fd)
@@ -508,7 +857,7 @@ def _enter(path, mode, timeout, cancel_event, _identity=None, _binding=None,
     holder = _holder_identity(cancel_event)
     deadline = _wait_deadline(timeout)
     thread_id = threading.get_ident()
-    with _registry_lock:
+    with _timed_registry():
         if any(other[0] == root and other != key for other in _registry):
             raise WorkspaceBusyError('Workspace metadata rebound during an active lease: ' + root)
         entry = _registry.setdefault(key, {
@@ -516,6 +865,7 @@ def _enter(path, mode, timeout, cancel_event, _identity=None, _binding=None,
             'writer_thread': None, 'writer_depth': 0,
             'readers': {}, 'reader_reentry': 0, 'file_writers': {},
             'fds': {}, 'acquiring_thread': None, 'holders': {},
+            'queued': {},  # blocked requests in arrival order: thread -> identity
         })
         entry['users'] += 1
     pending = False
@@ -539,9 +889,12 @@ def _enter(path, mode, timeout, cancel_event, _identity=None, _binding=None,
                 snapshot = None  # A blocked probe published no ownership.
                 remaining = _wait_remaining(deadline)
                 if remaining is not None and remaining <= 0:
-                    raise _busy(root, outcome, entry)
+                    raise _busy(root, outcome, entry, mode, holder)
                 waited_locally = True
                 now = time.monotonic()
+                entry['queued'].setdefault(
+                    thread_id, {**holder, 'mode': mode, 'since': now, 'queued': True})
+                _note_admission_blocked(root, mode, outcome, entry)
                 if waited_since is None:
                     waited_since = next_notice = now + _ADMISSION_NOTICE_SECONDS
                 elif now >= next_notice:
@@ -549,7 +902,9 @@ def _enter(path, mode, timeout, cancel_event, _identity=None, _binding=None,
                     _log_admission_wait(root, mode, outcome, entry,
                                         now - (waited_since - _ADMISSION_NOTICE_SECONDS),
                                         holder)
-                entry['cond'].wait(timeout=0.05 if remaining is None else min(0.05, remaining))
+                with timing_phase('workspace_local_wait'):
+                    entry['cond'].wait(timeout=0.05 if remaining is None else min(0.05, remaining))
+            entry['queued'].pop(thread_id, None)
             # Fresh reservations are always validated after physical admission,
             # before publication/body. Existing-FD/reentry and local-wait paths
             # also validate here; no identity is cached across acquisitions.
@@ -573,7 +928,7 @@ def _enter(path, mode, timeout, cancel_event, _identity=None, _binding=None,
             _validate_binding(validation_path, binding)
             _publish_hold(entry, thread_id, mode, holder)
             _check_cancelled(root, cancel_event)
-            with _registry_lock:
+            with _timed_registry():
                 entry['fds'][_FILE_BARRIER if mode == _FILE_BARRIER else _WRITE] = fd
             entry['acquiring_thread'] = None
             entry['cond'].notify_all()
@@ -582,8 +937,9 @@ def _enter(path, mode, timeout, cancel_event, _identity=None, _binding=None,
         return entry, root, key, outcome
     except BaseException:
         with entry['cond']:
+            entry['queued'].pop(thread_id, None)
             if fd is not None:
-                with _registry_lock:
+                with _timed_registry():
                     for descriptor_key, value in list(entry['fds'].items()):
                         if value == fd:
                             entry['fds'].pop(descriptor_key)
@@ -606,7 +962,7 @@ def _enter(path, mode, timeout, cancel_event, _identity=None, _binding=None,
             if pending:
                 entry['acquiring_thread'] = None
             entry['cond'].notify_all()
-        with _registry_lock:
+        with _timed_registry():
             entry['users'] -= 1
             if entry['users'] == 0:
                 _registry.pop(key, None)
@@ -642,6 +998,191 @@ def _waiting_task(cancel_event):
     return None
 
 
+class _AdmissionWaitRecord:
+    """One acquisition's first blocked probe and its longest-observed blocker.
+
+    A blocker is a published holder dict (stable for one hold, so identity marks
+    a handoff) or ``None`` when no local holder is known: another process owns
+    the flock, or another local thread is still acquiring it.
+    """
+
+    __slots__ = ('started', 'root', 'mode', 'request', '_holder', '_first', '_last',
+                 'dominant', 'dominant_last', '_dominant_span')
+
+    def __init__(self, started, root, mode, holder, request=None):
+        self.started, self.root, self.mode, self.request = started, root, mode, request
+        self._holder, self._first, self._last = holder, started, started
+        self.dominant, self.dominant_last, self._dominant_span = None, started, -1.0
+
+    def observe(self, now, holder):
+        if holder is not self._holder:
+            self._settle()
+            self._holder, self._first = holder, now
+        self._last = now
+
+    def _settle(self):
+        span = self._last - self._first
+        if span > self._dominant_span:
+            self.dominant, self.dominant_last, self._dominant_span = (
+                self._holder, self._last, span)
+
+    def finish(self):
+        self._settle()
+
+
+def _note_admission_blocked(root, mode, active, entry):
+    """Record one blocked probe of this thread's acquisition as wait evidence.
+
+    Local waits call this under the entry condition, so the blockers read are
+    current; cross-process flock waits pass no entry (their holder is unknowable
+    here). Only an armed thread (observer installed, task present) records.
+    """
+    state = _admission_wait_state
+    if not getattr(state, 'armed', False):
+        return
+    holders = _blocking_holders(entry, active, mode)
+    holder = holders[0] if holders else None
+    now = time.monotonic()
+    if state.record is None:
+        state.record = _AdmissionWaitRecord(
+            now, root, mode, holder, getattr(_admission_request_state, 'request', None))
+    else:
+        state.record.observe(now, holder)
+
+
+class _AdmissionPublication:
+    """One acquisition in progress on a task."""
+
+    __slots__ = ('since',)
+
+    def __init__(self, since):
+        self.since = since
+
+
+# Every acquisition in progress, per waiting task: id(task) -> (task, the value
+# the task held before the first began, its acquisitions oldest first). Parallel
+# calls of one task share its dict and end in any order, so the marker is
+# derived from the acquisitions still in progress, never restored LIFO.
+_admission_publications_lock = threading.Lock()
+_admission_publications = {}
+_NO_MARKER = object()
+
+
+def _open_admission_publication(task):
+    from .tool_admission import WORKSPACE_ADMISSION_KEY
+    publication = _AdmissionPublication(time.monotonic())
+    with _admission_publications_lock:
+        entry = _admission_publications.setdefault(
+            id(task), (task, task.get(WORKSPACE_ADMISSION_KEY, _NO_MARKER), []))
+        entry[2].append(publication)
+        _show_admission_marker(task)
+    return publication
+
+
+def _close_admission_publication(task, publication):
+    from .tool_admission import WORKSPACE_ADMISSION_KEY
+    with _admission_publications_lock:
+        _task, original, publications = _admission_publications[id(task)]
+        publications.remove(publication)
+        if publications:
+            _show_admission_marker(task)
+            return
+        del _admission_publications[id(task)]
+        if original is _NO_MARKER:
+            task.pop(WORKSPACE_ADMISSION_KEY, None)
+        else:
+            task[WORKSPACE_ADMISSION_KEY] = original
+
+
+def _show_admission_marker(task):
+    """Replace (never mutate) the task's marker; caller holds the lock.
+
+    Readers on other threads hold a stable snapshot of the oldest acquisition
+    still in progress.
+    """
+    from .tool_admission import WORKSPACE_ADMISSION_KEY
+    publications = _admission_publications[id(task)][2]
+    marker = {'since': publications[0].since, 'depth': len(publications)}
+    if task.get(WORKSPACE_ADMISSION_KEY) != marker:
+        task[WORKSPACE_ADMISSION_KEY] = marker
+
+
+_LOCK_KEY_DOMAINS = ('tree:', 'git-metadata:', 'runtime-setup:')
+
+
+def _lock_root_label(root):
+    """(domain, basename) of a lock key; full paths never leave this module."""
+    for prefix in _LOCK_KEY_DOMAINS:
+        if root.startswith(prefix):
+            domain, path = prefix[:-1], root[len(prefix):]
+            break
+    else:
+        domain, path = 'workspace', root
+    return domain, os.path.basename(path.rstrip(os.sep)) or os.sep
+
+
+def _waiter_call(cancel_event):
+    """(toolCallId, roundNum) of the waiting tool occurrence, when one is bound."""
+    from .tool_admission import cancellation
+    for control in (cancel_event, cancellation()):
+        runtime = getattr(control, 'runtime_context', None)
+        call_id = getattr(runtime, 'tool_call_id', None)
+        if isinstance(call_id, str) and 0 < len(call_id) <= 256:
+            round_num = getattr(runtime, 'round_num', None)
+            return call_id, round_num if type(round_num) is int else None
+    return '', None
+
+
+def _report_admission_wait(task, cancel_event, record, outcome, ended):
+    observer = _admission_wait_observer
+    if observer is None:
+        return
+    try:
+        record.finish()
+        holder = record.dominant or {}
+        domain, root = _lock_root_label(record.root)
+        call_id, round_num = _waiter_call(cancel_event)
+        waiter = _holder_identity(cancel_event)
+        observer(task, AdmissionWait(
+            started_monotonic=record.started,
+            ended_monotonic=max(record.started, ended),
+            mode=record.mode, lock_domain=domain, lock_root=root, outcome=outcome,
+            waiter_tool=waiter['tool'],
+            tool_call_id=call_id, round_num=round_num,
+            holder_tool=holder.get('tool', ''), holder_task=holder.get('task', ''),
+            holder_conversation=holder.get('conversation', ''),
+            holder_held_ms=(max(0, int((record.dominant_last - holder['since']) * 1000))
+                            if holder else None),
+            waiter_claims=_request_label(record.request),
+            holder_mode=_holder_mode_label(holder),
+            holder_claims=_request_label(holder.get('request')),
+            holder_command=_purpose(holder) if holder and _same_owner(holder, waiter) else ''))
+    except Exception:
+        # The observer contract forbids raising; evidence never decides admission.
+        from lib.log import get_logger
+        get_logger(__name__).warning('[WorkspaceLease] admission-wait evidence dropped',
+                                     exc_info=True)
+
+
+class _AdmittedWaitReport:
+    """An admitted wait's evidence, sent only once the caller owns the release.
+
+    The acquisition has already ended (its instant is captured); only delivery
+    is deferred, so an observer can never run while an acquired lease has no
+    release owner.
+    """
+
+    __slots__ = ('_pending',)
+
+    def __init__(self):
+        self._pending = None
+
+    def send(self):
+        pending, self._pending = self._pending, None
+        if pending is not None:
+            _report_admission_wait(*pending)
+
+
 @contextlib.contextmanager
 def _publish_admission_wait(cancel_event):
     """Mark a task as WAITING for admission for exactly the acquisition span.
@@ -649,31 +1190,45 @@ def _publish_admission_wait(cancel_event):
     The wait produces no process and no output, so every silence-based liveness
     decision would otherwise read it as a wedge
     (``lib.tasks_pkg.explained_wait`` owns that classification). Publishing it
-    here — the wait owner — covers every caller: commands, scoped file writes
-    and MCP preparation alike. A caller-side copy would only cover its own path.
+    here, the wait owner, covers every task-bound internal caller (dependency
+    setup, integration snapshots); a caller-side copy would cover only one.
+
+    The same owner records timing evidence: an acquisition whose first probe was
+    blocked is reported once to the admission-wait observer
+    (``set_admission_wait_observer``). A refused or cancelled acquisition holds
+    nothing and is reported here; an admitted one is handed back through the
+    yielded ``_AdmittedWaitReport``, which ``_lease`` sends inside the scope that
+    owns the release. An immediate admission records nothing.
     """
-    from .tool_admission import WORKSPACE_ADMISSION_KEY
+    admitted = _AdmittedWaitReport()
     task = _waiting_task(cancel_event)
     if task is None:
-        yield
+        yield admitted
         return
-    previous = task.get(WORKSPACE_ADMISSION_KEY)
-    depth = 1
-    since = time.monotonic()
-    if isinstance(previous, dict) and previous.get('depth'):
-        depth = int(previous['depth']) + 1
-        since = previous.get('since', since)
-    # A pre-existing marker is not guaranteed to be a mapping; only presence
-    # matters, so an unreadable value must not fail admission itself.
-    base = previous if isinstance(previous, dict) else {}
-    task[WORKSPACE_ADMISSION_KEY] = {**base, 'since': since, 'depth': depth}
+    publication = _open_admission_publication(task)
+    state = _admission_wait_state
+    outer = (getattr(state, 'armed', False), getattr(state, 'record', None))
+    state.armed, state.record = _admission_wait_observer is not None, None
+    outcome = 'error'
     try:
-        yield
+        yield admitted
+        outcome = 'admitted'
+    except WorkspaceLeaseCancelled:
+        outcome = 'cancelled'
+        raise
+    except WorkspaceBusyError:
+        outcome = 'refused'
+        raise
     finally:
-        if previous is None:
-            task.pop(WORKSPACE_ADMISSION_KEY, None)
-        else:
-            task[WORKSPACE_ADMISSION_KEY] = previous
+        record = state.record
+        state.armed, state.record = outer
+        _close_admission_publication(task, publication)
+        if record is not None:
+            pending = (task, cancel_event, record, outcome, time.monotonic())
+            if outcome == 'admitted':
+                admitted._pending = pending
+            else:
+                _report_admission_wait(*pending)
 
 
 @contextlib.contextmanager
@@ -681,16 +1236,18 @@ def _lease(path, mode, timeout, cancel_event, _identity=None, _binding=None,
            _validation_path=None):
     timeout = _validated_timeout(timeout)
     owner_pid = os.getpid()
-    with _publish_admission_wait(cancel_event):
+    with _publish_admission_wait(cancel_event) as admitted_wait:
         entry, root, key, action = _enter(path, mode, timeout, cancel_event, _identity,
                                          _binding, _validation_path)
     if entry is None:  # non-Git path: no-op
+        admitted_wait.send()
         yield
         return
     thread_id = threading.get_ident()
     state = _lease_scope_state
     state.depth = getattr(state, 'depth', 0) + 1
     try:
+        admitted_wait.send()
         yield
     finally:
         # At-fork cleanup already closed inherited FDs. Their numbers may now
@@ -699,7 +1256,7 @@ def _lease(path, mode, timeout, cancel_event, _identity=None, _binding=None,
             with entry['cond']:
                 _release(entry, thread_id, mode, action)
                 entry['cond'].notify_all()
-            with _registry_lock:
+            with _timed_registry():
                 entry['users'] -= 1
                 last_departure = entry['users'] == 0
                 if last_departure:
@@ -742,7 +1299,7 @@ def _release(entry, thread_id, mode, action):
             owners[thread_id] = depth - 1
     if (entry['writer_thread'] is None and not entry['readers']
             and not entry['file_writers'] and entry['reader_reentry'] == 0):
-        with _registry_lock:
+        with _timed_registry():
             for fd in entry['fds'].values():
                 _active_descriptors.discard(fd)
                 os.close(fd)
@@ -852,7 +1409,7 @@ def _validate_chain(path, chain):
 @contextlib.contextmanager
 def _root_lease(path, mode, timeout, cancel_event):
     deadline = _wait_deadline(timeout)
-    with _checkout_fence(path, deadline, cancel_event) as chain:
+    with _lease_request((('root', path),)), _checkout_fence(path, deadline, cancel_event) as chain:
         if not chain:
             yield
             return
@@ -937,7 +1494,7 @@ def workspace_file_write_lease(path, *, timeout=0.0, cancel_event=None):
     def remaining():
         return _wait_remaining(deadline)
 
-    with _checkout_fence(target, deadline, cancel_event) as chain:
+    with _lease_request((('file', path),)), _checkout_fence(target, deadline, cancel_event) as chain:
         if not chain or not is_source_workspace_path(target):
             with _plain_file_transaction(lexical, target, deadline, cancel_event, chain):
                 yield
@@ -947,7 +1504,7 @@ def workspace_file_write_lease(path, *, timeout=0.0, cancel_event=None):
         if target in (os.path.realpath(os.path.join(root, '.git')),
                       os.path.join(binding[2], 'commondir')):
             raise WorkspaceBusyError('Git workspace identity metadata cannot be rebound by a file lease: ' + target)
-        with _registry_lock:
+        with _timed_registry():
             entry = _registry.get((root, str(common)))
         whole_writer = False
         if entry is not None:
@@ -996,7 +1553,8 @@ def workspace_runtime_setup_lease(path, *, timeout=0.0, cancel_event=None):
     """
     deadline = _wait_deadline(timeout)
     _check_cancelled(path, cancel_event)
-    with _checkout_fence(path, deadline, cancel_event) as chain:
+    with _lease_request((('runtime-setup', path),)), \
+            _checkout_fence(path, deadline, cancel_event) as chain:
         if not chain:
             yield
             return
@@ -1042,7 +1600,8 @@ def workspace_git_metadata_lease(path, *, timeout=0.0, cancel_event=None):
     target resolution and authorization; this is not command classification.
     """
     deadline = _wait_deadline(timeout)
-    with _checkout_fence(path, deadline, cancel_event) as chain:
+    with _lease_request((('metadata', path),)), \
+            _checkout_fence(path, deadline, cancel_event) as chain:
         if not chain:
             yield
             return
@@ -1064,23 +1623,18 @@ def _tree_target_node(target):
 
 
 @contextlib.contextmanager
-def workspace_tree_write_lease(path, *, timeout=0.0, cancel_event=None,
-                               allow_namespace_ancestor=False):
+def workspace_tree_write_lease(path, *, timeout=0.0, cancel_event=None):
     """Fence a real recursive destructive/lifecycle target and descendants.
 
     Unlike root leases this also works on non-Git/prospective directories.
     Descendants advertise shared ancestor keys, including checkout, Git-dir
     and common-dir paths, without scans or a second ownership registry.
-
-    ``allow_namespace_ancestor`` serves conservative command-cwd claims whose
-    effects were never classified: the scope schedules opaque work, so an
-    ancestor relation to internal lease storage is not evidence of deletion.
     """
     deadline = _wait_deadline(timeout)
     _check_cancelled(path, cancel_event)
     lexical = os.path.abspath(os.path.expanduser(os.fspath(path)))
     target = os.path.realpath(lexical)
-    _protect_lease_namespace(target, tree=not allow_namespace_ancestor)
+    _protect_lease_namespace(target, tree=True)
     try:
         chain = _checkout_chain(target)
     except (OSError, UnicodeError) as error:
@@ -1091,6 +1645,7 @@ def workspace_tree_write_lease(path, *, timeout=0.0, cancel_event=None,
     except OSError as error:
         raise WorkspaceBusyError(f'Cannot bind workspace tree target: {error}') from error
     with contextlib.ExitStack() as stack:
+        stack.enter_context(_lease_request((('tree', path),)))
         stack.enter_context(_tree_fence((target,), target, binding, target, deadline, cancel_event))
         stack.enter_context(_metadata_fence((target,), None, deadline, cancel_event))
         _check_cancelled(path, cancel_event)
@@ -1104,17 +1659,16 @@ def workspace_tree_write_lease(path, *, timeout=0.0, cancel_event=None,
         yield
 
 
-def _physical_claim_plan(claims, neutral, approximated=frozenset()):
+def _physical_claim_order(item):
+    return item[0], str(item[3][1]), item[1]
+
+
+def _physical_claim_plan(claims, neutral):
     """Expand implicit barriers once; merge stronger claims on identical keys.
 
     Logical ordering alone cannot prevent TREE(A)+ROOT(B) from inverting
     ROOT(A)+TREE(B). All callers sharing a multi-target transaction admit the
     complete physical set before public-scope validation or filesystem reads.
-
-    ``approximated`` names tree targets that stand for unclassified command
-    effects (the command's cwd), not a proven recursive replacement. They keep
-    the namespace refusal only when they are the namespace itself, because the
-    claim schedules opaque work instead of asserting deletion.
     """
     physical = {}
     evidence = []
@@ -1140,7 +1694,7 @@ def _physical_claim_plan(claims, neutral, approximated=frozenset()):
         lexical = os.path.abspath(os.path.expanduser(os.fspath(path)))
         target = os.path.realpath(lexical)
         if scope == 'tree':
-            _protect_lease_namespace(target, tree=target not in approximated)
+            _protect_lease_namespace(target, tree=True)
         elif scope == 'file':
             _protect_lease_namespace(target)
         chain = _checkout_chain(target)
@@ -1188,23 +1742,22 @@ def _physical_claim_plan(claims, neutral, approximated=frozenset()):
                 add(2, root, _WRITE, common, binding, target)
         else:
             raise ValueError('Unknown workspace effect scope: ' + str(scope))
-    ordered = sorted(physical.values(), key=lambda item: (item[0], str(item[3][1]), item[1]))
+    ordered = sorted(physical.values(), key=_physical_claim_order)
     return ordered, evidence
 
 
 @contextlib.contextmanager
-def workspace_claims_lease(claims, *, timeout=0.0, cancel_event=None,
-                           approximated_tree_paths=()):
+def workspace_claims_lease(claims, *, timeout=0.0, cancel_event=None, purpose=''):
     """Atomically admit a complete ordered multi-target effect set.
 
-    This is the batching boundary for Edit and shell transactions.
-    The existing registry/flocks still own every descriptor. Public single-
-    target scopes remain usable; multi-target callers must not acquire their
-    hidden barriers one logical scope at a time.
+    This is the batching boundary for Tofu's own multi-target transactions
+    (delivery, publication, reclamation). The existing registry/flocks still
+    own every descriptor. Public single-target scopes remain usable;
+    multi-target callers must not acquire their hidden barriers one logical
+    scope at a time.
 
-    ``approximated_tree_paths`` lists command-cwd tree claims derived from
-    unclassified writers. ``workspace_claims_lease`` still fences them, but
-    only identified write targets keep the destructive-ancestor refusal.
+    ``purpose`` (a bounded one-line summary) only names the request in wait
+    diagnostics; it never changes admission.
     """
     deadline = _wait_deadline(timeout)
     _check_cancelled('workspace effects', cancel_event)
@@ -1216,16 +1769,14 @@ def workspace_claims_lease(claims, *, timeout=0.0, cancel_event=None,
         if scope not in {'root', 'file', 'metadata', 'tree'}:
             raise ValueError('Unknown workspace effect scope: ' + str(scope))
     neutral = _tree_lock_namespace()
-    approximated = frozenset(
-        os.path.realpath(os.path.expanduser(os.fspath(path)))
-        for path in approximated_tree_paths)
     try:
-        physical, evidence = _physical_claim_plan(claims, neutral, approximated)
+        physical, evidence = _physical_claim_plan(claims, neutral)
     except (OSError, UnicodeError) as error:
         raise WorkspaceBusyError(f'Cannot resolve workspace effects: {error}') from error
     apis = {'root': workspace_write_lease, 'file': workspace_file_write_lease,
             'metadata': workspace_git_metadata_lease, 'tree': workspace_tree_write_lease}
-    with contextlib.ExitStack() as stack:
+    with contextlib.ExitStack() as lifetime, contextlib.ExitStack() as stack:
+        lifetime.enter_context(_lease_request(claims, purpose=purpose))
         for _phase, key, mode, identity, binding, path in physical:
             stack.enter_context(_lease(key, mode, _wait_remaining(deadline),
                 cancel_event, _identity=identity, _binding=binding, _validation_path=path))
@@ -1238,14 +1789,6 @@ def workspace_claims_lease(claims, *, timeout=0.0, cancel_event=None,
                     or (scope == 'tree' and _tree_target_node(target) != node)):
                 raise WorkspaceBusyError('Workspace target changed while waiting for admission: ' + lexical)
         for scope, path in sorted(claims, key=lease_claim_order):
-            remaining = _wait_remaining(deadline)
-            if scope == 'tree':
-                stack.enter_context(workspace_tree_write_lease(
-                    path, timeout=remaining, cancel_event=cancel_event,
-                    allow_namespace_ancestor=(
-                        os.path.realpath(os.path.expanduser(os.fspath(path)))
-                        in approximated)))
-                continue
-            stack.enter_context(apis[scope](path,
-                timeout=remaining, cancel_event=cancel_event))
+            stack.enter_context(apis[scope](
+                path, timeout=_wait_remaining(deadline), cancel_event=cancel_event))
         yield

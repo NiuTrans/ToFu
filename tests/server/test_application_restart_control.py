@@ -22,7 +22,7 @@ def target(tmp_path, monkeypatch):
     package = tmp_path / 'serverctl_pkg'
     package.mkdir()
     (package / '__init__.py').write_text('')
-    for name in ('application_restart.py', 'native_engine.py'):
+    for name in ('application_restart.py', 'native_engine.py', 'restart_budget.py'):
         shutil.copyfile(Path(control.__file__).parent / name, package / name)
     roles = tmp_path / 'lib'
     roles.mkdir()

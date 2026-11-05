@@ -4,10 +4,9 @@ The foundation of the horizontal scale-out work (board epics
 ``` Epic C + ``` Epic B). See the
 ratified design in ``docs/ENTERPRISE_EVOLUTION.md`` (Runtime and scale-out).
 
-**Why this module exists.** Every per-process runtime cap (the admission
-ceiling in ``lib/agent_core/admission.py`` and the per-principal SSE semaphore
-in ``lib/agent_core/sse_limit.py``) and the push subscription registry
-(``lib/agent_core/push.py``) are TODAY in-process — so behind an N-replica
+**Why this module exists.** Every per-process runtime counter (the admission
+accounting in ``lib/agent_core/admission.py``) and the push subscription
+registry (``lib/agent_core/push.py``) are TODAY in-process — so behind an N-replica
 load balancer a ``cap`` silently becomes ``cap × N`` and a crashed replica
 holds its slots forever. This module is the single, pluggable lease/counter
 substrate they will all re-key onto (steps 2–4 of the Build Order), so the
@@ -64,7 +63,7 @@ import os
 import random
 import threading
 import time
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Tuple, cast
 
 from lib.log import get_logger
 
@@ -528,7 +527,7 @@ class RedisRuntimeStateStore:
             zk = self._zcap_k(kind, count_prefix)
             now = time.time()
             r.zremrangebyscore(zk, 0, now)
-            return list(r.zrangebyscore(zk, now, '+inf'))
+            return cast(list[str], r.zrangebyscore(zk, now, '+inf'))
         except Exception as e:
             self._command_failed(e, 'live_slot_members')
             return []
@@ -654,11 +653,11 @@ class RedisRuntimeStateStore:
 
 
 _store_lock = threading.Lock()
-_store: object = None
+_store: InProcRuntimeStateStore | RedisRuntimeStateStore | None = None
 _store_backend: str = ''
 
 
-def get_store():
+def get_store() -> InProcRuntimeStateStore | RedisRuntimeStateStore:
     """Return the active runtime-state store, building it lazily.
 
     Personal backend from ``TOFU_RUNTIME_STATE_BACKEND``:

@@ -8,11 +8,31 @@ pretends that a partial page is the complete project. No mutation or execution.
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 import hashlib
 import json
 
 from .project_identity import normalize_project_path
 from .repository import ConversationRepository
+
+def project_catalog_origins(owner: int, project: str, *, repository_factory=None,
+                            recipient_origins=None) -> Mapping[str, str]:
+    """Recipient → Coordinator provenance from durable assignment history.
+
+    New conversations already carry _coordinatorSource. Existing conversations
+    are enriched read-side from the same durable admissions Manage work lists;
+    no settings migration, title heuristic or ID-prefix inference is needed.
+    Composition roots pass the process ``RecipientOrigins`` so each admission
+    is read once instead of on every catalog page.
+    """
+    if repository_factory is None:
+        from lib.project_dispatch.repository import ProjectDispatchRepository
+        repository_factory = ProjectDispatchRepository
+    if recipient_origins is None:
+        from lib.project_dispatch.history import RecipientOrigins
+        recipient_origins = RecipientOrigins()
+    return recipient_origins.read(repository_factory(owner, normalize_project_path(project)))
+
 
 PAGE_SIZE = 64
 _SETTINGS = ('projectPath', '_coordinatorSource', 'archived', 'readOnly')
@@ -39,7 +59,8 @@ def _decode_cursor(cursor: str | None, scope: str) -> tuple[int | None, str]:
         raise ValueError('Invalid project conversation cursor') from exc
 
 
-def conversation_page(owner: int, project: str, cursor: str | None = None, *, repository=None) -> dict:
+def conversation_page(owner: int, project: str, cursor: str | None = None, *, repository=None, origins=None,
+                      recipient_origins=None) -> dict:
     if type(owner) is not int or owner < 1:
         raise ValueError('A positive owner is required')
     project = normalize_project_path(project)
@@ -58,8 +79,14 @@ def conversation_page(owner: int, project: str, cursor: str | None = None, *, re
                 or normalize_project_path(settings.get('projectPath') or '') != project):
             continue
         source = settings.get('_coordinatorSource')
+        if not source:
+            if origins is None:
+                origins = project_catalog_origins(owner, project, recipient_origins=recipient_origins)
+            source = origins.get(row['id'])
         result.append({'conversationId': row['id'], 'title': str(row.get('title') or row['id'])[:200],
             'turnCount': max(0, int(row.get('msg_count') or 0)),
+            'createdAt': max(0, int(row.get('created_at') or 0)),
+            'updatedAt': max(0, int(row.get('updated_at') or 0)),
             'coordinatorId': source if isinstance(source, str) and 0 < len(source) <= 256 else None})
     next_cursor = None
     if page.has_more:

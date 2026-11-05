@@ -17,12 +17,14 @@ authoritative total without materializing the owner's complete archive.
 only authority projections rather than hydrating transcript content.
 ``scan_conversations_bounded`` lists lightweight candidates first, then
 hydrates transcripts in small RPC batches so archive scans cannot build one
-oversize storage frame.
+oversize storage frame. Given a time bound, a transcript too large for any
+single response is paged backward in message windows to that bound instead.
 ``search_conversation_ids`` searches the authority without loading transcripts.
 
 Dependencies
 ------------
-Only ``lib.storage.get_storage_client`` and the stable storage error envelope.
+Only ``lib.storage.get_storage_client``, the stable storage error envelope and
+``lib.log``.
 Callers never receive a database connection, SQL row, archive blob, or
 storage-mode switch.
 """
@@ -33,14 +35,55 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from lib.agent_core.storage_errors import StorageError
+from lib.agent_core.storage_errors import StorageError, is_resource_bound_refusal
+from lib.log import get_logger
 
 
+logger = get_logger(__name__)
 StorageClientFactory = Callable[..., Any]
 _TRANSCRIPT_SCAN_BATCH_SIZE = 4
 _TRANSCRIPT_SCAN_MAX_BATCH_SIZE = 32
 _ACTIVITY_DATE_MAX_INTERVALS = 366
-_FRAME_TOO_LARGE_MESSAGE = "Storage frame exceeds the size limit"
+MAX_MESSAGE_WINDOW = 500
+
+
+def _is_response_too_large(exc: StorageError) -> bool:
+    """SQL frame-limit or native response-budget refusal of one read."""
+    return is_resource_bound_refusal(exc)
+
+
+def _timestamped_before(message: Mapping[str, Any], bound_ms: int) -> bool:
+    timestamp = message.get("timestamp")
+    return (
+        not isinstance(timestamp, bool)
+        and isinstance(timestamp, (int, float))
+        and 0 < timestamp < bound_ms
+    )
+
+
+def _message_page_start(
+    document: Mapping[str, Any],
+    message_count: int,
+    before_sequence: int | None,
+) -> int:
+    """Validate one window's ``message_page`` and return its first sequence."""
+    page = document.get("message_page")
+    if not isinstance(page, Mapping):
+        raise RuntimeError("conversation message page is malformed")
+    start, end, total = page.get("start"), page.get("end"), page.get("total_count")
+    if (
+        any(isinstance(value, bool) or not isinstance(value, int)
+            for value in (start, end, total))
+        or not 0 <= start <= end <= total
+        or end - start != message_count
+    ):
+        raise RuntimeError("conversation message page is malformed")
+    # Sequences are append-stable, so a window must end exactly at the cursor;
+    # a shorter transcript was truncated between windows.
+    if end != (total if before_sequence is None else before_sequence):
+        raise RuntimeError(
+            "conversation transcript changed during a windowed read")
+    return start
 
 
 def _owner_id(user_id: int) -> int:
@@ -57,10 +100,18 @@ def _conversation_id(conversation_id: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ConversationSnapshot(Mapping[str, Any]):
-    """Stable domain projection; metadata stays separate from transcript."""
+    """Stable domain projection; metadata stays separate from transcript.
+
+    ``message_start`` is the absolute main-lane sequence of ``messages[0]``:
+    0 for a complete transcript; the first retained sequence when an
+    oversized transcript was read back in windows (``metadata.msg_count``
+    still counts the whole transcript). Consumers that place a message by
+    its position in the full conversation add it to the local index.
+    """
 
     metadata: dict[str, Any]
     messages: list[dict[str, Any]]
+    message_start: int = 0
 
     def __getitem__(self, key: str) -> Any:
         if key == "messages":
@@ -73,6 +124,20 @@ class ConversationSnapshot(Mapping[str, Any]):
 
     def __len__(self) -> int:
         return len(self.metadata) + 1
+
+
+@dataclass(frozen=True, slots=True)
+class AnchoredMessageWindow:
+    """One bounded transcript window placed around a main-lane Turn.
+
+    ``snapshot.message_start`` is the absolute main-lane sequence of the first
+    message; ``anchor_sequence`` is the Turn's sequence, or None when it is
+    not a main-lane Turn of the conversation (then the window is empty).
+    """
+
+    snapshot: ConversationSnapshot
+    total_count: int
+    anchor_sequence: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,13 +185,91 @@ class ConversationRepository:
         message_window: int | None = None,
         before_sequence: int | None = None,
     ) -> ConversationSnapshot | None:
+        document = self._get_document(
+            conversation_id,
+            user_id=user_id,
+            include_messages=include_messages,
+            message_window=message_window,
+            before_sequence=before_sequence,
+        )
+        if document is None:
+            return None
+        if not include_messages:
+            document = dict(document)
+            document["messages"] = []
+        return self._snapshot(document)
+
+    def get_anchored_window(
+        self,
+        conversation_id: str,
+        *,
+        user_id: int,
+        turn_id: str,
+        message_window: int,
+    ) -> AnchoredMessageWindow | None:
+        """Read the window around one main-lane Turn (both authorities).
+
+        The authority ends the window at ``S + 1 + message_window // 2`` for
+        the Turn's sequence S. A returned anchor is verified against the
+        delivered Turn identity, so a drifting projection fails loudly.
+        """
+        if not isinstance(turn_id, str) or not 1 <= len(turn_id) <= 128:
+            raise ValueError("turn_id must be a 1-128 character Turn ID")
+        document = self._get_document(
+            conversation_id,
+            user_id=user_id,
+            include_messages=True,
+            message_window=message_window,
+            before_sequence=None,
+            anchor_turn_id=turn_id,
+        )
+        if document is None:
+            return None
+        snapshot = self._snapshot(document)
+        page = document.get("message_page")
+        anchor = page.get("anchor_sequence") if isinstance(page, Mapping) else None
+        if (not isinstance(page, Mapping) or "anchor_sequence" not in page
+                or (anchor is not None and (isinstance(anchor, bool)
+                                            or not isinstance(anchor, int)))):
+            raise RuntimeError("anchored conversation window is malformed")
+        start, end, total = page.get("start"), page.get("end"), page.get("total_count")
+        if (
+            any(isinstance(value, bool) or not isinstance(value, int)
+                for value in (start, end, total))
+            or not 0 <= start <= end <= total
+            or end - start != len(snapshot.messages)
+            or (anchor is None and end != 0)
+            or (anchor is not None and not (
+                start <= anchor < end
+                and snapshot.messages[anchor - start].get("_turnId") == turn_id))
+        ):
+            raise RuntimeError("anchored conversation window is malformed")
+        return AnchoredMessageWindow(
+            snapshot=ConversationSnapshot(
+                metadata=snapshot.metadata, messages=snapshot.messages,
+                message_start=start),
+            total_count=total,
+            anchor_sequence=anchor,
+        )
+
+    def _get_document(
+        self,
+        conversation_id: str,
+        *,
+        user_id: int,
+        include_messages: bool,
+        message_window: int | None,
+        before_sequence: int | None,
+        anchor_turn_id: str | None = None,
+    ) -> Mapping[str, Any] | None:
         if message_window is not None:
             if (
                 isinstance(message_window, bool)
                 or not isinstance(message_window, int)
-                or not 1 <= message_window <= 500
+                or not 1 <= message_window <= MAX_MESSAGE_WINDOW
             ):
-                raise ValueError("message_window must be between 1 and 500")
+                raise ValueError(
+                    f"message_window must be between 1 and {MAX_MESSAGE_WINDOW}")
             if not include_messages:
                 raise ValueError(
                     "message_window requires include_messages=True"
@@ -149,13 +292,11 @@ class ConversationRepository:
             payload["message_window"] = message_window
         if before_sequence is not None:
             payload["before_sequence"] = before_sequence
-        document = self._client().query("conversation.get", payload)
-        if document is None:
-            return None
-        if not include_messages:
-            document = dict(document)
-            document["messages"] = []
-        return self._snapshot(document)
+        if anchor_turn_id is not None:
+            if message_window is None or before_sequence is not None:
+                raise ValueError("anchor_turn_id requires message_window without before_sequence")
+            payload["anchor_turn_id"] = anchor_turn_id
+        return self._client().query("conversation.get", payload)
 
     def list(
         self,
@@ -315,6 +456,7 @@ class ConversationRepository:
         limit: int = 1000,
         settings_keys: list[str] | tuple[str, ...] | None = None,
         batch_size: int = _TRANSCRIPT_SCAN_BATCH_SIZE,
+        oversized_messages_since_ms: int | None = None,
     ) -> tuple[int, Iterator[ConversationSnapshot]]:
         """Return candidate count plus a lazy, frame-bounded transcript scan.
 
@@ -324,6 +466,16 @@ class ConversationRepository:
         A rare oversize batch is split recursively; an individual conversation
         that exceeds the protocol frame still fails loudly instead of yielding
         incomplete analytics.
+
+        ``oversized_messages_since_ms`` is a time-window contract for that
+        last case: the single conversation is read backward in bounded
+        message windows and its snapshot holds exactly the messages after the
+        newest message timestamped before the bound (``msg_count`` still
+        counts the whole transcript, and ``message_start`` is the absolute
+        sequence of the first retained message). Sequence order is append
+        order, so the unread older messages, including untimestamped ones,
+        predate the bound. A window that cannot carry even one message fails
+        loudly.
         """
         if (
             isinstance(batch_size, bool)
@@ -334,6 +486,11 @@ class ConversationRepository:
                 "batch_size must be an integer between 1 and "
                 f"{_TRANSCRIPT_SCAN_MAX_BATCH_SIZE}"
             )
+        if oversized_messages_since_ms is not None and (
+            isinstance(oversized_messages_since_ms, bool)
+            or not isinstance(oversized_messages_since_ms, int)
+        ):
+            raise ValueError("oversized_messages_since_ms must be an integer")
         metadata = self.list(
             user_id=user_id,
             updated_at_gte=updated_at_gte,
@@ -353,6 +510,7 @@ class ConversationRepository:
                     batch,
                     user_id=user_id,
                     settings_keys=settings_keys,
+                    oversized_messages_since_ms=oversized_messages_since_ms,
                 )
 
         return len(conversation_ids), snapshots()
@@ -430,8 +588,9 @@ class ConversationRepository:
         *,
         user_id: int,
         settings_keys: list[str] | tuple[str, ...] | None,
+        oversized_messages_since_ms: int | None,
     ) -> Iterator[ConversationSnapshot]:
-        """Split rejected batches; a single unavailable transcript still fails."""
+        """Split rejected batches; window or fail one oversized transcript."""
         if not conversation_ids:
             return
         try:
@@ -443,31 +602,138 @@ class ConversationRepository:
                 settings_keys=settings_keys,
             )
         except StorageError as exc:
-            is_frame_limit = (
-                (exc.code == "database_protocol_error"
-                 and _FRAME_TOO_LARGE_MESSAGE in exc.message)
-                or (exc.code == "database_unavailable"
-                    and exc.message == "database_resource_exhausted")
-            )
-            if not is_frame_limit or len(conversation_ids) == 1:
+            if not _is_response_too_large(exc):
                 raise
-            midpoint = len(conversation_ids) // 2
-            yield from self._hydrate_id_batch(
-                conversation_ids[:midpoint],
+            if len(conversation_ids) > 1:
+                midpoint = len(conversation_ids) // 2
+                for half in (conversation_ids[:midpoint],
+                             conversation_ids[midpoint:]):
+                    yield from self._hydrate_id_batch(
+                        half,
+                        user_id=user_id,
+                        settings_keys=settings_keys,
+                        oversized_messages_since_ms=oversized_messages_since_ms,
+                    )
+                return
+            if oversized_messages_since_ms is None:
+                raise
+            snapshot = self._read_messages_since(
+                conversation_ids[0],
                 user_id=user_id,
+                since_ms=oversized_messages_since_ms,
                 settings_keys=settings_keys,
             )
-            yield from self._hydrate_id_batch(
-                conversation_ids[midpoint:],
-                user_id=user_id,
-                settings_keys=settings_keys,
-            )
+            if snapshot is not None:
+                yield snapshot
             return
         by_id = {str(snapshot["id"]): snapshot for snapshot in snapshots}
         for conversation_id in conversation_ids:
             snapshot = by_id.get(conversation_id)
             if snapshot is not None:
                 yield snapshot
+
+    def _read_messages_since(
+        self,
+        conversation_id: str,
+        *,
+        user_id: int,
+        since_ms: int,
+        settings_keys: list[str] | tuple[str, ...] | None,
+    ) -> ConversationSnapshot | None:
+        """Read one oversized transcript newest-first in message windows.
+
+        Both authorities window by main-lane sequence: ``message_window=W``
+        with ``before_sequence=B`` returns sequences ``[max(0, B - W), B)``
+        in order (``B`` defaults to the message count) and reports them in
+        ``message_page``, whose ``start`` is the next cursor. Neither shrinks
+        a window to its response bound (native byte budget, SQL frame); both
+        refuse it with the whole-transcript signal. A one-message tail window
+        is read first: its ``message_page.total_count`` is the authoritative
+        total (a listing ``msg_count`` can be missing or stale), and the
+        refused whole read that would exceed it is never attempted. Read
+        windows therefore start at half of that total and halve on every
+        refusal; a refused one-message window fails loudly.
+        """
+        document = self._get_document(
+            conversation_id,
+            user_id=user_id,
+            include_messages=True,
+            message_window=1,
+            before_sequence=None,
+        )
+        if document is None:
+            return None
+        probe = self._snapshot(document)
+        # Validates the tail page and its authoritative total.
+        _message_page_start(document, len(probe.messages), None)
+        total = document["message_page"]["total_count"]
+        if total == 0:
+            metadata = probe.metadata
+            messages: list[dict[str, Any]] = []
+        else:
+            window = max(1, min(MAX_MESSAGE_WINDOW, total // 2))
+            before_sequence: int | None = total
+            metadata = None
+            messages = []
+            suffix: list[dict[str, Any]] = []
+            windows = 0
+            while True:
+                try:
+                    document = self._get_document(
+                        conversation_id,
+                        user_id=user_id,
+                        include_messages=True,
+                        message_window=window,
+                        before_sequence=before_sequence,
+                    )
+                except StorageError as exc:
+                    if not _is_response_too_large(exc) or window == 1:
+                        raise
+                    window //= 2
+                    continue
+                if document is None:
+                    return None
+                snapshot = self._snapshot(document)
+                window_messages = snapshot.messages
+                start = _message_page_start(
+                    document, len(window_messages), before_sequence)
+                windows += 1
+                if metadata is None:
+                    metadata = snapshot.metadata
+                boundary = next(
+                    (index for index in range(len(window_messages) - 1, -1, -1)
+                     if _timestamped_before(window_messages[index], since_ms)),
+                    None,
+                )
+                # Cut at the boundary inside the window too, so the suffix
+                # never depends on the window size that happened to fit.
+                suffix[:0] = (
+                    window_messages
+                    if boundary is None
+                    else window_messages[boundary + 1:]
+                )
+                if boundary is not None or start == 0:
+                    break
+                before_sequence = start
+            messages = suffix
+            logger.info(
+                "[Conversations] %s exceeds one storage response; read the last "
+                "%d of %s messages back to %d in %d windows",
+                conversation_id, len(suffix), metadata.get("msg_count"),
+                since_ms, windows + 1,
+            )
+        if settings_keys is not None:
+            settings = metadata.get("settings")
+            if not isinstance(settings, Mapping):
+                raise RuntimeError("conversation settings projection is malformed")
+            keys = [key.strip() for key in settings_keys]
+            metadata["settings"] = {
+                key: settings[key] for key in keys if key in settings
+            }
+        return ConversationSnapshot(
+            metadata=metadata, messages=messages,
+            message_start=total - len(messages),
+        )
 
     def search_ids(
         self,
@@ -560,6 +826,7 @@ def scan_conversations_bounded(
     limit: int = 1000,
     settings_keys: list[str] | tuple[str, ...] | None = None,
     batch_size: int = _TRANSCRIPT_SCAN_BATCH_SIZE,
+    oversized_messages_since_ms: int | None = None,
 ) -> tuple[int, Iterator[ConversationSnapshot]]:
     """Scan filtered transcripts without constructing one archive-sized RPC."""
     return ConversationRepository().scan_bounded(
@@ -571,6 +838,7 @@ def scan_conversations_bounded(
         limit=limit,
         settings_keys=settings_keys,
         batch_size=batch_size,
+        oversized_messages_since_ms=oversized_messages_since_ms,
     )
 
 
@@ -608,7 +876,26 @@ def search_conversation_page(query: str, *, user_id: int, limit: int = 200,
     for hit in page['items']:
         if not isinstance(hit, Mapping) or not isinstance(hit.get('id'), str) or not hit['id']:
             raise RuntimeError('conversation search hit is malformed')
+        if not _search_hit_turn_is_valid(hit.get('turn_id'), hit.get('ordinal')):
+            raise RuntimeError('conversation search hit turn is malformed')
     return page
+
+
+def _search_hit_turn_is_valid(turn_id: Any, ordinal: Any) -> bool:
+    """A hit names its live Turn and lane ordinal together, or neither."""
+    if turn_id is None:
+        return ordinal is None
+    return (isinstance(turn_id, str) and bool(turn_id)
+            and not isinstance(ordinal, bool) and isinstance(ordinal, int)
+            and ordinal >= 0)
+
+
+def get_anchored_conversation_window(
+    conversation_id: str, *, user_id: int, turn_id: str, message_window: int,
+) -> AnchoredMessageWindow | None:
+    return ConversationRepository().get_anchored_window(
+        conversation_id, user_id=user_id, turn_id=turn_id,
+        message_window=message_window)
 
 
 def search_conversation_ids(
@@ -625,6 +912,7 @@ def search_conversation_ids(
 
 
 __all__ = [
+    "AnchoredMessageWindow",
     "ConversationCatalogPage",
     "ConversationRepository",
     "ConversationSnapshot",
@@ -632,6 +920,7 @@ __all__ = [
     "list_conversations",
     "scan_conversations_bounded",
     "count_conversation_activity_intervals",
+    "get_anchored_conversation_window",
     "search_conversation_ids",
 
     "search_conversation_page",

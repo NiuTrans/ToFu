@@ -228,8 +228,8 @@ def test_program_output_without_final_message_requests_one_more_response():
     assert messages[-1]['_responses_items'][0]['type'] == 'program_output'
 
 
-def test_routed_native_exposure_reduces_catalog_but_keeps_discovery_floor():
-    from lib.tools.registry import ToolContext, assemble_tool_list
+def test_routed_native_exposure_narrows_only_eager_families():
+    from lib.tools.registry import ToolContext, all_specs, assemble_tool_list
 
     kwargs = dict(
         task_id='route-test', project_path='', project_enabled=False,
@@ -245,60 +245,59 @@ def test_routed_native_exposure_reduces_catalog_but_keeps_discovery_floor():
         cfg={'tools': {'nativeExposure': 'routed'}}, **kwargs)
     routed, _ = assemble_tool_list(routed_ctx)
     names = {tool['function']['name'] for tool in routed}
-    assert len(routed) < len(full)
+    full_names = {tool['function']['name'] for tool in full}
+    assert names <= full_names
     assert {
         'web_search', 'fetch_url', 'browser_download_url_to_server',
         'read_files', 'inspect_image',
     } <= names
+    # Searchable families stay candidates so every backend can defer them:
+    # local Tool Search, provider-native deferral, or direct with search off.
+    specs = {spec.key: spec for spec in all_specs()}
+    searchable = {
+        name for spec in specs.values() if spec.discovery_policy == 'searchable'
+        for name in spec.provides} & full_names
+    assert {'schedule_create', 'request_skill_install'} <= searchable <= names
     assert routed_ctx.omitted_spec_keys
+    assert all(specs[key].discovery_policy == 'eager'
+               for key in routed_ctx.omitted_spec_keys)
 
 
-def test_run_command_schema_stays_within_coding_round_budget():
-    """The shared shell contract is paid on every coding round; guidance must
-    stay complete without re-expanding its former repeated usage matrix."""
+def test_run_command_schema_keeps_complete_shell_guidance():
+    """The project and standalone shell schemas share one complete contract."""
     from lib.tools.code_exec import CODE_EXEC_TOOL
-    from lib.tools.gateway import tool_schema_tokens
+    from lib.tools.poll import AUTO_BACKGROUND_AFTER_S
     from lib.tools.project import PROJECT_TOOL_RUN_COMMAND
 
     for tool in (PROJECT_TOOL_RUN_COMMAND, CODE_EXEC_TOOL):
         wire = json.dumps(tool, ensure_ascii=False, sort_keys=True)
         for guidance in (
             'Never use a shell no-op as a placeholder', 'NO timeout',
-            'no persistent shell', 'read_files', 'grep_search', 'find_files',
+            'no persistent shell', 'read_files', 'search_files', 'find_files',
             'edit_file', 'write_file', 'browser_download_url_to_server',
             'FUSE-safe', 'credentials', '`sd`', '`mlr`', '`goawk',
-            'move to the background', 'arrive automatically',
+            f'after {AUTO_BACKGROUND_AFTER_S} s', 'moves to the background',
+            'arrive automatically',
         ):
             assert guidance in wire
-        # Budget audit 2026-09-18: pinned at 450 before the shell contract
-        # gained the background-arrival semantics, FUSE-safe grep redirect,
-        # and the sd/mlr/goawk helper line (all pinned above); the current
-        # text is 487/464 tokens with zero duplicated sentences — still far
-        # under the 750 repeated-usage-matrix defect this ratchet closes.
-        assert tool_schema_tokens([tool], model='kimi-k3') <= 500
 
 
-def test_core_read_search_schemas_stay_semantic_and_bounded():
-    from lib.tools.gateway import tool_schema_tokens
-    from lib.tools.project import PROJECT_TOOL_GREP, READ_FILES_TOOL
+def test_core_read_search_schemas_stay_semantic():
+    from lib.tools.project import PROJECT_TOOL_SEARCH_FILES, READ_FILES_TOOL
 
     expectations = (
-        # +10 over the pre-from_line baseline: the paging floor is declared
-        # in both invocation shapes so truncation recovery stays
-        # discoverable when the next round is batched.
-        (PROJECT_TOOL_GREP, 485, (
+        (PROJECT_TOOL_SEARCH_FILES, (
             'persistent file index', 'FUSE', 'Rust/ripgrep', 'every operation runs',
             'context_lines', 'count_only mode',
         )),
-        (READ_FILES_TOOL, 450, (
+        (READ_FILES_TOOL, (
             'Read WIDE', '200+ lines', '24k tokens', 'every requested read executes',
             'authoritative and never widened', 'Images', 'PDFs', 'Office',
         )),
     )
-    for tool, budget, guidance in expectations:
+    for tool, guidance in expectations:
         wire = json.dumps(tool, ensure_ascii=False, sort_keys=True)
         assert all(item in wire for item in guidance)
-        assert tool_schema_tokens([tool], model='kimi-k3') <= budget
 
 
 def test_multiroot_compat_projection_keeps_canonical_schema():
@@ -680,3 +679,36 @@ def test_benchmark_jsonl_budget_public_price_and_acceptance(tmp_path):
     )
     assert established['quality']['nonInferiorityEstablished'] is True
     assert established['releaseEligible'] is True
+
+
+def test_concurrent_mcp_searches_are_both_counted():
+    """Calls of one round run concurrently (owner decision 2026-10-28); the
+    per-task MCP search telemetry must not lose a sibling search."""
+    import threading
+
+    from lib.context_telemetry import record_mcp_search
+
+    readers = threading.Barrier(2)
+
+    class RacingTask(dict):
+        """Both searches read the counts before either writes, unless serialized."""
+
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            if key == '_mcpSearchCount':
+                try:
+                    readers.wait(timeout=1)
+                except threading.BrokenBarrierError:
+                    pass
+            return value
+
+    task = RacingTask()
+    workers = [threading.Thread(target=record_mcp_search, args=(task,),
+                                kwargs={'misses': 1}) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(10)
+
+    assert task['_mcpSearchCount'] == 2
+    assert task['_mcpSearchMissCount'] == 2

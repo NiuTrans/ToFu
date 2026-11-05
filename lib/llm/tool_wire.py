@@ -5,6 +5,22 @@ selected route capabilities and orchestration decisions. It grants no execution
 rights, performs no HTTP/storage work, and preserves transport diagnostics.
 """
 from dataclasses import dataclass
+from urllib.parse import urlparse
+
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
+# Claude behind your-llm-gateway.example.com's Anthropic face stops reading its own
+# prompt-cache writes once the request's tool names exceed ~492 bytes counted
+# as sum(len(name) + 1): byte-identical requests then re-write the whole
+# prefix every round. Kimi on the same face is unaffected. Live A/B 2026-10-28
+# (docs/LLM_COST_OPTIMIZATION.md, "Gateway tool-name budget"); the margin
+# absorbs gateway-side key material we cannot observe.
+SANKUAI_ANTHROPIC_TOOL_NAME_BUDGET_BYTES = 448
+
+_DISCOVERY_PAIR = frozenset({'search_tools', 'execute_tools'})
+
 
 def provider_tool_name(tool):
     if not isinstance(tool, dict):
@@ -17,6 +33,59 @@ def provider_tool_name(tool):
 
 _provider_tool_name = provider_tool_name
 
+
+def provider_tool_name_budget_bytes(*, api_protocol, base_url, model):
+    """Return the selected route's tool-name byte budget; 0 means none."""
+    try:
+        host = (urlparse(str(base_url or '')).hostname or '').lower()
+    except ValueError:
+        return 0
+    if api_protocol != 'anthropic' or host != 'your-llm-gateway.example.com':
+        return 0
+    from lib.model_info import is_claude
+    return SANKUAI_ANTHROPIC_TOOL_NAME_BUDGET_BYTES if is_claude(model) else 0
+
+
+def _name_bytes(name):
+    return len(name.encode('utf-8')) + 1
+
+
+def tool_name_bytes(tools):
+    """Joined provider-visible tool-name size, counted as sum(len(name) + 1)."""
+    if not isinstance(tools, list):
+        return 0
+    return sum(_name_bytes(name) for name in map(_provider_tool_name, tools)
+               if name)
+
+
+def fit_tool_name_budget(tools, *, budget_bytes, required_names):
+    """Hide the longest optional names until the joined names fit the budget.
+
+    Hiding by length keeps the largest number of tools directly callable;
+    equal lengths hide the later wire position first. ``required_names``
+    always stay, even above the budget. Survivors keep their order and object
+    identity, and an in-budget list is returned unchanged. The caller owns the
+    discovery path for hidden tools.
+    """
+    # Nameless entries are left for the final preflight to isolate.
+    total = sum(_name_bytes(_provider_tool_name(tool)) for tool in tools
+                if _provider_tool_name(tool))
+    if total <= budget_bytes:
+        return tools
+    optional = sorted(
+        ((index, _provider_tool_name(tool)) for index, tool in enumerate(tools)
+         if _provider_tool_name(tool)
+         and _provider_tool_name(tool) not in required_names),
+        key=lambda row: (-_name_bytes(row[1]), -row[0]))
+    hidden = set()
+    for index, name in optional:
+        if total <= budget_bytes:
+            break
+        hidden.add(index)
+        total -= _name_bytes(name)
+    return [tool for index, tool in enumerate(tools) if index not in hidden]
+
+
 @dataclass(frozen=True, slots=True)
 class ToolWireProjection:
     budget_compacted_names: object
@@ -26,6 +95,7 @@ class ToolWireProjection:
     multi_agent_backend: object
     ptc_backend: object
     tool_search_backend: object
+    tool_name_budget_bytes: int
 
 
 def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='',
@@ -316,6 +386,16 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
     _final_schema_budget = int(body.get('_tool_schema_budget_tokens') or 0)
     _budget_dropped_names: list[str] = []
     _budget_compacted_names: list[str] = []
+    _required_names = set(_required_direct_names)
+    if _multi_agent_backend != 'off':
+        # Keep the local swarm launch/result pair together. Unified
+        # poll/kill are already a mandatory budget floor when authorized;
+        # never pull the replay-only await_agents into a new wire surface.
+        from lib.swarm.tools import (
+            GET_AGENT_RESULT_TOOL, SPAWN_AGENTS_TOOL)
+        _required_names.update(
+            _provider_tool_name(tool)
+            for tool in (SPAWN_AGENTS_TOOL, GET_AGENT_RESULT_TOOL))
     if (_final_schema_budget and _tool_search_backend == 'local'
             and isinstance(body.get('tools'), list)):
         from lib.tools.gateway import fit_tool_schema_budget
@@ -324,16 +404,6 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
             if _provider_tool_name(tool)
         }
         _priority_names = set(body.get('_frontend_selected_tool_names') or ())
-        _required_names = set(_required_direct_names)
-        if _multi_agent_backend != 'off':
-            # Keep the local swarm launch/result pair together. Unified
-            # poll/kill are already a mandatory budget floor when authorized;
-            # never pull the replay-only await_agents into a new wire surface.
-            from lib.swarm.tools import (
-                GET_AGENT_RESULT_TOOL, SPAWN_AGENTS_TOOL)
-            _required_names.update(
-                _provider_tool_name(tool)
-                for tool in (SPAWN_AGENTS_TOOL, GET_AGENT_RESULT_TOOL))
         body['tools'] = fit_tool_schema_budget(
             body['tools'], budget_tokens=_final_schema_budget,
             model=body.get('model') or '', priority_names=_priority_names,
@@ -348,6 +418,47 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
         _budget_compacted_names = [
             name for name, schema in _before_budget.items()
             if name in _after_budget and _after_budget[name] != schema]
+
+    # A route's tool-name byte budget is a provider constraint, not a cost
+    # target. Hide names only while search_tools/execute_tools stay on the
+    # wire, so every hidden tool remains discoverable and executable.
+    _name_budget = provider_tool_name_budget_bytes(
+        api_protocol=api_protocol, base_url=base_url,
+        model=body.get('model') or '')
+    _named_wire = body.get('tools')
+    if (_name_budget and isinstance(_named_wire, list)
+            and _DISCOVERY_PAIR <= set(map(_provider_tool_name, _named_wire))):
+        from lib.tools.gateway import GATEWAY_TOOL_NAMES
+        _fitted = fit_tool_name_budget(
+            _named_wire, budget_bytes=_name_budget,
+            required_names=(_required_names | GATEWAY_TOOL_NAMES
+                            | BACKGROUND_TOOL_NAMES))
+        if _fitted is not _named_wire:
+            _kept_names = set(map(_provider_tool_name, _fitted))
+            _hidden_names = [name for name in map(_provider_tool_name, _named_wire)
+                             if name not in _kept_names]
+            _budget_dropped_names.extend(_hidden_names)
+            logger.info(
+                '%s [ToolWire] tool-name budget %d bytes hid %d tool(s) '
+                'behind search_tools: %s', log_prefix, _name_budget,
+                len(_hidden_names), ','.join(_hidden_names))
+            body['tools'] = _fitted
+    if _name_budget and isinstance(body.get('tools'), list):
+        # Hiding needs a discovery path: an explicit Tool Search ``off`` (or a
+        # catalog without search_tools/execute_tools) keeps every tool direct,
+        # and required names are never hidden. Such a request still goes out,
+        # but this route will not reuse its prompt cache, so say so per request.
+        _sent_name_bytes = tool_name_bytes(body['tools'])
+        if _sent_name_bytes > _name_budget:
+            _pair_on_wire = _DISCOVERY_PAIR <= set(
+                map(_provider_tool_name, body['tools']))
+            logger.warning(
+                '%s [ToolWire] tool-name budget %d bytes NOT met: %d bytes '
+                'sent (%s); this route will not reuse its prompt cache for '
+                'this request', log_prefix, _name_budget, _sent_name_bytes,
+                'required direct tools alone exceed it' if _pair_on_wire
+                else 'no search_tools/execute_tools discovery path, Tool '
+                     f'Search backend={_tool_search_backend or "none"}')
 
     # Wire-contract invariant at the LAST common boundary: whatever shape the
     # tools array arrived in (registry assembly, latched catalogs, headless
@@ -364,4 +475,4 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
             body, log_prefix=log_prefix,
             on_tool_isolated=_request_activity_sink)
 
-    return ToolWireProjection(_budget_compacted_names, _budget_dropped_names, _executable_catalog, _final_schema_budget, _multi_agent_backend, _ptc_backend, _tool_search_backend)
+    return ToolWireProjection(_budget_compacted_names, _budget_dropped_names, _executable_catalog, _final_schema_budget, _multi_agent_backend, _ptc_backend, _tool_search_backend, _name_budget)

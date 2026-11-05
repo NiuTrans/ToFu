@@ -53,21 +53,20 @@ def test_interfaces_agree_across_admission_context_and_wire(protocol, mode):
     plan = prepare_request(body, api_key='test-key',
                            base_url='https://gateway.example/v1', api_protocol=protocol)
     exposed = names(plan.body)
+    # The default (absent/auto) and explicit on agree: one first-class program action.
+    active = mode != 'off'
     assert 'custom__read_rows' in exposed
-    assert ('execute_program' in exposed) == (mode == 'on')
-    assert ('execute_program' in task['_tool_gateway_names']) == (mode == 'on')
-    assert bool(guide) == (mode == 'on')
-    if mode in (None, 'auto'):
-        assert 'execute_tools' in exposed
-        wire = json.dumps(plan.body['tools'])
-        assert all(token not in wire for token in ('JavaScript', 'tools.inputs', 'tools.result'))
-        batch = next(t for t in plan.body['tools']
-                     if (t.get('function') or t).get('name') == 'execute_tools')
-        fn = batch.get('function') or batch
-        params = fn.get('parameters') or fn.get('input_schema')
-        assert set(params['properties']) == {'calls', 'execution'}
+    assert ('execute_program' in exposed) == active
+    assert ('execute_program' in task['_tool_gateway_names']) == active
+    assert bool(guide) == active
+    for gateway in plan.body['tools']:
+        fn = gateway.get('function') or gateway
+        if fn.get('name') == 'execute_tools':
+            params = fn.get('parameters') or fn.get('input_schema')
+            assert set(params['properties']) == {'calls', 'execution'}
     if mode == 'off':
         assert exposed == {'custom__read_rows'}
+        assert 'JavaScript' not in json.dumps(plan.body['tools'])
 
 
 def test_stale_replay_latch_cannot_enable_programs_or_override_off():
@@ -75,12 +74,12 @@ def test_stale_replay_latch_cannot_enable_programs_or_override_off():
     request(task)
     old = deepcopy(task['_toolOrchestrationPromptLatch'])
     old.pop('programmaticRequestedMode')  # A replay produced before this contract.
-    for mode in ('auto', 'off'):
+    for mode, programs in (('auto', True), ('off', False)):
         current = {'config': {'tools': {'programmaticCalling': mode},
                               '_modelReplayToolLatch': old}}
         body = request(current)
         project_tool_wire(body, api_protocol='openai')
-        assert 'execute_program' not in names(body)
+        assert ('execute_program' in names(body)) == programs
         assert body['_programmatic_tool_calling'] == mode
         assert current['_toolOrchestrationPromptLatch']['programmaticRequestedMode'] == mode
 
@@ -93,27 +92,32 @@ def test_unchanged_policy_keeps_the_same_wire_after_failed_program_telemetry():
     later = request(task, round_num=9)
     project_tool_wire(later, api_protocol='openai')
     assert tool_schema_fingerprint(first['tools']) == tool_schema_fingerprint(later['tools'])
-    assert later['_tool_orchestration_decision_sink']['programmaticTier'] == 'batch'
+    # Execution refuses programs after the fallback; the cached prefix stays put.
+    assert 'execute_program' in names(later)
+    assert later['_tool_orchestration_decision_sink']['programmaticTier'] == 'program'
 
 
 @pytest.mark.parametrize('feature', ['supported', 'unknown', 'unsupported'])
 @pytest.mark.parametrize('force_local', [False, True])
-def test_selected_route_support_and_fallback_do_not_promote_local_javascript(feature, force_local):
+@pytest.mark.parametrize('task_tier', ['program', 'batch'])
+def test_selected_route_support_and_fallback_do_not_promote_local_javascript(
+        feature, force_local, task_tier):
     body = {
         'model': 'route-alias', 'messages': [], 'tools': [tool('read_files')],
         '_programmatic_tool_calling': 'auto',
         '_programmatic_eligible_tools': ['read_files'],
-        '_programmatic_tier': 'program',  # stale or untrusted capability hint
+        '_programmatic_tier': task_tier,  # 'batch' is a per-task authoring fallback
         '_force_local_programmatic': force_local,
     }
     project_tool_wire(body, api_protocol='responses', inference_profile={
         'features': {'responses_programmatic': feature}})
     native = feature == 'supported' and not force_local
     assert body['_resolved_programmatic_backend'] == ('native_openai' if native else 'local')
-    assert 'execute_program' not in names(body)
+    local_program = not native and task_tier == 'program'
+    assert ('execute_program' in names(body)) == local_program
     if not native:
-        assert 'execute_tools' in names(body)
-        assert body['_programmatic_tier'] == 'batch'
+        assert body['_programmatic_tier'] == task_tier
+        assert ('execute_tools' in names(body)) == (task_tier == 'batch')
 
 
 def test_batch_override_also_prevents_hosted_program_execution(monkeypatch):
@@ -132,10 +136,10 @@ def test_auto_code_api_request_preserves_direct_tools_and_json_discovery():
     body = request(task)
     body['_required_direct_tool_names'] = ['custom__read_rows']
     project_tool_wire(body, api_protocol='openai')
-    assert names(body) == {'custom__read_rows', 'search_tools', 'execute_tools'}
+    assert names(body) == {'custom__read_rows', 'search_tools', 'execute_tools', 'execute_program'}
     search = next(t['function'] for t in body['tools'] if t['function']['name'] == 'search_tools')
     assert 'execute_tools' in search['description']
     assert body['_executable_tool_catalog'] == [tool('custom__read_rows')]
     sink = body['_tool_orchestration_decision_sink']
     assert sink['programmaticExposure'] == 'additive'
-    assert sink['programmaticCodeApi']['reason'] == 'code_api_requires_program_tier'
+    assert sink['programmaticCodeApi']['reason'] == 'code_api_required_direct_tools'

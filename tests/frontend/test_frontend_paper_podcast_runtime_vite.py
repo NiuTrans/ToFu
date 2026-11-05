@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -47,16 +47,9 @@ global._pcSeedOptions = () => {};
 global._pcPersistOptions = () => {};
 global._pmSeedModel = () => {};
 global._pmAdoptModel = (_kind, model) => { _podcast.artifactModel = model; };
-global.paperDetachPush = () => { calls.detach++; };
 let push = null;
-global.paperAttachPush = (_state, taskId, options) => { push = { taskId, options }; };
-global.paperIngestEvent = (state, event, consume) => consume(state, event);
-global.taskReplayIngestPage = (state, page, consume, cursor) => {
-  let changed = false;
-  for (const event of page.events || []) changed = Boolean(consume(state, event)) || changed;
-  return { accepted:(page.events || []).length, nextCursor:page.cursor ?? cursor,
-    changed };
-};
+global.pushSubscribe = (_channel, taskId, handler) => { push = { taskId, handler }; };
+global.pushUnsubscribe = () => { push = null; calls.detach++; };
 const oldCreated = Date.now() - 120000, oldUpdated = Date.now() - 40000;
 let pollResponse = { ok:true, done:false, cursor:1,
   events:[{ type:'phase_started', phase:'script', phases:['script','audio'], phase_index:1 }] };
@@ -81,9 +74,9 @@ const PodcastRuntime = global.TofuTestBundle;
     pushTask:push && push.taskId };
   pollResponse = { ok:true, done:true, status:'done', cursor:2, events:[],
     scriptOnly:false, model:'m-done', script:{segments:[]} };
-  await PodcastRuntime.pollPodcastOnce();
+  await PodcastRuntime.podcastTaskObserver.poll();
   const terminal = { status:_podcast.status, taskId:_podcast.taskId,
-    cursor:_podcast.cursor, model:_podcast.artifactModel };
+    model:_podcast.artifactModel };
 
   _podcast.paperHash = 'hash-a';
   const pending = PodcastRuntime.generatePodcast();
@@ -98,18 +91,14 @@ const PodcastRuntime = global.TofuTestBundle;
   _podcast.taskId = 'destroy-me';
   PodcastRuntime.destroyPodcastRuntime();
   console.log(JSON.stringify({ reattach, terminal, staleFenced,
-    aborts:calls.aborts, destroyed:_podcast.taskId === '' && !_podcast.pollTimer,
+    aborts:calls.aborts, destroyed:_podcast.taskId === '' && !push,
     leakedGlobal:typeof global._initPodcastTab === 'function' }));
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD)
-    or not os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom')),
-    reason='node/jsdom/esbuild dev dependencies required',
-)
 def test_compiled_podcast_runtime_owns_task_state_and_teardown(tmp_path):
+    require_node_modules('jsdom', 'vite')
     built = tmp_path / 'podcast-runtime.js'
     compiled = subprocess.run(
         [ESBUILD, SOURCE, '--bundle', '--format=iife', '--platform=browser',
@@ -125,7 +114,7 @@ def test_compiled_podcast_runtime_owns_task_state_and_teardown(tmp_path):
         'oldActivity': True, 'pushTask': 'task-live',
     }
     assert result['terminal'] == {
-        'status': 'done', 'taskId': '', 'cursor': 2, 'model': 'm-done',
+        'status': 'done', 'taskId': '', 'model': 'm-done',
     }
     assert result['staleFenced']
     assert result['aborts'] == ['abort-me']

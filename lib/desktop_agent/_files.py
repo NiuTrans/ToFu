@@ -3,6 +3,9 @@ Desktop Agent — file-system & application command handlers.
 
 Contains ``_get_root_path`` (disk-usage root helper) plus the file/app
 command handlers: list/read/write/move files, open files, launch apps.
+Listing and reading stay inside the declared share roots on every permission
+tier (``_project.shared_path``); write/move/open are gated by their tiers in
+``_dispatch``.
 """
 
 import os
@@ -11,6 +14,7 @@ import shutil
 import subprocess
 import time
 
+from lib.desktop_agent._project import ProjectError, shared_path
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -32,8 +36,11 @@ def _get_root_path():
 # ══════════════════════════════════════════════════════════
 
 def cmd_list_files(params):
-    """List files in a directory."""
-    path = os.path.expanduser(params.get('path', '~'))
+    """List one directory inside a shared folder."""
+    try:
+        path = shared_path(params.get('path'))
+    except ProjectError as e:
+        return {'error': str(e)}
     if not os.path.isdir(path):
         return {'error': f'Not a directory: {path}'}
 
@@ -55,8 +62,11 @@ def cmd_list_files(params):
 
 
 def cmd_read_file(params):
-    """Read a local file."""
-    path = os.path.expanduser(params.get('path', ''))
+    """Read one file inside a shared folder."""
+    try:
+        path = shared_path(params.get('path'))
+    except ProjectError as e:
+        return {'error': str(e)}
     max_size = params.get('maxSize', 500_000)  # 500KB default
 
     if not os.path.isfile(path):

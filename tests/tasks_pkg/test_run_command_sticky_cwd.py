@@ -1,10 +1,13 @@
 """Tests for the sticky per-conversation working-directory anchor added to
-``run_command`` (2026-07-09).
+``run_command`` (2026-07-09, cd-capture layer removed 2026-10-24).
 
 Goal of the feature: stop the model burning tokens re-emitting ``cd <project>``
-/ absolute ``python``/``pip`` on every call. Once a conversation navigates (an
-explicit ``working_dir`` OR a trailing ``cd`` inside the command), later
-``run_command`` calls with no ``working_dir`` resume from that directory.
+/ absolute ``python``/``pip`` on every call. Once a conversation navigates via
+an explicit ``working_dir``, later ``run_command`` calls with no
+``working_dir`` resume from that directory. A ``cd`` INSIDE a command is a
+local idiom and never persists (conv mvl6adj1bcd1r1: a read-only
+``cd styles && grep`` silently moved the anchor and the next call's
+``ROOT=$(pwd)`` landed in the styles dir).
 
 Design invariants under test:
   * STATELESS derived affinity — no persistent shell, env re-derived per call.
@@ -12,7 +15,7 @@ Design invariants under test:
     conversation owns (``_cwd_within_conv_roots``); a ``cd /etc`` never sticks.
   * SAFE-DEGRADE — a vanished sticky, or the ``TOFU_STICKY_CWD=0`` gate, falls
     back to the project-root anchor and never corrupts.
-  * cd-capture uses a dedicated FILE (never stdout) and preserves the exit code.
+  * EXPLICIT-ONLY — only an explicit ``working_dir`` moves the anchor.
 
 The neuter check at the bottom proves the assertions bite: if ``set_conv_cwd``
 is made a no-op, the stickiness tests fail.
@@ -99,18 +102,22 @@ def test_no_working_dir_uses_anchor_when_no_sticky(workspace):
     out = _run(conv_id, primary, 'pwd')
     # No sticky yet → runs at the project-root anchor.
     assert primary in out
-    assert config.get_conv_cwd(conv_id) == primary
+    # Nothing is remembered: the anchor is the project root until an EXPLICIT
+    # working_dir moves it (an in-command cd never does).
+    assert config.get_conv_cwd(conv_id) is None
 
 
-def test_trailing_cd_is_captured(workspace):
+def test_trailing_cd_does_not_move_the_anchor(workspace):
+    """A `cd sub && …` inside a compound command is LOCAL — it must NOT move
+    the sticky anchor (conv mvl6adj1bcd1r1: a read-only `cd styles && grep`
+    moved the anchor and the next call's `$(pwd)` landed in styles)."""
     conv_id, primary, sub = workspace
-    # A trailing `cd sub` inside the command must stick for the next call.
     out = _run(conv_id, primary, 'cd sub && pwd')
-    assert 'sub' in out
-    assert config.get_conv_cwd(conv_id) == os.path.realpath(sub)
-    # And the next bare call resumes there.
+    assert 'sub' in out  # the command itself still sees the cd
+    assert config.get_conv_cwd(conv_id) is None
+    # The next bare call runs at the project root, not the cd target.
     out2 = _run(conv_id, primary, 'pwd')
-    assert 'sub' in out2
+    assert 'sub' not in out2
 
 
 def test_cd_capture_preserves_exit_code(workspace):
@@ -132,7 +139,7 @@ def test_cd_outside_roots_not_captured(workspace):
 def test_gate_off_disables_sticky(workspace, monkeypatch):
     conv_id, primary, sub = workspace
     monkeypatch.setenv('TOFU_STICKY_CWD', '0')
-    _run(conv_id, primary, 'cd sub && pwd', working_dir=None)
+    _run(conv_id, primary, 'pwd', working_dir='sub')
     # Nothing remembered while gated off.
     assert config.get_conv_cwd(conv_id) is None
 
@@ -146,7 +153,7 @@ def test_neuter_set_conv_cwd_breaks_stickiness(workspace, monkeypatch):
     # Re-patch the name imported into tools._exec_run_command's module scope.
     import lib.project_mod.tools as _tools
     monkeypatch.setattr(_tools, 'set_conv_cwd', lambda *a, **k: False, raising=False)
-    _run(conv_id, primary, 'cd sub && pwd')
+    _run(conv_id, primary, 'pwd', working_dir='sub')
     # With the no-op, nothing is remembered.
     assert config.get_conv_cwd(conv_id) is None
 

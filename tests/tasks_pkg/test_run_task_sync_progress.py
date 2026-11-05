@@ -105,6 +105,7 @@ class TestPipelineWiring:
 
     def test_send_progress_fn_reaches_run_task_sync(self, monkeypatch):
         import lib.feishu.pipeline as pipeline
+        from lib.feishu.authority import FeishuSender
 
         captured = {}
 
@@ -117,14 +118,13 @@ class TestPipelineWiring:
         monkeypatch.setattr(pipeline, 'get_history', lambda *a, **k: [])
         monkeypatch.setattr(pipeline, 'get_model', lambda *a, **k: 'qwen-plus')
         monkeypatch.setattr(pipeline, 'get_mode', lambda *a, **k: 'chat')
-        monkeypatch.setattr(pipeline, 'get_project', lambda *a, **k: '')
         monkeypatch.setattr(pipeline, 'get_conv_id', lambda *a, **k: 'c1')
-        monkeypatch.setattr(pipeline, 'resolve_owner_user_id', lambda *_: 7)
         monkeypatch.setattr(pipeline, 'persist_exchange', lambda *a, **k: True)
 
         import lib.tasks_pkg.sync_run as sync_run
         monkeypatch.setattr(sync_run, 'run_task_sync', fake_run_task_sync)
 
         sentinel = lambda line: None  # noqa: E731
-        pipeline.run_task_pipeline('user-1', 'hello', send_progress_fn=sentinel)
+        sender = FeishuSender('user-1', 7, True)
+        pipeline.run_task_pipeline(sender, 'hello', send_progress_fn=sentinel)
         assert captured['progress_fn'] is sentinel

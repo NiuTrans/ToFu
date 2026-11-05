@@ -25,7 +25,9 @@ on type-mismatch (``"field must be a string"``, etc.).
 
 The route layer's ``@safe_route`` decorator (``lib.api_response``) and
 the global exception boundary in ``lib.http_transport.error_handlers`` convert
-``BadRequest`` into a 400 response automatically.
+``BadRequest`` into a 400 response automatically. ``BadRequest`` is the one
+typed client fault owned by ``lib.error_envelope``; application code raises
+the same class when it rejects a caller-supplied value.
 
 Design philosophy
 -----------------
@@ -42,6 +44,8 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 from werkzeug.exceptions import BadRequest as WerkzeugBadRequest, HTTPException
+
+from lib.error_envelope import BadRequest
 
 # Encoded tokens that betray a still-percent-encoded value: a path separator
 # (%2f '/', %5c '\') or a bare percent (%25) that a proxy left behind.
@@ -60,8 +64,8 @@ def decode_proxy_path_arg(name: str = 'path', *,
     Quart then decodes ONCE, so the route receives the literal string
     ``%2Fmnt%2Fx`` — which matches no DB rows and blanks the Project Brain
     panel even though the data exists. Scalar params (``since=0``, ``limit=20``)
-    have no ``%`` so the proxy re-encode is a no-op for them; only path-valued
-    args break, which is why this is applied specifically to path args.
+    have no ``%`` so the proxy re-encode is a no-op for them; path-valued args
+    break, and so do JSON-valued args (see ``decode_proxy_json_value``).
 
     Fix: while the value STILL looks percent-encoded (contains ``%2f`` / ``%5c``
     / ``%25``, case-insensitive) AND does NOT already resolve to an existing
@@ -106,22 +110,28 @@ def decode_proxy_path_arg(name: str = 'path', *,
     return raw
 
 
-class BadRequest(ValueError):
-    """Raised by request_parser when a field is missing/wrong type.
+def decode_proxy_json_value(value: str) -> str:
+    """Undo a reverse proxy's re-encoding of a JSON-valued query arg.
 
-    Carries a ``.field`` attribute (empty string when not field-scoped)
-    that ``@safe_route`` and ``api_response._normalize_error`` both read
-    when converting the exception to a 400 response.
+    code-server's ``/proxy/<port>/`` (the VS Code web IDE forwarded port)
+    rebuilds the upstream URL as ``encodeURI(path + '?' + qs.stringify(query))``,
+    so every escape the browser sent arrives encoded twice (``%5B`` →
+    ``%255B``). After Quart's single decode a JSON arg sent as ``[{"…`` reads
+    ``%5B%7B%22…``. JSON text never begins with ``%``, so a value that does
+    is still percent-encoded: decode it until it no longer does. A correctly
+    encoded value is never touched. Each decode that changes the value
+    shortens it, so the loop ends without a pass limit; an undecodable value
+    is returned unchanged for the caller's JSON parser to reject.
     """
-    def __init__(self, message: str, *, field: str = ''):
-        super().__init__(message)
-        self.field = field
+    from urllib.parse import unquote
 
-    def to_envelope(self) -> dict:
-        env = {'kind': 'bad_request', 'detail': str(self)}
-        if self.field:
-            env['field'] = self.field
-        return env
+    while value.startswith('%'):
+        decoded = unquote(value)
+        if decoded == value:
+            break
+        value = decoded
+    return value
+
 
 
 # ── Body parsing ───────────────────────────────────────────────
@@ -427,6 +437,7 @@ def optional_dict(body: Mapping[str, Any], field: str, *,
 
 __all__ = [
     'BadRequest', 'parse_body', 'async_parse_body', 'decode_proxy_path_arg',
+    'decode_proxy_json_value',
     'require_str', 'optional_str', 'query_str',
     'require_int', 'optional_int',
     'require_bool', 'optional_bool',

@@ -15,10 +15,10 @@ from pathlib import Path
 import sys
 
 from .native_engine import _run
+from .restart_budget import ARTIFACT_PREPARATION_SECONDS
 
 RESULT_PREFIX = 'TOFU_RESTART_RESULT '
-# Native lock/build budget (1200s), frontend lock/build (660s), plus overhead.
-PREPARATION_TIMEOUT_SECONDS = 2010
+PREPARATION_TIMEOUT_SECONDS = ARTIFACT_PREPARATION_SECONDS
 DELEGATION_TIMEOUT_SECONDS = 45
 _MANAGED_ENGINE_ENVIRONMENT = ('TOFUDB_EXPECTED_SHA256', 'TOFUDB_BIN')
 
@@ -35,8 +35,11 @@ def run_application_restart_control(
     """
     if stage not in ('prepare', 'delegate'):
         raise ValueError(f'Unknown application restart stage: {stage}')
+    from .runtime_replica import authoritative_interpreter
     project = Path(project_path).resolve()
-    command = [sys.executable, '-m', 'serverctl_pkg.application_restart',
+    # Fresh control code also needs current packages: a runtime replica can
+    # predate the update this restart applies.
+    command = [authoritative_interpreter(), '-m', 'serverctl_pkg.application_restart',
                '--stage', stage, '--reason', reason]
     if requested_at is not None:
         command.extend(['--requested-at', str(requested_at)])

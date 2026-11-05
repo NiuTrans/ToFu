@@ -5,6 +5,8 @@ spec covers geometry and DOM retirement; transport/retry belongs to live-app
 journeys and coordinator tests, not a substitute transport in this fixture.
 """
 import json
+import threading
+import time
 import uuid
 
 import pytest
@@ -14,6 +16,7 @@ from tests.support.frontend_visual import (  # noqa: F401
     frontend_visual_origin,
     frontend_visual_page as frontend_visual_page,
 )
+from tests.turn_lifecycle.test_task_event_delivery import owner as owner, _discard
 
 pytestmark = pytest.mark.visual
 
@@ -185,6 +188,12 @@ def test_shipped_latest_button_restores_history_window_and_scoped_gestures(
         page.mouse.wheel(0, -100000)
         page.wait_for_function("""first => document.querySelector('#chatInner [data-turn-id]')
           ?.dataset.turnId !== first""", arg=first)
+        # Read upward until the latest Turns lie far enough below to retire.
+        for _ in range(40):
+            if surface.get_attribute('data-has-later-content') == 'true':
+                break
+            page.mouse.wheel(0, -100000)
+            page.wait_for_timeout(100)
         expect(surface).to_have_attribute('data-has-later-content', 'true')
         expect(page.locator('#scrollToBottomBtn')).to_be_visible()
         page.locator('#scrollToBottomBtn').click()
@@ -198,5 +207,117 @@ def test_shipped_latest_button_restores_history_window_and_scoped_gestures(
         page.screenshot(path=str(tmp_path / f'shipped-latest-{width}.png'))
         assert not errors, errors
     finally:
+        context.request.delete(f'{live_server}/api/v4/conversations/{cid}')
+        context.close()
+
+
+def test_scroll_up_loads_history_while_the_conversation_streams(
+        browser, live_server, owner, monkeypatch, tmp_path):
+    """A streaming reply commits a replay event every 50 ms, so the reader's
+    applied head trails the server's on every history read, and through a
+    remote proxy each page lands a round trip after storage read it. Wheeling
+    up must still page in older Turns down to the first one, without
+    history-page conflicts, without replacing the projection from a snapshot,
+    and without leaving the boundary failed."""
+    from playwright.sync_api import expect
+    from lib import turn_lifecycle
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    from tests.conftest import _dismiss_onboarding_modals
+    from tests.turn_lifecycle.test_turn_event_carried_task_event import _running_task
+
+    monkeypatch.setenv('TOFU_TURN_DELTA_RECORD_MS', '0')
+    cid = 'scroll-stream-' + uuid.uuid4().hex[:10]
+    context = browser.new_context(viewport={'width': 1180, 'height': 800}, service_workers='block')
+    context.add_init_script(f"localStorage.setItem('tofu_onboarding_v1_done', '1');"
+                            f"sessionStorage.setItem('tofu_activeConvId', '{cid}');")
+    page = context.new_page()
+    network = context.new_cdp_session(page)
+    network.send('Network.enable')
+    network.send('Network.emulateNetworkConditions', {
+        'offline': False, 'latency': 250, 'downloadThroughput': -1, 'uploadThroughput': -1})
+    errors, reads, snapshots = [], [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+
+    def record_response(response):
+        if f'/conversations/{cid}/' not in response.url or response.request.method != 'GET':
+            return
+        if '/turns/history?' in response.url:
+            reads.append({'status': response.status, 'at': time.monotonic()})
+        elif '/sync?' in response.url:
+            snapshots.append({'status': response.status, 'at': time.monotonic()})
+
+    page.on('response', record_response)
+    stop, streamer, task = threading.Event(), None, None
+    try:
+        for index in range(160):
+            text = f'Streaming history item {index}. ' + 'Readable older evidence. ' * 40
+            body = {'commandId': f'{cid}-{index}', 'actor': 'human' if index % 2 == 0 else 'assistant',
+                    'kind': 'text', 'projection': {'content': text, 'segments': [{
+                        'type': 'text', 'blockId': f'{cid}-{index}:answer', 'text': text,
+                        'terminal': True, 'deliverable': True}]}}
+            if index == 0:
+                body['conversation'] = {'allowCreate': True, 'title': cid, 'createdAt': 100, 'settings': {}}
+            response = context.request.post(f'{live_server}/api/v4/conversations/{cid}/turns/settled', data=body)
+            assert response.status == 200, response.text()
+        task_id = cid + '-task'
+        created, source = _running_task(turn_lifecycle, None, cid, task_id)
+        task = chat_task_runtime.create(user_id=1, task_id=task_id)
+        task.update(source)
+        task.update(convId=cid, _turnId=created['turn']['turnId'], _workerStartedAt=time.time())
+        events = {'recorded': 0, 'errors': []}
+
+        def stream():
+            while not stop.is_set():
+                try:
+                    task['content'] = f'Streaming reply {events["recorded"] + 1}'
+                    turn_lifecycle.record_task_event(task, {'type': 'delta', 'content': ' more'})
+                    events['recorded'] += 1
+                except Exception as error:  # surfaced by the assertion below
+                    events['errors'].append(repr(error))
+                    return
+                stop.wait(0.05)
+
+        streamer = threading.Thread(target=stream, name='scroll-history-streamer', daemon=True)
+        streamer.start()
+        page.goto(live_server, wait_until='domcontentloaded')
+        _dismiss_onboarding_modals(page)
+        surface = page.locator(f'#chatInner .conversation-surface[data-conversation-id="{cid}"]')
+        expect(surface).to_be_visible(timeout=20000)
+        expect(surface).to_contain_text('Streaming history item 159.', timeout=20000)
+        initial_snapshots = len(snapshots)
+        boundary_states = set()
+        page.locator('#chatContainer').hover()
+        deadline = time.monotonic() + 90
+        reached = False
+        while time.monotonic() < deadline:
+            page.mouse.wheel(0, -4000)
+            page.wait_for_timeout(120)
+            state = page.evaluate("""() => ({
+              first: document.querySelector('#chatInner [data-turn-id]')?.textContent?.includes(
+                'Streaming history item 0.') || false,
+              boundary: [...document.querySelectorAll('#chatInner [data-history-state]')]
+                .map(node => node.dataset.historyState)})""")
+            boundary_states.update(state['boundary'])
+            if state['first']:
+                reached = True
+                break
+        evidence = {'reached': reached, 'reads': reads, 'snapshots': snapshots,
+                    'initialSnapshots': initial_snapshots, 'events': events['recorded'],
+                    'boundaryStates': sorted(boundary_states)}
+        (tmp_path / 'streaming-scroll-history.json').write_text(json.dumps(evidence, indent=2) + '\n')
+        assert reached, evidence
+        assert not events['errors'], events['errors']
+        assert events['recorded'] > 20, evidence
+        assert reads and all(read['status'] == 200 for read in reads), evidence
+        assert len(snapshots) == initial_snapshots, evidence
+        assert 'failed' not in boundary_states, evidence
+        assert not errors, errors
+    finally:
+        stop.set()
+        if streamer:
+            streamer.join(5)
+        if task:
+            task['aborted'] = True
+            _discard(task)
         context.request.delete(f'{live_server}/api/v4/conversations/{cid}')
         context.close()

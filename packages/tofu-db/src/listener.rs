@@ -285,8 +285,8 @@ impl LoopbackServer {
             if workers.is_empty() && workers.capacity() > self.config.initial_connection_reservations {
                 workers.shrink_to(self.config.initial_connection_reservations);
             }
-            match self.listener.accept() {
-                Ok((stream, peer)) => {
+            match accept_connection(|| self.listener.accept()) {
+                Ok(Some((stream, peer))) => {
                     if !peer.ip().is_loopback() {
                         if let Err(error) = record_rejection(&self.shared) {
                             terminal_error = Some(error);
@@ -363,7 +363,7 @@ impl LoopbackServer {
                         }
                     }
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Ok(None) => {
                     if let Err(error) =
                         wait_for_connection(&self.listener, self.config.accept_poll_interval)
                     {
@@ -445,6 +445,20 @@ fn configure_stream(stream: &TcpStream, timeout: Duration) -> io::Result<()> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))
+}
+
+/// One accept observation; the outer loop owns parent checks and polling.
+fn accept_connection<T>(accept: impl FnOnce() -> io::Result<T>) -> io::Result<Option<T>> {
+    match accept() {
+        Ok(connection) => Ok(Some(connection)),
+        // An interrupted accept or a peer that reset/aborted before accept
+        // says nothing about authority health. Return to the outer loop so
+        // parent liveness and existing workers still make progress.
+        Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock
+            | io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn current_unix_milliseconds() -> u64 {
@@ -773,6 +787,29 @@ mod tests {
             accept_poll_interval: Duration::from_millis(2),
             connection_stack_bytes: 1024 * 1024,
         }
+    }
+
+    #[test]
+    fn transient_accept_failure_preserves_listener_and_next_connection() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        for kind in [io::ErrorKind::Interrupted, io::ErrorKind::ConnectionAborted,
+                     io::ErrorKind::ConnectionReset] {
+            let outcome = accept_connection::<(TcpStream, SocketAddr)>(|| Err(kind.into()));
+            assert!(matches!(outcome, Ok(None)), "one peer/interrupt ended the listener: {outcome:?}");
+            let client = TcpStream::connect(address).unwrap();
+            let (accepted, _) = accept_connection(|| listener.accept()).unwrap().unwrap();
+            assert_eq!(accepted.peer_addr().unwrap(), client.local_addr().unwrap());
+        }
+    }
+
+    #[test]
+    fn fatal_accept_failure_is_preserved_without_spinning() {
+        let error = accept_connection::<()>(|| Err(io::Error::new(
+            io::ErrorKind::PermissionDenied, "listener unavailable"))).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "listener unavailable");
     }
 
     fn egress_request() -> Message {

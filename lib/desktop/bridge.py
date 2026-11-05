@@ -237,7 +237,7 @@ def get_command_stream(cmd_id, since_seq=0):
     }
 
 
-def register_agent(agent_id, meta=None, user_id='', key_id='') -> None:
+def register_agent(agent_id, meta=None, user_id='', key_id='') -> dict | None:
     """Upsert a v2 agent in the registry and heartbeat it.
 
     ``meta`` is the agent frame from the poll body (name / platform /
@@ -246,10 +246,23 @@ def register_agent(agent_id, meta=None, user_id='', key_id='') -> None:
     the liveness heartbeat: :func:`online_agents` only returns agents seen
     within the connection window, and a registered agent counts toward
     :func:`is_desktop_agent_connected`.
+
+    Returns the new connection ``{agent_id, user_id, name, connection_epoch,
+    connected_at}`` when this heartbeat brings the device online: first
+    registration in this process, a heartbeat after the connection window
+    lapsed, or a different owner. Heartbeats of a live connection return
+    None, so an online transition is observed once per connection epoch.
     """
     meta = meta if isinstance(meta, dict) else {}
+    connection = None
     with command_queue_lock:
         prev = _agents.get(agent_id) or {}
+        now = time.time()
+        owner = str(user_id or '')
+        reconnected = (not prev or prev.get('user_id') != owner
+                       or now - prev['last_seen'] >= _CONNECTED_WINDOW_S)
+        epoch = (prev.get('connection_epoch') or 0) + 1 if reconnected else prev['connection_epoch']
+        connected_at = now if reconnected else prev['connected_at']
         caps = meta.get('capabilities')
         _agents[agent_id] = {
             'agent_id': agent_id,
@@ -269,22 +282,30 @@ def register_agent(agent_id, meta=None, user_id='', key_id='') -> None:
             'share_roots': (list(meta['share_roots'])
                             if isinstance(meta.get('share_roots'), list)
                             else prev.get('share_roots') or []),
-            'user_id': str(user_id or ''),
+            'user_id': owner,
             'key_id': str(key_id or ''),
-            'registered_at': prev.get('registered_at') or time.time(),
-            'last_seen': time.time(),
+            'registered_at': prev.get('registered_at') or now,
+            'last_seen': now,
+            'connection_epoch': epoch,
+            'connected_at': connected_at,
         }
         for command_id in _agents[agent_id]['active_command_ids']:
             command = command_queue.get(command_id)
-            if (command and command.get('user_id') == str(user_id or '')
+            if (command and command.get('user_id') == owner
                     and command.get('claimed_agent_id') == agent_id):
                 command['delivery_acknowledged'] = True
-        _last_poll[0] = time.time()
+        _last_poll[0] = now
+        if reconnected:
+            connection = {'agent_id': agent_id, 'user_id': owner,
+                          'name': _agents[agent_id]['name'],
+                          'connection_epoch': epoch, 'connected_at': connected_at}
+    return connection
 
 
 def _public_agent(agent):
     return {key: value for key, value in agent.items()
-            if key not in ('active_command_ids', 'execution_slots', 'protocol_version')}
+            if key not in ('active_command_ids', 'execution_slots', 'protocol_version',
+                           'connection_epoch', 'connected_at')}
 
 
 def online_agents() -> list:
@@ -309,6 +330,23 @@ def list_agents(user_id=None) -> list:
     if user_id is not None:
         out = [a for a in out if (a.get('user_id') or '') == (user_id or '')]
     return out
+
+
+def online_connection(agent_id, user_id) -> dict | None:
+    """The live connection of one owner's device, or None while it is offline.
+
+    Same shape as the connection :func:`register_agent` returns at the online
+    transition; another owner's device is never visible.
+    """
+    now = time.time()
+    with command_queue_lock:
+        agent = _agents.get(agent_id)
+        if (not agent or agent['user_id'] != str(user_id or '')
+                or now - agent['last_seen'] >= _CONNECTED_WINDOW_S):
+            return None
+        return {'agent_id': agent_id, 'user_id': agent['user_id'], 'name': agent['name'],
+                'connection_epoch': agent['connection_epoch'],
+                'connected_at': agent['connected_at']}
 
 
 def _online_ids_locked(user_id=None) -> set:

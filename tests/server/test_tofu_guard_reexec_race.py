@@ -13,7 +13,7 @@ Epic pt_aa3cd224b3b346e7. Two production incidents drove this:
 
 Fix (design: docs/modules/infra_runtime.md):
   (b1) re-exec marker data/.reexec_in_progress (written by
-       routes/api_v1/update.py::_perform_server_reexec, cleared by
+       lib/server/server_reexec.py::perform_server_reexec, cleared by
        server.py at boot-ready) — yield while fresh (<300s);
   (b2) instance-lock yield — no listener/HTTP but a LIVE server.py holds
        data/.server.lock → boot in progress; a DEAD recorded pid means a
@@ -342,9 +342,9 @@ class TestReexecRace(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_static_anchors(self):
-        """The marker write (update.py), clear (server_boot_report.py) and both guard
+        """The marker write (server_reexec.py), clear (server_boot_report.py) and both guard
         layers are present in the shipped sources."""
-        with open(os.path.join(ROOT, 'routes', 'api_v1', 'update.py'),
+        with open(os.path.join(ROOT, 'lib', 'server', 'server_reexec.py'),
                   encoding='utf-8') as f:
             upd = f.read()
         with open(os.path.join(ROOT, 'lib', 'server', 'server_boot_report.py'),

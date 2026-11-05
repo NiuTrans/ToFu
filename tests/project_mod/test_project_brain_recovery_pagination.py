@@ -52,7 +52,7 @@ def test_pages_include_inactive_projects_and_continue_after_settlement(
         for project in page['projects']:
             identity = (project['ownerUserId'], project['projectKey'])
             seen.append(identity)
-            # Real settlement moves this row ahead of the page cursor.
+            # Real settlement rewrites this row with a newer update time.
             db.execute(
                 'UPDATE storage_project_brain_projects SET updated_at_ms=100, '
                 'projection_json=? WHERE owner_user_id=? AND project_key=?',
@@ -111,8 +111,12 @@ def test_empty_active_page_still_has_continuation(recovery_database):
     assert last == {'projects': [], 'capped': False}
 
 
-@pytest.mark.parametrize('cursor', [[], {}, {'updatedAt': -1}, {
-    'updatedAt': True, 'ownerUserId': 1, 'projectKey': '/project'}])
+@pytest.mark.parametrize('cursor', [
+    [], {}, {'ownerUserId': True, 'projectKey': '/project'},
+    {'ownerUserId': 0, 'projectKey': '/project'},
+    {'ownerUserId': 1, 'projectKey': ''},
+    # Update-order continuations are retired; they cannot be reinterpreted.
+    {'updatedAt': 50, 'ownerUserId': 1, 'projectKey': '/project'}])
 def test_invalid_cursor_fails_closed(recovery_database, cursor):
     with pytest.raises(StorageError):
         _project_brain_recovery_snapshot(Session(recovery_database), {'cursor': cursor})
@@ -121,7 +125,7 @@ def test_invalid_cursor_fails_closed(recovery_database, cursor):
 def test_startup_continues_empty_pages_and_preserves_task_owner(monkeypatch):
     from lib.conversations import project_brain_startup as startup
 
-    cursor = {'updatedAt': 50, 'ownerUserId': 7, 'projectKey': '/earlier'}
+    cursor = {'ownerUserId': 7, 'projectKey': '/earlier'}
     requests, commands = [], []
 
     class Client:
@@ -159,8 +163,7 @@ def test_startup_rejects_missing_or_repeated_continuation(monkeypatch, repeat):
         def maintenance(self, *args, **kwargs):
             result = {'projects': [], 'capped': True}
             if repeat:
-                result['nextCursor'] = {
-                    'updatedAt': 50, 'ownerUserId': 7, 'projectKey': '/same'}
+                result['nextCursor'] = {'ownerUserId': 7, 'projectKey': '/same'}
             return result
 
     monkeypatch.setattr(startup, 'get_storage_client', lambda **kwargs: Client())

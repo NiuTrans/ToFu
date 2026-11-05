@@ -15,6 +15,7 @@ Routes (timer):
   GET    /api/v1/timer/list
   GET    /api/v1/timer/<id>/status
   POST   /api/v1/timer/<id>/cancel                    (admin)
+  POST   /api/v1/timer/<id>/check                     (admin)
   POST   /api/v1/timer/<id>/trigger                   (admin)
 """
 
@@ -282,16 +283,77 @@ def timer_trigger(timer_id):
     if not timer:
         return api_not_found('Timer not found')
     if timer['status'] != 'active':
-        return api_bad_request(
+        # A settled row is not a client mistake and there is nothing to retry:
+        # the panel uses this code to say "no longer watching" instead of
+        # rendering an unactionable failure.
+        return api_conflict(
             f'Timer is not active (status={timer["status"]})',
-            field='status')
+            error_code='timer_inactive', timer_id=timer_id)
     logger.info('[Timer.v1] Force-triggering timer %s', timer_id)
-    exec_task_id = force_trigger_timer(timer_id, user_id=user_id)
-    if not exec_task_id:
-        return api_internal_error('Trigger failed',
-                                  context='timer_trigger',
-                                  source='api_v1.scheduler.timer_trigger')
-    return api_ok({'execution_task_id': exec_task_id})
+    outcome = force_trigger_timer(timer_id, user_id=user_id)
+    if outcome is None:
+        return api_not_found('Timer not found')
+    conflict = _delivery_conflict(outcome, timer_id)
+    if conflict is not None:
+        return conflict
+    # A steered or queued delivery has no executor of its own yet; the row's
+    # ``last_poll_decision`` carries the delivery receipt either way.
+    return api_ok({'execution_task_id': outcome.task_id})
+
+
+@api_v1_scheduler_bp.route('/api/v1/timer/<timer_id>/check', methods=['POST'])
+@require_scope('admin')
+@api_meta(
+    summary='Check a timer now; deliver its continuation only when ready',
+    description=(
+        'Runs one readiness check immediately. It counts against '
+        '``max_polls`` and is recorded in the poll log. ``ready=false`` '
+        'leaves the watcher active with ``decision``/``reason``; '
+        '``ready=true`` delivers the continuation as a background poll would '
+        'and names the lane in ``delivery`` (``started``, ``steered`` or '
+        '``queued``). ``/trigger`` delivers without checking.'
+    ),
+    tags=['scheduler'], scope='admin',
+)
+def timer_check(timer_id):
+    from lib.scheduler.timer import check_timer_now, get_timer
+    user_id = int(_request_user_id())
+    timer = get_timer(timer_id, user_id=user_id)
+    if not timer:
+        return api_not_found('Timer not found')
+    if timer['status'] != 'active':
+        return api_conflict(
+            f'Timer is not active (status={timer["status"]})',
+            error_code='timer_inactive', timer_id=timer_id)
+    logger.info('[Timer.v1] Checking timer %s now', timer_id)
+    outcome = check_timer_now(timer_id, user_id=user_id)
+    if outcome is None:
+        return api_conflict('Timer is no longer active',
+                            error_code='timer_inactive', timer_id=timer_id)
+    delivery = outcome.delivery
+    if delivery is None:
+        return api_ok({'ready': False, 'decision': outcome.decision,
+                       'reason': outcome.reason})
+    conflict = _delivery_conflict(delivery, timer_id)
+    if conflict is not None:
+        return conflict
+    return api_ok({'ready': True, 'decision': 'ready', 'reason': outcome.reason,
+                   'delivery': delivery.kind,
+                   'execution_task_id': delivery.task_id})
+
+
+def _delivery_conflict(outcome, timer_id):
+    """Map an unaccepted continuation delivery to the panel's 409 codes."""
+    if outcome.kind == 'retry':
+        # Nothing was accepted and the watcher still owns the obligation, so
+        # the click is retryable and the timer row is untouched. 409 (not 500):
+        # the conversation lane is busy, which is expected, not a server fault.
+        return api_conflict('Target conversation is busy; the timer is still watching',
+                            error_code='timer_delivery_retry', timer_id=timer_id)
+    if outcome.kind == 'closed':
+        return api_conflict('Timer is no longer active',
+                            error_code='timer_inactive', timer_id=timer_id)
+    return None
 
 
 __all__ = ['api_v1_scheduler_bp']

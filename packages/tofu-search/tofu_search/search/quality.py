@@ -7,8 +7,8 @@ miss is uncertainty, never a semantic rejection or proof of nonexistence.
 import re
 from urllib.parse import urlsplit
 
-from tofu_search.lexical import matching_text
-from tofu_search.search.prefetch_gate import query_subject, query_terms
+from tofu_search.lexical import matching_text, query_subject
+from tofu_search.search.prefetch_gate import query_terms
 from tofu_search.search.prefetch_gate import result_terms as result_terms
 from tofu_search.search.rerank import _tokenize
 
@@ -205,6 +205,8 @@ def classify_relevance(result, query):
                    if any(e['status'] == label for e in sources.values())))
     terms = query_terms(query)
     matched = set(serp['matched_terms']) | set(body['matched_terms'])
+    body_scripts = _script_families(fetched_body(result))
+    query_scripts = _script_families(query_subject(query))
     return {
         'status': status,
         'query_terms': sorted(terms),
@@ -216,9 +218,22 @@ def classify_relevance(result, query):
 
         # Different-script text is explicitly uncertain, not automatically
         # relevant. Keep it accessible without penalizing a partial overlap.
-        'cross_language': bool(_script_families(fetched_body(result))
-                               - _script_families(query_subject(query))),
+        # A shared Latin product name must not hide the query's other script.
+        'cross_language': bool(body_scripts and body_scripts != query_scripts),
     }
+
+
+def is_established_evidence(result):
+    """Whether an annotated result may be delivered as evidence, not a candidate.
+
+    Weak or absent lexical evidence leaves a result an unverified candidate,
+    except a fetched body in another script than the query, which stays
+    readable evidence because lexical overlap cannot judge it.
+    """
+    if result.get('relevance') not in ('weak_match', 'unverified'):
+        return True
+    return bool(result.get('full_content')
+                and (result.get('relevance_evidence') or {}).get('cross_language'))
 
 
 def annotate_relevance(result, query):

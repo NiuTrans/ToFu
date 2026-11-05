@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from lib.site_packs import reset_cache_for_tests
+from lib.site_packs import load_packs, reset_cache_for_tests
 
 pytestmark = pytest.mark.api
 
@@ -105,6 +105,31 @@ def test_install_rejects_invalid_manifest():
         assert again.status_code == 400
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize('invalid', ['input_type', 'output_type', 'numeric_schema'])
+def test_invalid_schema_update_preserves_the_installed_pack(tmp_path, invalid):
+    async def run():
+        client = _app().test_client()
+        original = _pack_doc()
+        assert (await client.post('/api/v1/site-packs', json=original)).status_code == 200
+        saved = tmp_path / 'site_packs' / 'intranet-wiki.json'
+        before = saved.read_bytes()
+        candidate = _pack_doc()
+        candidate['version'] = 2
+        operation = candidate['operations'][0]
+        if invalid == 'input_type':
+            operation['input_schema']['type'] = 'array'
+        elif invalid == 'output_type':
+            operation['output_schema'] = {'type': 'null'}
+        else:
+            operation['input_schema']['properties']['limit']['minimum'] = 'invalid'
+        response = await client.post('/api/v1/site-packs', json=candidate)
+        assert response.status_code == 400
+        assert saved.read_bytes() == before
+        assert load_packs()['intranet-wiki'].version == 1
+
+    asyncio.run(run())
 
 
 def test_delete_unknown_user_pack_is_404():

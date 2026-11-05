@@ -3,15 +3,18 @@
 import copy
 import os
 
-PROJECT_TOOL_GREP = {
+from lib.tools.background_guidance import RUN_COMMAND_HANDOFF, RUN_COMMAND_STOP
+
+PROJECT_TOOL_SEARCH_FILES = {
     "type": "function",
     "function": {
-        "name": "grep_search",
+        "name": "search_files",
         "description": (
             "Search project file content and return paths, line numbers, and matches. "
             "Prefer this over shell grep/rg: a persistent file index plus ripgrep over "
             "exact candidates avoids recursive walks on huge/network (FUSE) trees, "
-            "skips ignored directories, and is case-insensitive by default. Prefer "
+            "includes hidden files, skips ignored paths unless `path` is inside one, "
+            "and is case-insensitive by default. Prefer "
             "short literal keywords; regex uses Rust/ripgrep syntax (`A|B`, `\\.` for "
             "a literal dot, per-line `^`/`$`), not GNU BRE. `path` is one relative "
             "path or project root. For independent roots/patterns use one `searches` "
@@ -50,6 +53,12 @@ PROJECT_TOOL_GREP = {
     }
 }
 
+# Retired name of ``search_files``, absent from the model-visible surface. The
+# schema stays defined so a direct ``grep_search`` dispatch keeps argument
+# repair; name repair maps fresh calls to ``search_files``.
+PROJECT_TOOL_GREP_SEARCH = copy.deepcopy(PROJECT_TOOL_SEARCH_FILES)
+PROJECT_TOOL_GREP_SEARCH['function']['name'] = 'grep_search'
+
 PROJECT_TOOL_FIND = {
     "type": "function",
     "function": {
@@ -59,8 +68,9 @@ PROJECT_TOOL_FIND = {
             "test files, configs, etc.\n\n"
             "**Prefer this over ``run_command find``** — find_files is served from a "
             "persistent project file index (near-instant even on huge or network-mounted "
-            "trees), supports ``max_results``, and auto-filters ignored dirs "
-            "(node_modules, .venv, etc.).\n\n"
+            "trees), supports ``max_results``, includes hidden files, and auto-filters "
+            "ignored paths (node_modules, .venv, .gitignore matches, etc.) unless "
+            "``path`` points inside one.\n\n"
             "For MULTIPLE searches, provide a 'searches' array — each entry has the same "
             "fields as the top-level parameters. Batch mode cuts round trips."
         ),
@@ -151,7 +161,10 @@ PROJECT_TOOL_WRITE_FILE = {
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "Short pre-write intent shown before execution."
+                    "description": (
+                        "Optional pre-write caption shown before execution. "
+                        "Omit it to use the file-path label."
+                    )
                 },
                 "path": {
                     "type": "string",
@@ -196,17 +209,7 @@ PROJECT_TOOL_WRITE_FILE = {
                     )
                 }
             },
-            "required": ["description", "path"],
-            "oneOf": [
-                {
-                    "properties": {"content": {"type": "string"}},
-                    "required": ["content"]
-                },
-                {
-                    "properties": {"content_ref": {"type": "object"}},
-                    "required": ["content_ref"]
-                }
-            ],
+            "required": ["path"],
             "additionalProperties": False
         }
     }
@@ -234,7 +237,7 @@ PROJECT_TOOL_APPLY_DIFF = {
         "parameters": {
             "type": "object",
             "properties": {
-                "description": {"type": "string", "description": "Brief description of the change (generated FIRST, before writing search/replace)"},
+                "description": {"type": "string", "description": "Optional caption for the change."},
                 "path": {"type": "string", "description": "Relative file path from project root"},
                 "search": {"type": "string", "description": "Exact text to find in the file (must match precisely)"},
                 "replace": {"type": "string", "description": "Replacement text"},
@@ -247,7 +250,7 @@ PROJECT_TOOL_APPLY_DIFF = {
                     "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused. Unneeded for a git worktree of a registered repo."
                 }
             },
-            "required": ["description", "path", "search", "replace"]
+            "required": ["path", "search", "replace"]
         }
     }
 }
@@ -280,16 +283,16 @@ PROJECT_TOOL_APPLY_DIFFS = {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "description": {"type": "string", "description": "Brief description of this edit (generated FIRST, before writing search/replace)"},
+                            "description": {"type": "string", "description": "Optional caption for this edit."},
                             "path": {"type": "string", "description": "Relative file path"},
                             "search": {"type": "string", "description": "Exact text to find"},
                             "replace": {"type": "string", "description": "Replacement text"},
                             "replace_all": {"type": "boolean", "description": "Replace ALL occurrences (default false)"}
                         },
-                        "required": ["description", "path", "search", "replace"]
+                        "required": ["path", "search", "replace"]
                     }
                 },
-                "description": {"type": "string", "description": "Brief description of the overall change"},
+                "description": {"type": "string", "description": "Optional caption for the overall change."},
                 "atomic": {
                     "type": "boolean",
                     "description": "Preflight atomicity (default false). When true, validate every edit before writing; a validation failure writes nothing and marks edits as would-apply or FAIL. Later I/O failures can still leave partial writes; this is not cross-file rollback."
@@ -325,7 +328,7 @@ PROJECT_TOOL_INSERT_CONTENT = {
         "parameters": {
             "type": "object",
             "properties": {
-                "description": {"type": "string", "description": "Brief description of the insertion (generated FIRST, before writing anchor/content)"},
+                "description": {"type": "string", "description": "Optional caption for the insertion."},
                 "path": {"type": "string", "description": "Relative file path from project root"},
                 "anchor": {
                     "type": "string",
@@ -342,7 +345,7 @@ PROJECT_TOOL_INSERT_CONTENT = {
                     "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused. Unneeded for a git worktree of a registered repo."
                 }
             },
-            "required": ["description", "path", "anchor", "content"]
+            "required": ["path", "anchor", "content"]
         }
     }
 }
@@ -372,7 +375,7 @@ PROJECT_TOOL_INSERT_CONTENTS = {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "description": {"type": "string", "description": "Brief description of this insertion (generated FIRST, before writing anchor/content)"},
+                            "description": {"type": "string", "description": "Optional caption for this insertion."},
                             "path": {"type": "string", "description": "Relative file path"},
                             "anchor": {"type": "string", "description": "Exact text to locate the insertion point"},
                             "content": {"type": "string", "description": "New content to insert"},
@@ -381,10 +384,10 @@ PROJECT_TOOL_INSERT_CONTENTS = {
                                 "description": "Insert before or after the anchor. Default: 'after'"
                             }
                         },
-                        "required": ["description", "path", "anchor", "content"]
+                        "required": ["path", "anchor", "content"]
                     }
                 },
-                "description": {"type": "string", "description": "Brief description of the overall insertion"},
+                "description": {"type": "string", "description": "Optional caption for the overall insertion."},
                 "allow_outside_workspace": {
                     "type": "boolean",
                     "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused. Unneeded for a git worktree of a registered repo."
@@ -426,11 +429,10 @@ PROJECT_TOOL_EDIT_FILE = {
             "properties": {
                 "description": {
                     "type": "string",
-                    "minLength": 1,
                     "maxLength": 120,
                     "description": (
-                        "Short pre-edit intent shown before execution "
-                        "(max 120 chars)."),
+                        "Optional pre-edit caption (max 120 chars). "
+                        "Omit it to use the file-path label."),
                 },
                 "path": {
                     "type": "string",
@@ -496,7 +498,7 @@ PROJECT_TOOL_EDIT_FILE = {
                     ),
                 },
             },
-            "required": ["description", "edits"],
+            "required": ["edits"],
             # `path` is deliberately NOT required at either level: the two
             # accepted forms are "batch path, no item paths" and "item paths",
             # and a root combinator cannot express that choice without
@@ -515,13 +517,13 @@ PROJECT_TOOL_RUN_COMMAND = {
         "name": "run_command",
         "description": (
             "Run builds, tests, lint, installs, Git or pipelines; returns stdout/stderr. "
-            "NO timeout: runs until it finishes, the user stops it, or you stop a backgrounded one with `kill`. "
-            "Execution may move to the background on new messages; results arrive automatically. "
+            f"NO timeout: {RUN_COMMAND_STOP} "
+            f"{RUN_COMMAND_HANDOFF}"
             "Avoid waiting for stdin.\n\n"
             "Fresh subprocess; no persistent shell or environment changes. "
             "Prefer absolute paths and `working_dir` over `cd`.\n\n"
-            "Use `read_files`, `grep_search`, `find_files`, `edit_file`, `write_file` for repository data. "
-            "Filesystem grep uses a bounded FUSE-safe engine or returns a `grep_search` translation; "
+            "Use `read_files`, `search_files`, `find_files`, `edit_file`, `write_file` for repository data. "
+            "Filesystem grep uses a bounded FUSE-safe engine or returns a `search_files` translation; "
             "filtering command output is allowed. `browser_download_url_to_server` handles authenticated "
             "browser downloads. Text helpers: `sd`, `mlr`, `goawk`.\n\n"
             "Never use a shell no-op as a placeholder (`true`, `:`, `exit 0`); repetition is a tool loop."
@@ -541,9 +543,11 @@ PROJECT_TOOL_RUN_COMMAND = {
                     "type": "string",
                     "description": (
                         "Optional directory. In multi-root workspaces use "
-                        "`rootname:subdir`. STICKY: after setting it (or using "
-                        "`cd`), later project run_command calls resume there. "
-                        "Default: last conversation directory, then project root."
+                        "`rootname:subdir`. STICKY: an explicit `working_dir` "
+                        "becomes the default for later run_command calls in "
+                        "this conversation; a `cd` INSIDE a command never "
+                        "persists. Default: the explicit sticky directory, "
+                        "then the project root."
                     )
                 },
                 "frozen_input_paths": {
@@ -590,7 +594,7 @@ PROJECT_TOOL_CHECK_BACKGROUND = {
                     "description": "The command_id returned by run_command(background=true)."
                 },
                 "wait_s": {
-                    "type": "integer",
+                    "type": "integer", "minimum": 0, "maximum": 60, "default": 0,
                     "description": (
                         "Seconds to block waiting for completion (clamped to 60). "
                         "On cap, returns the running snapshot; call again to keep waiting."
@@ -639,7 +643,7 @@ READ_FILES_TOOL = {
             "Read one or more files with line numbers and optional ranges. Read WIDE "
             "within the round budget: for 1-2 relevant files request 200+ lines or a "
             "whole small file instead of repeated 50-line fragments; for 3+ files use "
-            "focused ranges or `grep_search`. An explicit start/end range is "
+            "focused ranges or `search_files`. An explicit start/end range is "
             "authoritative and never widened. Whole-file text reads retain complete "
             "sources; model previews are budgeted separately. Batch independent "
             "ranges while keeping expected model content near 24k tokens; every "
@@ -710,13 +714,13 @@ def with_remote_hint(tools):
 # (lib/tools/poll.py) absorb them. The schema dicts stay defined below for
 # conversation-latched history, and their handlers stay registered.
 PROJECT_TOOLS_UNIFIED = [
-    PROJECT_TOOL_GREP, PROJECT_TOOL_FIND, PROJECT_TOOL_REPO_MAP,
+    PROJECT_TOOL_SEARCH_FILES, PROJECT_TOOL_FIND, PROJECT_TOOL_REPO_MAP,
     PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_EDIT_FILE,
     PROJECT_TOOL_RUN_COMMAND,
 ]
 
 PROJECT_TOOLS_LEGACY = [
-    PROJECT_TOOL_GREP, PROJECT_TOOL_FIND, PROJECT_TOOL_REPO_MAP,
+    PROJECT_TOOL_SEARCH_FILES, PROJECT_TOOL_FIND, PROJECT_TOOL_REPO_MAP,
     PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_APPLY_DIFF, PROJECT_TOOL_APPLY_DIFFS,
     PROJECT_TOOL_INSERT_CONTENT, PROJECT_TOOL_INSERT_CONTENTS,
     PROJECT_TOOL_RUN_COMMAND,
@@ -764,7 +768,9 @@ PROJECT_TOOL_NAMES = {
     # ``list_dir`` remains dispatchable only for conversation-latched legacy
     # schemas. New tool epochs omit it and route simple ``run_command`` ls
     # requests through the same bounded directory reader instead.
-    'list_dir', 'grep_search', 'find_files', 'repo_map',
+    # ``grep_search`` is the retired name of ``search_files``: latched schemas
+    # and frozen catalogs still dispatch it; name repair maps fresh calls.
+    'list_dir', 'search_files', 'grep_search', 'find_files', 'repo_map',
     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
     'run_command', 'check_background_command', 'kill_background_command',
@@ -772,7 +778,7 @@ PROJECT_TOOL_NAMES = {
 
 __all__ = [
     'READ_FILES_TOOL',
-    'PROJECT_TOOL_GREP', 'PROJECT_TOOL_FIND', 'PROJECT_TOOL_REPO_MAP',
+    'PROJECT_TOOL_SEARCH_FILES', 'PROJECT_TOOL_FIND', 'PROJECT_TOOL_REPO_MAP',
     'PROJECT_TOOL_WRITE_FILE', 'PROJECT_TOOL_EDIT_FILE',
     'PROJECT_TOOL_APPLY_DIFF', 'PROJECT_TOOL_APPLY_DIFFS',
     'PROJECT_TOOL_INSERT_CONTENT', 'PROJECT_TOOL_INSERT_CONTENTS',

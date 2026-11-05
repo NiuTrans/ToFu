@@ -322,19 +322,21 @@ def _serialize_search_result(item: dict) -> dict:
     }
 
 
-def _run_search(query: str, *, max_results: int, freshness: str,
+def _run_search(query: str, *, owner_user_id: int, max_results: int, freshness: str,
                 user_question: str, fetch_pages: bool, filter_pages: bool,
                 rerank: bool, engines, max_chars_per_page) -> dict:
     """Run the orchestrator and return a JSON-serialisable envelope.
 
-    Pure function; no Flask dependencies, so the same body powers both
-    the sync route and the async worker.
+    The explicit owner lets the same body serve the route and detached worker
+    without depending on an HTTP request context.
     """
     from lib.search.search_runtime import ensure_search_runtime
     perform_web_search = ensure_search_runtime().perform_web_search
+    from lib.search.search_bridge import bind_search_browser
 
     t0 = time.time()
-    with log_context('api_v1.search.perform', logger=logger):
+    with bind_search_browser(user_id=owner_user_id), \
+            log_context('api_v1.search.perform', logger=logger):
         results = perform_web_search(
             query,
             max_results=max_results,
@@ -413,7 +415,7 @@ def search_run():
                 params['query'][:100], params['fetch_pages'],
                 params['filter_pages'], params['rerank'])
     try:
-        result = _run_search(**params)
+        result = _run_search(owner_user_id=request_user_id(), **params)
     except Exception as e:
         logger.exception('[api_v1.search] sync failed')
         return api_internal_error(e, context='api_v1.search',
@@ -437,7 +439,8 @@ def search_run_async():
         params = _parse_search_body()
     except BadRequest as e:
         return api_bad_request(str(e), field=e.field)
-    task = _search_runtime.create(user_id=int(request_user_id()), meta={
+    owner_user_id = request_user_id()
+    task = _search_runtime.create(user_id=owner_user_id, meta={
         'query': params['query'][:200],
         'fetch_pages': params['fetch_pages'],
         'filter_pages': params['filter_pages'],
@@ -453,7 +456,7 @@ def search_run_async():
             'query': params['query'][:200],
         })
         try:
-            result = _run_search(**params)
+            result = _run_search(owner_user_id=owner_user_id, **params)
         except Exception as e:
             logger.exception('[api_v1.search] async task=%s failed', task_id[:8])
             _search_runtime.finish(task_id, error=e,
@@ -492,7 +495,9 @@ def browser_fetch():
         return api_internal_error(e, context='Fetch pipeline unavailable',
                                   source='api_v1.agents.browser_fetch')
     try:
-        text = fetch_page_content(url) or ''
+        from lib.search.search_bridge import bind_search_browser
+        with bind_search_browser(user_id=request_user_id()):
+            text = fetch_page_content(url) or ''
     except Exception as e:
         logger.warning('[api_v1.browser] fetch failed for url=%s: %s',
                        url, e, exc_info=True)

@@ -7,8 +7,9 @@ Root cause: the Sidecar branch of ``list_convs`` shipped the FULL
 serialized that same list TWICE (``items`` + ``conversations``) into ~37.6 MB.
 
 Pin:
-  * ``_sidecar_conversation_meta`` projects settings to the sidebar whitelist
-    (``_SIDEBAR_SETTINGS_KEYS``) and truncates the free-text title.
+  * ``_sidecar_conversation_meta`` projects settings to the catalog keys of
+    ``contracts/conversation_settings_v1.json`` and truncates the free-text
+    title.
   * the ``?meta=1`` (non-prefetch) response is the normal ``{ok, items}``
     envelope — no duplicate ``conversations`` key.
 """
@@ -53,6 +54,7 @@ class TestSidecarConversationMetaProjection:
             settings={
                 'folderId': 'fld-1',
                 'clonedFrom': 'conv-0',
+                # Retired keys with no producer stay in old rows only:
                 'lastMsgRole': 'assistant',
                 'lastFinishReason': 'stop',
                 'lastMsgError': False,
@@ -76,11 +78,6 @@ class TestSidecarConversationMetaProjection:
         assert meta['settings'] == {
             'folderId': 'fld-1',
             'clonedFrom': 'conv-0',
-            'lastMsgRole': 'assistant',
-            'lastFinishReason': 'stop',
-            'lastMsgError': False,
-            'lastMsgHasOutput': True,
-            'activeTaskId': 'task-9',
             'projectPath': '/workspace/p',
             'projectPaths': ['/workspace/p'],
             'readOnlyPaths': [],
@@ -168,8 +165,7 @@ class TestSidecarMetaRouteShape:
         assert resp.headers.get('X-Total-Count') == '2'
 
         rows = {c['id']: c for c in data['items']}
-        assert rows['conv-1']['settings'] == {
-            'folderId': 'fld-1', 'lastMsgRole': 'user'}
+        assert rows['conv-1']['settings'] == {'folderId': 'fld-1'}
         assert 'autopilotSummaries' not in rows['conv-1']['settings']
         assert 'model' not in rows['conv-1']['settings']
         assert rows['conv-1']['msgCount'] == 3
@@ -179,6 +175,30 @@ class TestSidecarMetaRouteShape:
         assert fake.list_calls
         assert 'settings_keys' in fake.list_calls[0]
         assert 'folderId' in fake.list_calls[0]['settings_keys']
+
+    def test_meta_route_does_not_reconstruct_origins_from_dispatch_history(
+            self, flask_client, monkeypatch):
+        fake = _FakeSidecarClient([
+            _document('legacy-worker', title='Legacy worker', settings={
+                'projectPath': '/project', 'folderId': 'fld-1'}),
+        ])
+        monkeypatch.setattr(
+            'routes.conversations.list_conversation_metadata_page',
+            fake.list_metadata_page,
+        )
+
+        def unexpected_history(*args, **kwargs):
+            raise AssertionError('catalog read must not scan dispatch history')
+
+        monkeypatch.setattr(
+            'lib.conversations.coordinator_conversations.project_catalog_origins',
+            unexpected_history,
+        )
+        resp = flask_client.get('/api/v4/conversations?meta=1')
+        assert resp.status_code == 200
+        rows = resp.get_json()['items']
+        assert rows[0]['id'] == 'legacy-worker'
+        assert '_coordinatorSource' not in rows[0]['settings']
 
     def test_meta_route_truncates_title(self, flask_client, monkeypatch):
         fake = _FakeSidecarClient([_document('conv-1', title='x' * 500)])

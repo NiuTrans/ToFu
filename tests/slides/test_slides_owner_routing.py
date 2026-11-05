@@ -108,7 +108,7 @@ def test_build_deck_threads_owner_route_into_stage_context(tmp_path, monkeypatch
         }
 
     monkeypatch.setattr(owner_routing, 'owner_chat_route', fake_owner_route)
-    monkeypatch.setattr(recipe, 'run_stages', fake_run_stages)
+    monkeypatch.setattr(recipe, 'run_workflow', fake_run_stages)
 
     result = recipe.build_deck_from_topic(
         '美团大模型发展', str(tmp_path / 'job'), max_pages=3,
@@ -189,10 +189,10 @@ def test_route_group_skips_one_uninitializable_candidate(monkeypatch):
         )
 
     candidates = [candidate(1), candidate(2)]
-    monkeypatch.setattr(adapter, 'compile_candidates',
-                        lambda *args, **kwargs: candidates)
-    monkeypatch.setattr(adapter, 'compile_model_fallback_candidates',
-                        lambda *args, **kwargs: [])
+    monkeypatch.setattr(adapter, 'RouteCandidateCompiler', lambda document: SimpleNamespace(
+        compile=lambda *args, **kwargs: candidates,
+        compile_fallbacks=lambda *args, **kwargs: [],
+    ))
 
     calls = []
 
@@ -205,7 +205,8 @@ def test_route_group_skips_one_uninitializable_candidate(monkeypatch):
             logical_model='model-2', capabilities={'text'},
             provider_id=kwargs['provider_pin_id']))
 
-    monkeypatch.setattr(adapter, 'mint_ephemeral_slot', fake_mint)
+    monkeypatch.setattr(adapter, 'prepare_ephemeral_slot', fake_mint)
+    monkeypatch.setattr(adapter, 'publish_ephemeral_slots', lambda handles: None)
 
     class Repository:
         def get(self, boundary):

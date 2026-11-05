@@ -30,6 +30,7 @@ import {
   type TranslationActivity,
   type ConversationTurnViewModel,
   type ConversationLaneViewModel,
+  type ConversationTurnLocation,
   type ConversationViewModel,
   type ConversationViewModelDiagnostics,
 } from './view-model/types';
@@ -84,6 +85,8 @@ export type {
   ConversationTurnAction,
   ConversationTurnActionViewModel,
   ConversationLaneViewModel,
+  ConversationTurnLocation,
+  ConversationNavigationIndex,
   ConversationQueueItemViewModel,
   ConversationViewModel,
   PlanDecisionViewModel,
@@ -110,7 +113,6 @@ interface LaneOwner {
  * a cross-Turn or live input is deliberately left uncached. */
 interface TurnVmMemoEntry {
   taskTimePresentations: ReadonlyArray<AutomationManagementPresentation> | undefined;
-  reasoningAttempt: object | undefined;
   laneId: string;
   taskId: string;
   commandPending: string;
@@ -254,7 +256,7 @@ function selectJoins(state: TurnState, presentation: ConversationPresentationSta
 interface CompiledSelection {
   joins: ReturnType<typeof selectJoins>;
   lanes: Map<string, ConversationLaneViewModel>;
-  locations: Map<string, { laneId: string; index: number }>;
+  locations: Map<string, ConversationTurnLocation>;
   viewModel: ConversationViewModel;
   cyclic: boolean;
 }
@@ -327,7 +329,7 @@ function composeSelection(
   const { autopilotNoticesByTurn, queueExplanationFor, queuedOutputTurnIds,
     latestAttemptByTurn, mainLiveTurnId, goalProgressByTurn, laneOwners, childrenByTurn } = joins;
   const lanes = new Map(previous?.lanes);
-  const locations = previous?.locations ?? new Map<string, { laneId: string; index: number }>();
+  const locations = previous?.locations ?? new Map<string, ConversationTurnLocation>();
   const affected = new Map<string, Set<string>>();
   // A changed descendant also replaces each containing Turn/lane, once.
   for (const changedId of dirty) {
@@ -379,8 +381,6 @@ function composeSelection(
           .map((childLaneId) => selectLane(childLaneId, nextStack));
         const role = roleFor(turn);
         const taskId = latestAttemptByTurn.get(turn.turnId)?.taskId;
-        const reasoningAttempt = turn.currentAttemptId
-          ? state.attemptsById[turn.currentAttemptId] : undefined;
         const taskTimePresentations = turn.currentAttemptId
           ? presentation.taskTimePresentationsByAttempt?.get(turn.currentAttemptId) : undefined;
         const commandPending = state.commandPending[turn.turnId] ?? null;
@@ -409,7 +409,6 @@ function composeSelection(
               && cached.translationMode === preferredTranslationMode
               && cached.costSignature === (costSignatureForMetadata || '')
               && cached.taskTimePresentations === taskTimePresentations
-              && cached.reasoningAttempt === reasoningAttempt
               && cached.inspector === inspectorEnabled
               && cached.translationActivity === translationActivity) {
             return [cached.vm];
@@ -508,7 +507,7 @@ function composeSelection(
            * projectionRevision footer compare; only the client-side batch
            * fill (historical turns without a stamped cost) needs the
            * presentation-state signature. */
-          costSignatureForMetadata, turn, reasoningAttempt,
+          costSignatureForMetadata,
         );
         if (taskTimePresentations?.length) metadata.taskTimePresentations = taskTimePresentations;
         const turnVm: ConversationTurnViewModel = {
@@ -545,7 +544,6 @@ function composeSelection(
             translationMode: preferredTranslationMode,
             costSignature: costSignatureForMetadata || '',
             taskTimePresentations,
-            reasoningAttempt,
             inspector: inspectorEnabled,
             translationActivity,
             vm: turnVm,
@@ -580,6 +578,8 @@ function composeSelection(
       ...(state.historyByLane?.[laneId]
         ? { history: { ...state.historyByLane[laneId] } } : {}),
       turns,
+      childLaneIds: cachedLane?.childLaneIds
+        ?? turns.flatMap(turn => turn.branches.map(branch => branch.laneId)),
     };
     lanes.set(laneId, lane);
     return lane;
@@ -623,6 +623,7 @@ function composeSelection(
     transport: state.transport,
     mainLane,
     orphanLanes,
+    ...(!cyclic ? { navigation: { lanes, turnLocations: locations } } : {}),
     queue,
     planDecision,
     transportNotice: selectTransportNotice(presentation.syncHealth),

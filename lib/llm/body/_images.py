@@ -4,9 +4,9 @@
 Cohesive group:
   - sniff_image_mime(head) -> str|None       (lightweight shared re-export)
   - _validate_image_blocks(messages) -> messages
-  - _downscale_oversized_images(messages, model) -> None
+  - _downscale_oversized_images(messages, model) -> messages
   - _project_images_for_text_model(messages, model, ...) -> int
-  - _CLAUDE_IMAGE_MAX_PX / _IMAGE_MAGICS      (compatibility exports)
+  - _IMAGE_MAGICS                            (compatibility export)
 """
 
 import base64 as _b64
@@ -18,27 +18,81 @@ from lib.image_mime import (
     sniff_image_mime,
 )
 from lib.log import get_logger
-from lib.model_info import is_claude
+from lib.model_info import claude_line_version, is_claude
 
 logger = get_logger(__name__)
 _IMAGE_MAGICS = IMAGE_MIME_MAGICS
 
-# ── Claude image dimension cap ──
-# Claude's vision tower internally downscales EVERY image to a ~1568px long
-# edge (~1.15 MP) before tokenization — https://docs.claude.com/en/docs/
-# build-with-claude/vision — so anything larger conveys the SAME information
-# to the model while wasting wire bytes. A single uniform cap at 1568px:
-#   • is well under BOTH hard-reject limits (8000px single / 2000px many-image),
-#     so neither HTTP 400 can ever fire;
-#   • loses NO quality (the model never sees more than 1568px anyway);
-#   • is COUNT-INDEPENDENT, which removes the retroactive re-encode cliff the
-#     old two-tier design hit: previously an image rode at up to 7999px until
-#     the 5th image arrived, then ALL images were retro-shrunk to 1999px on
-#     that round → a guaranteed prompt-cache miss (and, in image-gen chats
-#     that cross 5 images fast, per-round churn). At a fixed cap an image is
-#     shrunk at most ONCE and then skipped by the idempotent size check
-#     forever, regardless of how many images accumulate.
-_CLAUDE_IMAGE_MAX_PX = 1568
+# ── Claude image limits ──
+# https://platform.claude.com/docs/en/build-with-claude/vision (2026-10-23):
+#   • Claude 4.7 and later models use a high-resolution tier of up to 2,576 px
+#     on the long edge (4,784 visual tokens, automatic); every other Claude
+#     model is downscaled to 1,568 px, so pixels beyond that are wire waste;
+#   • a request with more than 20 images must keep EVERY image at or under
+#     2,000 px, on every platform;
+#   • one image may carry at most 10 MB of base64 on the Claude API and 5 MB
+#     on Amazon Bedrock; gateway routes are Bedrock-backed, so 5 MB applies.
+# The caps are COUNT-INDEPENDENT. 4.7+ gets 2,000 px rather than 2,576 px
+# because the 21st image would otherwise force every earlier image to be
+# retro-shrunk on that round — a guaranteed prompt-cache miss (the cliff the
+# old 7999/1999 px two-tier design hit at its 5th image). With a fixed
+# per-model cap and byte budget an image is re-encoded at most ONCE and then
+# skipped by the idempotent check forever, however many images accumulate.
+_CLAUDE_STANDARD_IMAGE_MAX_PX = 1568
+_CLAUDE_HIGH_RES_IMAGE_MAX_PX = 2000
+_CLAUDE_HIGH_RES_GENERATION = (4, 7)
+_CLAUDE_LINES = ('opus', 'sonnet', 'haiku', 'fable', 'mythos')
+_CLAUDE_IMAGE_MAX_BASE64_BYTES = 5 * 1024 * 1024
+
+
+def _claude_image_max_px(model: str) -> int:
+    """Long-edge cap for *model*: high-res from Claude generation 4.7 on."""
+    for line in _CLAUDE_LINES:
+        version = claude_line_version(model, line)
+        if version is not None and version >= _CLAUDE_HIGH_RES_GENERATION:
+            return _CLAUDE_HIGH_RES_IMAGE_MAX_PX
+    return _CLAUDE_STANDARD_IMAGE_MAX_PX
+
+
+def _encode_within_claude_limits(img, max_px: int, max_base64_bytes: int):
+    """Re-encode *img* under the long-edge cap and the base64 byte budget.
+
+    Any image with transparency data (RGBA, LA, palette or colour-key
+    transparency) becomes lossless RGBA PNG; every other mode becomes RGB
+    JPEG q85. An encoding still over the budget shrinks the long edge by the
+    square root of the byte ratio (bytes track pixel area) and retries, so
+    the result is deterministic and passes the caller's skip check on the
+    next round. Returns ``(base64_text, mime, (width, height))``.
+    """
+    from PIL import Image
+
+    if img.mode != 'RGBA' and img.has_transparency_data:
+        # Never flatten onto a matte: JPEG painted transparency black and
+        # erased black strokes drawn on it, and white would erase white
+        # text and logos. The shrink loop below fits PNG into any budget.
+        img = img.convert('RGBA')
+    width, height = img.size
+    long_side = max(width, height)
+    long_edge = min(long_side, max_px)
+    while True:
+        size = (max(1, width * long_edge // long_side),
+                max(1, height * long_edge // long_side))
+        out = img if size == img.size else img.resize(size, Image.LANCZOS)
+        out.info.pop('icc_profile', None)
+        out.info.pop('exif', None)
+        if out.mode == 'RGBA':
+            out_format, mime = 'PNG', 'image/png'
+        else:
+            if out.mode != 'RGB':
+                out = out.convert('RGB')
+            out_format, mime = 'JPEG', 'image/jpeg'
+        buf = io.BytesIO()
+        out.save(buf, format=out_format, quality=85, optimize=True)
+        encoded = _b64.b64encode(buf.getvalue()).decode('ascii')
+        if len(encoded) <= max_base64_bytes or long_edge == 1:
+            return encoded, mime, size
+        long_edge = max(1, int(long_edge * min(
+            0.9, 0.95 * (max_base64_bytes / len(encoded)) ** 0.5)))
 
 
 def _project_images_for_text_model(
@@ -108,6 +162,29 @@ def _project_images_for_text_model(
     return total_images
 
 
+def _local_images_dir() -> str:
+    """Directory behind local ``/api/images/`` URLs.
+
+    Resolve the uploads dir via the single runtime-base authority so local
+    /api/images/ URLs resolve on a relocated install (data dir off the code
+    tree). Falls back to the legacy in-tree path if runtime_paths is
+    somehow unavailable (byte-identical in the default layout).
+    """
+    try:
+        from lib.runtime.runtime_paths import uploads_root
+        return os.path.join(uploads_root(), 'images')
+    except Exception as _rp_e:
+        logger.debug('[ImageValidation] uploads_root() unavailable, using in-tree: %s', _rp_e)
+        return os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+            'uploads', 'images')
+
+
+def _with_image_url(block: dict, url: str) -> dict:
+    """Copy of an image_url block whose URL is replaced."""
+    return {**block, 'image_url': {**block['image_url'], 'url': url}}
+
+
 def _validate_image_blocks(messages: list, *, user_id: int | None = None) -> list:
     """Validate image_url blocks, replacing invalid ones with text placeholders.
 
@@ -117,20 +194,12 @@ def _validate_image_blocks(messages: list, *, user_id: int | None = None) -> lis
       3. Unrecognized formats
       4. Unknown URL schemes
 
-    Mutates messages in-place.
+    Returns the validated list. Only changed messages and blocks are copied;
+    the input, possibly shared with the caller, is never modified.
     """
-    # Resolve the uploads dir via the single runtime-base authority so local
-    # /api/images/ URLs resolve on a relocated install (data dir off the code
-    # tree). Falls back to the legacy in-tree path if runtime_paths is
-    # somehow unavailable (byte-identical in the default layout).
-    try:
-        from lib.runtime.runtime_paths import uploads_root
-        _IMAGES_DIR = os.path.join(uploads_root(), 'images')
-    except Exception as _rp_e:
-        logger.debug('[ImageValidation] uploads_root() unavailable, using in-tree: %s', _rp_e)
-        _IMAGES_DIR = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
-            'uploads', 'images')
+    # Resolved on the first local URL only: uploads_root() creates its
+    # directory, a filesystem call every model round would otherwise pay.
+    _IMAGES_DIR = None
     _MIN_IMAGE_BYTES = 32
     _EXT_MIME = {
         '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
@@ -139,8 +208,9 @@ def _validate_image_blocks(messages: list, *, user_id: int | None = None) -> lis
     _sniff_mime = sniff_image_mime
     _dropped = 0
     _resolved = 0
+    result = None
 
-    for msg in messages:
+    for index, msg in enumerate(messages):
         content = msg.get('content')
         if not isinstance(content, list):
             continue
@@ -165,8 +235,8 @@ def _validate_image_blocks(messages: list, *, user_id: int | None = None) -> lis
                     mime = _sniff_mime(raw)
                     if len(raw) > MAX_TURN_IMAGE_BYTES or not mime:
                         raise ValueError('invalid bounded image source')
-                    block['image_url']['url'] = f'data:{mime};base64,{_b64.b64encode(raw).decode("ascii")}'
-                    new_blocks.append(block)
+                    new_blocks.append(_with_image_url(
+                        block, f'data:{mime};base64,{_b64.b64encode(raw).decode("ascii")}'))
                 except Exception as exc:
                     logger.warning('[ImageValidation] retained image unavailable: %s', type(exc).__name__)
                     new_blocks.append({'type': 'text', 'text':
@@ -180,6 +250,8 @@ def _validate_image_blocks(messages: list, *, user_id: int | None = None) -> lis
                 filename = url[_local_idx + len(_local_prefix):]
                 filename = filename.split('?')[0].split('#')[0]
                 filename = os.path.basename(filename)
+                if _IMAGES_DIR is None:
+                    _IMAGES_DIR = _local_images_dir()
                 filepath = os.path.join(_IMAGES_DIR, filename)
                 try:
                     with open(filepath, 'rb') as f:
@@ -192,11 +264,10 @@ def _validate_image_blocks(messages: list, *, user_id: int | None = None) -> lis
                         ext = os.path.splitext(filename)[1].lower()
                         mime = _EXT_MIME.get(ext, 'image/png')
                     b64 = _b64.b64encode(raw).decode('ascii')
-                    block['image_url']['url'] = f'data:{mime};base64,{b64}'
                     _resolved += 1
                     logger.info('[ImageValidation] Resolved local image %s '
                                 '(%d bytes) to inline base64', filename, len(raw))
-                    new_blocks.append(block)
+                    new_blocks.append(_with_image_url(block, f'data:{mime};base64,{b64}'))
                 except FileNotFoundError:
                     _dropped += 1
                     logger.warning('[ImageValidation] Local image file not found: %s', filepath)
@@ -246,7 +317,8 @@ def _validate_image_blocks(messages: list, *, user_id: int | None = None) -> lis
                     _declared_mime = _header[len('data:'):].split(';', 1)[0].strip().lower()
                     if _declared_mime != _true_mime:
                         _suffix = _header[len('data:') + len(_declared_mime):] if _declared_mime else ';base64'
-                        block['image_url']['url'] = f'data:{_true_mime}{_suffix},{b64_data}'
+                        block = _with_image_url(
+                            block, f'data:{_true_mime}{_suffix},{b64_data}')
                         logger.warning(
                             '[ImageValidation] Corrected mislabeled image media '
                             'type %r → %r (bytes sniffed as %s) to satisfy strict '
@@ -278,31 +350,34 @@ def _validate_image_blocks(messages: list, *, user_id: int | None = None) -> lis
                     'text': '[Image removed — empty image URL]',
                 })
 
-        msg['content'] = new_blocks
+        if any(new is not old for new, old in zip(new_blocks, content)):
+            if result is None:
+                result = list(messages)
+            result[index] = {**msg, 'content': new_blocks}
 
     if _resolved:
         logger.info('[ImageValidation] Resolved %d local image(s) to inline base64', _resolved)
     if _dropped:
         logger.info('[ImageValidation] Replaced %d invalid image block(s) with text placeholders', _dropped)
 
-    return messages
+    return messages if result is None else result
 
 
 def _downscale_oversized_images(messages: list, model: str, *,
-                               image_reuse=None, user_id=None) -> None:
-    """Downscale base64 images exceeding Claude's dimension limits.
+                               image_reuse=None, user_id=None) -> list:
+    """Re-encode base64 images exceeding Claude's dimension or byte limits.
 
-    Only applies to Claude models. Requires Pillow.
-    Mutates messages in-place.
+    Only applies to Claude models. Requires Pillow. Returns the adapted list;
+    only messages with a re-encoded image are copied, the input never is.
     """
     if not is_claude(model):
-        return
+        return messages
 
     try:
         from PIL import Image
     except ImportError:
         logger.debug('[ImageDownscale] Pillow not installed — skipping image size check')
-        return
+        return messages
 
     total_images = 0
     for msg in messages:
@@ -313,17 +388,20 @@ def _downscale_oversized_images(messages: list, model: str, *,
             if isinstance(block, dict) and block.get('type') == 'image_url':
                 total_images += 1
 
-    # Uniform cap — count-independent (see _CLAUDE_IMAGE_MAX_PX rationale). An
-    # image already at/under the cap is skipped, so the resize is idempotent
-    # and a fixed-size image is never re-encoded across rounds → no cache churn.
-    max_px = _CLAUDE_IMAGE_MAX_PX
+    # Per-model, count-independent limits (see "Claude image limits"). An image
+    # already within both is skipped, so re-encoding is idempotent and a
+    # stable image is never re-encoded across rounds → no cache churn.
+    max_px = _claude_image_max_px(model)
+    max_base64_bytes = _CLAUDE_IMAGE_MAX_BASE64_BYTES
 
     _resized = 0
-    for msg in messages:
+    result = None
+    for index, msg in enumerate(messages):
         content = msg.get('content')
         if not isinstance(content, list):
             continue
-        for block in content:
+        adapted = None
+        for position, block in enumerate(content):
             if not isinstance(block, dict) or block.get('type') != 'image_url':
                 continue
             url = block.get('image_url', {}).get('url', '')
@@ -333,11 +411,14 @@ def _downscale_oversized_images(messages: list, model: str, *,
             cache_key = None
             if image_reuse is not None:
                 cache_key = image_reuse.key(
-                    url, (model, max_px, 'lanczos-rgb-jpeg-rgba-png-v1',
-                          85, True, 'strip-icc-exif'), user_id=user_id)
+                    url, (model, max_px, 'lanczos-rgb-jpeg-alpha-png-v3',
+                          85, True, 'strip-icc-exif', max_base64_bytes),
+                    user_id=user_id)
                 cached = image_reuse.get(cache_key)
                 if cached is not None:
-                    block['image_url']['url'] = cached
+                    if cached != url:
+                        adapted = adapted or list(content)
+                        adapted[position] = _with_image_url(block, cached)
                     continue
 
             parts = url.split(',', 1)
@@ -349,46 +430,35 @@ def _downscale_oversized_images(messages: list, model: str, *,
                 img = Image.open(io.BytesIO(raw_bytes))
                 w, h = img.size
 
-                if max(w, h) <= max_px:
+                if max(w, h) <= max_px and len(b64_data) <= max_base64_bytes:
                     img.close()
                     if cache_key is not None:
                         image_reuse.put(cache_key, url)
                     continue
 
-                scale = max_px / max(w, h)
-                new_w = int(w * scale)
-                new_h = int(h * scale)
-
-                img = img.resize((new_w, new_h), Image.LANCZOS)
-                img.info.pop('icc_profile', None)
-                img.info.pop('exif', None)
-
-                if img.mode == 'RGBA':
-                    out_format = 'PNG'
-                    mime = 'image/png'
-                else:
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    out_format = 'JPEG'
-                    mime = 'image/jpeg'
-
-                buf = io.BytesIO()
-                img.save(buf, format=out_format, quality=85, optimize=True)
-                new_b64 = _b64.b64encode(buf.getvalue()).decode('ascii')
-
-                block['image_url']['url'] = f'data:{mime};base64,{new_b64}'
+                new_b64, mime, (new_w, new_h) = _encode_within_claude_limits(
+                    img, max_px, max_base64_bytes)
+                new_url = f'data:{mime};base64,{new_b64}'
+                adapted = adapted or list(content)
+                adapted[position] = _with_image_url(block, new_url)
                 img.close()
                 if cache_key is not None:
-                    image_reuse.put(cache_key, block['image_url']['url'])
+                    image_reuse.put(cache_key, new_url)
                 _resized += 1
-                logger.info('[ImageDownscale] Resized %dx%d → %dx%d '
-                            '(max_px=%d, %d→%d bytes, images=%d)',
+                logger.info('[ImageDownscale] Re-encoded %dx%d → %dx%d '
+                            '(max_px=%d, %d→%d base64 bytes, images=%d)',
                             w, h, new_w, new_h, max_px,
-                            len(raw_bytes), buf.tell(), total_images)
+                            len(b64_data), len(new_b64), total_images)
 
             except Exception as e:
                 logger.warning('[ImageDownscale] Failed to check/resize image: %s', e)
+        if adapted is not None:
+            if result is None:
+                result = list(messages)
+            result[index] = {**msg, 'content': adapted}
 
     if _resized:
-        logger.info('[ImageDownscale] Resized %d oversized image(s) for model %s '
-                    '(limit=%dpx, total_images=%d)', _resized, model, max_px, total_images)
+        logger.info('[ImageDownscale] Re-encoded %d oversized image(s) for model %s '
+                    '(limit=%dpx/%d base64 bytes, total_images=%d)', _resized, model,
+                    max_px, max_base64_bytes, total_images)
+    return messages if result is None else result

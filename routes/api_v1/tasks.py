@@ -34,6 +34,7 @@ from lib.api_response import (
     api_service_unavailable,
     sse_response,
 )
+from lib.error_envelope import BadRequest
 from lib.research.action_budget import action_logical_budget_schema
 from lib.production.work_unit import project_work_unit
 from lib.log import audit_log, get_logger
@@ -45,6 +46,7 @@ from lib.task_replay.task_replay import (
     project_bounded_replay_payload,
     task_event_base_cursor,
 )
+from lib.turn_lifecycle import LifecycleConflict, LifecycleNotFound
 from lib.tools.tool_env import (
     MAX_CUSTOM_TOOL_CALL_ID_CHARS,
     MAX_CUSTOM_TOOL_RESULT_CHARS,
@@ -122,7 +124,7 @@ def _registries() -> dict:
     # Plugin task runtimes (e.g. trading-sim) via the tofu.task_runtimes
     # entry-point group — no core file names an optional feature.
     try:
-        from routes.plugin_registry import discover_task_runtime_plugins
+        from lib.app.plugin_registry import discover_task_runtime_plugins
         for rt in discover_task_runtime_plugins():
             if rt is not None:
                 out[rt.kind] = rt
@@ -237,7 +239,7 @@ def start_task():
     body = parse_body()
     try:
         kind = require_str(body, 'kind')
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e))
 
     spec = _starters().get(kind)
@@ -264,12 +266,21 @@ def start_task():
 
     try:
         res = spec['start'](value.strip(), **kwargs) or {}
-    except (TypeError, ValueError) as e:
-        # A caller-supplied param the capability does not accept — a client
-        # bug, not a server fault, so report it as such with the real reason.
+    except BadRequest as e:
+        # A caller-supplied param the capability does not accept.
         logger.warning('[api_v1.tasks] start %s rejected params %s: %s',
                        kind, sorted(kwargs), e)
-        return api_bad_request(f'invalid parameters for kind={kind!r}: {e}')
+        return api_bad_request(f'invalid parameters for kind={kind!r}: {e}',
+                               **({'field': e.field} if e.field else {}))
+    except LifecycleConflict as e:
+        # A valid request that the resource's current state no longer admits.
+        logger.warning('[api_v1.tasks] start %s conflict %s: %s',
+                       kind, e.code, e.message)
+        return api_conflict({'kind': e.code, 'message': e.message})
+    except LifecycleNotFound as e:
+        # A resource the request depends on does not exist for this owner.
+        logger.warning('[api_v1.tasks] start %s not found: %s', kind, e)
+        return api_not_found(str(e))
     except Exception as e:
         logger.error('[api_v1.tasks] start %s failed: %s', kind, e, exc_info=True)
         return api_internal_error('internal_error')
@@ -366,7 +377,7 @@ def list_tasks():
         logger.debug('[tasks] list_tasks caught %s: %s', type(_e_audit).__name__, _e_audit)
         limit = 50
 
-    items = []
+    candidates = []
     for k, rt in _registries().items():
         if kind and k != kind:
             continue
@@ -383,25 +394,27 @@ def list_tasks():
                 continue
             if lang is not None and metadata.get('lang') != lang:
                 continue
-            item = {
-                'id': t.get('id'),
-                'kind': t.get('kind') or k,
-                'status': t.get('status'),
-                # Product-quality axis. This surface hand-lists its fields, so
-                # unlike _public_task it must name the field explicitly or a
-                # degraded job is indistinguishable from a clean one in the
-                # list view (status is 'done' for both, by design).
-                'artifact_quality': t.get('artifact_quality'),
-                'created_at': t.get('created_at'),
-                'finished_at': t.get('finished_at'),
-                'meta': t.get('meta') or {},
-            }
-            unit = project_work_unit(t, events=[], compact=True)
-            if unit is not None:
-                item['workUnit'] = unit
-            items.append(item)
-    items.sort(key=lambda x: x.get('created_at') or 0, reverse=True)
-    return api_ok({'tasks': items[:limit], 'total': len(items)})
+            candidates.append((t, k))
+    # Select from owned matches before building public rows. Keep the original
+    # stable timestamp order and full total, without projecting invisible work.
+    candidates.sort(key=lambda entry: entry[0].get('created_at') or 0, reverse=True)
+    items = []
+    for task, runtime_kind in candidates[:limit]:
+        item = {
+            'id': task.get('id'),
+            'kind': task.get('kind') or runtime_kind,
+            'status': task.get('status'),
+            # Delivery status and product quality remain separate public axes.
+            'artifact_quality': task.get('artifact_quality'),
+            'created_at': task.get('created_at'),
+            'finished_at': task.get('finished_at'),
+            'meta': task.get('meta') or {},
+        }
+        unit = project_work_unit(task, events=[], compact=True)
+        if unit is not None:
+            item['workUnit'] = unit
+        items.append(item)
+    return api_ok({'tasks': items, 'total': len(candidates)})
 
 
 def _find_task(task_id: str, *, user_id: int):
@@ -668,6 +681,7 @@ def task_requests(task_id):
 def task_trace(task_id):
     """Return live event-derived or permanent attempt-owned timing evidence."""
     from lib.tasks_pkg.turn_trace import (
+        TurnTraceEventReadError,
         fold_task_trace,
         merge_client_trace_evidence,
         read_persisted_task_trace,
@@ -684,7 +698,16 @@ def task_trace(task_id):
         if durable is not None and durable.get('running') is False \
                 and isinstance(durable.get('summary'), dict):
             return api_ok(durable)
-        live = fold_task_trace(task_id)
+        try:
+            live = fold_task_trace(task_id)
+        except TurnTraceEventReadError:
+            # Absence of events was not established. A settled attempt (such
+            # as an ``event-read-failed`` snapshot) still answers honestly;
+            # otherwise the client retries instead of showing "expired".
+            if durable is not None and durable.get('running') is False:
+                return api_ok(durable)
+            return api_service_unavailable(
+                'Trace evidence temporarily unavailable')
         if durable is not None:
             live = merge_client_trace_evidence(
                 live, durable, task_id=task_id)
@@ -753,7 +776,10 @@ def task_request_payload(task_id, round_num):
 @api_meta(summary='Request Inspector: bounded raw provider archive chunk',
           tags=['tasks'], scope='tasks')
 def task_raw_archive_chunk(task_id, archive_id, part):
-    """Lazily hydrate one bounded request/response body chunk."""
+    """Lazily hydrate one bounded request/response body chunk.
+
+    An archive the task no longer retains answers ``state: expired``.
+    """
     task_id = _inspector_task_path(task_id)
     owner_user_id = int(request_user_id())
     if not _request_inspector_task_accessible(
@@ -777,8 +803,6 @@ def task_raw_archive_chunk(task_id, archive_id, part):
         logger.error('[api_v1.tasks] raw archive read failed task=%s: %s',
                      task_id[:8], exc, exc_info=True)
         return api_internal_error('internal_error')
-    if chunk is None:
-        return api_not_found('Raw archive not found')
     return api_ok(chunk)
 
 
@@ -969,7 +993,7 @@ def task_tool_result(task_id):
         content = require_str(
             body, 'content', allow_empty=True,
             max_len=MAX_CUSTOM_TOOL_RESULT_CHARS)
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e))
     is_error = optional_bool(body, 'is_error', default=False)
     ok = resolve_client_tool_result(

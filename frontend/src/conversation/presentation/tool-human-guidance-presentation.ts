@@ -2,7 +2,8 @@
  * Pure presentation policy for ask_human tool rounds.
  *
  * Responsibility: normalize legacy guidance payloads and render the awaiting,
- * expired, skipped, and submitted states through one bounded projection.
+ * expired, skipped, submitted, and superseded states plus the non-blocking
+ * chat-reply card and its replied row through one bounded projection.
  * Entry point: `createToolHumanGuidancePresentation`. Dependencies are explicit
  * translation and Markdown ports. This owner reads no DOM/browser globals,
  * never mutates input, and keeps untrusted values in data attributes rather
@@ -11,13 +12,9 @@
 
 import { escapeHtmlText } from '../../html-safety';
 import type { I18nArgs, I18nKey, Translator } from '../../i18n';
-
-type UnknownRecord = Readonly<Record<string, unknown>>;
-
-type BoundedText = Readonly<{
-  value: string;
-  truncated: boolean;
-}>;
+import {
+  record, field, scalarText as safeText, type BoundedText,
+} from './tool-payload-values';
 
 type GuidanceOption = Readonly<{
   originalLabel: BoundedText;
@@ -57,6 +54,7 @@ const TOOL_LABEL_UNITS = 512;
 const SKIPPED_PREVIEW_UNITS = 60;
 const RESPONSE_PREVIEW_UNITS = 80;
 const RESPONSE_UNITS = 32_768;
+const REPLY_QUOTE_UNITS = 4_096;
 
 export const TOOL_HUMAN_GUIDANCE_PRESENTATION_LIMITS = Object.freeze({
   identifierUnits: IDENTIFIER_UNITS,
@@ -70,39 +68,15 @@ export const TOOL_HUMAN_GUIDANCE_PRESENTATION_LIMITS = Object.freeze({
   skippedPreviewUnits: SKIPPED_PREVIEW_UNITS,
   responsePreviewUnits: RESPONSE_PREVIEW_UNITS,
   responseUnits: RESPONSE_UNITS,
+  replyQuoteUnits: REPLY_QUOTE_UNITS,
 });
 
-const EMPTY_RECORD: UnknownRecord = Object.freeze({});
 const EMPTY_OPTIONS: GuidanceOptionsProjection = Object.freeze({
   options: Object.freeze([]),
   total: 0,
   truncated: false,
   contentLimit: null,
 });
-
-function record(value: unknown): UnknownRecord {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as UnknownRecord
-    : EMPTY_RECORD;
-}
-
-function field(value: unknown, name: string): unknown {
-  try {
-    return record(value)[name];
-  } catch {
-    return undefined;
-  }
-}
-
-function safeText(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (
-    typeof value === 'number'
-    || typeof value === 'boolean'
-    || typeof value === 'bigint'
-  ) return String(value);
-  return '';
-}
 
 function boundedText(value: unknown, limit: number): BoundedText {
   const text = safeText(value);
@@ -361,10 +335,32 @@ export function createToolHumanGuidancePresentation(
 
     return `<div class="hg-batch-form">${sections}${submitBtn}</div>`;
   }
-  function renderAwaitingCard(round: unknown): string {
+
+  /** Plain question text the chat reply quotes, so the model sees what it answers. */
+  function replyQuote(round: unknown, responseType: string): string {
+    let text = '';
+    const batchQuestions = field(round, 'guidanceBatchQuestions');
+    if (responseType === 'batch' && Array.isArray(batchQuestions)) {
+      // Numbered like the form, so the numbered chat answers map back to them.
+      batchQuestions.forEach((item, index) => {
+        const question = safeText(field(item, 'question')).trim();
+        if (!question || text.length > REPLY_QUOTE_UNITS) return;
+        const numbered = `${index + 1}. ${question}`;
+        text = text ? `${text}\n\n${numbered}` : numbered;
+      });
+    }
+    if (!text) text = safeText(field(round, 'guidanceQuestion')).trim();
+    return text.length > REPLY_QUOTE_UNITS
+      ? `${text.slice(0, REPLY_QUOTE_UNITS - 1)}…`
+      : text;
+  }
+
+  function renderAwaitingCard(round: unknown, chatReply = false): string {
     const guidanceId = boundedText(field(round, 'guidanceId'), IDENTIFIER_UNITS);
     if (!guidanceId.value) return '';
-    const expired = Boolean(field(round, '_turnSettled'));
+    /* A non-blocking question has no live request behind it: an ordinary
+     * chat message answers it, so turn settlement never expires its card. */
+    const expired = !chatReply && Boolean(field(round, '_turnSettled'));
     /* A settled turn whose settlement still offers answer_guidance for this
      * question keeps the card answerable: submitting completes the
      * interrupted tool round inside a new attempt. The turn id rides the
@@ -410,21 +406,30 @@ export function createToolHumanGuidancePresentation(
     const lateAttributes = lateAnswerable && lateTurnId
       ? ` data-hg-late-answer="1" data-turn-id="${escapeHtmlText(lateTurnId.value)}"`
       : '';
+    const replyAttributes = chatReply
+      ? ` data-hg-reply="chat" data-hg-quote="${escapeHtmlText(replyQuote(round, responseType))}"`
+      : '';
+    const badgeHtml = chatReply
+      ? translatedHtml('toolHumanGuidance.nonBlockingBadge')
+      : translatedHtml(expired && !lateAnswerable ? 'project.hgExpired' : 'project.hgWaitingReply');
+    const hintHtml = chatReply
+      ? `\n    <div class="hg-reply-hint">${translatedHtml('toolHumanGuidance.nonBlockingHint')}</div>`
+      : '';
     /* A rendered batch form already presents each question inside its own
      * section; the synthetic top-level summary would repeat every line. */
     const batchSectionsShown = responseType === 'batch' && inputHtml !== '';
     const questionBlock = batchSectionsShown
       ? ''
       : `<div class="hg-question">${questionHtml}${displayQuestion.truncated ? limitHtml(QUESTION_UNITS) : ''}</div>`;
-    return `<div class="hg-card${expired && !lateAnswerable ? ' hg-expired' : ''}" data-gid="${guidanceIdHtml}"${lateAttributes}>
+    return `<div class="hg-card${expired && !lateAnswerable ? ' hg-expired' : ''}" data-gid="${guidanceIdHtml}"${lateAttributes}${replyAttributes}>
     <div class="hg-header">
       ${''}
       <span class="hg-title">${translatedHtml('project.hgPanelTitle')}</span>
-      <span class="hg-badge">${translatedHtml(expired && !lateAnswerable ? 'project.hgExpired' : 'project.hgWaitingReply')}</span>
+      <span class="hg-badge">${badgeHtml}</span>
     </div>
     ${batchSectionsShown ? '' : translatingIndicator}
     ${questionBlock}
-    ${inputHtml}
+    ${inputHtml}${hintHtml}
   </div>`;
   }
 
@@ -446,6 +451,45 @@ export function createToolHumanGuidancePresentation(
       <span class="ptool-icon">${safeText(slots.iconHtml)}</span>
       <span class="ptool-text">${escapeHtmlText(label)}${skippedQuestion.value ? ` — ${escapeHtmlText(skippedQuestion.value)}` : ''}</span>
       <span class="ptool-badge ptool-badge-skip">${translatedHtml('project.hgUnanswered')}</span>
+    </div>`;
+  }
+
+  /** A blocking question the user bypassed by typing a chat message instead. */
+  function renderSupersededRow(round: unknown, slots: ToolHumanGuidanceSlots): string {
+    if (
+      safeText(field(round, 'status')) !== 'done'
+      || safeText(field(round, 'toolName')) !== 'ask_human'
+      || field(round, 'guidanceSuperseded') !== true
+    ) return '';
+    const question = boundedText(
+      field(round, 'guidanceQuestion'),
+      SKIPPED_PREVIEW_UNITS,
+    );
+    const label = boundedText(
+      slots.toolDisplayLabel,
+      TOOL_LABEL_UNITS,
+    ).value || translatedText('toolHumanGuidance.label');
+    return `<div class="ptool-line hg-superseded-line">
+      <span class="ptool-icon">${safeText(slots.iconHtml)}</span>
+      <span class="ptool-text">${escapeHtmlText(label)}${question.value ? ` — ${escapeHtmlText(question.value)}` : ''}</span>
+      <span class="ptool-badge ptool-badge-skip">${translatedHtml('toolHumanGuidance.supersededRow')}</span>
+    </div>`;
+  }
+
+  /** A non-blocking question this browser answered with a chat message. */
+  function renderRepliedRow(round: unknown, slots: ToolHumanGuidanceSlots): string {
+    const response = boundedText(
+      field(round, '_hgRepliedInChat'),
+      RESPONSE_PREVIEW_UNITS,
+    );
+    const label = boundedText(
+      slots.toolDisplayLabel,
+      TOOL_LABEL_UNITS,
+    ).value || translatedText('toolHumanGuidance.label');
+    return `<div class="ptool-line hg-replied-line">
+      <span class="ptool-icon">${safeText(slots.iconHtml)}</span>
+      <span class="ptool-text">${escapeHtmlText(label)}${response.value ? ` — ${escapeHtmlText(response.value)}` : ''}</span>
+      <span class="ptool-badge ptool-badge-ok">${translatedHtml('toolHumanGuidance.repliedInChat')}</span>
     </div>`;
   }
 
@@ -474,10 +518,21 @@ export function createToolHumanGuidancePresentation(
     round: unknown,
     slots: ToolHumanGuidanceSlots,
   ): string {
+    if (
+      safeText(field(round, 'toolName')) === 'ask_human'
+      && field(round, 'guidanceBlocking') === false
+      && safeText(field(round, 'guidanceId'))
+    ) {
+      return typeof field(round, '_hgRepliedInChat') === 'string'
+        ? renderRepliedRow(round, slots)
+        : renderAwaitingCard(round, true);
+    }
     if (safeText(field(round, 'status')) === 'awaiting_human') {
       return renderAwaitingCard(round);
     }
-    return renderSkippedRow(round, slots) || renderSubmittedRow(round, slots);
+    return renderSupersededRow(round, slots)
+      || renderSkippedRow(round, slots)
+      || renderSubmittedRow(round, slots);
   }
 
   return Object.freeze({ renderGuidanceHtml });

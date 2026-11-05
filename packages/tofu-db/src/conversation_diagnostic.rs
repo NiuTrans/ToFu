@@ -439,6 +439,13 @@ pub(crate) fn read(
         .get("projectionRevision")
         .and_then(Value::as_u64)
         .ok_or_else(|| invalid_data("diagnostic projection revision is malformed"))?;
+    // Live text appends fold several revisions into bounded pages behind the
+    // patch chain; this per-revision view cannot replay them. The Turn is
+    // still streaming, so answer like a concurrent write: the caller retries
+    // once a structural write or settlement has retired the tail.
+    if head.as_ref().is_some_and(|head| head.text_tail.is_some()) {
+        return Err(stale());
+    }
     if head.as_ref().is_some_and(|head| {
         head.base_revision.checked_add(head.patch_count as u64) != Some(projection_revision)
     }) {

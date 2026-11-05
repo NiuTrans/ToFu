@@ -68,6 +68,7 @@ const EMPTY_RECORD: UnknownRecord = Object.freeze({});
 const IMAGE_TOOL_NAMES: readonly string[] = Object.freeze([
   'read_files',
   'inspect_image',
+  'inspect_video',
   'browser_screenshot',
   'browser_preview_page',
   // Artifact read-backs surface retained media via meta.imageDataUris and

@@ -7,6 +7,8 @@ provider default, not an inferred effective value. Requests remain unchanged.
 from collections.abc import Mapping
 import math
 
+from lib.llm.reasoning import ReasoningContractError, native_reasoning_effort
+
 
 def request_parameter_receipt(request: Mapping) -> dict:
     receipt = {}
@@ -14,7 +16,10 @@ def request_parameter_receipt(request: Mapping) -> dict:
         value = request.get(name)
         receipt[name] = value if type(value) in (int, float) and (
             type(value) is int or math.isfinite(value)) else None
-    effort = request.get("reasoning_effort")
+    try:
+        effort = native_reasoning_effort(request)
+    except ReasoningContractError:
+        effort = None
     receipt["reasoning_effort"] = effort if isinstance(effort, str) and effort in {
         "none", "minimal", "low", "medium", "high", "xhigh", "max"} else None
     thinking = request.get("thinking")

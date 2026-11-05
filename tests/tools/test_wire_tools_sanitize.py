@@ -29,23 +29,53 @@ def _fn(name, **extra):
             **extra}
 
 
+def _dynamic_root_oneof_tool():
+    """A dynamic (MCP/plugin) schema shaped like the 2026-09-06 write_file root.
+
+    Built-ins declare plain object roots (write_file's content choice lives in
+    ``lib.tools.contracts.ARGUMENT_ALTERNATIVES``); the provider projection
+    keeps dynamic schemas of this shape callable.
+    """
+    return {'type': 'function', 'function': {
+        'name': 'dynamic_write',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'description': {'type': 'string'},
+                'path': {'type': 'string'},
+                'content': {'type': 'string'},
+                'content_ref': {'type': 'object'},
+            },
+            'required': ['path'],
+            'oneOf': [
+                {'properties': {'content': {'type': 'string'}},
+                 'required': ['content']},
+                {'properties': {'content_ref': {'type': 'object'}},
+                 'required': ['content_ref']},
+            ],
+            'additionalProperties': False,
+        },
+    }}
+
+
 class TestGptRootCombinatorProjection:
     """2026-09-06 incident: OpenAI's tool-parameter validator rejects any
     root combinator ("schema must have type 'object' and not have 'oneOf'/
     'anyOf'/'allOf'/'enum'/'const'/'not' at the top level"), so write_file's
-    canonical root ``oneOf`` (content | content_ref) hard-400'd every gpt-*
-    dispatch. The provider projection applies the same sound root relaxation
-    Kimi gets; the MFJS dialect rewrites stay Kimi-only."""
+    then-canonical root ``oneOf`` (content | content_ref) hard-400'd every
+    gpt-* dispatch. Built-ins now declare plain object roots; the provider
+    projection keeps dynamic schemas of that shape callable with the same
+    sound root relaxation Kimi gets; the MFJS dialect rewrites stay
+    Kimi-only."""
 
-    def test_real_write_file_root_oneof_projected_for_gpt(self):
+    def test_dynamic_root_oneof_projected_for_gpt(self):
         from lib.tools.gateway import _normalize_provider_tool_schema
-        from lib.tools.project import PROJECT_TOOL_WRITE_FILE
 
-        canonical = PROJECT_TOOL_WRITE_FILE['function']['parameters']
-        assert 'oneOf' in canonical  # canonical contract unchanged
+        dynamic_tool = _dynamic_root_oneof_tool()
+        canonical = dynamic_tool['function']['parameters']
 
         out, repairs, error = _normalize_provider_tool_schema(
-            PROJECT_TOOL_WRITE_FILE, model='gpt-4.1')
+            dynamic_tool, model='gpt-4.1')
 
         assert error == ''
         assert repairs == ('$.function.parameters.oneOf',)
@@ -54,13 +84,85 @@ class TestGptRootCombinatorProjection:
         assert projected.get('type') == 'object'
         for combinator in ('oneOf', 'anyOf', 'allOf', 'enum', 'const', 'not'):
             assert combinator not in projected
-        # Union of branch properties; requirements that hold for EVERY branch.
+        # Union of branch properties. The root's own requirements survive
+        # verbatim (only the mutually exclusive branch requirements relax
+        # away), so the expectation is derived, not pinned.
         properties = projected.get('properties') or {}
         assert 'content' in properties
         assert 'content_ref' in properties
-        assert set(projected.get('required') or []) == {'description', 'path'}
+        assert (set(projected.get('required') or [])
+                == set(canonical.get('required') or []))
         # The caller's canonical catalog is not mutated.
-        assert 'oneOf' in PROJECT_TOOL_WRITE_FILE['function']['parameters']
+        assert 'oneOf' in dynamic_tool['function']['parameters']
+
+    def test_dynamic_root_oneof_projected_for_claude(self):
+        """2026-10-22 incident: the Messages API rejects the same root shape even
+        more bluntly — "input_schema does not support oneOf, allOf, or anyOf at
+        the top level" — so write_file's then-canonical root ``oneOf``
+        hard-400'd ``claude-opus-5.5`` at round 1 of a plain chat turn (conv
+        mvjc05mq9n0mo6). Anthropic-protocol slots get the same sound root
+        relaxation; only the MFJS dialect rewrites stay Kimi-only. Built-ins
+        such as write_file now declare plain object roots, which
+        tests/tools/test_tool_schema_provider_compatibility.py enforces."""
+        from lib.tools.gateway import _normalize_provider_tool_schema
+
+        dynamic_tool = _dynamic_root_oneof_tool()
+        canonical = dynamic_tool['function']['parameters']
+
+        for model in ('claude-opus-5.5', 'aws.claude-opus-4.7',
+                      'claude-fable-5-1'):
+            out, repairs, error = _normalize_provider_tool_schema(
+                dynamic_tool, model=model)
+            assert error == '', model
+            assert repairs == ('$.function.parameters.oneOf',), model
+            projected = out['function']['parameters']
+            assert projected is not canonical, model
+            assert projected.get('type') == 'object', model
+            for combinator in ('oneOf', 'anyOf', 'allOf'):
+                assert combinator not in projected, (model, combinator)
+            properties = projected.get('properties') or {}
+            assert 'content' in properties, model
+            assert 'content_ref' in properties, model
+            assert (set(projected.get('required') or [])
+                    == set(canonical.get('required') or [])), model
+        # The caller's canonical catalog is not mutated.
+        assert 'oneOf' in dynamic_tool['function']['parameters']
+
+    def test_messages_wire_input_schema_has_no_root_combinator(self):
+        """End to end through the Anthropic translation: the projection is what
+        stops the 400, and the canonical contract still validates strictly."""
+        from lib.llm.anthropic_outbound import openai_body_to_anthropic
+        from lib.tools.gateway import preflight_wire_tool_body
+        from lib.tools.project import PROJECT_TOOL_WRITE_FILE
+
+        body = {'model': 'claude-opus-5.5',
+                'messages': [{'role': 'user', 'content': 'hi'}],
+                'tools': [PROJECT_TOOL_WRITE_FILE]}
+        preflight_wire_tool_body(body)
+        wire = openai_body_to_anthropic(body)
+        schema = wire['tools'][0]['input_schema']
+        for combinator in ('oneOf', 'anyOf', 'allOf'):
+            assert combinator not in schema, combinator
+        assert {'content', 'content_ref'} <= set(schema.get('properties') or {})
+
+    def test_nested_combinators_survive_the_root_relaxation(self):
+        # Anthropic only restricts the ROOT; a nested oneOf stays as written.
+        from lib.tools.gateway import _normalize_provider_tool_schema
+        tool = _fn('nested')
+        tool['function']['parameters'] = {
+            'type': 'object',
+            'properties': {'v': {'oneOf': [{'type': 'string'},
+                                           {'type': 'integer'}]}},
+            'required': ['v'],
+            'oneOf': [{'required': ['v']}],
+        }
+        out, _repairs, error = _normalize_provider_tool_schema(
+            tool, model='claude-opus-5.5')
+        assert error == ''
+        params = out['function']['parameters']
+        assert 'oneOf' not in params
+        assert params['properties']['v'] == {
+            'oneOf': [{'type': 'string'}, {'type': 'integer'}]}
 
     def test_root_oneof_untouched_for_non_gpt_non_kimi(self):
         from lib.tools.gateway import _normalize_provider_tool_schema
@@ -72,7 +174,7 @@ class TestGptRootCombinatorProjection:
             'oneOf': [{'required': ['a']}, {'required': ['b']}],
         }
         out, repairs, error = _normalize_provider_tool_schema(
-            tool, model='claude-fable-5-1')
+            tool, model='deepseek-v4-pro')
         assert out is tool
         assert repairs == ()
         assert error == ''
@@ -86,6 +188,18 @@ class TestGptRootCombinatorProjection:
         assert out is tool
         assert repairs == ()
         assert error == ''
+
+
+class TestAnthropicWireCombinators:
+    def test_sanitize_wire_tools_keeps_projected_claude_entry(self):
+        from lib.tools.gateway import sanitize_wire_tools
+        from lib.tools.project import PROJECT_TOOL_WRITE_FILE
+
+        out = sanitize_wire_tools([PROJECT_TOOL_WRITE_FILE],
+                                  model='claude-opus-5.5')
+        assert len(out) == 1
+        assert out[0]['function']['name'] == 'write_file'
+        assert 'oneOf' not in out[0]['function']['parameters']
 
 
 class TestSanitizeWireTools:

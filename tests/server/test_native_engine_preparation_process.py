@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,11 +49,21 @@ def test_silent_work_reports_elapsed_time(tmp_path, monkeypatch, capsys):
     assert 'Checking storage engine' in capsys.readouterr().err
 
 
-def test_timeout_keeps_last_diagnostic(tmp_path):
+def test_timeout_keeps_last_diagnostic(tmp_path, monkeypatch):
+    # Expire the owner clock after the diagnostic is observable; interpreter
+    # startup under concurrent test load is not part of this contract.
+    now = [0.0]
+
+    def progress(text, **_kwargs):
+        if 'waiting-for-linker' in text:
+            now[0] = 1.0
+
+    monkeypatch.setattr(engines, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(engines, '_report_progress', progress)
     program = 'import time; print("waiting-for-linker", flush=True); time.sleep(60)'
     with pytest.raises(engines.EnginePreparationError, match='timed out.*') as error:
         engines._run([sys.executable, '-c', program], cwd=tmp_path,
-                     environment=dict(os.environ), timeout=0.3)
+                     environment=dict(os.environ), timeout=1, progress='Preparing engine')
     assert 'waiting-for-linker' in str(error.value)
 
 

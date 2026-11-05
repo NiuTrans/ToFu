@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import re
 import uuid
 from typing import Any
 
@@ -20,7 +21,11 @@ from lib.storage.protocol import PROTOCOL_VERSION
 
 
 CONNECTION_FILE_FORMAT = 'tofu.storage-connection/v1'
-_MAX_CONNECTION_FILE_BYTES = 4096
+_NATIVE_SCHEMA = json.loads(
+    (Path(__file__).resolve().parents[2] / 'contracts/native_storage_connection_v2.json')
+    .read_text(encoding='utf-8'))
+NATIVE_CONNECTION_FILE_FORMAT = _NATIVE_SCHEMA['properties']['format']['const']
+_MAX_CONNECTION_FILE_BYTES = _NATIVE_SCHEMA['x-maxBytes']
 
 
 def resolve_connection_file(raw_path: str | os.PathLike[str]) -> Path:
@@ -37,12 +42,16 @@ def resolve_connection_file(raw_path: str | os.PathLike[str]) -> Path:
 def _validate_document(document: Any) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise RuntimeError('storage connection file must contain an object')
-    expected_keys = {'format', 'protocol', 'host', 'port', 'token', 'backend'}
+    native = document.get('format') == NATIVE_CONNECTION_FILE_FORMAT
+    expected_keys = (set(_NATIVE_SCHEMA['required']) if native else
+                     {'format', 'protocol', 'host', 'port', 'token', 'backend'})
     if set(document) != expected_keys:
         raise RuntimeError('storage connection file has an invalid schema')
-    if document.get('format') != CONNECTION_FILE_FORMAT:
+    if not native and document.get('format') != CONNECTION_FILE_FORMAT:
         raise RuntimeError('storage connection file format mismatch')
-    if document.get('protocol') != PROTOCOL_VERSION:
+    protocol = _NATIVE_SCHEMA['properties']['protocol']['const'] if native else PROTOCOL_VERSION
+    if (document.get('protocol') != protocol
+            or (native and type(document.get('protocol')) is not int)):
         raise RuntimeError('storage connection file protocol mismatch')
     if document.get('host') not in {'127.0.0.1', 'localhost', '::1'}:
         raise RuntimeError('storage connection endpoint must be loopback-only')
@@ -54,6 +63,38 @@ def _validate_document(document: Any) -> dict[str, Any]:
         raise RuntimeError('storage connection file has an invalid token')
     if document.get('backend') not in {'sqlite', 'postgres', 'tofudb'}:
         raise RuntimeError('storage connection file has an invalid backend')
+    if native:
+        if document['backend'] != 'tofudb' or len(token) > 256 or not token.isascii():
+            raise RuntimeError('native storage connection identity is invalid')
+        for name in ('ownerId', 'pid', 'processStartTime'):
+            if type(document[name]) is not int or document[name] <= 0:
+                raise RuntimeError('native storage connection identity is invalid')
+        tenant = document['tenantId']
+        if tenant is not None and (type(tenant) is not int or tenant <= 0):
+            raise RuntimeError('native storage tenant is invalid')
+        for name in ('projectPath', 'dataDirectory'):
+            path = document[name]
+            if not isinstance(path, str) or not Path(path).is_absolute():
+                raise RuntimeError('native storage project/data directory is invalid')
+        for name in ('binarySha256', 'serviceId'):
+            value = document[name]
+            if not isinstance(value, str) or not re.fullmatch(
+                    _NATIVE_SCHEMA['properties'][name]['pattern'], value):
+                raise RuntimeError('native storage generation is invalid')
+        projection = document['searchProjectionDirectory']
+        if not isinstance(projection, str) or not Path(projection).is_absolute():
+            raise RuntimeError('native search projection directory is invalid')
+        fastpath = document['nativeFastpath']
+        if fastpath is not None:
+            expected = _NATIVE_SCHEMA['properties']['nativeFastpath']['required']
+            if not isinstance(fastpath, dict) or set(fastpath) != set(expected):
+                raise RuntimeError('native fastpath descriptor is invalid')
+            for name in ('durableAuthority', 'localAuthority', 'shadowDirectory'):
+                if not isinstance(fastpath[name], str) or not Path(fastpath[name]).is_absolute():
+                    raise RuntimeError('native fastpath directory is invalid')
+            interval = fastpath['syncIntervalMs']
+            if interval is not None and (type(interval) is not int or interval <= 0):
+                raise RuntimeError('native fastpath interval is invalid')
     return dict(document)
 
 
@@ -86,7 +127,6 @@ def write_connection_file(
     backend: str,
 ) -> None:
     """Atomically publish one fsynced private connection document."""
-    resolved = resolve_connection_file(path)
     document = _validate_document({
         'format': CONNECTION_FILE_FORMAT,
         'protocol': PROTOCOL_VERSION,
@@ -95,8 +135,17 @@ def write_connection_file(
         'token': token,
         'backend': backend,
     })
+    write_connection_document(path, document)
+
+
+def write_connection_document(path: Path, document: dict[str, Any]) -> None:
+    """Publish either negotiated transport through the same private file owner."""
+    resolved = resolve_connection_file(path)
+    document = _validate_document(document)
     encoded = json.dumps(
         document, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    if len(encoded) > _MAX_CONNECTION_FILE_BYTES:
+        raise RuntimeError('storage connection file has an invalid size')
     temporary = resolved.with_name(f'.{resolved.name}.tmp-{uuid.uuid4().hex}')
     descriptor = None
     try:
@@ -141,4 +190,6 @@ __all__ = [
     'remove_connection_file',
     'resolve_connection_file',
     'write_connection_file',
+    'write_connection_document',
+    'NATIVE_CONNECTION_FILE_FORMAT',
 ]

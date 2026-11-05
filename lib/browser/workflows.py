@@ -16,7 +16,7 @@ from .access import is_read_allowed
 from .metrics import measure_browser
 from .network_evidence import redact_value
 from .page import BrowserPage
-from .sessions import acquire_browser_lease
+from .sessions import acquire_browser_lease, release_browser_lease
 from .workflow_contract import SESSION_SCHEMA, SESSION_REF_SCHEMA, WORKFLOW_SCHEMA
 
 from lib.log import get_logger
@@ -101,8 +101,14 @@ def execute_workflow(adapter, workflow, runtime):
         lease = acquire_browser_lease(owner_user_id=runtime.owner_user_id,
                                       client_id=runtime.client_id, session='ephemeral',
                                       timeout=max(1, deadline - time.monotonic()) + 10)
-        return BrowserPage(lease, reuse_tab=True, deadline=deadline,
-                           cancel_event=getattr(runtime, 'cancel_event', None))
+        try:
+            return BrowserPage(lease, reuse_tab=True, deadline=deadline,
+                               cancel_event=getattr(runtime, 'cancel_event', None))
+        except BaseException:
+            # The page's context manager owns release; without a page the
+            # lease would hold its slot and tab until expiry.
+            release_browser_lease(lease, reason='error')
+            raise
 
     def invoke(operation, params, page, collector):
         check_budget()

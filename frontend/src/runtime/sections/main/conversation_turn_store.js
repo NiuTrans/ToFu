@@ -45,11 +45,11 @@ function _nativeRegenerateInputOptions(resolved, inputEdit) {
   let inputProjection = inputTurn.projection || {};
   let shouldUpdateInput = false;
   if (inputEdit) {
-    if (inputEdit.images?.length) {
-      inputProjection = {
-        ...inputProjection,
-        images: [...(inputProjection.images || []), ...inputEdit.images],
-      };
+    /* The editor reports the message's images AFTER its edits. Replace rather
+     * than append: a kept image is already in the projection, and removal
+     * would be impossible if the reported list were merged back in. */
+    if (inputEdit.images) {
+      inputProjection = { ...inputProjection, images: [...inputEdit.images] };
     }
     inputProjection = _nativeTurnEditProjection(
       inputProjection, String(inputEdit.content ?? ''),
@@ -278,6 +278,12 @@ async function _editNativeTurn(conv, turnId) {
       allowEmpty: hasAttachments,
       canResend: resolved.turn.actor === 'human'
         && Boolean(_nextGeneratedNativeTurn(resolved.state, resolved.turn)),
+      /* Submitted images seed the editor's attachment strip so they stay
+       * visible — and removable — while the message is being edited. */
+      existingImages: (projection.images || []).map((image) => ({
+        payload: image,
+        preview: typeof image?.preview === 'string' ? image.preview : '',
+      })),
       findTurnNode: _findRenderedNativeTurnNode,
       translate: (key) => (typeof t === 'function' ? t(key) : key),
       /* Paste-to-attach inside the edit session: reuse the composer's shared
@@ -316,8 +322,10 @@ async function _editNativeTurn(conv, turnId) {
           }
           return false;
         }
-        const nextProjection = images?.length
-          ? { ...projection, images: [...(projection.images || []), ...images] }
+        /* Same replace semantics as resend: the strip is the message's full
+         * image list, so dropped images must disappear from the projection. */
+        const nextProjection = images
+          ? { ...projection, images: [...images] }
           : projection;
         return _commitNativeTurnEdit(conv, turnId, nextProjection, text);
       },
@@ -754,6 +762,7 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
       conversationId, turnId,
       commandId: createTurnCommandId,
       text: (key, fallback) => { const value = typeof t === 'function' ? t(key) : ''; return value && value !== key ? value : fallback; },
+      replyInChat: (request) => replyToGuidanceInChat(request),
     });
   },
   inspectToolEffect(reference, signal) {
@@ -925,6 +934,7 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
     return finish?.classList.contains('message-finish') ? finish.innerHTML : html;
   },
   renderContextProvenanceHtml,
+  contextProvenanceFacts,
   renderProvenanceBlockHtml(block) {
     const value = block.value || {};
     const passive = { ...value };
@@ -941,6 +951,12 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
   resolveMediaUrl(url) {
     return typeof apiUrl === 'function' && String(url || '').startsWith('/')
       ? apiUrl(url) : String(url || '');
+  },
+  /* Rich-response figures own their bitmap as an object URL, so they cannot
+   * reach the Markdown lightbox through source markup. Same opener, same
+   * zoom behavior. */
+  previewImage(source) {
+    if (typeof openImagePreview === 'function') openImagePreview(source);
   },
   localizedText(key, fallback, values) {
     const localizedValues = values && typeof values === 'object'
@@ -1155,15 +1171,7 @@ const _conversationSurfaceController = createConversationSurfaceController({
   getContainer() {
     return document.getElementById('chatInner');
   },
-  schedule(render) {
-    if (typeof requestAnimationFrame === 'function') {
-      const handle = requestAnimationFrame(render);
-      return () => cancelAnimationFrame(handle);
-    }
-    let cancelled = false;
-    queueMicrotask(() => { if (!cancelled) render(); });
-    return () => { cancelled = true; };
-  },
+  schedule: createAnimationFrameScheduler(globalThis).schedule,
   nativeRenderers: {
     ..._nativeTurnRenderers,
     renderPlanDecision(node, decision, context) {
@@ -1449,12 +1457,18 @@ const _conversationSurfaceController = createConversationSurfaceController({
       runtimeScope.ConversationTurnRead.ordered(conv),
       mountedTurnIds)) renderConversationList();
     runtimeScope.renderBackgroundAgents?.();
-    renderComposerModelNotice(document.getElementById('composerModelNotice'), viewModel, {
-      localizedText: (key, fallback, values) => {
-        const label = t(key, values);
-        return label && label !== key ? label : undefined;
-      },
-    });
+    /* A cold selection commits its empty state before the snapshot lands.
+     * Its served model is still unknown there, so the notice the selection
+     * held keeps the composer still until a commit with Turns replaces it. */
+    const awaitingSnapshot = conv._turnSnapshotRequired && !viewModel?.mainLane?.turns?.length;
+    if (!awaitingSnapshot) {
+      renderComposerModelNotice(document.getElementById('composerModelNotice'), viewModel, {
+        localizedText: (key, fallback, values) => {
+          const label = t(key, values);
+          return label && label !== key ? label : undefined;
+        },
+      });
+    }
 
     runtimeScope.ConversationTurnStore?.notifyRenderedState?.(
       conv.id, state,
@@ -1476,6 +1490,9 @@ const _conversationTransientTurnOverlay = createTransientTurnOverlay();
 runtimeScope.ConversationSurfacePresentation = Object.freeze({
   activateConversation(conversationId) {
     _turnReviewPresentation.activate(conversationId || null);
+  },
+  isMounted(conversationId) {
+    return _conversationSurfaceController.isMounted(conversationId);
   },
   ownsConversation(conversationId) {
     return _conversationSurfaceController.ownsConversation(conversationId);
@@ -1542,6 +1559,11 @@ const _backgroundActivityEvidenceChanged = createBackgroundActivityEvidenceObser
 function _renderConversationSurfaceState(conv, state, repaint) {
 
   if (_backgroundActivityEvidenceChanged(state)) runtimeScope.refreshBackgroundActivity?.();
+  if (conv && !conv._localOnly) {
+    runtimeScope.CompactionHistoryState?.observe?.(
+      conv.id, conversationCompactionArchiveIds(state),
+    );
+  }
   const transientState = _conversationTransientTurnOverlay.compose(state);
   const presentationState = runtimeScope.ConversationSwarmPresentation?.compose?.(
     conv, state, transientState,
@@ -1677,9 +1699,9 @@ runtimeScope.requestAuthoritativeConversationRender = function (
       return typeof activeConvId !== 'undefined' && activeConvId === conv.id
         && !_conversationSurfaceController.ownsConversation(conv.id);
     },
-    applySettings(conv, settings) {
+    applySettings(conv, settings, projection) {
       const previousPaper = JSON.stringify(conv.paperDocument || null);
-      if (typeof _applySettingsToConv === 'function') _applySettingsToConv(conv, settings);
+      if (typeof _applySettingsToConv === 'function') _applySettingsToConv(conv, settings, projection);
       if (activeConvId === conv.id && previousPaper !== JSON.stringify(conv.paperDocument || null)) {
         runtimeScope._paperPreviewDiscover(conv.id);
       }
@@ -1753,9 +1775,7 @@ runtimeScope.requestAuthoritativeConversationRender = function (
       console.warn('[ConversationSync] snapshot recovery failed for turn',
                    turnId, error?.message || error);
     },
-    onHealth(conversationId, health) {
-      const conv = conversations.find(item => item?.id === conversationId);
-      if (conv) conv._conversationSyncHealth = health;
+    onHealth(conversationId) {
       if (typeof renderConversationList === 'function') renderConversationList();
       if (conversationId === activeConvId) {
         runtimeScope.requestAuthoritativeConversationRender?.(

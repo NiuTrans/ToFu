@@ -16,7 +16,9 @@ pub const COMPONENT_BACKGROUND_PACKER: usize = 3;
 pub const COMPONENT_MAINTENANCE: usize = 4;
 pub const COMPONENT_OTHER: usize = 5;
 pub const COMPONENT_WAL_BARRIER: usize = 6;
-const COMPONENT_COUNT: usize = 7;
+pub const COMPONENT_ONLINE_GC: usize = 7;
+pub const COMPONENT_ONLINE_BACKUP: usize = 8;
+const COMPONENT_COUNT: usize = 9;
 pub const COMPONENT_NAMES: [&str; COMPONENT_COUNT] = [
     "foreground",
     "rotation_driver",
@@ -25,6 +27,8 @@ pub const COMPONENT_NAMES: [&str; COMPONENT_COUNT] = [
     "maintenance",
     "other",
     "wal_barrier",
+    "online_gc",
+    "online_backup",
 ];
 
 thread_local! {
@@ -39,7 +43,7 @@ pub fn set_current_component(component: usize) {
     CURRENT_COMPONENT.with(|cell| cell.set(component));
 }
 
-fn current_component() -> usize {
+pub(crate) fn current_component() -> usize {
     CURRENT_COMPONENT.with(|cell| cell.get())
 }
 
@@ -379,7 +383,8 @@ pub const STAGE_AUTHORITY_COMMIT_STREAM_PREPARE: usize = 209;
 pub const STAGE_OVERLAY_VALIDATE_HEAD_VERSIONS: usize = 210;
 pub const STAGE_OVERLAY_VALIDATE_ORIGINAL_BLIND_VERSIONS: usize = 211;
 pub const STAGE_OVERLAY_VALIDATE_RANGE_WITNESSES: usize = 212;
-const STAGE_COUNT: usize = 213;
+pub const STAGE_RETENTION_PRUNE: usize = 213;
+const STAGE_COUNT: usize = 214;
 pub const STAGE_NAMES: [&str; STAGE_COUNT] = [
     "semantic",
     "prepare",
@@ -594,6 +599,7 @@ pub const STAGE_NAMES: [&str; STAGE_COUNT] = [
     "overlay_validate_head_versions",
     "overlay_validate_original_blind_versions",
     "overlay_validate_range_witnesses",
+    "retention_prune",
 ];
 
 #[derive(Clone, Copy)]
@@ -992,11 +998,6 @@ mod foreground_sampler_tests {
     }
 }
 
-
-// Anonymous semantic resource causes have counts, not fake elapsed spans.
-#[path = "resource_exhaustion.rs"]
-mod resource_exhaustion;
-pub(crate) use resource_exhaustion::{note_resource_exhaustion, resource_exhaustion_snapshot};
 
 // History promotion owns these preparation counters; they are attempts/work,
 // never proof that the later CONTROL publication completed.

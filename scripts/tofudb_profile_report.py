@@ -47,11 +47,18 @@ def analyze(document: dict) -> dict:
                        if queue_samples == requests else None)
         waiting = sum(stage["exclusiveNanos"] for stage in stages if stage["stage"] in WAIT_STAGES)
         hold = sum(stage["inclusiveNanos"] for stage in stages if stage["stage"] == "authority_hold")
+        # Engines before hold attribution report neither field.
+        holds, hold_phases = operation.get("holds", 0), operation.get("holdPhaseNanos", {})
+        if (type(holds) is not int or holds < 0 or not isinstance(hold_phases, dict)
+                or any(type(nanos) is not int or nanos < 0 for nanos in hold_phases.values())):
+            raise ValueError(f"invalid hold phase accounting: {operation['operation']}")
         rows.append({
             "operation": operation["operation"], "requests": requests, "errors": operation["errors"],
             "dispatch_ms": dispatch / 1e6, "mean_dispatch_ms": dispatch / requests / 1e6,
             "wait_ms": waiting / 1e6, "wait_percent": 100 * waiting / max(1, dispatch),
             "authority_hold_ms": hold / 1e6,
+            "holds": holds,
+            "hold_phase_ms": {phase: nanos / 1e6 for phase, nanos in hold_phases.items() if nanos},
             "embedded_queue_ms": (queue_nanos or 0) / 1e6,
             "embedded_queue_samples": queue_samples,
             "mean_embedded_queue_ms": queue_mean,
@@ -130,13 +137,17 @@ def _profile_interval(before, after):
             for key in ("calls", "inclusiveNanos", "exclusiveNanos")}} for name in sorted(old_stages.keys() | new_stages.keys())]
         old_work, new_work = left.get("work", {}), right["work"]
         row["work"] = {name: _delta(old_work.get(name, 0), new_work.get(name, 0)) for name in old_work.keys() | new_work.keys()}
+        row["holds"] = _delta(left.get("holds", 0), right.get("holds", 0))
+        old_phases, new_phases = left.get("holdPhaseNanos", {}), right.get("holdPhaseNanos", {})
+        row["holdPhaseNanos"] = {name: _delta(old_phases.get(name, 0), new_phases.get(name, 0))
+                                 for name in old_phases.keys() | new_phases.keys()}
         if not requests:
             changed = (any(row[key] for key in ("errors", "dispatchNanos", "embeddedQueueNanos",
                 "embeddedQueueSamples", "unattributedNanos", "invalidSpans"))
                 or any(row["dispatchLog2NanosHistogram"])
                 or any(stage[key] for stage in row["stages"]
                        for key in ("calls", "inclusiveNanos", "exclusiveNanos"))
-                or any(row["work"].values()))
+                or any(row["work"].values()) or row["holds"] or any(row["holdPhaseNanos"].values()))
             if changed:
                 raise ValueError("profile counters changed without a completed request")
             continue
@@ -232,6 +243,11 @@ def main() -> None:
               f"{queue_text:>9} {native_text:>10} {coverage:>15} "
               f"{row['wait_percent']:>7.1f} {row['authority_hold_ms']/row['requests']:>13.3f}")
     print("dispatch/queue/native columns are means; native = embedded queue + dispatch, not end-to-end latency")
+    for row in result["operations"]:
+        if row["holds"]:
+            phases = sorted(row["hold_phase_ms"].items(), key=lambda item: -item[1])
+            print(f"{row['operation']} hold phases ms/hold over {row['holds']} holds: "
+                  + ", ".join(f"{phase} {ms / row['holds']:.3f}" for phase, ms in phases))
     print(result["scope"])
     if "matched_window" in result:
         window = result["matched_window"]

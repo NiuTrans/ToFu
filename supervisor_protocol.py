@@ -19,7 +19,6 @@ import os
 from pathlib import Path
 import signal
 import subprocess
-import sys
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -39,7 +38,14 @@ SUPERVISOR_SOURCE_FILES = (
     'supervisor.py',
     'supervisor_protocol.py',
     'server_manager.py',
+    'serverctl_pkg/__init__.py',
+    'serverctl_pkg/native_engine.py',
+    'serverctl_pkg/native_storage_service.py',
+    'serverctl_pkg/restart_budget.py',
     'runtime_guards.py',
+    'tofu_workers/__init__.py',
+    'tofu_workers/executor.py',
+    'tofu_workers/resources.py',
     'bootstrap_pkg/__init__.py',
     'bootstrap_pkg/resource_policy_generated.py',
     'tofu_dotenv.py',
@@ -169,10 +175,13 @@ def _launch_supervisor(
     project_path: str,
     environment: Mapping[str, str],
 ) -> None:
+    from serverctl_pkg.runtime_replica import authoritative_interpreter
     project = os.path.realpath(project_path)
     child_environment = dict(environment)
     child_environment['TOFU_SUPERVISOR_PROJECTS'] = project
-    child_environment['TOFU_SUPERVISOR_PYTHON'] = sys.executable
+    # A serving worker may run from a runtime replica; the Supervisor and
+    # every worker it spawns must start from the source environment.
+    child_environment['TOFU_SUPERVISOR_PYTHON'] = authoritative_interpreter()
     script = os.path.join(project, 'supervisor.sh')
     try:
         completed = subprocess.run(

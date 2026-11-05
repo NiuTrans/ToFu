@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 BUNDLER = ROOT / "scripts/vite_test_bundle.mjs"
@@ -19,8 +19,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(scope="module")
 def round_card_stability_bundle(tmp_path_factory):
-    if not shutil.which("node"):
-        pytest.skip("node required")
+    require_node_modules('vite')
     directory = tmp_path_factory.mktemp("round_card_stability")
     entry = directory / "entry.ts"
     entry.write_text("\n".join(

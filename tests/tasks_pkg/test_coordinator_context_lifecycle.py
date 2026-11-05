@@ -26,7 +26,6 @@ def coordinator(semantic_authority, monkeypatch):
     from lib.agent_core.store import get_conversation_store
     from lib.conversations.project_coordination import ProjectCoordinationRepository
     from lib.conversations.coordinator_reports import CoordinatorReports
-    from lib.conversations.coordinator_budget import CoordinatorBudgetSettings
     from lib.project_dispatch.repository import ProjectDispatchRepository
     from lib.identity import PrincipalContext
     from lib.turn_lifecycle import create_turn_pair, bind_task, mark_task_started, get_turn
@@ -41,10 +40,6 @@ def coordinator(semantic_authority, monkeypatch):
     bindings = ProjectCoordinationRepository(owner)
     binding = bindings.create(project, folder_id='test', expected_revision=0, command_id='create')
     conv = binding['conversationId']
-    settings = CoordinatorBudgetSettings(owner, project)
-    initial = settings.read()
-    settings.update({'path': project, 'conversationId': conv, 'bindingRevision': binding['revision'],
-        'expectedRevision': initial['revision'], 'settings': {**initial['settings'], 'maxTokens': 65536}})
     accepted = create_turn_pair(conv, user_id=owner, command_id='accepted-source',
         input_projection={'content': 'Coordinate this exact human request'}, config={})
     attempt = accepted['attempt']['attemptId']
@@ -70,14 +65,15 @@ def coordinator(semantic_authority, monkeypatch):
         task_id=task, terminal=True, status='completed', projection={'content': 'Source coordination complete'},
         settlement={'outcome': 'completed', 'cause': 'stop', 'resumeOptions': []}), 'settled-source')
     return SimpleNamespace(factory=factory, owner=owner, project=project, conv=conv, bindings=bindings,
-        reports=reports, settings=settings, repo=repo, grant=grant, published=published,
+        reports=reports, repo=repo, grant=grant, published=published,
         attempt=attempt, human=human, store=get_conversation_store())
 
 
 def snapshot(r):
     from lib.conversations.repository import ConversationRepository
     from lib.turn_lifecycle import list_turns, get_attempt
-    return deepcopy({'binding': r.bindings.read(r.project), 'budget': r.settings.read(),
+    from lib.conversations.coordinator_budget import read_state
+    return deepcopy({'binding': r.bindings.read(r.project), 'usage': read_state(r.owner, r.project),
         'document': dict(ConversationRepository().get(r.conv, user_id=r.owner)),
         'turns': list_turns(r.conv, user_id=r.owner)['turns'], 'attempt': get_attempt(r.attempt, user_id=r.owner),
         'grant': r.repo.read(r.grant['id']), 'report': r.reports.read()})
@@ -92,7 +88,14 @@ def test_rejection_keeps_canonical_source_attempt_report_grant_binding_and_budge
         from lib.tasks_pkg.compaction._manual import compact_conversation_now
         result = compact_conversation_now(r.conv, user_id=r.owner,
             config={'projectPath': '/forged-to-bypass-binding'})
-        assert result == {'ok': False, 'error': COORDINATOR_COMPACTION_UNSUPPORTED}
+        # The rewrite stays refused; the request becomes a working-view marker.
+        assert result['ok'] is True and result['scheduled'] is True
+        assert (result['alreadyScheduled'], result['protection']) == (False, 'coordinator')
+        again = compact_conversation_now(r.conv, user_id=r.owner, config={})
+        assert again['alreadyScheduled'] is True
+        assert again['requestId'] == result['requestId']
+        marker = r.store.scheduled_working_view_compaction(r.conv, user_id=r.owner)
+        assert marker['requestId'] == result['requestId']
     else:
         messages, _, revision = r.store.load_transcript(r.conv, user_id=r.owner)
         with pytest.raises(ManualCompactionRefused, match=COORDINATOR_COMPACTION_UNSUPPORTED):
@@ -101,6 +104,33 @@ def test_rejection_keeps_canonical_source_attempt_report_grant_binding_and_budge
     assert snapshot(r) == before
     assert r.repo.validate(r.repo.admission(r.grant['id'])) == r.repo.read(r.grant['id'])
     assert before['report']['latest']['turnId'] == r.published['turnId']
+
+
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native'], indirect=True)
+def test_scheduled_marker_is_owner_scoped_and_clears_only_its_request(coordinator):
+    r = coordinator
+    store = r.store
+    first = store.schedule_working_view_compaction(
+        r.conv, user_id=r.owner, reason=COORDINATOR_COMPACTION_UNSUPPORTED)
+    assert first['created'] is True
+    assert store.schedule_working_view_compaction(
+        r.conv, user_id=r.owner, reason='repeat')['requestId'] == first['requestId']
+    # Another owner's key never names this marker.
+    assert store.scheduled_working_view_compaction(r.conv, user_id=r.owner + 1) is None
+    assert store.clear_scheduled_working_view_compaction(
+        r.conv, user_id=r.owner + 1, request_id=first['requestId']) is False
+    assert store.clear_scheduled_working_view_compaction(
+        r.conv, user_id=r.owner, request_id='another-request') is False
+    assert store.scheduled_working_view_compaction(
+        r.conv, user_id=r.owner)['requestId'] == first['requestId']
+    assert store.clear_scheduled_working_view_compaction(
+        r.conv, user_id=r.owner, request_id=first['requestId']) is True
+    assert store.scheduled_working_view_compaction(r.conv, user_id=r.owner) is None
+    assert store.clear_scheduled_working_view_compaction(
+        r.conv, user_id=r.owner, request_id=first['requestId']) is False
+    later = store.schedule_working_view_compaction(
+        r.conv, user_id=r.owner, reason=COORDINATOR_COMPACTION_UNSUPPORTED)
+    assert later['created'] is True and later['requestId'] != first['requestId']
 
 
 @pytest.mark.parametrize('semantic_authority', ['sqlite', 'native'], indirect=True)

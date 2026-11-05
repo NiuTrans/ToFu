@@ -18,7 +18,7 @@ def test_original_actor_prefix_never_recharges_successor_wallet(application_stor
     from lib.billing import users, deposit, reserve, get_balance, settle
     from lib.billing.native_admission import protect_before_dispatch
     from lib.billing.native_settlement import freeze, recover
-    from lib.billing.cost import transfer_native_child_fees
+    from lib.billing.native_cost import transfer_native_child_fees
     from lib.task_replay.task_result_checkpoint_contract import TASK_RESULT_CHECKPOINT_GUARD_CONTRACT
 
     user = users.create_user(uuid.uuid4().hex + '@actor-fee.example')

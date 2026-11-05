@@ -7,6 +7,7 @@ import secrets
 import time
 from typing import Optional
 
+from lib.error_envelope import BadRequest
 from lib.identity import require_user_id
 from lib.log import audit_log, get_logger
 from lib.storage import get_storage_client
@@ -66,21 +67,21 @@ def _mint_key(
     admin: bool = False,
 ) -> tuple[dict | None, str]:
     if not isinstance(name, str) or not name.strip():
-        raise ValueError('name required')
+        raise BadRequest('name required', field='name')
     normalized_name = name.strip()[:80]
     scope_set = _normalise_scopes(scopes)
     if admin:
         scope_set = scope_set | {_ADMIN_SCOPE}
     if not scope_set:
-        raise ValueError('at least one scope required')
+        raise BadRequest('at least one scope required', field='scopes')
     if metadata is not None and not isinstance(metadata, dict):
-        raise ValueError('metadata must be an object')
+        raise BadRequest('metadata must be an object', field='metadata')
     try:
         rpm = max(0, int(rate_limit_rpm or 0))
         tpd = max(0, int(rate_limit_tpd or 0))
         expiration = float(expires_at) if expires_at is not None else None
     except (TypeError, ValueError) as exc:
-        raise ValueError('credential limits and expiry must be numeric') from exc
+        raise BadRequest('credential limits and expiry must be numeric') from exc
     token_kind = 'admin' if _ADMIN_SCOPE in scope_set else 'live'
     plaintext = f'tofu_{token_kind}_{secrets.token_hex(16)}'
     prefix = plaintext[:len('tofu_xxxx_') + 6]
@@ -219,7 +220,7 @@ def update_key(
             else:
                 scopes.discard(_ADMIN_SCOPE)
             if not scopes:
-                raise ValueError('at least one scope required')
+                raise BadRequest('at least one scope required', field='scopes')
             value = sorted(scopes)
         elif key in {'rate_limit_rpm', 'rate_limit_tpd'}:
             value = max(0, int(value or 0))
@@ -227,11 +228,11 @@ def update_key(
             value = bool(value)
         elif key == 'name':
             if not isinstance(value, str) or not value.strip():
-                raise ValueError('name required')
+                raise BadRequest('name required', field='name')
             value = value.strip()[:80]
         elif key == 'metadata':
             if not isinstance(value, dict):
-                raise ValueError('metadata must be an object')
+                raise BadRequest('metadata must be an object', field='metadata')
             value = dict(value)
         elif key == 'expires_at' and value is not None:
             value = float(value)

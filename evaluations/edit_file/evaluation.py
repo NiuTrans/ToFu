@@ -7,56 +7,84 @@ character reduction metric. It does not measure billed tokens, retries,
 latency or total task cost. Correct output and preferred operation are scored
 separately: a longer legal replacement is not an execution failure.
 
-This provider-neutral, offline corpus simulator covers exact matching and
-basic edit splicing, not runtime authorization, echo repair, the batch cap or
-partial failures. Production-boundary tests own those contracts.
+Each call runs the actual unwrapped production executor in a fresh hermetic
+child process. The workspace lease decorator is deliberately not entered:
+its global/Git lock writes are outside the per-case scratch directory.
 """
 
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 from statistics import median
 
+from .comparison import REPOSITORY, _install_scratch_guard
 from .dataset import CASES_BY_ID
 
 
-def _apply(files, edits):
-    current = dict(files)
-    operations = []
-    for edit in edits:
-        path = edit['path']
-        operation = edit['operation']
-        anchor = edit['anchor']
-        content = edit['content']
-        text = current[path]
-        count = text.count(anchor)
-        if not count or (count > 1 and not (
-                operation == 'replace' and edit.get('replace_all'))):
-            raise ValueError('anchor cardinality')
-        if operation == 'replace':
-            text = (text.replace(anchor, content) if edit.get('replace_all')
-                    else text.replace(anchor, content, 1))
-        elif operation == 'insert_before':
-            inserted = content if content.endswith('\n') else content + '\n'
-            text = text.replace(anchor, inserted + anchor, 1)
-        elif operation == 'insert_after':
-            idx = text.index(anchor) + len(anchor)
-            inserted = content
-            if idx < len(text) and text[idx] == '\n':
-                idx += 1
-            elif idx < len(text):
-                inserted = '\n' + inserted
-            if not inserted.endswith('\n'):
-                inserted += '\n'
-            text = text[:idx] + inserted + text[idx:]
-        else:
-            raise ValueError('operation')
-        current[path] = text
-        operations.append(operation)
-    return current, operations
+def _run_worker(root, arguments, case_id):
+    root = Path(root).resolve(strict=True)
+    blocked = _install_scratch_guard(root)
+    from lib.project_mod.write_tools import tool_edit_file
+
+    edit_file = inspect.unwrap(tool_edit_file)
+    case = CASES_BY_ID[case_id]
+    project = root / 'tmp' / 'case'
+    project.mkdir(parents=True)
+    for path, text in case['files'].items():
+        destination = project / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding='utf-8')
+    try:
+        output = edit_file(
+            str(project), arguments.get('edits'),
+            allow_outside=bool(arguments.get('allow_outside_workspace')),
+            atomic=arguments.get('atomic', True),
+            batch_path=(arguments.get('path')
+                        if isinstance(arguments.get('path'), str) else None),
+        )
+    except PermissionError as error:
+        output = f'Error [scratch-guard]: {error}'
+    files = {path: (project / path).read_text(encoding='utf-8')
+             for path in case['files']}
+    return {'files': files, 'tool_output': output,
+            'forbidden_effect_attempts': blocked}
+
+
+def _score_with_production(case, arguments):
+    with tempfile.TemporaryDirectory(prefix='edit-file-score-') as directory:
+        root = Path(directory)
+        for name in ('tmp', 'home', 'runtime', 'cache'):
+            (root / name).mkdir()
+        env = {
+            'PATH': os.defpath,
+            'HOME': str(root / 'home'),
+            'TMPDIR': str(root / 'tmp'),
+            'TOFU_DATA_DIR': str(root / 'runtime'),
+            'XDG_CACHE_HOME': str(root / 'cache'),
+            'XDG_DATA_HOME': str(root / 'runtime'),
+            'PYTHONDONTWRITEBYTECODE': '1',
+            'PYTHONHASHSEED': '0',
+            'PYTHONPATH': str(REPOSITORY),
+            'LANG': 'C.UTF-8',
+        }
+        proc = subprocess.run(
+            [sys.executable, '-B', '-m', 'evaluations.edit_file.evaluation',
+             '--worker', str(root), '--case-id', case['id'],
+             '--arguments', json.dumps(arguments)],
+            cwd=root, env=env, text=True, capture_output=True, timeout=30,
+            check=False)
+        if proc.returncode:
+            raise RuntimeError('offline edit scorer worker failed: '
+                               + proc.stderr[-8000:])
+        return json.loads(proc.stdout)
 
 
 def score_row(row):
@@ -84,17 +112,16 @@ def score_row(row):
     }
     if row.get('tool_name') != 'edit_file' or not isinstance(raw_args, dict):
         return score
+    outcome = _score_with_production(case, raw_args)
     edits = raw_args.get('edits')
-    if not isinstance(edits, list) or not edits:
-        return score
-    try:
-        output, operations = _apply(case['files'], edits)
-    except (KeyError, TypeError, ValueError):
-        return score
-    score['valid_call'] = True
-    score['correct_edit'] = output == case['expected']
-    score['efficient_operation'] = all(
-        operation in case['expected_operations'] for operation in operations)
+    total = len(edits) if isinstance(edits, list) else 0
+    score['valid_call'] = outcome['tool_output'].startswith(
+        f'Applied {total}/{total} edits') if total else False
+    score['correct_edit'] = outcome['files'] == case['expected']
+    if score['valid_call']:
+        score['efficient_operation'] = all(
+            edit.get('operation') in case['expected_operations']
+            for edit in edits if isinstance(edit, dict))
     return score
 
 
@@ -128,11 +155,20 @@ def summarize(rows):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('jsonl', type=Path)
+    parser.add_argument('jsonl', nargs='?', type=Path)
+    parser.add_argument('--worker', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--case-id', help=argparse.SUPPRESS)
+    parser.add_argument('--arguments', help=argparse.SUPPRESS)
     args = parser.parse_args()
-    rows = [json.loads(line) for line in args.jsonl.read_text().splitlines()
-            if line.strip()]
-    print(json.dumps(summarize(rows), ensure_ascii=False, indent=2))
+    if args.worker:
+        result = _run_worker(args.worker, json.loads(args.arguments), args.case_id)
+    else:
+        if args.jsonl is None:
+            parser.error('jsonl is required')
+        rows = [json.loads(line) for line in args.jsonl.read_text().splitlines()
+                if line.strip()]
+        result = summarize(rows)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':

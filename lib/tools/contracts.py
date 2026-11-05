@@ -260,6 +260,7 @@ class ToolContractV2:
         if not isinstance(validated, dict):
             raise ToolContractError(
                 "invalid_argument_type", "Tool arguments must be an object.")
+        check_argument_alternatives(self.name, value)
         return validated
 
 
@@ -509,7 +510,81 @@ def validate_tool_arguments_from_documents(
     if not isinstance(validated, dict):
         raise ToolContractError(
             "invalid_argument_type", "Tool arguments must be an object.")
+    check_argument_alternatives(tool_name, value)
     return validated
+
+
+@dataclass(frozen=True)
+class ArgumentAlternatives:
+    """A choice between optional arguments, enforced at admission.
+
+    Provider tool-parameter validators reject a root ``oneOf``/``anyOf``/
+    ``allOf`` (OpenAI, Anthropic, Moonshot), so a built-in schema declares
+    every alternative as an optional property, states the choice in its
+    description, and registers the rule in :data:`ARGUMENT_ALTERNATIVES`.
+    ``exactly_one`` selects oneOf semantics; otherwise at least one is needed.
+    A ``None`` value counts as absent, exactly like ``required``.
+    """
+
+    names: tuple[str, ...]
+    exactly_one: bool
+    next_action: str
+
+
+ARGUMENT_ALTERNATIVES: dict[str, ArgumentAlternatives] = {
+    "write_file": ArgumentAlternatives(
+        ("content", "content_ref"), exactly_one=True,
+        next_action=(
+            "Pass content with the complete text (an empty string creates "
+            "an empty file), or content_ref to reuse a prior tool result.")),
+    "browser_preview_page": ArgumentAlternatives(
+        ("path", "url"), exactly_one=True,
+        next_action=(
+            "Pass path for a project .html file, or url for an HTTP(S) page.")),
+    "timer_create": ArgumentAlternatives(
+        ("check_instruction", "condition_command"), exactly_one=False,
+        next_action=(
+            "Add check_instruction (model-judged readiness), "
+            "condition_command (shell predicate), or both.")),
+    "browser_download_url_to_server": ArgumentAlternatives(
+        ("url", "text", "selector"), exactly_one=False,
+        next_action=(
+            "Pass the exact HTTP(S) file url, or text/selector naming a "
+            "download link on the open page.")),
+    # Canonical read_files documents path as ignored beside reads, so the
+    # shared rule is at-least-one. A files-mode dispatch copy also refuses
+    # both; lib.project_dispatch.scope enforces that before any I/O.
+    "read_files": ArgumentAlternatives(
+        ("path", "reads"), exactly_one=False,
+        next_action=(
+            "Pass path for one file, or reads with one "
+            "{path, start_line?, end_line?} entry per file.")),
+    "channel_read": ArgumentAlternatives(
+        ("thread", "event_id"), exactly_one=True,
+        next_action=(
+            "Pass thread (for example dx:gid:123) for a page of its events, "
+            "or event_id for one event with its full text.")),
+}
+
+
+def check_argument_alternatives(tool_name: str, value: Any) -> None:
+    """Reject a call that names no alternative, or several for exactly-one."""
+    rule = ARGUMENT_ALTERNATIVES.get(tool_name)
+    if rule is None or not isinstance(value, Mapping):
+        return
+    given = [name for name in rule.names if value.get(name) is not None]
+    choices = ", ".join(rule.names)
+    if not given:
+        quantity = "exactly one" if rule.exactly_one else "at least one"
+        raise ToolContractError(
+            "missing_required_arguments",
+            f"Missing required arguments: {quantity} of {choices}.",
+            next_action=rule.next_action)
+    if rule.exactly_one and len(given) > 1:
+        raise ToolContractError(
+            "invalid_argument_value",
+            f"Pass only one of {choices}; got {', '.join(given)}.",
+            next_action=rule.next_action)
 
 
 def _clamp_walk(value: Any, schema: Any, path: str,
@@ -666,8 +741,10 @@ def contract_json(contract: ToolContractV2) -> str:
 
 
 __all__ = [
+    "ARGUMENT_ALTERNATIVES", "ArgumentAlternatives",
     "ToolContractError", "ToolContractV2", "ToolErrorContract",
-    "adapt_legacy_tool_contract", "clamp_arguments_to_schema",
+    "adapt_legacy_tool_contract", "check_argument_alternatives",
+    "clamp_arguments_to_schema",
     "clamp_tool_arguments_from_documents", "NEVER_CLAMP_PARAMS",
     "compile_execution_contract_documents",
     "contract_json", "validate_tool_arguments_from_documents",

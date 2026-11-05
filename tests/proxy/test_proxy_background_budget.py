@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests._runtime_sections import native_module_path, runtime_section_path
+from tests._jsdom import require_node_modules
+from tests._runtime_sections import (
+    native_module_path, runtime_section, runtime_section_path,
+)
 
 
 pytestmark = pytest.mark.unit
@@ -131,7 +133,7 @@ def test_mcp_context_summary_piggybacks_without_a_schema_request():
         global.runtimeScope = {};
         global.document = {
           addEventListener(name) { listenerNames.push(name); },
-          /* The rail-follow boot pass walks .chat-container nodes; none
+          /* The rail-track boot pass walks .chat-container nodes; none
            * exist in this bare harness, so an empty list is the faithful
            * stub (ResizeObserver is only constructed for real nodes). */
           querySelectorAll() { return []; },
@@ -169,9 +171,10 @@ def test_mcp_context_summary_piggybacks_without_a_schema_request():
     """, INFO_RAIL)
     assert result == {
         'apiCalls': 0,
-        # click delegation + the rail-follow scroll pass (captured). No
-        # timers, no startup schema request — the budget contract stands.
-        'listenerNames': ['click', 'scroll'],
+        # Click delegation only: rail tracks re-measure on layout changes and
+        # nothing runs on scroll (docs/RENDER_CONTRACT.md, sticky context card
+        # on a measured track). No timers, no startup schema request.
+        'listenerNames': ['click'],
         'labels': ['MCP: alpha ×2', 'MCP: zeta'],
         'replacedLabels': [],
         'hasApply': True,
@@ -187,14 +190,20 @@ def test_mcp_context_summary_piggybacks_without_a_schema_request():
     assert 'toolsList:' not in api_source
     assert 'Api.mcp.toolsList()' not in info_source
     assert 'runtimeScope.applyMcpToolSummary(data.mcp_tool_summary)' in toolbar_source
-    assert settings_source.count(
-        'runtimeScope.applyMcpToolSummary(data.mcp_tool_summary)') == 2
+    # Both summary-bearing Settings responses feed the rail: the catalog read
+    # applies its own, and each acknowledged per-tool mutation applies the
+    # summary mcp-tool-selection.ts hands to the acknowledge port (behavior:
+    # tests/frontend/test_settings_mcp_commands.py).
+    assert 'runtimeScope.applyMcpToolSummary(data.mcp_tool_summary)' in settings_source
+    assert 'runtimeScope.applyMcpToolSummary(summary)' in settings_source
 
 
 def test_network_badge_reuses_push_liveness_without_a_parallel_clock():
-    source = Path(runtime_section_path(
-        'net-latency.js', scope_prelude=False,
-    )).read_text(encoding='utf-8')
+    # The authored section, not runtime_section_path: that executable view
+    # prepends bundled import-port owners (lifecycle.ts for
+    # retainedCompositionLifecycle), whose generic timer helpers are not a
+    # clock this badge runs.
+    source = runtime_section('net-latency.js', scope_prelude=False)
     assert 'setInterval' not in source
     assert '_watchdogTimer' not in source
     assert '_STALE_MS' not in source
@@ -332,8 +341,7 @@ def test_client_log_flush_scheduler_is_demand_scoped_and_resource_complete():
 
 
 def _node(source: str, path: str) -> dict:
-    if not shutil.which('node'):
-        pytest.skip('node is required')
+    require_node_modules()
     completed = subprocess.run(
         ['node', '-e', source.replace('SOURCE_PATH', json.dumps(path))],
         capture_output=True,
