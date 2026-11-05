@@ -14,7 +14,10 @@ use uuid::Uuid;
 use crate::generated_tofudb_ir::BLOCK_PAYLOAD_CACHE_ENTRY_OVERHEAD_BYTES;
 use crate::payload_manifest::{PayloadManifest, PayloadSegmentReference};
 use crate::payload_segment::{CatalogLocationTable, PayloadSegment, PayloadSegmentStore};
-use crate::vfs::{sync_all_barrier, sync_directory_barrier, FileKind, OpenRequest, RealVfs, Vfs, VfsFile, VfsPositionedReader};
+use crate::vfs::{
+    hyphenated_temporary_name, is_hyphenated_temporary_name, sync_all_barrier, sync_directory_barrier, FileKind,
+    OpenRequest, RealVfs, Vfs, VfsFile, VfsPositionedReader,
+};
 use crate::FORMAT_VERSION;
 
 const MAGIC: &[u8; 8] = b"TDBBLK01";
@@ -1335,7 +1338,7 @@ impl BlockStore {
             Err(error) => return Err(error),
         }
         let shard = self.ensure_shard(id)?;
-        let temporary = shard.join(format!(".new-{}", Uuid::new_v4()));
+        let temporary = new_temporary_block_path(&shard);
         let encoded = encoded_block(id, payload)?;
         let encoded_len = encoded.len() as u64;
         let write_result = (|| {
@@ -2405,7 +2408,7 @@ impl BlockStore {
     /// before the rename publishes its name, so a published name never has
     /// unsynced content. The caller owns the shard directory barrier.
     fn write_loose_synced(&self, id: BlockId, payload: &[u8], shard: &Path) -> io::Result<u64> {
-        let temporary = shard.join(format!(".new-{}", Uuid::new_v4()));
+        let temporary = new_temporary_block_path(shard);
         let encoded = encoded_block(id, payload)?;
         let write_result = (|| {
             let mut file = self.vfs.open(
@@ -3857,22 +3860,32 @@ fn validate_temporary_block_path(root: &Path, path: &Path) -> io::Result<()> {
     }
     hex_nibble(shard.as_bytes()[0])?;
     hex_nibble(shard.as_bytes()[1])?;
-    let identifier = path
+    let name = path
         .file_name()
         .and_then(|value| value.to_str())
-        .and_then(|name| name.strip_prefix(".new-"))
         .ok_or_else(|| invalid_data("temporary block filename is malformed"))?;
-    if identifier.len() != 32
-        || !identifier
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        || Uuid::parse_str(identifier)
-            .ok()
-            .is_none_or(|uuid| uuid.simple().to_string() != identifier)
+    // Exactly the names engine writers leave in a shard: a loose-block
+    // writer's staging file, or an at-rest re-encryption rename's.
+    if !is_hyphenated_temporary_name(name, TEMPORARY_BLOCK_PREFIX)
+        && !crate::at_rest::is_reencrypt_temporary_name(name)
     {
         return Err(invalid_data("temporary block filename is malformed"));
     }
     Ok(())
+}
+
+/// Loose-block writers stage each file under this prefix in its shard, sync
+/// it and rename it into place.
+const TEMPORARY_BLOCK_PREFIX: &str = ".new-";
+
+fn new_temporary_block_path(shard: &Path) -> PathBuf {
+    shard.join(temporary_block_file_name(Uuid::new_v4()))
+}
+
+/// The staging name of a loose-block write; collectors accept exactly this
+/// spelling (`validate_temporary_block_path`).
+pub(crate) fn temporary_block_file_name(identifier: Uuid) -> String {
+    hyphenated_temporary_name(TEMPORARY_BLOCK_PREFIX, identifier)
 }
 
 fn validate_open_segment(
@@ -6570,28 +6583,116 @@ mod tests {
         );
     }
 
+    /// Only names an engine writer mints are collectable; every other `.new-*`
+    /// entry, near-miss spellings of a UUID included, fails closed.
     #[test]
     fn malformed_temporary_block_names_fail_closed() {
+        let identifier = Uuid::from_bytes([0x3c; 16]);
+        let hyphenated = identifier.hyphenated().to_string();
+        for name in [
+            ".new-not-a-uuid".to_owned(),
+            format!(".new-{}", identifier.simple()),
+            format!(".new-{}", hyphenated.to_uppercase()),
+            format!(".new-{}", identifier.braced()),
+            format!(".new-{hyphenated}.blk"),
+            format!(".new-ren-{}", identifier.simple()),
+            format!(".new-witness-{hyphenated}"),
+        ] {
+            let vfs = DeterministicVfs::new(None);
+            let store = simulated_store(&vfs);
+            let block_id = store.put(b"temporary-name-shard").unwrap();
+            create_simulated_file(&vfs, &store.root.join(&block_id.to_hex()[..2]).join(&name));
+            let error = store.plan_temporary_file().unwrap_err();
+            assert_eq!(
+                (error.kind(), error.to_string()),
+                (io::ErrorKind::InvalidData, "temporary block filename is malformed".to_owned()),
+                "{name}"
+            );
+        }
+    }
+
+    /// Fails the first rename of `write` and then the writer's cleanup unlink,
+    /// leaving the exact staging file a crash between staging and rename
+    /// leaves. A no-fault run on an identically built store numbers the rename.
+    fn leave_writer_staging_file(
+        open: impl Fn(&DeterministicVfs) -> BlockStore,
+        write: impl Fn(&BlockStore) -> io::Result<()>,
+    ) -> (DeterministicVfs, BlockStore) {
+        let rename = {
+            let vfs = DeterministicVfs::new(None);
+            let store = open(&vfs);
+            vfs.arm_fault(None).unwrap();
+            write(&store).unwrap();
+            let trace = vfs.trace().unwrap();
+            trace.iter().position(|operation| *operation == Operation::Rename).unwrap() + 1
+        };
         let vfs = DeterministicVfs::new(None);
-        let store = simulated_store(&vfs);
-        let block_id = store.put(b"temporary-name-shard").unwrap();
-        let malformed = store
-            .root
-            .join(&block_id.to_hex()[..2])
-            .join(".new-not-a-uuid");
-        vfs.open(
-            &malformed,
-            OpenRequest {
-                write: true,
-                create_new: true,
-                ..OpenRequest::default()
-            },
-        )
+        let store = open(&vfs);
+        let failure = FaultAction::ErrorBefore(io::ErrorKind::Other);
+        vfs.arm_faults(&[
+            FaultRule { operation_number: rename as u64, action: failure },
+            FaultRule { operation_number: rename as u64 + 1, action: failure },
+        ])
         .unwrap();
-        assert_eq!(
-            store.plan_temporary_file().unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
+        write(&store).unwrap_err();
+        let trace = vfs.trace().unwrap();
+        assert_eq!(trace.get(rename - 1), Some(&Operation::Rename));
+        assert_eq!(trace.get(rename), Some(&Operation::RemoveFile), "the cleanup unlink must fail too");
+        vfs.arm_fault(None).unwrap();
+        (vfs, store)
+    }
+
+    fn assert_staging_file_is_collected(store: &BlockStore, payload: &[u8], name_prefix: &str) {
+        let shard = store.root.join(&BlockId::for_payload(payload).to_hex()[..2]);
+        let candidate = store
+            .plan_temporary_file()
+            .unwrap()
+            .candidate
+            .expect("the writer's staging file is a collection candidate");
+        assert_eq!(candidate.path.parent(), Some(shard.as_path()));
+        let name = candidate.path.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with(name_prefix), "{name}");
+        assert_eq!(store.remove_temporary_file(&candidate).unwrap(), candidate.file_bytes);
+        assert!(store.plan_temporary_file().unwrap().candidate.is_none());
+    }
+
+    /// Both loose writers stage under a name the collectors accept, so a
+    /// staging file an interrupted write leaves never stops collection.
+    #[test]
+    fn staging_files_left_by_the_loose_writers_are_collected() {
+        let payload = b"interrupted between staging and rename".to_vec();
+        let (_vfs, store) = leave_writer_staging_file(simulated_store, |store| {
+            store.put_loose(&payload).map(drop)
+        });
+        assert_staging_file_is_collected(&store, &payload, ".new-");
+
+        let (_vfs, store) = leave_writer_staging_file(simulated_store, |store| {
+            let (id, staged) = store.put_deferred_fresh(&payload)?;
+            assert!(staged);
+            store.flush_pending_subset(&BTreeSet::from([id]))
+        });
+        assert_staging_file_is_collected(&store, &payload, ".new-");
+    }
+
+    /// At-rest encryption re-encrypts every loose publication through its own
+    /// staging file beside the destination; an interrupted one is collected.
+    #[test]
+    fn staging_files_left_by_the_at_rest_rename_are_collected() {
+        let encrypted_store = |vfs: &DeterministicVfs| {
+            vfs.create_dir(Path::new("/data")).unwrap();
+            vfs.sync_directory(Path::new("/")).unwrap();
+            let encrypting = crate::at_rest::EncryptingVfs::new(
+                Arc::new(vfs.clone()),
+                Path::new("/data"),
+                crate::at_rest::AtRestKey::from_key([0x5e; 32]),
+            );
+            BlockStore::initialize_with_vfs(Path::new("/data"), Arc::new(encrypting)).unwrap()
+        };
+        let payload = b"interrupted inside the at-rest rename".to_vec();
+        let (_vfs, store) = leave_writer_staging_file(encrypted_store, |store| {
+            store.put_loose(&payload).map(drop)
+        });
+        assert_staging_file_is_collected(&store, &payload, ".new-ren-");
     }
 
     /// Payloads whose content-addressed blocks all land in `shard`.
@@ -6745,10 +6846,10 @@ mod tests {
             store.put_loose(&payload).unwrap();
         }
         store.put_loose(&payloads_in_shard(0xff, 1)[0]).unwrap();
-        let temporary = store.root.join("ff").join(format!(
-            ".new-{}",
-            uuid::Uuid::from_bytes([0x3c; 16]).simple()
-        ));
+        let temporary = store
+            .root
+            .join("ff")
+            .join(temporary_block_file_name(Uuid::from_bytes([0x3c; 16])));
         create_simulated_file(&vfs, &temporary);
         let plan = store.plan_temporary_file().unwrap();
         assert_eq!(plan.candidate.map(|candidate| candidate.path), Some(temporary));
