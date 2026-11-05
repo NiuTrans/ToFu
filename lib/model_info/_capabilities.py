@@ -370,17 +370,57 @@ def model_requires_thought_signature_on_tool_calls(model: str) -> bool:
     return is_gemini(model)
 
 
-def model_requires_reasoning_content_replay(model: str) -> bool:
-    """True if this model's API REJECTS an assistant turn whose
-    ``reasoning_content`` was emptied/stripped when thinking mode is on.
+# Declared ``reasoning.preserve_history`` values that keep an assistant turn's
+# trace on later requests: plain replay, or replay plus a retention flag the
+# request compiler sends (GLM ``clear_thinking: false``, Kimi ``keep: all``).
+_REPLAYED_HISTORY = frozenset({'replay', 'clear_thinking_false', 'keep_all'})
 
-    DeepSeek V4 (pro/flash) in thinking mode returns HTTP 400
-    (``The reasoning_content in the thinking mode must be passed back to
-    the API.``) if a prior assistant message that carried a tool_call has
-    its ``reasoning_content`` blanked.  Compaction's ``strip_thinking``
-    step must therefore skip these models so the reasoning trace stays on
-    the replayed turn.
+
+def _declared_preserve_history(profile):
+    reasoning = profile.get('reasoning') if isinstance(profile, dict) else None
+    value = reasoning.get('preserve_history') if isinstance(reasoning, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def _maintained_preserve_history(model: str):
+    """The declaration in the attributed Model's maintained defaults, if any."""
+    from lib.model_catalog._creator_identity import creator_family, strip_routing_decoration
+    from lib.model_routing.domain import ModelRef, ModelRoutingError
+    from lib.model_routing.model_defaults import current_model_defaults
+
+    creator = creator_family(model)
+    if not creator:
+        return None
+    try:
+        ref = ModelRef.from_value({'creator_id': creator,
+                                   'model_id': strip_routing_decoration(model)})
+    except ModelRoutingError:
+        return None
+    found = current_model_defaults().resolve(ref)
+    return _declared_preserve_history(found[0]) if found else None
+
+
+def model_requires_reasoning_content_replay(model: str, inference_profile=None) -> bool:
+    """True when prior assistant ``reasoning_content`` must be passed back.
+
+    The destination's declared ``inference_profile.reasoning.preserve_history``
+    decides: ``replay``, ``clear_thinking_false`` and ``keep_all`` keep the
+    trace on replayed turns; ``none`` lets callers drop it. The selected
+    route's profile is read first, then the Model's maintained defaults.
+    Callers (compaction ``strip_thinking``, history reconstruction, request
+    repair) must not blank or omit a trace this returns True for.
+
+    Without any declaration, DeepSeek keeps its documented rule: V4 thinking
+    mode returns HTTP 400 (``The reasoning_content in the thinking mode must
+    be passed back to the API.``) for a blanked trace on a tool-call turn,
+    and gateway spellings such as ``deepseek-v4-flash-tencent`` resolve to no
+    maintained identity.
     """
+    declared = _declared_preserve_history(inference_profile)
+    if declared is None and model:
+        declared = _maintained_preserve_history(model)
+    if declared is not None:
+        return declared in _REPLAYED_HISTORY
     return is_deepseek(model)
 
 

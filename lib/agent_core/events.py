@@ -462,6 +462,10 @@ _SPECS: tuple[EventSpec, ...] = (
                                           'names behind `toolContext` — compose '
                                           'the suffix in the UI language from '
                                           'THESE when present',
+                      'toolCallId': '(optional, llm_thinking preparing-tool-call '
+                                    'phase) provider id of the call being '
+                                    'written; that call\'s tool_start retires '
+                                    'the phase',
                       # Production-channel and retry/queue phase fields (the
                       # PhaseSpec registry below carries the per-phase prose;
                       # the schema is the UNION every phase value may ride).
@@ -525,6 +529,7 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('tools', 'list'),
                   FieldSpec('toolContext', 'str'),
                   FieldSpec('toolContextTools', 'list'),
+                  FieldSpec('toolCallId', 'str'),
                   FieldSpec('attempt', 'int'),
                   FieldSpec('max', 'int'),
                   FieldSpec('bucket', 'str'),
@@ -2496,9 +2501,15 @@ _PHASE_SPECS: tuple[PhaseSpec, ...] = (
     # ───────────────────────── chat turn ─────────────────────────
     PhaseSpec(Phase.LLM_THINKING, (_CHAT,),
               'An LLM round opened — the model is generating (the pre-token '
-              'window and the inter-round "analyzing tool results" beat).',
+              'window and the inter-round "analyzing tool results" beat), or '
+              'is writing a tool call\'s arguments (detailKey '
+              'stream.phase.preparingToolCall, announced when the call opens; '
+              'that call\'s tool_start retires it).',
               fields={'detail': 'English fallback label',
                       'detailKey': 'i18n key', 'detailArgs': 'interpolation args',
+                      'model': '(optional) attempt model id',
+                      'toolCallId': '(optional) provider id of the tool call '
+                                    'being written',
                       'roundNum': 'round index',
                       'toolContext': 'pre-joined English label of the previous '
                                      "round's tools (headless fallback)",
@@ -2573,7 +2584,8 @@ _PHASE_SPECS: tuple[PhaseSpec, ...] = (
                       'statusCode': '(optional) HTTP status (forwarded '
                                     'step_phase meta)'}),
     PhaseSpec(Phase.COMPACTING, (_CHAT,),
-              'Proactive context-window compaction is running.',
+              'Context-window compaction is running inside another activity; '
+              'its compaction_done resumes the phase it interrupted.',
               fields={'detail': 'English fallback label',
                       'detailKey': 'i18n key'}),
     PhaseSpec(Phase.TODO_CONTINUATION, (_CHAT,),

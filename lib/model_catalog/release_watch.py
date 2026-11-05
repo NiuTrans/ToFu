@@ -17,11 +17,17 @@ State (``data/config/model_release_watch.json``) is deployment maintainer
 state, not owner data. The first report records the current candidates as a
 baseline and reports none; a public catalogue first seen later contributes its
 standing listings to the baseline the same way, so neither installation nor a
-newly allowlisted feed floods the intake with old releases. Reviews keep a
-``deferred`` or ``declined`` decision with reason, date and checked sources;
-deferred candidates are listed in every report, but only unreviewed ones are
-new. Reports never fetch (the daily model-intelligence update owns feed
-refresh) and start no worker, cache or model call.
+newly allowlisted feed floods the intake with old releases. The state records
+each catalogue's first observation: the fetch time of the first snapshot the
+watch classified. A feed keeps only its newest listings, so an old one can
+rotate into it later; a candidate whose every lead was listed upstream
+(``catalog_feed.listed_at``) before its catalogue's first observation is such
+a standing listing and joins the baseline instead of being new. An unknown
+listing time is never old. Reviews keep a ``deferred`` or ``declined``
+decision with reason, date and checked sources; deferred candidates are
+listed in every report, but only unreviewed ones are new. Reports never fetch
+(the daily model-intelligence update owns feed refresh) and start no worker,
+cache or model call.
 """
 from __future__ import annotations
 
@@ -32,7 +38,7 @@ from lib.config_dir import config_path
 from lib.json_store import JsonStoreReadError, read_json, update_json_atomic
 
 STATE_PATH = config_path('model_release_watch.json')
-STATE_VERSION = 1
+STATE_VERSION = 2
 DECISIONS = ('deferred', 'declined')
 MAX_REASON_CHARS = 500
 # The evidence-URL bound of registration_metadata.source_urls.
@@ -43,16 +49,15 @@ class ReleaseWatchError(ValueError):
     """The watch state or a requested review cannot be used."""
 
 
-def _lead(supply: dict) -> dict:
+def _lead(supply: dict, listed_at: dict) -> dict:
     lead = {'template': supply['template'], 'wire_model_ids': supply['wire_model_ids']}
     for field in ('context_window', 'capabilities', 'actual_pricing'):
         if supply.get(field):
             lead[field] = supply[field]
+    times = [listed_at.get(wire) for wire in supply['wire_model_ids']]
+    if times and all(times):
+        lead['listed_at'] = max(times)
     return lead
-
-
-def _sources(candidate: dict) -> set[str]:
-    return {lead['template'] for lead in candidate['leads']}
 
 
 def release_candidates(templates: list[dict]) -> tuple[dict, list[dict]]:
@@ -68,18 +73,47 @@ def release_candidates(templates: list[dict]) -> tuple[dict, list[dict]]:
                 'id': f"{row['creator_id']}/{row['model_id']}",
                 'creator_id': row['creator_id'], 'model_id': row['model_id'],
                 'missing': row['missing'],
-                'leads': [_lead(supply) for supply in row['supply']],
+                'leads': [_lead(supply, feeds[supply['template']].get('listed_at') or {})
+                          for supply in row['supply']],
             })
     return feeds, sorted(candidates, key=lambda candidate: candidate['id'])
 
 
+def _observed_at(stamp) -> float:
+    """Epoch seconds of an ISO first-observation stamp; 0.0 when unusable."""
+    try:
+        return datetime.fromisoformat(stamp).timestamp() if isinstance(stamp, str) else 0.0
+    except (ValueError, OverflowError, OSError):
+        return 0.0
+
+
+def _first_observed(feed: dict) -> str:
+    return datetime.fromtimestamp(feed['fetched_at']).isoformat(timespec='seconds')
+
+
 def _validated(state) -> dict:
+    """The current state shape; version 1 upgrades with ``initialized_at`` as
+    every known catalogue's first observation."""
+    if (isinstance(state, dict) and state.get('version') == 1
+            and isinstance(state.get('sources'), list)
+            and all(isinstance(key, str) for key in state['sources'])):
+        state = {**state, 'version': STATE_VERSION,
+                 'sources': dict.fromkeys(sorted(state['sources']), state.get('initialized_at'))}
     if (not isinstance(state, dict) or state.get('version') != STATE_VERSION
-            or not isinstance(state.get('sources'), list)
+            or not isinstance(state.get('sources'), dict)
+            or not all(_observed_at(stamp) > 0 for stamp in state['sources'].values())
             or not isinstance(state.get('baseline'), list)
             or not isinstance(state.get('reviews'), dict)):
         raise ReleaseWatchError('release watch state is unreadable; inspect it instead of re-baselining')
     return state
+
+
+def _standing(candidate: dict, sources: dict, fresh: set[str]) -> bool:
+    """Every lead predates the watch: its catalogue is first observed now, or the
+    lead was listed upstream before that catalogue's first observation."""
+    return all(lead['template'] in fresh
+               or 0 < lead.get('listed_at', 0) < _observed_at(sources[lead['template']])
+               for lead in candidate['leads'])
 
 
 def _update_state(state_path: str, mutator):
@@ -113,17 +147,21 @@ def release_watch_report(*, templates: list[dict] | None = None,
     def settle(state):
         if state is None:
             outcome['status'] = 'initialized'
-            return {'version': STATE_VERSION, 'initialized_at': stamp, 'sources': sorted(feeds),
+            return {'version': STATE_VERSION, 'initialized_at': stamp,
+                    'sources': {key: _first_observed(feeds[key]) for key in sorted(feeds)},
                     'baseline': [candidate['id'] for candidate in candidates], 'reviews': {}}
+        current = isinstance(state, dict) and state.get('version') == STATE_VERSION
         state = _validated(state)
-        fresh = feeds.keys() - set(state['sources'])
-        if not fresh:
-            outcome['state'] = state
-            return None
+        fresh = feeds.keys() - state['sources'].keys()
+        state['sources'] = dict(sorted({**state['sources'],
+                                        **{key: _first_observed(feeds[key]) for key in fresh}}.items()))
         known = set(state['baseline']) | state['reviews'].keys()
-        state['baseline'] += [candidate['id'] for candidate in candidates
-                              if candidate['id'] not in known and _sources(candidate) <= fresh]
-        state['sources'] = sorted(set(state['sources']) | fresh)
+        standing = [candidate['id'] for candidate in candidates
+                    if candidate['id'] not in known and _standing(candidate, state['sources'], fresh)]
+        outcome['state'] = state
+        if current and not fresh and not standing:
+            return None
+        state['baseline'] += standing
         return state
 
     state = _update_state(state_path, settle) or outcome['state']
@@ -177,7 +215,7 @@ def record_review(identity: str, decision: str, reason: str, source_urls=(), *,
 
 
 def baseline_identities(*, state_path: str = STATE_PATH) -> list[str]:
-    """Identities recorded as standing listings when their catalogue was first seen."""
+    """Standing listings: listed when their catalogue was first observed, or upstream before it."""
     try:
         state = read_json(state_path, default=None, strict=True)
     except JsonStoreReadError as exc:

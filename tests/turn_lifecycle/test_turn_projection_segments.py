@@ -1185,14 +1185,15 @@ def _browser_evidence_projection():
     }
 
 
-def test_completed_browser_view_omits_replay_signatures_and_unrendered_detail():
+@pytest.mark.parametrize('status', ['completed', 'interrupted', 'truncated', 'failed'])
+def test_terminal_browser_view_omits_replay_signatures_and_unrendered_detail(status):
     from lib.turn_projection_segments import (
         projection_with_reference_tool_segments,
     )
 
     source = _browser_evidence_projection()
     before = deepcopy(source)
-    browser = projection_with_reference_tool_segments(source, status="completed")
+    browser = projection_with_reference_tool_segments(source, status=status)
 
     assert source == before
     assert "signature" not in browser["segments"][0]
@@ -1225,24 +1226,18 @@ def test_completed_browser_view_omits_replay_signatures_and_unrendered_detail():
         "attrs": {},
     })
     compacted_view = projection_with_reference_tool_segments(
-        compacted, status="completed",
+        compacted, status=status,
     )
     assert compacted_view["timingTrace"]["spans"] is compacted["timingTrace"]["spans"]
 
-    for status in ("interrupted", "truncated", "failed"):
-        resumable = projection_with_reference_tool_segments(source, status=status)
-        assert resumable["segments"][0]["signature"] == before["segments"][0]["signature"]
-        assert resumable["toolRounds"][0]["thinkingSignature"] == before[
-            "toolRounds"][0]["thinkingSignature"]
-        assert resumable["timingTrace"] is source["timingTrace"]
-        assert resumable["apiRounds"] is source["apiRounds"]
     for status in ("pending", "running"):
         assert projection_with_reference_tool_segments(
             source, status=status,
         ) is source
 
 
-def test_client_edit_of_browser_view_restores_omitted_server_evidence():
+@pytest.mark.parametrize('status', ['completed', 'interrupted', 'truncated', 'failed'])
+def test_client_edit_of_browser_view_restores_omitted_server_evidence(status):
     from lib.turn_projection_segments import (
         projection_with_reference_tool_segments,
         projection_with_restored_browser_evidence,
@@ -1250,7 +1245,7 @@ def test_client_edit_of_browser_view_restores_omitted_server_evidence():
 
     authority = _browser_evidence_projection()
     browser = projection_with_reference_tool_segments(
-        authority, status="completed",
+        authority, status=status,
     )
     # The generated client materializes roundRef segments before TurnStore.
     edit = {
@@ -1285,6 +1280,26 @@ def test_client_edit_of_browser_view_restores_omitted_server_evidence():
     assert "_anthropicContentBlocks" not in kept["toolRounds"][0]
     assert kept["apiRounds"] == [{"round": 1}]
     assert kept["timingTrace"] is authority["timingTrace"]
+
+
+@pytest.mark.parametrize('call_id', ['reused', ''])
+def test_browser_edit_preserves_replay_for_ambiguous_tool_rounds(call_id):
+    from lib.turn_projection_segments import (
+        projection_with_reference_tool_segments,
+        projection_with_restored_browser_evidence,
+    )
+
+    authority = _browser_evidence_projection()
+    first = {**authority['toolRounds'][0], 'toolCallId': call_id}
+    second = {**first, 'thinking': 'another plan', 'thinkingSignature': 'other-signature'}
+    authority['toolRounds'] = [first, second]
+    browser = projection_with_reference_tool_segments(authority, status='interrupted')
+    restored = projection_with_restored_browser_evidence(
+        {**browser, 'content': 'edited answer'}, authority,
+    )
+    for source, result in zip(authority['toolRounds'], restored['toolRounds'], strict=True):
+        assert result['thinkingSignature'] == source['thinkingSignature']
+        assert result['_anthropicContentBlocks'] == source['_anthropicContentBlocks']
 
 
 def test_shared_tool_documents_alias_only_identical_values_of_equal_length():

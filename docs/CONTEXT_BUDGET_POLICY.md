@@ -9,23 +9,42 @@ sample of conversation `mw1qxog7wlwbz5` contained 20 `working_set` archives over
 window-safety trigger was 777,600. This establishes premature economic pressure,
 not that every rewrite lost facts or caused every long-running task.
 
-**Decision.** Automatic compaction defaults to the existing route-window safety
-trigger with output and compaction reserves. The default economic working set
-is zero, and pricing tiers do not silently select one. Explicit positive
-`compaction.workingSetTokens` / `TOFU_WORKING_CONTEXT_TOKENS` values retain the
-existing economic candidate and ROI policy; request config wins. Invalid values
-fall back to window safety. Manual compaction, mandatory admission, reactive
-recovery, source preservation and complete-summary requirements are unchanged.
+**Decision.** Automatic semantic compaction uses one trigger: the existing
+route-window safety boundary with output and compaction reserves. The request
+field `compaction.workingSetTokens` and environment variable
+`TOFU_WORKING_CONTEXT_TOKENS` are retired and cannot alter it; stored old presets
+may retain the field without reactivating early summaries. There is no replacement
+setting. Read-only v1 gauge/receipt economic-target fields remain zero; historical
+receipts keep their original values. Manual compaction, mandatory admission,
+reactive recovery, source preservation and complete-summary requirements remain.
 No task-age, token-spend or total-round limit is introduced.
 
-**Alternatives rejected.** Raising the arbitrary default only moves the same
-unproven quality/cost tradeoff. ROI alone predicts spending, not task completion
-or evidence retention. Waiting for literal window exhaustion would omit the
-space required for output and safe recovery. This policy can retain larger
-prompts and cost more per request; end-to-end quality/cost gains require a live
-comparison, not extrapolation from token savings. Gate regressions keep a
-150K/1M prompt intact by default, allow an explicit 128K target, and still trigger
-under 900K/1M pressure.
+**Timing, not just break-even.** Positive savings against “never compact” do not
+prove that now is cheaper than waiting. Compare equal future work, including:
+
+- compact now: summary cost + new-prefix cache write + subsequent request costs
+  + any extra reads needed after the rewrite;
+- compact later: cached reads while waiting + the later summary/cache write
+  + subsequent request costs + its extra reads.
+
+Stable cheap cache reads reduce the cost of waiting. Delaying can fold more cold
+material into fewer summaries and preserve evidence longer. Cached tokens still
+cost something, however, so a larger one-time reduction does not establish a
+lower total bill. Remaining work, future cache hits, summary retention and
+re-reading costs are not known exactly; the current rewrite ROI equation does
+not prove an optimal stopping time. It cannot independently authorize automatic
+L2. Optional deterministic L1 projections retain their own next-request/adoption
+checks, and required window recovery always wins over cost.
+
+**Alternatives rejected.** A configurable 128K/300K ceiling moves an unproven
+tradeoff to the operator; “positive ROI means compact immediately” ignores the
+wait alternative; predicting a fixed number of remaining rounds invents a task
+horizon. Waiting for literal window exhaustion omits output/recovery space.
+Window safety is a continuity-first policy, not a claim of minimum possible
+spending. Gate regressions preserve 150K and 300K prompts on a 1M route despite
+legacy overrides, while 900K still requires recovery. Live quality and total-cost
+claims require paired execution evidence; the bounded incident sample above is
+not that comparison.
 
 ## Native route scope
 

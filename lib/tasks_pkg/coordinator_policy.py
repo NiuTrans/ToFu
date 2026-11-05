@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from lib.llm.llm_errors import AbortedError
 from lib.log import get_logger
+from lib.tools.execution_timing import timing_phase
 
 logger = get_logger(__name__)
 
@@ -142,7 +143,8 @@ def coordinator_call_rejection(task: dict, name: str, arguments: dict,
     lookup failure refuses only this call.
     """
     try:
-        active = coordinator_scope(task, project_path)
+        with timing_phase('coordinator_policy'):
+            active = coordinator_scope(task, project_path)
     except AbortedError:
         raise
     except Exception:

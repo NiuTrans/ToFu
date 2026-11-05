@@ -26,7 +26,7 @@ from .registry import (
 
 
 PLUGIN_ID = "tofu.context-cost"
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "2.0.0"
 _ANALYZER_DIGEST = implementation_digest(Path(__file__).with_name("decision.py"))
 
 
@@ -35,7 +35,7 @@ def plugin() -> ExperimentPlugin:
     return ExperimentPlugin(
         plugin_id=PLUGIN_ID,
         version=PLUGIN_VERSION,
-        description="Context exposure and economic working-set experiment",
+        description="MCP context exposure experiment under shared window safety",
         strategies=strategy_providers(PLUGIN_ID, PLUGIN_VERSION),
         metrics=metric_providers(PLUGIN_ID, PLUGIN_VERSION),
         analyzers=(

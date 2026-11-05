@@ -24,8 +24,9 @@ sibling gateway call has settled (``GatewaySiblingOrder``).
 Entry points: ``call_predecessors``, ``plan_command_working_dirs``
 (``CommandDirectoryPlan``), ``restore_command_sticky_cwd`` and the sibling
 gateway order (``publish_gateway_sibling_order``, ``gateway_sibling_turn``,
-``gateway_sibling_settler``). Path resolution borrows the workspace owners
-read-only; nothing here executes a tool or holds a lock.
+``gateway_sibling_adopter``, ``release_gateway_siblings``). Path resolution
+borrows the workspace owners read-only; nothing here executes a tool, and the
+order's own lock only guards its bookkeeping.
 """
 from __future__ import annotations
 
@@ -150,43 +151,83 @@ class GatewaySiblingOrder:
     whether an earlier one will still mutate its target. A child that
     ``_ordering_keys`` orders therefore waits until every earlier-issued
     sibling has settled. Waits only point at earlier calls, so they cannot form
-    a cycle, and Stop releases every waiter. The owner of each occurrence
-    settles it once its worker is done: ran, refused, failed or never started.
+    a cycle, and Stop releases every waiter.
+
+    An occurrence is its published (call ID, round row) pair, so a nested call
+    reusing a call ID never takes a sibling's place. The worker that runs an
+    occurrence adopts it when submitted and settles it when it returns: a
+    worker still running past its collection deadline keeps its place, since
+    its program may still mutate. An occurrence no worker adopted is released
+    by whoever learns it will not run: its dispatch invocation's exit, a native
+    callback that failed first, the native gateway's close, or the next
+    response's publication. A nested gateway call keeps its parent's place.
     """
 
-    def __init__(self, scope: str, call_ids) -> None:
+    def __init__(self, scope: str, occurrences) -> None:
         self.scope = scope
+        self._lock = threading.Lock()
+        self._rows: dict[str, Any] = {}
         self._settled: dict[str, Future] = {}
-        for call_id in call_ids:
-            self._settled.setdefault(call_id, Future())
+        self._adopted: set[str] = set()
+        self._inherited: dict[int, tuple[Any, GatewaySiblingTurn]] = {}
+        for call_id, row in occurrences:
+            if call_id not in self._rows:
+                self._rows[call_id] = row
+                self._settled[call_id] = Future()
 
-    def __contains__(self, call_id: object) -> bool:
-        return call_id in self._settled
+    def owns(self, call_id: str, row: Any) -> bool:
+        return row is not None and self._rows.get(call_id) is row
 
-    def settle(self, call_id: str) -> None:
-        settled = self._settled.get(call_id)
-        if settled is None:
-            return
-        try:
-            settled.set_result(None)
-        except InvalidStateError:
-            pass  # the worker and the invocation exit both settle a call
+    def turn(self, call_id: str, row: Any) -> GatewaySiblingTurn | None:
+        if self.owns(call_id, row):
+            earlier = []
+            for other, settled in self._settled.items():
+                if other == call_id:
+                    break
+                earlier.append(settled)
+            return GatewaySiblingTurn(self, tuple(earlier))
+        with self._lock:
+            inherited = self._inherited.get(id(row))
+        return inherited[1] if inherited is not None and inherited[0] is row else None
 
-    def turn(self, call_id: str) -> GatewaySiblingTurn | None:
-        if call_id not in self._settled:
+    def inherit(self, row: Any, turn: GatewaySiblingTurn) -> None:
+        with self._lock:
+            self._inherited[id(row)] = (row, turn)
+
+    def adopt(self, call_id: str, row: Any) -> Callable[[], None] | None:
+        if not self.owns(call_id, row):
             return None
-        earlier = []
-        for other, settled in self._settled.items():
-            if other == call_id:
-                break
-            earlier.append(settled)
-        return GatewaySiblingTurn(tuple(earlier))
+        with self._lock:
+            self._adopted.add(call_id)
+        return partial(self._settle, call_id)
+
+    def release(self, call_id: str, row: Any) -> None:
+        if not self.owns(call_id, row):
+            return
+        with self._lock:
+            if call_id in self._adopted:
+                return
+        self._settle(call_id)
+
+    def release_unadopted(self) -> None:
+        with self._lock:
+            unadopted = [call_id for call_id in self._settled
+                         if call_id not in self._adopted]
+        for call_id in unadopted:
+            self._settle(call_id)
+
+    def _settle(self, call_id: str) -> None:
+        try:
+            self._settled[call_id].set_result(None)
+        except InvalidStateError:
+            pass  # a release and a late worker may both settle an occurrence
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class GatewaySiblingTurn:
     """One gateway call's place in its response: the siblings issued before it."""
 
+    order: GatewaySiblingOrder
     earlier: tuple[Future, ...]
 
     def predecessors(self, task: dict, project_path: str | None, item: tuple,
@@ -198,31 +239,55 @@ class GatewaySiblingTurn:
             return ()
         return self.earlier
 
+    def inherit(self, row: Any) -> None:
+        """A nested gateway call issued by this call keeps this call's place."""
+        self.order.inherit(row, self)
+
 
 def publish_gateway_sibling_order(task: dict, round_num: int, items: list[tuple]) -> None:
-    """Publish one response's gateway calls in provider order before any runs."""
+    """Publish one response's gateway calls in provider order before any runs.
+
+    ``items`` are the occurrences the runtime will run. The previous response
+    is over by now, so its occurrences no worker adopted never run.
+    """
+    previous = task.get(_SIBLING_ORDER_KEY)
     task[_SIBLING_ORDER_KEY] = GatewaySiblingOrder(
         _execute_gateway_delegation_scope(task, round_num),
-        [item[2] for item in items if item[1] in _GATEWAY_EXECUTE_NAMES and not item[6]])
+        [(item[2], item[5]) for item in items
+         if item[1] in _GATEWAY_EXECUTE_NAMES and not item[6]])
+    if isinstance(previous, GatewaySiblingOrder):
+        previous.release_unadopted()
 
 
-def gateway_sibling_turn(task: dict, call_id: str,
-                         round_num: int) -> GatewaySiblingTurn | None:
-    """The turn of a gateway call in its response's published order, if any."""
+def gateway_sibling_turn(task: dict, call_id: str, round_num: int,
+                         row: Any) -> GatewaySiblingTurn | None:
+    """A gateway occurrence's place in its response's order: its own or its parent's."""
     order = task.get(_SIBLING_ORDER_KEY)
     if (not isinstance(order, GatewaySiblingOrder)
             or order.scope != _execute_gateway_delegation_scope(task, round_num)):
         return None
-    return order.turn(call_id)
+    return order.turn(call_id, row)
 
 
-def gateway_sibling_settler(task: dict, item: tuple) -> Callable[[], None] | None:
-    """Settle callback for a published gateway occurrence; None for other calls."""
+def gateway_sibling_adopter(
+        task: dict, item: tuple) -> Callable[[], Callable[[], None] | None] | None:
+    """Adoption of a published occurrence by the worker submitted to run it."""
     order = task.get(_SIBLING_ORDER_KEY)
     if (item[1] not in _GATEWAY_EXECUTE_NAMES
-            or not isinstance(order, GatewaySiblingOrder) or item[2] not in order):
+            or not isinstance(order, GatewaySiblingOrder)
+            or not order.owns(item[2], item[5])):
         return None
-    return partial(order.settle, item[2])
+    return partial(order.adopt, item[2], item[5])
+
+
+def release_gateway_siblings(task: dict, items) -> None:
+    """Release the published occurrences among ``items`` that no worker adopted."""
+    order = task.get(_SIBLING_ORDER_KEY)
+    if not isinstance(order, GatewaySiblingOrder):
+        return
+    for item in items:
+        if item[1] in _GATEWAY_EXECUTE_NAMES:
+            order.release(item[2], item[5])
 
 
 def _execution_cwd(task: dict, frozen_cwd: str) -> str:

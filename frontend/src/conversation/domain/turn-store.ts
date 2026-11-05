@@ -14,6 +14,7 @@ export {
 export type {
   AttemptRecord,
   ConversationQueueItem,
+  LiveContentGrowth,
   ReduceTurnStateOptions,
   TurnAction,
   TurnCommandResult,

@@ -74,8 +74,10 @@ class AdmittedCall:
     The worker records ``entered``/``deadline`` when the handler starts, so time
     spent waiting for order, approval or a human never consumes the ceiling.
     A gateway child also waits for ``sibling_predecessors``, the settlement of
-    earlier sibling gateway calls of its response; ``on_finished`` settles a
-    gateway occurrence itself once its worker is done, whatever the outcome.
+    earlier sibling gateway calls of its response. ``adopt_settlement`` hands a
+    published gateway occurrence to the worker submitted for it, which settles
+    it when it returns, whatever the outcome; a worker still running past its
+    collection deadline keeps its place.
     """
 
     item: tuple
@@ -84,7 +86,7 @@ class AdmittedCall:
     deadline: float = math.inf
     entered: bool = False
     sibling_predecessors: tuple[Future, ...] = ()
-    on_finished: Callable[[], None] | None = None
+    adopt_settlement: Callable[[], Callable[[], None] | None] | None = None
 
 
 class _EntryDeadlines(Mapping):
@@ -443,9 +445,11 @@ def execute_admitted_tools(
             future, start_generation = ports.submit(
                 pool, partial(_run_admitted_call, batch, ports, call, predecessors,
                               timeout_seconds, copy_context()))
-            if call.on_finished is not None:
-                # Runs once the worker returns, raises or is cancelled unstarted.
-                future.add_done_callback(lambda _done, finish=call.on_finished: finish())
+            settle = call.adopt_settlement() if call.adopt_settlement is not None else None
+            if settle is not None:
+                # Runs once the worker returns, raises or is cancelled unstarted,
+                # never when only its collection deadline expires.
+                future.add_done_callback(lambda _done, finish=settle: finish())
             futures[future] = (call.item[2], call.item[1], start_generation)
             calls_by_future[future] = call
             futures_by_id[call.item[2]] = future

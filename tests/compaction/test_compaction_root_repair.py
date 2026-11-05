@@ -66,8 +66,8 @@ def test_recovery_target_uses_physical_capacity_not_advisory_working_set(
     from lib.tasks_pkg.compaction._prompt_admission import _resolved_ceiling
     task = {'config': {'model': 'kimi-k3',
                        'compaction': {'workingSetTokens': working_set}}}
-    # Price-tier/working-set targets and first-dispatch targets are advisory.
+    # Retired economic and first-dispatch targets cannot reduce capacity.
     # Physical route capacity reserves output and safety headroom every round.
     assert resolve_admission_budget(task, round_num=round_num) == (777600, 777600)
-    assert task['_contextBudgetDecision']['economicTargetTokens'] == working_set
+    assert task['_contextBudgetDecision']['economicTargetTokens'] == 0
     assert _resolved_ceiling(task, round_num=round_num) == (777600, 777600)

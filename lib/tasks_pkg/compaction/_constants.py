@@ -116,18 +116,6 @@ _USER_VERBATIM_MAX_MESSAGES = 8
 Keeps the retained block scannable; the newest N instructions are the ones
 most likely to still bind the current work."""
 
-_DEFAULT_WORKING_SET_TOKENS = 0
-"""Economic compaction is opt-in; automatic compaction follows window safety.
-
-The 2026-11-05 owner decision prioritizes execution continuity over speculative
-prompt savings. A fixed working set or a pricing tier does not prove that
-discarding visible evidence improves task completion. Zero leaves the existing
-route-window/output-reserve guard authoritative. Explicit positive
-``compaction.workingSetTokens`` or ``TOFU_WORKING_CONTEXT_TOKENS`` values retain
-the economic policy and its candidate/ROI checks. No task execution limit is
-implied by either policy.
-"""
-
 _SUMMARY_MAX_TOKENS = 2200
 """Advisory continuation size and expected-output pricing projection.
 

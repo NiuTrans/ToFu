@@ -187,6 +187,67 @@ def test_partial_source_failure_isolated(monkeypatch):
     assert feed.load_cached_feed()['templates']['openrouter']
 
 
+def test_listing_times_survive_refresh_cache_and_merge_beside_offering_recipes():
+    rows = [row('a/dated', created=1793766031), row('a/zero', created=0), row('a/missing'),
+            row('a/text', created='soon'), row('a/negative', created=-5),
+            row('a/flag', created=True), row('a/retired', created=1754524800)]
+    assert feed.refresh_now(lambda *a, **kw: Response(rows))['ok']
+    with open(feed._CACHE_PATH) as handle:
+        stored = json.load(handle)
+    times = {'a/dated': 1793766031, 'a/retired': 1754524800}
+    assert stored['version'] == 2 and stored['sources']['openrouter']['listed_at'] == times
+    assert feed.load_cached_feed()['sources']['openrouter']['listed_at'] == times
+
+    original = {**template(), 'retired_model_ids': ['a/retired']}
+    merged = feed.merge_feed_recipes([original], feed.load_cached_feed())[0]
+    assert merged['catalog_feed']['listed_at'] == {'a/dated': 1793766031}
+    assert all(not {'created', 'listed_at'} & recipe.keys() for recipe in merged['offering_recipes'])
+
+
+def test_cache_without_listing_times_stays_readable_and_invalid_times_stay_unknown():
+    store(cache())
+    loaded = feed.load_cached_feed()
+    assert loaded['sources']['openrouter']['listed_at'] == {}
+    assert feed.merge_feed_recipes([template()], loaded)[0]['catalog_feed']['listed_at'] == {}
+    for listed in (['garbage'], {row()['id']: 'nan', 'unlisted/model': 1793766031}):
+        raw = cache()
+        raw['sources']['openrouter']['listed_at'] = listed
+        store(raw)
+        assert feed.load_cached_feed()['sources']['openrouter']['listed_at'] == {}
+
+
+def test_failed_source_keeps_its_last_good_listing_times(monkeypatch):
+    raw = cache()
+    raw['sources']['openrouter']['listed_at'] = {row()['id']: 1793766031}
+    store(raw)
+    monkeypatch.setattr(feed, 'PUBLIC_CATALOGS', {
+        **feed.PUBLIC_CATALOGS, 'other': {'url': 'https://example.test/models',
+                                         'base_url': 'https://example.test/v1'},
+    })
+    def get(method, url, **kw):
+        if 'openrouter' in url:
+            raise ConnectionError('down')
+        return Response([row('other/model', created=1793626154)])
+    assert feed.refresh_now(get)['sources'] == {'openrouter': 'unavailable', 'other': 'ok'}
+    with open(feed._CACHE_PATH) as handle:
+        sources = json.load(handle)['sources']
+    assert sources['openrouter']['listed_at'] == {row()['id']: 1793766031}
+    assert sources['other']['listed_at'] == {'other/model': 1793626154}
+
+
+def test_compiled_bundles_never_carry_listing_times(monkeypatch):
+    import lib.provider.provider_template_recipes as recipes
+    raw = cache()
+    raw['sources']['openrouter']['listed_at'] = {row()['id']: 1793766031}
+    store(raw)
+    relay = recipes.normalize_provider_template({**template(), 'name': 'Relay'})
+    merged = feed.merge_feed_recipes([relay], feed.load_cached_feed())
+    assert merged[0]['catalog_feed']['listed_at'] == {row()['id']: 1793766031}
+    monkeypatch.setattr(recipes, 'load_provider_templates', lambda: merged)
+    bundle = json.dumps(recipes.compile_provider_template_bundle('openrouter'))
+    assert 'listed_at' not in bundle and '1793766031' not in bundle
+
+
 def test_refresh_is_single_flight_and_opt_out_skips_network(monkeypatch):
     feed._refresh_lock.acquire()
     try:

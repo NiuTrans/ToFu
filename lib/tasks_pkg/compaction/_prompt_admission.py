@@ -65,10 +65,9 @@ def _resolved_ceiling(task: dict[str, Any], *, round_num: int,
                       input_tokens: int | None = None) -> tuple[int, int]:
     """Return ``(hard_ceiling, proactive_target)`` for this dispatch.
 
-    The economic working set is advisory here: the proactive pipeline owns
-    its ROI decision. Every round measures the full rendered prompt against
-    the same route-derived safety ceiling; neither first dispatch nor a
-    pricing-tier boundary reduces physical model capacity.
+    Every round measures the full rendered prompt against the same
+    route-derived safety ceiling. Retired economic targets, first dispatch
+    and pricing-tier boundaries do not reduce physical model capacity.
     """
     from lib.tasks_pkg.compaction._admission_budget import resolve_admission_budget
     return resolve_admission_budget(

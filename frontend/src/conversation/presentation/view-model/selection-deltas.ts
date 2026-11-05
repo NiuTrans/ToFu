@@ -21,6 +21,7 @@ export function canReuseSelection(before: TurnState, after: TurnState, update: T
       || before.conversationId !== after.conversationId
       || before.laneOrder !== after.laneOrder || before.historyByLane !== after.historyByLane
       || before.queueItems !== after.queueItems || before.livePhase !== after.livePhase
+      || before.liveContentGrowth !== after.liveContentGrowth
       || before.pushWithheld !== after.pushWithheld) return false;
   for (const id of update.changes.turnIds) {
     const left = before.turnsById[id], right = after.turnsById[id];

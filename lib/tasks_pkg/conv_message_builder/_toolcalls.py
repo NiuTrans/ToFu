@@ -52,6 +52,9 @@ def build_assistant_tool_call_message(
       * ``_anthropic_content_blocks`` — the ordered native Anthropic assistant
         content (signed thinking, hosted-tool, compaction blocks), carried
         unchanged so the Messages API receives the turn exactly as returned.
+        Native thinking also owns the exact public reasoning text/signature;
+        multiple, empty or redacted blocks retain their ordered sequence in
+        ``reasoning_details`` for checked Chat Completions conversion.
       * key order is FIXED (role, content, reasoning_content, thinking_signature,
         tool_calls) so the serialized wire bytes are deterministic regardless of
         which caller populated the fields.
@@ -79,6 +82,17 @@ def build_assistant_tool_call_message(
     _reasoning = (reasoning_content
                   if isinstance(reasoning_content, str) else '')
     _sig = thinking_signature if isinstance(thinking_signature, str) else ''
+    native_blocks = (anthropic_content_blocks
+                     if isinstance(anthropic_content_blocks, (list, tuple)) else [])
+    native_thinking = [dict(block) for block in native_blocks
+                       if isinstance(block, dict)
+                       and block.get('type') in {'thinking', 'redacted_thinking'}]
+    if native_thinking:
+        # Display text may be trimmed; a flattened signature describes only
+        # the last block. Rebuild from the exact native replay authority.
+        _reasoning = ''.join(block.get('thinking', '') for block in native_thinking)
+        _sig = (native_thinking[0].get('signature', '')
+                if len(native_thinking) == 1 else '')
     msg: dict = {'role': 'assistant'}
     if _content:
         msg['content'] = _content
@@ -86,6 +100,9 @@ def build_assistant_tool_call_message(
         msg['reasoning_content'] = _reasoning
         if _sig:
             msg['thinking_signature'] = _sig
+    if native_thinking and (len(native_thinking) != 1 or not _reasoning
+                            or native_thinking[0]['type'] != 'thinking'):
+        msg['reasoning_details'] = native_thinking
     if isinstance(responses_items, (list, tuple)) and responses_items:
         msg['_responses_items'] = [dict(item) for item in responses_items
                                    if isinstance(item, dict)]

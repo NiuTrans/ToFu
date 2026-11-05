@@ -10,6 +10,7 @@ from lib.llm.conversion import (
     checked_conversion, conversion_report, object_arguments, stop_sequences, validate_request,
 )
 from lib.llm.conversion import ProtocolConversionError
+from lib.llm.route_features import body_route_profile
 from lib.llm_sanitize.text_blocks import normalize_text_blocks
 from lib.log import get_logger
 from lib.model_info import model_requires_reasoning_content_replay
@@ -277,7 +278,8 @@ def _convert_body_to_anthropic(body: dict) -> dict:
     """
     validate_request(body, 'anthropic')
     replay_unsigned_reasoning = model_requires_reasoning_content_replay(
-        body.get('_admission_logical_model') or body.get('model') or '')
+        body.get('_admission_logical_model') or body.get('model') or '',
+        inference_profile=body_route_profile(body))
 
     stops = stop_sequences(body)
     out = {

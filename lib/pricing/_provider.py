@@ -76,7 +76,10 @@ def _legacy_context_tiers(model_id):
 
     This is an input compatibility seam only. Runtime arithmetic consumes the
     unified rows and therefore can select exactly one tier from total prompt
-    tokens for every component.
+    tokens for every component. A tier carries only what the legacy row
+    declares (per-context input/output and optional cache multipliers);
+    normalize_pricing inherits every other rate from the model's declared row,
+    so a translation can never replace a declared cache rate with zero.
     """
     row = QWEN_PRICING_CNY.get(model_id)
     if not row and 'qwen' in (model_id or '').lower():
@@ -87,6 +90,8 @@ def _legacy_context_tiers(model_id):
     for side in ('input', 'output'):
         for limit, price in row.get(side, ()):
             by_limit.setdefault(int(limit), {})[side] = float(price)
+    declared_cache = {key: float(row[key]) for key in ('cacheWriteMul', 'cacheReadMul')
+                      if key in row}
     tiers = []
     last = {'input': 0.0, 'output': 0.0}
     for index, limit in enumerate(sorted(by_limit)):
@@ -94,8 +99,7 @@ def _legacy_context_tiers(model_id):
         tiers.append({
             'id': f'ctx_{limit}', 'maxPromptTokens': limit,
             'input': last['input'], 'output': last['output'],
-            'currency': 'CNY', 'cacheWriteMul': 1.0,
-            'cacheReadMul': 0.0, 'order': index,
+            'currency': 'CNY', **declared_cache, 'order': index,
         })
     return tiers
 

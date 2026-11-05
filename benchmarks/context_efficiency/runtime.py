@@ -205,27 +205,6 @@ ARM_CONFIGS: dict[str, dict] = {
         'orchestration': {'multiAgent': 'auto'},
         'compaction': {'evidenceLedger': False},
     },
-    'tofu-ws64': {
-        'cache': {'gpt56BreakpointMode': 'implicit'},
-        'tools': {'nativeExposure': 'full', 'programmaticCalling': 'off'},
-        'responses': {'promptProfile': 'full'},
-        'orchestration': {'multiAgent': 'off'},
-        'compaction': {'evidenceLedger': False, 'workingSetTokens': 65536},
-    },
-    'tofu-ws96': {
-        'cache': {'gpt56BreakpointMode': 'implicit'},
-        'tools': {'nativeExposure': 'full', 'programmaticCalling': 'off'},
-        'responses': {'promptProfile': 'full'},
-        'orchestration': {'multiAgent': 'off'},
-        'compaction': {'evidenceLedger': False, 'workingSetTokens': 98304},
-    },
-    'tofu-ws128': {
-        'cache': {'gpt56BreakpointMode': 'implicit'},
-        'tools': {'nativeExposure': 'full', 'programmaticCalling': 'off'},
-        'responses': {'promptProfile': 'full'},
-        'orchestration': {'multiAgent': 'off'},
-        'compaction': {'evidenceLedger': False, 'workingSetTokens': 131072},
-    },
 }
 
 
@@ -294,7 +273,13 @@ def arm_config(arm: str, candidate_path: Path | None = None) -> dict:
         if candidate_path is None:
             raise ValueError('tofu-candidate requires --candidate-config')
         payload = json.loads(candidate_path.read_text())
-        return dict(payload.get('config') or payload)
+        config = dict(payload.get('config') or payload)
+        compaction = config.get('compaction')
+        if isinstance(compaction, dict) and 'workingSetTokens' in compaction:
+            raise ValueError(
+                'candidate uses retired compaction.workingSetTokens; '
+                'regenerate it under the shared window policy')
+        return config
     if arm not in ARM_CONFIGS:
         raise ValueError(f'unknown arm: {arm}')
     return json.loads(json.dumps(ARM_CONFIGS[arm]))

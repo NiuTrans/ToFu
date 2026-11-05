@@ -448,31 +448,12 @@ def freeze_candidate(grouped: dict[str, dict[str, dict]]) -> dict:
         evidence['tofu-multi-agent']['reason'] = (
             'quality_cost_latency_or_task_gate_evidence_failed')
 
-    workset_arms = [arm for arm in ('tofu-ws64', 'tofu-ws96', 'tofu-ws128')
-                    if arm in grouped]
-    eligible = []
-    workset_compactions = baseline_summary['compactions']
-    for arm in workset_arms:
-        comparison, summary = decision(arm)
-        workset_compactions += summary['compactions'] if summary else 0
-        if comparison and comparison['pairs'] and comparison['qualityNotLower']:
-            eligible.append((
-                -comparison['candidateResolved'],
-                comparison['candidatePublicCostUsd'], arm))
-    if eligible and workset_compactions > 0:
-        _neg_resolved, _cost, winner = min(eligible)
-        config = _deep_merge(config, {'compaction': {
-            'workingSetTokens': ARM_CONFIGS[winner][
-                'compaction']['workingSetTokens']}})
-        selected.append(
-            'compaction.workingSetTokens='
-            + str(ARM_CONFIGS[winner]['compaction']['workingSetTokens']))
-        evidence[winner]['selected'] = True
-    elif workset_arms:
-        for arm in workset_arms:
+    # Historical runs remain reportable, but cannot promote a retired knob.
+    for arm in ('tofu-ws64', 'tofu-ws96', 'tofu-ws128'):
+        if arm in grouped:
+            decision(arm)
             evidence[arm]['selected'] = False
-            evidence[arm].setdefault(
-                'reason', 'no_compaction_observed_or_quality_gate_failed')
+            evidence[arm]['reason'] = 'retired_fixed_compaction_target'
 
     return {
         'contractVersion': 'tofu-context-efficiency-candidate/v1',

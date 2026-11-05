@@ -896,12 +896,13 @@ def _tool_rounds_for_browser(
 ) -> Any:
     """Project closed-world tool-round presentation without changing storage.
 
-    Completed views drop opaque provider replay bodies. Every terminal view
+    Terminal views drop opaque provider replay bodies. Every terminal view
     also normalizes reconstructible historical Swarm tool timelines to their
     current resource budget. Nested values are shallow-shared unless changed.
     """
     if not isinstance(tool_rounds, list):
         return tool_rounds
+    restorable_rounds = _unique_rounds_by_call_id(tool_rounds)
     changed = False
     projected: list[Any] = []
     for source in tool_rounds:
@@ -909,8 +910,13 @@ def _tool_rounds_for_browser(
             projected.append(source)
             continue
         browser_source = trim_tool_round_for_persist(source)
+        # An edited browser copy can restore evidence only with an unambiguous
+        # call identity. Keep it inline for legacy duplicate or missing IDs.
+        omit_round_replay = omit_provider_replay and restorable_rounds.get(
+            str(source.get("toolCallId") or "").strip()
+        ) is source
         has_private_replay = (
-            omit_provider_replay
+            omit_round_replay
             and not _BROWSER_PRIVATE_TOOL_ROUND_FIELDS.isdisjoint(browser_source)
         )
         source_swarm_snapshot = browser_source.get("_swarmSnapshot")
@@ -927,7 +933,7 @@ def _tool_rounds_for_browser(
         round_record = {
             key: value for key, value in browser_source.items()
             if not (
-                omit_provider_replay
+                omit_round_replay
                 and key in _BROWSER_PRIVATE_TOOL_ROUND_FIELDS
             )
         }
@@ -1063,9 +1069,9 @@ def projection_with_reference_tool_segments(
 
     The input must already have passed ``projection_with_stable_segments``.
     All terminal Turns may receive a bounded historical Swarm presentation.
-    Only completed turns are immutable enough for segment references and
-    provider-evidence omission. Running turns remain byte-identical, while
-    resumable/failed turns retain complete segments and provider evidence.
+    Terminal Turns omit server-only provider evidence. Resuming reads that
+    evidence from storage; it never takes replay authority from this view.
+    Running/pending Turns remain byte-identical for incremental patches.
 
     ``TurnToolUseSegment.result`` remains an object for backward-compatible
     generated types. ``roundRef`` makes the empty object explicit; the browser
@@ -1073,7 +1079,7 @@ def projection_with_reference_tool_segments(
     Opaque Responses/Anthropic provider-replay bodies, thinking signatures,
     per-request stream / pricing evidence, unrendered admission and recache
     detail, and task-trace spans with no browser consumer are also
-    server-only and omitted from this completed browser view. Per-round token,
+    server-only and omitted from this terminal browser view. Per-round token,
     cost, cache-break, dispatch, quota, trace, write-allocation and settled
     clock facts remain. Model requests read signatures from storage, and
     ``projection_with_restored_browser_evidence`` restores every omission
@@ -1091,14 +1097,10 @@ def projection_with_reference_tool_segments(
     source_rounds = stable_projection.get("toolRounds")
     browser_rounds = _tool_rounds_for_browser(
         source_rounds,
-        omit_provider_replay=completed,
+        omit_provider_replay=True,
     )
     source_api_rounds = stable_projection.get("apiRounds")
-    browser_api_rounds = (
-        _api_rounds_for_browser(source_api_rounds)
-        if completed
-        else source_api_rounds
-    )
+    browser_api_rounds = _api_rounds_for_browser(source_api_rounds)
     rounds_by_id = _unique_rounds_by_call_id(browser_rounds)
     segments = stable_projection.get("segments")
 
@@ -1117,11 +1119,7 @@ def projection_with_reference_tool_segments(
                 )
 
     source_timing_trace = stable_projection.get("timingTrace")
-    browser_timing_trace = (
-        _timing_trace_for_browser(source_timing_trace)
-        if completed
-        else source_timing_trace
-    )
+    browser_timing_trace = _timing_trace_for_browser(source_timing_trace)
 
     segments_changed = False
     referenced_segments: list[Any] = []
@@ -1132,7 +1130,6 @@ def projection_with_reference_tool_segments(
         )
         if (
             segment_type == "thinking"
-            and completed
             and not _BROWSER_PRIVATE_THINKING_SEGMENT_FIELDS.isdisjoint(source)
         ):
             referenced_segments.append({
@@ -1309,7 +1306,7 @@ def projection_with_restored_browser_evidence(
     """Restore server evidence a browser view omitted from a client edit.
 
     Whole-projection edits are built from the browser's TurnStore copy, so a
-    completed Turn arrives without provider replay, thinking signatures,
+    terminal Turn arrives without provider replay, thinking signatures,
     unrendered diagnostics or task-trace detail, and a terminal swarm timeline
     arrives budgeted. ``authority`` is the stored projection at the CAS-fenced
     revision the edit was based on. A value is restored only where the client

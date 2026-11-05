@@ -183,6 +183,40 @@ then `TOFU_SEARCH_TEST_BROWSER=1 pytest tests/test_rendered_dom_browser.py` with
 the optional Playwright runtime. Base-package CI skips only that opt-in test;
 ordinary source/admission tests need neither a browser nor external network.
 
+## Declared text alternates
+
+**Problem:** Mintlify release notes (docs.z.ai, docs.bigmodel.cn) returned
+`spa_shell`. Their server HTML holds the text, but the sanitized `<main>` is
+empty, so rendering was required; Playwright and the browser then failed and
+the received extraction was discarded. Both pages declare
+`<link rel="alternate" type="text/markdown" href="….md">`, which returns the
+complete page.
+
+**Decision:** `fetch/declared_alternates.py` selects the first alternate the
+received document declares, `<link rel="alternate">` (resolved through its
+`<base>` and the final response URL) before an HTTP `Link` header, whose type is
+`text/markdown`, `text/x-markdown` or `text/plain` and whose origin is the
+document's. Translations (an `hreflang` other than the document language),
+header links anchored to another resource, inert `<template>` content and other
+origins are ignored. Every branch where a received HTML document yields no
+content (application shell, empty extract, raw or extracted bot/JS wall) admits
+it once, before Playwright and the browser: both bot heuristics also match JS
+shells, and a genuine interstitial declares nothing, so it adds no request.
+`fetch/core.py` sends one GET through `_should_fetch`, the page budget, the byte
+limit and the document's TLS transport. Only a text answer is accepted and it is
+never searched for alternates. Success is cached under the requested URL and
+recorded as `strategy='declared_alternate'` with `alternate_url` in the raw
+diagnostics; a failure leaves the existing chain and diagnostics unchanged.
+Readable pages never request it.
+
+**Alternatives rejected:** appending `.md` or reading `/llms.txt` guesses at one
+vendor's URL layout; `Accept: text/markdown` negotiation is not a declaration;
+trying every declared alternate lets one page multiply requests; following an
+alternate's own declarations would recurse. The empty `<main>` on those pages
+comes from the sanitizer's class-word rule matching `banner` inside a Tailwind
+value (`pt-[calc(10rem+var(--banner-height,2.5rem))]`); that extraction rule is
+unchanged here. Run `tests/test_declared_alternates.py` with the admission tests.
+
 ## HTML fragment scope
 
 **Problem:** reading a documentation URL with an observed `#fragment` returned

@@ -26,8 +26,9 @@ def conversation_id(chat_sidecar):
 def _capture_submitted_input(monkeypatch, conversation_id: str) -> dict:
     captured: list[dict] = []
 
-    def submit(conv_id, user_id, command):
+    def submit(conv_id, user_id, command, *, trusted_dispatch=None):
         assert conv_id == conversation_id
+        assert trusted_dispatch is None
         captured.append(command["inputTurn"])
         return {"attempt": {"attemptId": "attempt-accepted"}}
 

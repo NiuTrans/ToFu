@@ -16,9 +16,11 @@ logger = get_logger('lib.tasks_pkg.compaction._layer2._compact')
 
 @dataclass(frozen=True, slots=True)
 class AcceptedSummary:
+    """Full recoverable handoff plus its separately persisted narrative."""
     text: str
     turn_diff_included: bool
     continuity_digest: str = ''
+    archive_text: str = ''
 
 
 def accept_summary(
@@ -51,6 +53,7 @@ def accept_summary(
             'dropped optional blocks to preserve the global budget',
             log_prefix, recovery_max_chars)
     from lib.tasks_pkg.compaction._continuity import attach_continuity
+    narrative = summary_text
     try:
         summary_text, digest = attach_continuity(summary_text, messages, task)
     except (ValueError, TypeError) as exc:
@@ -58,4 +61,5 @@ def accept_summary(
         result_meta.update(compacted=False, summaryFailureReason='continuity_invalid')
         return 'Compaction continuity could not be verified; original context preserved.'
     result_meta['continuityDigest'] = digest
-    return AcceptedSummary(summary_text, turn_diff_included, digest)
+    result_meta['archive_summary_text'] = narrative
+    return AcceptedSummary(summary_text, turn_diff_included, digest, narrative)

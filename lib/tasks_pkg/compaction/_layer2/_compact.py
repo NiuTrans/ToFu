@@ -373,6 +373,16 @@ def _persist_compaction_candidate(messages, task, meta):
     """Commit the accepted bounded model view before adopting a durable Turn candidate."""
     archive_id = meta.get('archive_id')
     summary_text = meta.get('summary_text') or ''
+    archive_summary_text = meta.get('archive_summary_text')
+    if archive_summary_text is None:
+        archive_summary_text = summary_text
+        if meta.get('continuityDigest'):
+            from lib.tasks_pkg.compaction._continuity import narrative_without_continuity
+            handoff = next((message for message in reversed(messages)
+                            if is_compaction_handoff(message)), None)
+            if handoff is not None:
+                archive_summary_text = narrative_without_continuity(
+                    handoff, handoff['content'])
     tokens_after = _estimate_total_tokens(messages)
     msgs_after = len(messages)
     from lib.tasks_pkg.compaction._continuity import read_continuity
@@ -437,7 +447,7 @@ def _persist_compaction_candidate(messages, task, meta):
                     logger.debug('[Compact] resume witness unavailable: %s', type(exc).__name__)
             from lib.agent_core.store import get_conversation_store
             get_conversation_store().update_archive_summary(
-                archive_id, summary_text, tokens_after, msgs_after,
+                archive_id, archive_summary_text, tokens_after, msgs_after,
                 user_id=_task_owner(task), receipt=receipt,
                 archive_scope=(task or {}).get('_archiveScope', ''),
                 post_messages=deepcopy(messages))
@@ -452,13 +462,14 @@ def _persist_compaction_candidate(messages, task, meta):
     return receipt
 
 
-def _settle_failed_compaction_attempt(task, result_meta, messages, *, conv_id: str,
-                                      tokens_before: int, msgs_before: int,
-                                      summary_usage: dict,
-                                      summary_duration_ms: int,
-                                      trigger: str, round_num: int,
-                                      outcome_reason: str,
-                                      implementation: str = 'summary_dispatch') -> None:
+def _settle_unadopted_compaction_attempt(task, result_meta, messages, *, conv_id: str,
+                                         tokens_before: int, msgs_before: int,
+                                         summary_usage: dict,
+                                         summary_duration_ms: int,
+                                         trigger: str, round_num: int,
+                                         outcome_reason: str,
+                                         status: str = 'failed',
+                                         implementation: str = 'summary_dispatch') -> None:
     """Give a non-adopting summary attempt an authentic terminal UI fact.
 
     ``force_compact_if_needed`` (working_set/window) emits a durable
@@ -476,6 +487,10 @@ def _settle_failed_compaction_attempt(task, result_meta, messages, *, conv_id: s
          failure.  A pending archive row is updated + settled through it;
          an admission attempt with no archive emits the archive-less
          failed-DONE the fold layer already accepts (span ``failed:{seq}``).
+    ``status='declined'`` settles a proactive candidate that post-summary
+    economics rejected after the ``Phase.COMPACTING`` beat was announced: the
+    receipt records the decline, not a fault, and the fold retires that beat
+    without a Turn row, like a declined preflight (mw1sawbtu8xr3h).
     Best effort only: observability never aborts a compaction return path.
     """
     if task is None:
@@ -489,7 +504,7 @@ def _settle_failed_compaction_attempt(task, result_meta, messages, *, conv_id: s
         from lib.tasks_pkg.manager import task_user_id
         tokens_after = _estimate_total_tokens(messages) or int(tokens_before)
         receipt = build_compaction_receipt(
-            trigger=trigger or 'force', status='failed',
+            trigger=trigger or 'force', status=status,
             strategy='unchanged', implementation=implementation,
             continuation_format='none',
             summary_usage=summary_usage, summary_duration_ms=summary_duration_ms,
@@ -509,7 +524,7 @@ def _settle_failed_compaction_attempt(task, result_meta, messages, *, conv_id: s
         # reactive-archive placeholder into the Phase.COMPACTING row, and
         # this done event settles through that same archiveId — one authentic
         # failed compaction row instead of a stuck "compressing" ghost.
-        bridge_id = f'summary-failed:{(task.get("id") or "")[:8]}:{int(round_num or 0)}'
+        bridge_id = f'summary-{status}:{(task.get("id") or "")[:8]}:{int(round_num or 0)}'
         reactive = task.get('_reactiveCompactions')
         if not isinstance(reactive, dict):
             reactive = {}
@@ -723,6 +738,7 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     # Economic/eligibility preflights above may decline without model I/O.
     # Once accepted, announce the blocking work BEFORE it starts.
     _announce_summary_start(task, pfx)
+    _result_meta['summaryAnnounced'] = True
     try:
         summary_text = _generate_query_aware_summary(
             sources.summary_input, current_query, pfx, conv_id=conv_id, task=task,
@@ -863,6 +879,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
         result_meta=_result_meta, log_prefix=pfx, ports=economic_ports,
     )
     if isinstance(candidate_economics, str):
+        _result_meta.update(summary_usage=dict(_summary_usage),
+                            summary_duration_ms=int(_summary_duration_ms))
         return candidate_economics
 
     _round_num = kwargs.get('_compaction_round')
@@ -1345,11 +1363,16 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                         summary_usage=_meta.get('summary_usage'),
                         adopted=False, pfx=pfx)
         _decline_reason = str(_meta.get('reason') or '')
+        _settlement = None
         if _decline_reason in {
                 'cache_negative', 'low_yield', 'nothing_foldable'}:
             logger.debug(
                 '%s [ForceCompact] Expected proactive decline (%s); '
                 'messages unchanged', pfx, _decline_reason)
+            # A decline after summary I/O already showed the compacting beat;
+            # it settles as a decline, never as a failure.
+            if _meta.get('summaryAnnounced'):
+                _settlement = ('declined', _decline_reason)
         else:
             logger.warning('%s [ForceCompact] Compaction did not mutate messages '
                            '(summary empty or refused) — reporting failure so the '
@@ -1364,21 +1387,22 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
             # accounting and are untouched.  `_meta` carries `archive_id`
             # only when this attempt archived; helper is best-effort.
             if _trigger in {'working_set', 'window', 'dispatch_guard'}:
-                _failure_reason = str(
+                _settlement = ('failed', str(
                     _meta.get('summaryFailureReason')
                     or _meta.get('summaryRejectionReason')
                     or _meta.get('reason')
-                    or 'summary_failed')
-                _settle_failed_compaction_attempt(
-                    task, _meta, messages, conv_id=conv_id,
-                    tokens_before=int(_meta.get('tokens_before') or 0),
-                    msgs_before=int(_meta.get('msgs_before') or 0),
-                    summary_usage=dict(_meta.get('summary_usage') or {}),
-                    summary_duration_ms=int(
-                        _meta.get('summary_duration_ms') or 0),
-                    trigger=str(_trigger),
-                    round_num=int(kwargs.get('_compaction_round') or 0),
-                    outcome_reason=_failure_reason)
+                    or 'summary_failed'))
+        if _settlement is not None:
+            _settle_unadopted_compaction_attempt(
+                task, _meta, messages, conv_id=conv_id,
+                tokens_before=int(_meta.get('tokens_before') or 0),
+                msgs_before=int(_meta.get('msgs_before') or 0),
+                summary_usage=dict(_meta.get('summary_usage') or {}),
+                summary_duration_ms=int(
+                    _meta.get('summary_duration_ms') or 0),
+                trigger=str(_trigger),
+                round_num=int(kwargs.get('_compaction_round') or 0),
+                status=_settlement[0], outcome_reason=_settlement[1])
         return False
 
     tokens_before = int(_meta.get('tokens_before', 0))
